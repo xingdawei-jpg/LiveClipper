@@ -1,8 +1,8 @@
 {
   "latest_version": "5.3.4",
   "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/latest",
-  "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.3/LiveClipper_v5.3.3_asrfix_update.zip",
-  "release_notes": "修复云端ASR SSL连接问题(改用curl)",
+  "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.3/LiveClipper_v5.3.4_update.zip",
+  "release_notes": "修复云端ASR SSL问题 + 更新进度条",
   "force_update": false,
   "sha256": ""
 }
