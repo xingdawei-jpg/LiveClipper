@@ -1,8 +1,8 @@
 {
-  "latest_version": "5.3.4",
+  "latest_version": "5.3.6",
   "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/latest",
-  "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.3/LiveClipper_v5.3.4_update.zip",
-  "release_notes": "修复云端ASR SSL问题 + 更新进度条",
-  "force_update": false,
-  "sha256": ""
+  "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.6/LiveClipper_v5.3.6_update.zip",
+  "release_notes": "AI选片质量大幅升级(v8.0) + 云端ASR优先 + Groq支持 + 字幕样式优化",
+  "force_update": true,
+  "sha256": "9f6a92dbf669bdacdf723672de7de368cd190977b866cc23a53054bef5cab1e8"
 }
