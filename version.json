@@ -1,7 +1,7 @@
 {
     "latest_version": "5.3.7",
     "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/latest",
-    "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.7/LiveClipper_v5.3.7_update.zip",
+    "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/releases/v5.3.7/LiveClipper_v5.3.7_update.zip",
     "release_notes": "选片更丰富(10-15段) + 修复片段重叠重复 + 延伸保底不凑时长",
     "force_update": false,
     "sha256": "016b2d828e8a090ae1502b3772bc1d8e8c265f1c241b45ddcd82357f78a38c5c"
