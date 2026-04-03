@@ -1,1 +1,8 @@
-{"latest_version": "5.3.6", "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/latest", "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/releases/v5.3.7/LiveClipper_v5.3.7_update.zip", "release_notes": "AI选片v8.0(5种Hook+灵活链路) + Groq ASR可选 + 移除AI画面替换 + Canvas进度条修复", "force_update": false, "sha256": "2d37defd681bf73f29b8af60e61a3273fb420d3a030ffdf5f6db728982d9b773"}
+{
+    "latest_version": "5.3.8",
+    "download_url": "https://pan.baidu.com/s/1JALz2lbagK4rMYjdPdheqA?pwd=8y35",
+    "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/releases/v5.3.8/LiveClipper_v5.3.8_update.zip",
+    "release_notes": "v5.3.8: 音画同步彻底修复 | 跨品类套装保护 | 画中画循环+无字幕叠加 | 版本自动更新",
+    "force_update": false,
+    "sha256": "dbc479a32b54182c69daa9937571a727096f87f36e399ca9d92a277433fd6862"
+}
