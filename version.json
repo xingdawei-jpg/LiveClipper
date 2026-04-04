@@ -1,9 +1,9 @@
 {
-  "version": "5.3.10",
-  "latest_version": "5.3.10",
+  "version": "5.3.11",
+  "latest_version": "5.3.11",
   "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.8/LiveClipper_v5.3.10_update.zip",
   "sha256": "4f39a4ea716609b09b6d7ce184a944c7dc5dfbe248d658af16f02bbc192d1e2b",
   "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/version.json",
-  "changelog": "v5.3.10: UI配色优化(Apple Dark Mode)、修复更新检测",
+  "changelog": "v5.3.11: 测试更新机制",
   "force_update": false
 }
