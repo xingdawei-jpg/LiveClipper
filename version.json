@@ -5,5 +5,6 @@
   "sha256": "",
   "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/version.json",
   "changelog": "",
-  "force_update": false
+  "force_update": false,
+  "note": "no_update_available"
 }
