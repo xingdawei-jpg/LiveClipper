@@ -1,8 +1,8 @@
 {
-    "latest_version": "5.3.9",
-    "download_url": "https://pan.baidu.com/s/1-9T4FllK-82qA_gyWVWoCQ?pwd=y92t",
-    "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.8/LiveClipper_v5.3.9_update.zip",
-    "release_notes": "v5.3.9: 修复增量更新解压失败(exe被锁定) | 时长参数优化(45-65s,最少7片段)",
-    "force_update": false,
-    "sha256": "6163a7c314e5ce6b693da9a9e75121ebf5119809104b80fafa2ded73ec1a516e"
+  "version": "5.3.10",
+  "download_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.8/LiveClipper_v5.3.10_update.zip",
+  "sha256": "e114f0d198d64ccc9476ea0fb1086a808accef4e41bc3f269a2f95f7fecf552b",
+  "update_url": "https://gitee.com/xing-dawei/live-clipper/raw/master/version.json",
+  "changelog": "v5.3.10: UI配色优化(Apple Dark Mode风格)、版本号更新",
+  "force_update": false
 }
