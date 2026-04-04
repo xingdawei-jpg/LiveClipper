@@ -1,8 +1,8 @@
 {
-    "latest_version": "5.3.8",
+    "latest_version": "5.3.9",
     "download_url": "https://pan.baidu.com/s/1JALz2lbagK4rMYjdPdheqA?pwd=8y35",
-    "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.8/LiveClipper_v5.3.8_update.zip",
-    "release_notes": "v5.3.8: 音画同步彻底修复 | 跨品类套装保护 | 画中画循环+无字幕叠加 | 版本自动更新",
+    "update_url": "https://gitee.com/xing-dawei/live-clipper/releases/download/v5.3.8/LiveClipper_v5.3.9_update.zip",
+    "release_notes": "v5.3.9: 修复增量更新解压失败(exe被锁定) | 时长参数优化(45-65s,最少7片段)",
     "force_update": false,
-    "sha256": "dbc479a32b54182c69daa9937571a727096f87f36e399ca9d92a277433fd6862"
+    "sha256": "6163a7c314e5ce6b693da9a9e75121ebf5119809104b80fafa2ded73ec1a516e"
 }
