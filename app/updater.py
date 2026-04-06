@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import hashlib
+import time
 import threading
 import tempfile
 import subprocess
@@ -28,10 +29,10 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 
 # 国内加速镜像列表（优先使用，失败自动回退）
 MIRROR_PREFIXES = [
-    "https://ghfast.top/",
-    "https://mirror.ghproxy.com/",
-    "https://gh-proxy.com/",
-    "https://ghps.cc/",
+    "https://ghfast.top/https://",
+    "https://mirror.ghproxy.com/https://",
+    "https://gh-proxy.com/https://",
+    "https://ghps.cc/https://",
 ]
 
 # version.json 的远程地址（不再使用，由 get_version_url 自动生成）
@@ -59,7 +60,7 @@ def get_mirrored_url(raw_github_url):
     """将 GitHub raw URL 转为镜像列表（镜像优先，原始地址兜底）"""
     if not raw_github_url or "raw.githubusercontent.com" not in raw_github_url:
         return [raw_github_url]
-    path = raw_github_url.replace("https://raw.githubusercontent.com/", "")
+    path = raw_github_url.replace("https://", "")
     urls = [prefix + path for prefix in MIRROR_PREFIXES]
     urls.append(raw_github_url)  # 原始地址兜底
     return urls
@@ -230,8 +231,12 @@ def check_update():
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
 
-            req = urllib.request.Request(try_url, headers={
-                "User-Agent": "LiveClipper-Updater/2.0"
+            # 加时间戳防 CDN 缓存
+            sep = '&' if '?' in try_url else '?'
+            no_cache_url = try_url + sep + '_t=' + str(int(time.time()))
+            req = urllib.request.Request(no_cache_url, headers={
+                "User-Agent": "LiveClipper-Updater/2.0",
+                "Cache-Control": "no-cache"
             })
             with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
                 raw = resp.read().decode("utf-8")
