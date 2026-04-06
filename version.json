@@ -1,6 +1,6 @@
 {
   "latest_version": "8.3.1",
-  "release_notes": "测试增量更新：更新了 updater.py",
+  "release_notes": "增量更新架构上线 - 更新只需几十KB",
   "force_update": false,
   "files": {
     "updater.py": {
