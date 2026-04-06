@@ -1,0 +1,7 @@
+﻿{
+  "latest_version": "8.2.0",
+  "release_notes": "修复自动更新系统，切换到GitHub+国内镜像加速",
+  "force_update": false,
+  "download_url": "",
+  "sha256": ""
+}
