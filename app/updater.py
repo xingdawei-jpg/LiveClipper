@@ -288,7 +288,9 @@ def incremental_update(version_info, progress_callback=None):
     """
     files_info = version_info.get("files", {})
     if not files_info:
-        return False, "版本信息中没有文件列表"
+        # 无文件列表 = 仅版本号变更，直接更新版本号
+        _set_installed_version(version_info["latest_version"])
+        return True, "版本号已更新"
 
     app_dir = get_app_dir()
     if not app_dir:
