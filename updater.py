@@ -1,4 +1,4 @@
-"""
+﻿"""
 LiveClipper 自动更新模块
 - 启动时后台检查 GitHub Releases 是否有新版本
 - 支持强制更新、下载进度、SHA256 校验
@@ -23,11 +23,19 @@ from pathlib import Path
 # ============ 配置（发布时修改） ============
 
 # GitHub 仓库（私有仓库需在 version.json 里放完整 URL）
-GITHUB_REPO = ""  # 格式: owner/repo，后续填入
+GITHUB_REPO = "xingdawei-jpg/LiveClipper"  # 格式: owner/repo，后续填入
 
 # version.json 的远程地址（优先使用这个）
 # 如果设置了这个，会忽略 GITHUB_REPO
-VERSION_URL = "https://gitee.com/邢大伟/LiveClipper/raw/main/version.json"
+VERSION_URL = ""
+
+# 国内加速镜像列表（优先使用，失败自动回退）
+MIRROR_PREFIXES = [
+    "https://ghfast.top/",
+    "https://mirror.ghproxy.com/",
+    "https://gh-proxy.com/",
+    "https://ghps.cc/",
+]
 
 # 当前版本号（每次发布时更新）
 CURRENT_VERSION = "1.0.0"
@@ -40,6 +48,16 @@ def get_version_url():
     if GITHUB_REPO and "/" in GITHUB_REPO:
         return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
     return ""
+
+
+def get_mirrored_url(raw_github_url):
+    """将 GitHub raw URL 转为镜像列表（镜像优先，原始地址兜底）"""
+    if not raw_github_url or "raw.githubusercontent.com" not in raw_github_url:
+        return [raw_github_url]
+    path = raw_github_url.replace("https://raw.githubusercontent.com/", "")
+    urls = [prefix + path for prefix in MIRROR_PREFIXES]
+    urls.append(raw_github_url)  # 原始地址兜底
+    return urls
 
 
 # ============ 版本比较 ============
@@ -107,29 +125,41 @@ def check_update():
     检查是否有新版本
     返回 dict（包含版本信息）或 None（无更新/出错）
     """
-    url = get_version_url()
-    if not url:
-        return None
+    # 生成带镜像的 URL 列表
+    base_url = get_version_url()
+    urls = get_mirrored_url(base_url)
     
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+    for try_url in urls:
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            req = urllib.request.Request(try_url, headers={
+                "User-Agent": "LiveClipper-Updater/1.0"
+            })
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+                raw = resp.read().decode("utf-8")
+                # 镜像可能返回 HTML 错误页，验证是 JSON
+                if not raw.strip().startswith("{"):
+                    continue
+                data = json.loads(raw)
+            
+            remote_ver = data.get("latest_version", "")
+            if not remote_ver or not is_newer(remote_ver, CURRENT_VERSION):
+                return None
+            
+            # 将 download_url 也走镜像加速
+            dl_url = data.get("download_url", "")
+            if dl_url and "raw.githubusercontent.com" in dl_url:
+                data["download_url"] = get_mirrored_url(dl_url)[0]
+            
+            return data
         
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "LiveClipper-Updater/1.0"
-        })
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        
-        remote_ver = data.get("latest_version", "")
-        if not remote_ver or not is_newer(remote_ver, CURRENT_VERSION):
-            return None
-        
-        return data
+        except Exception:
+            continue
     
-    except Exception:
-        return None
+    return None
 
 
 # ============ GUI 组件 ============
