@@ -1,0 +1,7 @@
+﻿__pycache__/
+*.pyc
+.installed_version
+ai_settings.json
+*.egg-info/
+dist/
+build/
