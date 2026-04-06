@@ -1,10 +1,6 @@
 {
-  "latest_version": "8.3.1",
-  "release_notes": "增量更新架构上线 - 更新只需几十KB",
+  "latest_version": "8.2.0",
+  "release_notes": "当前版本",
   "force_update": false,
-  "files": {
-    "updater.py": {
-      "sha256": "4d5cc4aad82ed2b7c2da37f347795129090c6aa030d544cf4e8e21079ef86661"
-    }
-  }
+  "files": {}
 }
