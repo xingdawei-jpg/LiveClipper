@@ -373,6 +373,9 @@ class App:
                                   highlightbackground=C["inp"], highlightcolor=C["btn_sel"])
         self.ai_key_entry.pack(side="left", fill="x", expand=True, padx=(4,0))
         tk.Label(ai_row1, text="📑 DeepSeek: platform.deepseek.com/api_keys", font=("Arial", 8), fg=C["dim"], bg=C["card"]).pack(side="right", padx=(8,0))
+        tk.Button(ai_row1, text="✓测试", font=FNT_S, fg=C["ok"], bg=C["card"],
+              relief="flat", cursor="hand2", padx=6, pady=0,
+              command=self._test_ai_connection).pack(side="right", padx=(2,0))
         self.ai_key_entry.bind("<FocusIn>", lambda e: self.ai_key_entry.configure(highlightbackground=C["btn_sel"]))
         self.ai_key_entry.bind("<FocusOut>", lambda e: self.ai_key_entry.configure(highlightbackground=C["inp"]))
         tk.Button(ai_row1, text="👁", font=FNT_S, fg=C["dim"], bg=C["card"],
@@ -539,6 +542,13 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               show="*", relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
 
+        # 火山引擎测试连接按钮
+        _vr_test = tk.Frame(self.volc_fields, bg=C["card"])
+        _vr_test.pack(fill="x", pady=(4,0))
+        tk.Label(_vr_test, text="", font=FNT_S, bg=C["card"], width=10).pack(side="left")
+        tk.Button(_vr_test, text="✓ 测试火山引擎连接", font=FNT_S, fg=C["ok"], bg=C["card"],
+              relief="flat", cursor="hand2", padx=8, pady=2,
+              command=self._test_volc_connection).pack(side="left", padx=(4,0))
         _vr5 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr5.pack(fill="x", pady=(2,0))
         tk.Label(_vr5, text="TOS 桶名", font=FNT_S, fg=C["text"],
@@ -811,6 +821,83 @@ class App:
     def _toggle_key_vis(self):
         self._key_visible = not self._key_visible
         self.ai_key_entry.configure(show="" if self._key_visible else "*")
+
+    def _test_ai_connection(self):
+        api_key = self.ai_key_var.get().strip()
+        base_url = self.ai_url_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("测试连接", "API Key 为空，请先填写")
+            return
+        if not base_url:
+            messagebox.showwarning("测试连接", "Base URL 为空，请先填写")
+            return
+        try:
+            url = base_url.rstrip("/") + "/models"
+            result = subprocess.run(
+                ["curl", "-s", "-w", "\n%{http_code}", url,
+                 "-H", f"Authorization: Bearer {api_key}"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=0x08000000 if sys.platform == "win32" else 0
+            )
+            lines = result.stdout.strip().split("\n")
+            http_code = lines[-1] if lines else "0"
+            if http_code == "200":
+                messagebox.showinfo("测试连接", "✅ 连接成功！API Key 有效")
+            elif http_code == "401":
+                messagebox.showerror("测试连接", "❌ 401 认证失败！API Key 无效或已过期\n请检查：\n1. Key 是否以 sk- 开头\n2. platform.deepseek.com 确认Key状态\n3. 账户是否已充值")
+            else:
+                messagebox.showerror("测试连接", f"❌ 连接失败 (HTTP {http_code})\n请检查 Base URL 是否正确")
+        except Exception as e:
+            messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
+
+    def _test_volc_connection(self):
+        app_id = self.volc_app_id_var.get().strip()
+        access_token = self.volc_token_var.get().strip()
+        tos_ak = self.volc_tos_ak_var.get().strip()
+        tos_sk = self.volc_tos_sk_var.get().strip()
+        if not app_id or not access_token:
+            messagebox.showwarning("测试连接", "App ID 或 Access Token 为空")
+            return
+        if not tos_ak or not tos_sk:
+            messagebox.showwarning("测试连接", "TOS AK/SK 为空")
+            return
+        try:
+            submit_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
+            req_id = hashlib.md5(str(time.time()).encode()).hexdigest()
+            payload = json.dumps({
+                "user": {"uid": "test"},
+                "audio": {"format": "wav", "url": "https://example.com/test.wav"},
+                "request": {"model_name": "bigmodel", "show_utterances": True}
+            })
+            result = subprocess.run(
+                ["curl", "-s", "-w", "\n%{http_code}", submit_url,
+                 "-X", "POST",
+                 "-H", "Content-Type: application/json",
+                 "-H", f"X-Api-App-Key: {app_id}",
+                 "-H", f"X-Api-Access-Key: {access_token}",
+                 "-H", "X-Api-Resource-Id: volc.bigasr.auc",
+                 "-H", f"X-Api-Request-Id: {req_id}",
+                 "-H", "X-Api-Sequence: -1",
+                 "-d", payload],
+                capture_output=True, text=True, timeout=15,
+                creationflags=0x08000000 if sys.platform == "win32" else 0
+            )
+            lines = result.stdout.strip().split("\n")
+            http_code = lines[-1] if lines else "0"
+            body = "\n".join(lines[:-1]) if len(lines) > 1 else ""
+            if http_code == "200":
+                messagebox.showinfo("测试连接", "✅ App ID 和 Access Token 有效！\nTOS 上传需要实际音频文件才能验证，请直接运行一次完整流程测试")
+            elif http_code == "401":
+                messagebox.showerror("测试连接", "❌ 401 认证失败！App ID 或 Access Token 错误\n请检查：\n1. 是否开通了「录音文件识别大模型」\n2. App ID和Token是否同一个应用\n3. 教程: https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
+            else:
+                if "SignatureDoesNotMatch" in body:
+                    messagebox.showerror("测试连接", "❌ TOS AK/SK 错误（签名不匹配）\n请检查 TOS AK 和 TOS SK 是否正确")
+                elif "AccessDenied" in body:
+                    messagebox.showerror("测试连接", "❌ TOS 权限不足\n请确认 TOS 桶已创建且 AK/SK 有访问权限")
+                else:
+                    messagebox.showwarning("测试连接", f"⚠️ HTTP {http_code}\n{body[:200]}")
+        except Exception as e:
+            messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
 
     def _on_preset_change(self, value):
         preset = AI_PRESETS.get(value, {})

@@ -124,6 +124,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         _log(f"volcengine_asr: 任务已提交, id={task_id}")
     except Exception as e:
         _log(f"volcengine_asr: 提交异常: {e}")
+        if "401" in str(e):
+            _log("⚠️ 401认证失败！请检查语音识别控制台的 App ID 和 Access Token 是否正确，教程：https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
         _cleanup_tos(client, bucket, obj_key, _log)
         return None
 
