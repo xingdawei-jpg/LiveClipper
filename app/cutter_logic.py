@@ -137,7 +137,7 @@ def _generate_random_dedup_params(clip_index):
 def build_dedup_filters(width, height, clip_index=0):
     """
     构建去重滤镜链
-    - enhanced模式: 镜像 + 随机变速(保音调) + 随机微裁剪 + 音频微pitch
+    - enhanced模式: 镜像 + 随机变速 + 随机微裁剪（pitch已移除）
     - classic模式: 原有随机方法（兼容）
     """
     _, methods, strategy = apply_preset("custom")
@@ -149,7 +149,7 @@ def build_dedup_filters(width, height, clip_index=0):
 
 
 def _build_enhanced_dedup(width, height, clip_index):
-    """增强版去重：镜像 + 随机变速(保音调) + 随机微裁剪 + 音频微pitch"""
+    """增强版去重：镜像 + 随机变速 + 随机微裁剪（pitch已移除，修复音画不同步）"""
     cfg = DEDUP_CONFIG
     params = _generate_random_dedup_params(clip_index)
 
@@ -177,19 +177,14 @@ def _build_enhanced_dedup(width, height, clip_index):
         vf_list.append(f"scale={width}:{height}")
         applied.append(f"crop({cw:.3f}x{ch:.3f})")
 
-    # 3. 变速（atempo 纯变速，不保音调，音质好）
+    # [v9.1] 变速：setpts和atempo使用同一个speed值，确保音画绝对同步
+    # pitch已移除——之前视频用speed变速、音频用speed*pitch变速，速率不一致是音画不同步的根因
     speed = params["speed"]
-    pitch = params["audio_pitch"]
 
-    # 3+4. 变速 + pitch 合并为单个 atempo，避免双 atempo 链式累乘导致音画不同步
-    # 视频速率 = speed, 音频速率 = speed * (1 + pitch/100)
-    if speed != 1.0 or pitch != 0.0:
-        actual_speed = speed * (1.0 + pitch / 100.0)
-        vf_list.append(f"setpts=PTS/{speed}")  # 视频只变速，不变pitch
-        af_list.append(f"atempo={actual_speed}")  # 音频变速+变pitch
+    if speed != 1.0:
+        vf_list.append(f"setpts=PTS/{speed}")   # 视频变速
+        af_list.append(f"atempo={speed}")         # 音频变速（同值，保证同步）
         applied.append(f"speed({speed}x)")
-        if pitch != 0.0:
-            applied.append(f"pitch({pitch:+.1f}%)")
 
     # 5. 伽马微调（等级1，肉眼不可见）
     gamma = params.get("gamma", 0.0)
@@ -1147,38 +1142,43 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log(f"切割 [{i+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
             temp_file = os.path.join(temp_dir, f"clip_{i:02d}.mp4")
 
+            # [v9.2] 只留尾部缓冲，不做前向缓冲（前向缓冲会延伸到未选中的内容）
+            start_buf = 0
+            end_buf = 0.3
+            # 尾部缓冲不能超过时间轴上下一个片段的开头
+            later_clips = [c for c in ordered_clips if c[2] > end]
+            if later_clips:
+                next_start = min(c[2] for c in later_clips)
+                end_buf = min(end_buf, max(next_start - end, 0))
+            start = max(0, start - start_buf)
+            end = min(video_duration, end + end_buf)
+
             if start >= video_duration:
                 _log(f"SKIP [{c_type}] 起始 {start:.1f}s > 视频时长 {video_duration:.1f}s")
                 continue
             if end > video_duration:
-                end = video_duration - 0.5
+                end = video_duration - 0.1
                 if end <= start:
                     continue
 
-            duration = end - start
-
-            # 随机镜像（50%概率，片段级别）
+            # [v9.2] 切割编码模式 + crop+mirror（crop过滤器规范化帧时间，避免VFR跳帧）
             mirror_vf = ""
             if random.random() < 0.5:
                 mirror_vf = "hflip"
-
-            # 构建 -vf: 强制9:16 + 镜像
             aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
-            video_filters = [aspect_vf]
+            vf_parts = [aspect_vf]
             if mirror_vf:
-                video_filters.append(mirror_vf)
-            combined_vf = ",".join(video_filters)
+                vf_parts.append(mirror_vf)
+            combined_vf = ",".join(vf_parts)
 
-            # 切割命令（纯视频，不带字幕 — 字幕在去重后添加，避免被镜像）
             cmd = [ffmpeg, "-y"]
             cmd += ["-ss", f"{start:.3f}", "-i", video_path]
-            cmd += ["-t", f"{end - start + 0.15:.3f}"]
+            cmd += ["-t", f"{end - start:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
             cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+            cmd += ["-vf", combined_vf]
             cmd += ["-pix_fmt", "yuv420p"]
-            if video_filters:
-                cmd += ["-vf", combined_vf]
             cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1"]
             cmd += ["-movflags", "+faststart"]
             cmd += [temp_file]
@@ -1298,8 +1298,14 @@ def process_video(video_path, srt_path=None, output_path=None,
     else:
         _log(f"去重步骤使用分辨率: {w}x{h}，去重预设: {dedup_preset}")
         dedup = build_dedup_filters(w, h, 0)
+        # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
+        # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease,crop={w}:{h}"
-        af = "aresample=async=1000:first_pts=0,asetpts=PTS-STARTPTS"
+        # 随机镜像（50%概率）
+        if random.random() < 0.5:
+            vf = "hflip," + vf
+        # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
+        af = "afade=t=in:st=0:d=0.3"
         if dedup["video_filters"]:
             vf = dedup["video_filters"] + "," + vf
         if dedup["audio_filters"]:
