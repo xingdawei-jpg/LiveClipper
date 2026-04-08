@@ -381,46 +381,172 @@ class DownloadDialog(tk.Toplevel):
             return f"{size_bytes / (1024 * 1024):.1f} MB"
     
     def _start_download(self):
-        # Choose download URL: small update for existing installs, full for new
-        is_update = _is_installed() and self.version_info.get("update_url", "")
-        if is_update:
-            download_url = self.version_info["update_url"]
+        # Support incremental file-by-file updates from version.json "files" field
+        files_info = self.version_info.get("files", {})
+        has_update_url = self.version_info.get("update_url", "") or self.version_info.get("download_url", "")
+
+        if files_info and not has_update_url:
+            # Incremental update: download individual files
+            self._do_incremental_update(files_info)
+        elif has_update_url:
+            # Full package download
+            download_url = self.version_info.get("update_url", "") or self.version_info.get("download_url", "")
+            self._do_full_download(download_url)
         else:
-            download_url = self.version_info.get("download_url", "")
-        if not download_url:
-            self.on_error("下载地址无效")
+            self.on_error("无可用的更新方式")
             self.destroy()
             return
-        
+
+    def _do_incremental_update(self, files_info):
+        """逐文件增量更新：下载app/下变化的文件，校验SHA256后直接替换"""
+        import hashlib as _hl
+
+        # Determine app directory
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.join(os.path.dirname(sys.executable), "_internal", "app")
+        else:
+            app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
+            if not os.path.isdir(app_dir):
+                app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        if not os.path.isdir(app_dir):
+            self.on_error("找不到app目录")
+            self.destroy()
+            return
+
+        file_list = list(files_info.items())
+        total = len(file_list)
+        success_count = 0
+        fail_count = 0
+
+        def update_thread():
+            nonlocal success_count, fail_count
+            for idx, (fname, expected_sha) in enumerate(file_list):
+                if self.cancelled:
+                    return
+
+                # Skip version.json itself and non-code files
+                if fname == "version.json":
+                    success_count += 1
+                    continue
+
+                # Update progress
+                pct = (idx / total) * 100
+                self.after(0, lambda p=pct, f=fname: (
+                    self.progress_var.set(p),
+                    self.status_label.config(text=f"({idx+1}/{total}) {f}")
+                ))
+
+                # Build download URL
+                base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/app/{fname}" if GITHUB_REPO else ""
+                if not base:
+                    fail_count += 1
+                    continue
+
+                # Try downloading with mirrors
+                content = None
+                for prefix in ["https://gh-proxy.com/https://", "https://ghfast.top/https/"]:
+                    mirror_url = prefix + base.replace("https://", "")
+                    try:
+                        result = subprocess.run(
+                            ["curl.exe", "-s", "-k", "--max-time", "15", mirror_url],
+                            capture_output=True, timeout=20
+                        )
+                        if result.stdout and len(result.stdout) > 10:
+                            # Check it's not HTML error page
+                            preview = result.stdout[:50]
+                            if not preview.startswith(b"<!") and not preview.startswith(b"<html"):
+                                content = result.stdout
+                                break
+                    except Exception:
+                        continue
+
+                # Fallback to direct
+                if content is None:
+                    try:
+                        result = subprocess.run(
+                            ["curl.exe", "-s", "-k", "--max-time", "15", base + "?_t=" + str(int(time.time()))],
+                            capture_output=True, timeout=20
+                        )
+                        if result.stdout and len(result.stdout) > 10:
+                            preview = result.stdout[:50]
+                            if not preview.startswith(b"<!"):
+                                content = result.stdout
+                    except Exception:
+                        pass
+
+                if content is None:
+                    fail_count += 1
+                    continue
+
+                # Verify SHA256
+                actual_sha = _hl.sha256(content).hexdigest()
+                if actual_sha.lower() != expected_sha.lower():
+                    fail_count += 1
+                    continue
+
+                # Write to app directory
+                dest = os.path.join(app_dir, fname)
+                try:
+                    with open(dest, 'wb') as f:
+                        f.write(content)
+                    success_count += 1
+                except Exception:
+                    fail_count += 1
+
+            if self.cancelled:
+                return
+
+            # Update installed version
+            new_ver = self.version_info.get("version", self.version_info.get("latest_version", ""))
+            if new_ver:
+                _set_installed_version(new_ver)
+
+            self.after(0, lambda: self.progress_var.set(100))
+            self.after(0, lambda: self.status_label.config(text="更新完成"))
+
+            if fail_count == 0:
+                msg = f"成功更新 {success_count} 个文件"
+                self.after(500, lambda: self.on_complete(None, "", True))
+                self.after(600, self.destroy)
+            elif success_count > 0:
+                msg = f"更新完成: {success_count} 成功, {fail_count} 失败"
+                self.after(0, lambda: self.on_error(msg))
+                self.after(0, self.destroy)
+            else:
+                self.after(0, lambda: self.on_error("所有文件下载失败，请检查网络"))
+                self.after(0, self.destroy)
+
+        threading.Thread(target=update_thread, daemon=True).start()
+
+    def _do_full_download(self, download_url):
+        """全量下载（zip/exe包）"""
         expected_sha = self.version_info.get("sha256", "")
-        self._is_incremental_update = is_update
-        
+        self._is_incremental_update = False
+
         def progress_cb(downloaded, total):
             if self.cancelled:
                 return
             if total > 0:
                 pct = downloaded / total * 100
-                self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * pct / 100), 20)
+                self.progress_var.set(pct)
                 self.status_label.config(
                     text=f"{self._format_size(downloaded)} / {self._format_size(total)}"
                 )
             else:
                 self.status_label.config(text=f"已下载 {self._format_size(downloaded)}")
-        
+
         def download_thread():
             try:
-                # 下载到临时目录
                 temp_dir = tempfile.mkdtemp(prefix="liveclipper_update_")
-                # 从 URL 提取文件名
                 filename = download_url.split("/")[-1] or "LiveClipper_Setup.exe"
                 temp_path = os.path.join(temp_dir, filename)
-                
+
                 download_file(download_url, temp_path, progress_cb)
-                
+
                 if self.cancelled:
                     return
-                
-                # SHA256 校验
+
                 if expected_sha:
                     self.after(0, lambda: self.status_label.config(text="正在校验文件完整性..."))
                     actual_sha = compute_sha256(temp_path)
@@ -430,18 +556,16 @@ class DownloadDialog(tk.Toplevel):
                         ))
                         self.after(0, self.destroy)
                         return
-                
-                # 下载成功
-                self.after(0, lambda: self.on_complete(temp_path, filename, self._is_incremental_update))
+
+                self.after(0, lambda: self.on_complete(temp_path, filename, False))
                 self.after(0, self.destroy)
-                
+
             except Exception as e:
                 if not self.cancelled:
                     self.after(0, lambda: self.on_error(f"下载失败: {str(e)}"))
                     self.after(0, self.destroy)
-        
+
         threading.Thread(target=download_thread, daemon=True).start()
-    
     def _on_cancel(self):
         self.cancelled = True
         self.destroy()
@@ -558,20 +682,53 @@ def _apply_update(zip_path):
         with zipfile.ZipFile(zip_path, 'r') as zf:
             zf.extractall(staging)
         
-        # Read version from extracted version.json
+
+        # Handle GitHub zip structure: LiveClipper-main/app/...
+        app_src = None
+        for root, dirs, fns in os.walk(staging):
+            if "ai_clipper.py" in fns and "gui.py" in fns:
+                app_src = root
+                break
+        if not app_src:
+            alt = os.path.join(staging, "_internal", "app")
+            if os.path.isdir(alt) and os.path.exists(os.path.join(alt, "gui.py")):
+                app_src = alt
+        if not app_src:
+            return False
+
+        # Read version from version.json
         try:
-            vj = os.path.join(staging, "_internal", "version.json")
-            if os.path.exists(vj):
-                import json as _json
-                with open(vj, "r", encoding="utf-8") as f:
-                    vdata = _json.load(f)
-                new_ver = vdata.get("latest_version", "")
-                if new_ver:
-                    _set_installed_version(new_ver)
+            vj_paths = [
+                os.path.join(app_src, "version.json"),
+                os.path.join(staging, "_internal", "version.json"),
+            ]
+            for vj in vj_paths:
+                if os.path.exists(vj):
+                    import json as _json
+                    with open(vj, "r", encoding="utf-8") as f:
+                        vdata = _json.load(f)
+                    new_ver = vdata.get("version", vdata.get("latest_version", ""))
+                    if new_ver:
+                        _set_installed_version(new_ver)
+                    break
         except Exception:
             pass
         
-        # Create a bat script that: waits for app exit -> copies files -> restarts
+        # Copy app files directly if not frozen, otherwise use bat script
+        if not getattr(sys, 'frozen', False):
+            # Dev mode: just copy files directly
+            import shutil as _shutil
+            target_app = app_src  # same directory
+            for fname in os.listdir(app_src):
+                if fname.endswith(('.py', '.json')):
+                    src_f = os.path.join(app_src, fname)
+                    dst_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+                    try:
+                        _shutil.copy2(src_f, dst_f)
+                    except Exception:
+                        pass
+            return True
+
         if getattr(sys, 'frozen', False):
             exe_name = os.path.basename(sys.executable)
         else:
