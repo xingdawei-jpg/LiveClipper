@@ -1,5 +1,5 @@
 {
-  "version": "8.3.0",
+  "version": "8.3.1",
   "files": {
     "ai_clipper.py": "d09ecdf2fe58011c76717404d730f58aa6499b5ebbb93541272842bc0383e1ad",
     "ai_settings.json": "9561bc383fa034c96172d8e4a101b66a4dd7b85207fcc1e03611bd56b44d1f1f",
@@ -18,7 +18,7 @@
     "version.json": "38fbc2f3778028d79eea1986de1bc853e8158a1da72f4e4f0e3f9f93bd163baa",
     "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
-  "release_notes": "v8.3: AI选片优化+价格硬过滤+Whisper模型可选+界面优化",
-  "latest_version": "8.3.0",
+  "release_notes": "v8.3.1: 测试增量更新",
+  "latest_version": "8.3.1",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
 }
