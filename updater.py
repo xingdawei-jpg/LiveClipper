@@ -1,4 +1,4 @@
-﻿"""
+"""
 LiveClipper 自动更新模块
 - 启动时后台检查 GitHub Releases 是否有新版本
 - 支持强制更新、下载进度、SHA256 校验
@@ -12,10 +12,9 @@ import hashlib
 import threading
 import tempfile
 import subprocess
-import urllib.request
-import urllib.error
-import ssl
+import time
 import tkinter as tk
+from tkinter import ttk
 from tkinter import messagebox
 from pathlib import Path
 
@@ -23,22 +22,94 @@ from pathlib import Path
 # ============ 配置（发布时修改） ============
 
 # GitHub 仓库（私有仓库需在 version.json 里放完整 URL）
-GITHUB_REPO = "xingdawei-jpg/LiveClipper"  # 格式: owner/repo，后续填入
+GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 
 # version.json 的远程地址（优先使用这个）
 # 如果设置了这个，会忽略 GITHUB_REPO
-VERSION_URL = ""
-
-# 国内加速镜像列表（优先使用，失败自动回退）
-MIRROR_PREFIXES = [
-    "https://ghfast.top/",
-    "https://mirror.ghproxy.com/",
-    "https://gh-proxy.com/",
-    "https://ghps.cc/",
-]
+VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "8.3.0"
+
+
+
+def init_installed_version():
+    """First launch: create .installed_version from version.json in package"""
+    try:
+        vf = _get_installed_version_file()
+        if not os.path.exists(vf):
+            # Read version from bundled version.json
+            if getattr(sys, 'frozen', False):
+                vj = os.path.join(os.path.dirname(sys.executable), '_internal', 'version.json')
+            else:
+                vj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')
+            if os.path.exists(vj):
+                with open(vj, 'r', encoding='utf-8-sig') as f:
+                    vdata = json.load(f)
+                ver = vdata.get('latest_version', '')
+                if ver:
+                    _set_installed_version(ver)
+                    return
+            _set_installed_version(CURRENT_VERSION)
+    except Exception:
+        _set_installed_version(CURRENT_VERSION)
+
+
+def _get_installed_version_file():
+    """Path to local version tracking file"""
+    base = _get_install_base() if hasattr(sys, 'modules') else os.path.dirname(os.path.abspath(__file__))
+    try:
+        base = _get_install_base()
+    except Exception:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, ".installed_version")
+
+def _get_installed_version():
+    """Read installed version from local file, fallback to CURRENT_VERSION"""
+    try:
+        vf = _get_installed_version_file()
+        if os.path.exists(vf):
+            with open(vf, "r", encoding="utf-8") as f:
+                v = f.read().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return CURRENT_VERSION
+
+def _set_installed_version(version):
+    """Write installed version to local file after update"""
+    try:
+        vf = _get_installed_version_file()
+        with open(vf, "w", encoding="utf-8") as f:
+            f.write(version.strip())
+    except Exception:
+        pass
+
+
+def init_installed_version():
+    """First-launch: create .installed_version from version.json if not exists.
+    Call this once at app startup before any update check."""
+    try:
+        vf = _get_installed_version_file()
+        if not os.path.exists(vf):
+            # Read version from bundled version.json
+            if getattr(sys, 'frozen', False):
+                vj = os.path.join(os.path.dirname(sys.executable), '_internal', 'version.json')
+            else:
+                vj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')
+            if os.path.exists(vj):
+                with open(vj, 'r', encoding='utf-8-sig') as f:
+                    data = json.load(f)
+                ver = data.get('version', CURRENT_VERSION)
+                _set_installed_version(ver)
+                return ver
+            else:
+                _set_installed_version(CURRENT_VERSION)
+                return CURRENT_VERSION
+    except Exception:
+        pass
+    return CURRENT_VERSION
 
 # 检查更新的 API 地址（GitHub Releases）
 def get_version_url():
@@ -46,18 +117,8 @@ def get_version_url():
     if VERSION_URL:
         return VERSION_URL
     if GITHUB_REPO and "/" in GITHUB_REPO:
-        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
+        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/app/version.json"
     return ""
-
-
-def get_mirrored_url(raw_github_url):
-    """将 GitHub raw URL 转为镜像列表（镜像优先，原始地址兜底）"""
-    if not raw_github_url or "raw.githubusercontent.com" not in raw_github_url:
-        return [raw_github_url]
-    path = raw_github_url.replace("https://raw.githubusercontent.com/", "")
-    urls = [prefix + path for prefix in MIRROR_PREFIXES]
-    urls.append(raw_github_url)  # 原始地址兜底
-    return urls
 
 
 # ============ 版本比较 ============
@@ -91,31 +152,54 @@ def compute_sha256(filepath):
 
 def download_file(url, dest_path, progress_callback=None):
     """
-    下载文件，支持进度回调
-    progress_callback(downloaded_bytes, total_bytes) 
+    下载文件，使用 curl.exe（兼容 Gitee 多级重定向）
+    progress_callback(downloaded_bytes, total_bytes)
     """
-    # 创建不受证书验证影响的 context（某些环境需要）
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # 先用 HEAD 获取文件大小
+    total_size = 0
+    try:
+        result = subprocess.run(
+            ["curl.exe", "-s", "-k", "-L", "-I", url],
+            capture_output=True, encoding="utf-8", timeout=15
+        )
+        # 取最后一次重定向后的 Content-Length
+        for line in reversed(result.stdout.splitlines()):
+            if line.lower().startswith("content-length:"):
+                val = line.split(":", 1)[1].strip()
+                if val.isdigit():
+                    total_size = int(val)
+                break
+    except Exception:
+        pass
 
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "LiveClipper-Updater/1.0"
-    })
-    
-    with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
-        total_size = int(response.headers.get("Content-Length", 0))
-        downloaded = 0
-        
-        with open(dest_path, "wb") as f:
-            while True:
-                chunk = response.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_callback:
-                    progress_callback(downloaded, total_size)
+    # 用 curl 下载
+    process = subprocess.Popen(
+        ["curl.exe", "-s", "-k", "-L", "-o", dest_path, url],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+    # 轮询文件大小上报进度
+    while process.poll() is None:
+        if progress_callback and total_size > 0:
+            downloaded = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+            progress_callback(downloaded, total_size)
+        time.sleep(0.3)
+
+    process.wait()
+    if process.returncode != 0:
+        raise Exception(f"curl 下载失败 (code {process.returncode})")
+
+    if progress_callback:
+        downloaded = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        progress_callback(downloaded, downloaded)
+
+    # Check if downloaded file is HTML (Gitee CDN sometimes returns error pages)
+    if os.path.exists(dest_path):
+        with open(dest_path, 'rb') as f:
+            header = f.read(512)
+        if b'<html' in header.lower() or b'<!doctype' in header.lower():
+            os.remove(dest_path)
+            raise Exception("下载被拦截，服务器返回了网页而非更新文件。请检查网络或手动下载更新。")
 
 
 # ============ 检查更新 ============
@@ -125,41 +209,25 @@ def check_update():
     检查是否有新版本
     返回 dict（包含版本信息）或 None（无更新/出错）
     """
-    # 生成带镜像的 URL 列表
-    base_url = get_version_url()
-    urls = get_mirrored_url(base_url)
-    
-    for try_url in urls:
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            
-            req = urllib.request.Request(try_url, headers={
-                "User-Agent": "LiveClipper-Updater/1.0"
-            })
-            with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-                raw = resp.read().decode("utf-8")
-                # 镜像可能返回 HTML 错误页，验证是 JSON
-                if not raw.strip().startswith("{"):
-                    continue
-                data = json.loads(raw)
-            
-            remote_ver = data.get("latest_version", "")
-            if not remote_ver or not is_newer(remote_ver, CURRENT_VERSION):
-                return None
-            
-            # 将 download_url 也走镜像加速
-            dl_url = data.get("download_url", "")
-            if dl_url and "raw.githubusercontent.com" in dl_url:
-                data["download_url"] = get_mirrored_url(dl_url)[0]
-            
-            return data
-        
-        except Exception:
-            continue
-    
-    return None
+    url = get_version_url()
+    if not url:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["curl.exe", "-s", "-k", "--max-time", "10", url],
+            capture_output=True, encoding="utf-8", timeout=15
+        )
+        data = json.loads(result.stdout)
+
+        remote_ver = data.get("version", "")
+        if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
+            return None
+
+        return data
+
+    except Exception:
+        return None
 
 
 # ============ GUI 组件 ============
@@ -191,6 +259,10 @@ class UpdateDialog(tk.Toplevel):
         vi = self.version_info
         version = vi.get("latest_version", "?")
         notes = vi.get("release_notes", "修复了一些问题")
+        # Check if incremental update is available
+        is_update = _is_installed() and vi.get("update_url", "")
+        if is_update:
+            notes += "\n\n（增量更新，仅下载变更文件，几秒完成）"
         force = vi.get("force_update", False)
         
         # 标题
@@ -282,12 +354,10 @@ class DownloadDialog(tk.Toplevel):
             font=("Microsoft YaHei UI", 11)
         ).pack(pady=(15, 5))
         
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = tk.Progressbar(
-            self, variable=self.progress_var,
-            maximum=100, length=350
-        )
-        self.progress_bar.pack(pady=5)
+        self._progress_value = 0
+        self._progress_canvas = tk.Canvas(self, width=350, height=20, bg="#E0E0E0", highlightthickness=0)
+        self._progress_canvas.pack(pady=5)
+        self._progress_bar = self._progress_canvas.create_rectangle(0, 0, 0, 20, fill="#2196F3", outline="")
         
         self.status_label = tk.Label(
             self, text="准备中...",
@@ -311,20 +381,26 @@ class DownloadDialog(tk.Toplevel):
             return f"{size_bytes / (1024 * 1024):.1f} MB"
     
     def _start_download(self):
-        download_url = self.version_info.get("download_url", "")
+        # Choose download URL: small update for existing installs, full for new
+        is_update = _is_installed() and self.version_info.get("update_url", "")
+        if is_update:
+            download_url = self.version_info["update_url"]
+        else:
+            download_url = self.version_info.get("download_url", "")
         if not download_url:
             self.on_error("下载地址无效")
             self.destroy()
             return
         
         expected_sha = self.version_info.get("sha256", "")
+        self._is_incremental_update = is_update
         
         def progress_cb(downloaded, total):
             if self.cancelled:
                 return
             if total > 0:
                 pct = downloaded / total * 100
-                self.progress_var.set(pct)
+                self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * pct / 100), 20)
                 self.status_label.config(
                     text=f"{self._format_size(downloaded)} / {self._format_size(total)}"
                 )
@@ -356,7 +432,7 @@ class DownloadDialog(tk.Toplevel):
                         return
                 
                 # 下载成功
-                self.after(0, lambda: self.on_complete(temp_path, filename))
+                self.after(0, lambda: self.on_complete(temp_path, filename, self._is_incremental_update))
                 self.after(0, self.destroy)
                 
             except Exception as e:
@@ -410,27 +486,158 @@ def _show_dialog(version_info):
         root.wait_window(download_dlg)
 
 
-def _on_download_complete(filepath, filename):
-    """下载完成，提示用户运行安装包"""
+def _on_download_complete(filepath, filename, is_incremental=False):
+    """下载完成，处理更新"""
     try:
-        result = messagebox.askyesno(
-            "下载完成",
-            f"更新包已下载完成。\n\n文件: {filename}\n\n点击「是」将关闭当前程序并运行安装包。\n也可以稍后手动运行。",
-            icon="info"
-        )
-        if result:
-            # 启动安装包
-            subprocess.Popen([filepath], shell=True)
-            # 关闭当前程序
+        if is_incremental and filename.endswith('.zip'):
+            # Incremental update: extract zip and restart
+            success = _apply_update(filepath)
+            # Clean up temp file
             try:
-                root = tk._default_root
-                if root:
-                    root.quit()
+                os.remove(filepath)
+                os.rmdir(os.path.dirname(filepath))
             except Exception:
                 pass
-            sys.exit(0)
+            if success:
+                # _apply_update handles restart via bat script
+                pass
+            else:
+                messagebox.showerror(
+                    "更新失败",
+                    "解压更新包失败，请尝试重新下载。",
+                    icon="error"
+                )
+        else:
+            # Full update: prompt user to run installer
+            result = messagebox.askyesno(
+                "下载完成",
+                f"更新包已下载完成。\n\n文件: {filename}\n\n点击「是」将关闭当前程序并运行安装包。\n也可以稍后手动运行。",
+                icon="info"
+            )
+            if result:
+                subprocess.Popen([filepath], shell=True)
+                try:
+                    root = tk._default_root
+                    if root:
+                        root.quit()
+                except Exception:
+                    pass
+                sys.exit(0)
     except Exception:
         pass
+
+
+def _is_installed():
+    """Check if this is an existing installation (has FFmpeg)"""
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+        ffmpeg_path = os.path.join(base, '_internal', 'ffmpeg', 'ffmpeg.exe')
+        return os.path.exists(ffmpeg_path)
+    return False
+
+
+def _get_install_base():
+    """Get the installation base directory"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _apply_update(zip_path):
+    """Extract update zip via bat script to handle locked exe"""
+    import zipfile, tempfile
+    base = _get_install_base()
+    try:
+        # Extract to a temp staging directory first
+        staging = os.path.join(tempfile.gettempdir(), "liveclipper_update_staging")
+        if os.path.exists(staging):
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging, exist_ok=True)
+        
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(staging)
+        
+        # Read version from extracted version.json
+        try:
+            vj = os.path.join(staging, "_internal", "version.json")
+            if os.path.exists(vj):
+                import json as _json
+                with open(vj, "r", encoding="utf-8") as f:
+                    vdata = _json.load(f)
+                new_ver = vdata.get("latest_version", "")
+                if new_ver:
+                    _set_installed_version(new_ver)
+        except Exception:
+            pass
+        
+        # Create a bat script that: waits for app exit -> copies files -> restarts
+        if getattr(sys, 'frozen', False):
+            exe_name = os.path.basename(sys.executable)
+        else:
+            exe_name = None
+        
+        bat_path = os.path.join(tempfile.gettempdir(), "liveclipper_update.bat")
+        bat_lines = [
+            "@echo off",
+            "chcp 65001 >nul 2>&1",
+            "echo Updating LiveClipper...",
+        ]
+        if exe_name:
+            # Wait for the exe process to exit
+            bat_lines.append('taskkill /IM "' + exe_name + '" /F >nul 2>&1')
+            bat_lines.append("timeout /t 2 /nobreak >nul")
+        
+        # Copy all files from staging to install dir
+            bat_lines.append('xcopy "' + staging + '\\*" "' + base + '\\" /E /Y /Q >nul 2>&1')
+        
+        # Cleanup staging
+            bat_lines.append('rmdir /S /Q "' + staging + '" >nul 2>&1')
+        
+        # Restart app
+        if exe_name:
+            bat_lines.append('start "" "' + os.path.join(base, exe_name) + '"')
+        
+        # Self-delete the bat
+        bat_lines.append('del "%~f0"')
+        
+        with open(bat_path, 'w', encoding='utf-8') as bf:
+            bf.write("\n".join(bat_lines))
+        
+        # Launch the bat and exit current app
+        import subprocess
+        subprocess.Popen([bat_path], shell=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
+        
+        # Exit current app
+        try:
+            root = tk._default_root
+            if root:
+                root.quit()
+        except Exception:
+            pass
+        sys.exit(0)
+        
+    except Exception as e:
+        return False
+
+
+def _restart_app():
+    """Restart the application"""
+    try:
+        if getattr(sys, 'frozen', False):
+            exe = sys.executable
+        else:
+            exe = sys.argv[0]
+        subprocess.Popen([exe], shell=True)
+    except Exception:
+        pass
+    try:
+        root = tk._default_root
+        if root:
+            root.quit()
+    except Exception:
+        pass
+    sys.exit(0)
 
 
 def _on_download_error(msg):

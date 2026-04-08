@@ -309,7 +309,7 @@ SUBTITLE_OVERLAY = {
     "outline_color": "&H00000000",
     "outline_width": 0,
     "position": "bottom",
-    "margin_v": 270,
+    "margin_v": 350,
     "keyword_font_size": 112,
     "keyword_font_color": "&H0000FFFF",
     "keyword_bold": True,
