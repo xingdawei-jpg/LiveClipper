@@ -1,30 +1,23 @@
 {
-  "version": "9.2.0",
-  "latest_version": "9.2.0",
+  "version": "8.3.0",
   "files": {
-    "ai_clipper.py": "560aa17591bffee8ca39eb5fd02be7ccb7613c561a7e05e227ebd89d2d41a338",
-    "ai_settings.json": "78bbbec44ba4eeb7d1578c793b91edb8a4aaba5f386db6e9f1d94745f69d5cc7",
+    "ai_clipper.py": "d09ecdf2fe58011c76717404d730f58aa6499b5ebbb93541272842bc0383e1ad",
+    "ai_settings.json": "9561bc383fa034c96172d8e4a101b66a4dd7b85207fcc1e03611bd56b44d1f1f",
     "asr_api.py": "c7c5da6ba3d6319ddbf81519fd96b13de556ac70e4031c8f616105ff527759bc",
-    "config.py": "f61c21689e7ced3e52a8368b6735f32ab6297bb97dfa47caf3f37e86530ca71c",
+    "config.py": "8d2fd0bb96cb7fa9ea13975ee0ffad33680ed64d7ce9aa041adcd85edc49ebf7",
     "cutter.py": "07eb7b7da0f4d3b459c5b0cfe48f52669b8f78d9d064c1520e634b0eb23023c3",
-    "cutter_logic.py": "095bd586f4fb4638ccab5efe4f338484cf20a964ee3cf65a4868682e34382396",
-    "gui.py": "2d94157d048776e9d40e01219bab18ba7932a6efda9c2f4b876635e9fce85970",
+    "cutter_logic.py": "5e3acac74261e69767a25eca0feaa8dcfae1227ef208ef59b78815ef34be5eef",
+    "gui.py": "ad9017dec87266f497f2ad9b6d59d23d474d43637b1d4de702ff9156c648f002",
     "keywords.json": "bde3c0a549ca8bb20371381fcd26af2f3aa548d3ccd11d1f4569e6fa785c7ca1",
     "license_client.py": "98e783537ac78ad609694c74c03d83a2dcaf7efb51128fa83ab2901ea00e282e",
     "platform_config.py": "b2963b288c1231ce2d6694072bd87125a3478b9cf6febfbc800d09afdb1ae595",
     "run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
     "srt_parser.py": "229bb03b151bc9f49db1038a451d270307155be324c5f721fe0d1a7131a82c3c",
-    "stt.py": "1b0cf3ba2779a122c491d6feedb03fea9ce8ef0a650bc184df88db323777bcb8",
+    "stt.py": "126fcbddf52a1ee34bf3ead1f6440a948e631aaeff205c452fb89e1a613755dd",
     "updater.py": "5089d4a3a4c90c77c5245b84ecd00c7ac48c80106f5e88fd9c4d17017f26f0b3",
-    "version.json": "3d707d4d5918bdb99d09b1faca5cfded179384c62835196da9a2214b71f0ef94",
+    "version.json": "38fbc2f3778028d79eea1986de1bc853e8158a1da72f4e4f0e3f9f93bd163baa",
     "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
-  "changelog": "v9.2: 圈人群Hook+促单Close+跳帧修复+语气词裁剪+测试连接按钮+价格排除增强",
-  "force_update": false,
-  "mirrors": [
-    "https://ghfast.top/https://raw.githubusercontent.com/xingdawei-jpg/LiveClipper/master/app",
-    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/xingdawei-jpg/LiveClipper/master/app",
-    "https://gh-proxy.com/https://raw.githubusercontent.com/xingdawei-jpg/LiveClipper/master/app",
-    "https://ghps.cc/https://raw.githubusercontent.com/xingdawei-jpg/LiveClipper/master/app"
-  ]
+  "release_notes": "v8.3: AI选片优化+价格硬过滤+Whisper模型可选+界面优化",
+  "latest_version": "8.3.0"
 }

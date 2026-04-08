@@ -90,7 +90,7 @@ def _ensure_whisper_model(model_size="small", log_fn=None):
     return False
 
 
-def transcribe_to_srt(audio_path, srt_output, log_fn=None):
+def transcribe_to_srt(audio_path, srt_output, log_fn=None, whisper_model="small"):
     """用 faster_whisper 识别音频，输出 SRT 字幕文件（支持多镜像源自动切换）"""
     import os as _os
 
@@ -113,8 +113,8 @@ def transcribe_to_srt(audio_path, srt_output, log_fn=None):
     for mirror_name, mirror_url in mirrors:
         _os.environ['HF_ENDPOINT'] = mirror_url
         try:
-            _log(f"正在加载语音识别模型 (small)...")
-            model = WhisperModel("small", device="cpu", compute_type="int8")
+            _log(f"正在加载语音识别模型 ({whisper_model})...")
+            model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
             break  # 成功加载，跳出循环
         except Exception as _e:
             _log(f"⚠️ {mirror_name} 加载失败，尝试下一个源...")
@@ -185,7 +185,7 @@ def transcribe_to_srt(audio_path, srt_output, log_fn=None):
     return True
 
 
-def generate_srt(video_path, log_fn=None):
+def generate_srt(video_path, log_fn=None, whisper_model="small"):
     """
     从视频自动生成 SRT 字幕文件。
     返回 SRT 文件路径，失败返回 None。
@@ -208,7 +208,7 @@ def generate_srt(video_path, log_fn=None):
         return None
 
     # 语音识别
-    if not transcribe_to_srt(wav_path, srt_path, log_fn):
+    if not transcribe_to_srt(wav_path, srt_path, log_fn, whisper_model=whisper_model):
         return None
 
     # 清理临时音频文件

@@ -54,6 +54,7 @@ AI_PRESETS = {
     "通义千问":  {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
     "GPT-4o":    {"base_url": "https://api.openai.com/v1", "model": "gpt-4o"},
     "GLM-4":     {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4"},
+    "DeepSeek R1": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-reasoner"},
 }
 
 # 去重等级说明
@@ -156,7 +157,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("直播带货切片工具 v5.3.10")
-        self.root.geometry("720x820")
+        self.root.geometry("800x820")
         self.root.configure(bg=C["bg"])
         self.root.minsize(550, 650)
         self.videos = []  # [(path, name), ...]
@@ -218,45 +219,7 @@ class App:
                                           width=10, font=FNT_S, state="readonly")
         self.main_category_combo.pack(side="left", pady=(4,0))
 
-        # 可选：画中画
-        sf = tk.Frame(m, bg=C["card"], padx=12, pady=8, highlightbackground=C["card_border"], highlightthickness=1)
-        sf.pack(fill="x", padx=16, pady=2)
-        pip_f = tk.Frame(sf, bg=C["card"])
-        pip_f.pack(fill="x")
-        tk.Label(pip_f, text="画中画", font=FNT_B, fg=C["text"],
-                 bg=C["card"], anchor="w").pack(side="left")
-        tk.Button(pip_f, text="浏览", font=FNT_S, fg="white", bg=C["btn_sel"],
-                  relief="flat", cursor="hand2", padx=10,
-                  command=self._browse_pip).pack(side="right")
-        tk.Button(pip_f, text="清除", font=FNT_S, fg=C["dim"], bg=C["card"],
-                  relief="flat", cursor="hand2", padx=6,
-                  command=self._clear_pip).pack(side="right", padx=(4,0))
-        # PIP 可配项（同一行，选了文件后显示）
-        self.pip_size_var = tk.StringVar(value="15%")
-        self.pip_opacity_var = tk.StringVar(value="3%")
-        self.pip_pos_var = tk.StringVar(value="右下")
-        self._pip_cfg_widgets = []
-        for _lbl, _var, _vals, _w in [
-            ("大小", self.pip_size_var, ["10%","15%","20%","25%","30%","50%","100%"], 3),
-            ("透明度", self.pip_opacity_var, ["1%","3%","5%","10%","20%","50%","100%"], 4),
-            ("位置", self.pip_pos_var, ["左上","右上","左下","右下"], 3),
-        ]:
-            _cb = ttk.Combobox(pip_f, textvariable=_var, values=_vals, width=_w,
-                               font=FNT_S, state="readonly")
-            _cb.pack(side="right")
-            self._pip_cfg_widgets.append(_cb)
-            _l = tk.Label(pip_f, text=f" {_lbl}:", font=FNT_S, fg=C["dim"], bg=C["card"])
-            _l.pack(side="right")
-            self._pip_cfg_widgets.append(_l)
-        # 初始隐藏可配项
-        for _w in self._pip_cfg_widgets:
-            _w.pack_forget()
-        self.pip_var = tk.StringVar(value="留空 = 自动去重")
-        self.pip_path = ""
-        self.pip_path_label = tk.Label(pip_f, textvariable=self.pip_var, font=FNT_S, fg=C["dim"],
-                 bg=C["card"])
-        self.pip_path_label.pack(side="left", fill="x", expand=True, padx=8)
-
+        # 画中画已移到去重行
         # SRT 字幕（藏到去重面板里，不单独显示）
 
         # 去重 + 字幕（可折叠）
@@ -286,13 +249,41 @@ class App:
             rb.pack(side="left", padx=1)
             ToolTip(rb, DEDUP_TIPS[val])
 
-        # 字幕叠加开关
-        self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
-        self.ai_enabled_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(opt, text="字幕叠加", variable=self.subtitle_var,
-                       font=FNT_S, fg=C["text"], bg=C["card"],
-                       selectcolor=C["inp"], activebackground=C["card"],
-                       cursor="hand2").pack(side="right", padx=4)
+        # 画中画（与去重同行，| 分隔）
+        tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
+        tk.Label(opt, text="画中画:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
+        self.pip_var = tk.StringVar(value="留空=无")
+        self.pip_path = ""
+        tk.Button(opt, text="选择", font=FNT_S, fg="white", bg=C["btn_sel"],
+                  relief="flat", cursor="hand2", padx=6,
+                  command=self._browse_pip).pack(side="left", padx=2)
+        tk.Button(opt, text="清除", font=FNT_S, fg=C["dim"], bg=C["card"],
+                  relief="flat", cursor="hand2", padx=4,
+                  command=self._clear_pip).pack(side="left", padx=1)
+        self.pip_path_label = tk.Label(opt, textvariable=self.pip_var, font=FNT_S, fg=C["dim"],
+                 bg=C["card"])
+        self.pip_path_label.pack(side="left", padx=4)
+        # PIP配置（选择文件后显示）
+        self.pip_size_var = tk.StringVar(value="15%")
+        self.pip_opacity_var = tk.StringVar(value="3%")
+        self.pip_pos_var = tk.StringVar(value="右下")
+        self._pip_cfg_widgets = []
+        for _lbl, _var, _vals, _w in [
+            ("大小", self.pip_size_var, ["10%","15%","20%","25%","30%","50%","100%"], 3),
+            ("透明度", self.pip_opacity_var, ["1%","3%","5%","10%","20%","50%","100%"], 4),
+            ("位置", self.pip_pos_var, ["左上","右上","左下","右下"], 3),
+        ]:
+            _cb = ttk.Combobox(opt, textvariable=_var, values=_vals, width=_w,
+                               font=FNT_S, state="readonly")
+            _cb.pack(side="left")
+            self._pip_cfg_widgets.append(_cb)
+            _l = tk.Label(opt, text=f" {_lbl}:", font=FNT_S, fg=C["dim"], bg=C["card"])
+            _l.pack(side="left")
+            self._pip_cfg_widgets.append(_l)
+        # 初始隐藏PIP配置（选了文件后显示）
+        for _w in self._pip_cfg_widgets:
+            _w.pack_forget()
+        # 字幕叠加开关（移到输出行）
 
         # 自定义去重面板
         self._dedup_frame = tk.Frame(dedup_card, bg=C["card"], padx=12, pady=4)
@@ -316,6 +307,7 @@ class App:
         # 输出目录（移到按钮行，不单独占行）
         self.output_dir = ""
         self.output_var = tk.StringVar(value="默认: output/")
+        self.ai_enabled_var = tk.BooleanVar(value=False)
         # AI 设置（可折叠）
         self.ai_frame = tk.Frame(m, bg=C["card"], padx=12, pady=6)
         self.ai_frame.pack(fill="x", padx=16, pady=2)
@@ -431,8 +423,16 @@ class App:
               font=FNT_S, fg="#4fc3f7", bg=C["card"],
               selectcolor=C["inp"], activebackground=C["card"],
               cursor="hand2", command=self._toggle_asr).pack(side="left")
+        # Whisper模型选择
+        tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
+        tk.Label(asr_hdr, text="Whisper:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
+        self._whisper_model_var = tk.StringVar(value="small")
+        wm_combo = ttk.Combobox(asr_hdr, textvariable=self._whisper_model_var,
+                                values=["small", "medium"],
+                                width=7, font=FNT_S, state="readonly")
+        wm_combo.pack(side="left", padx=2)
         # SRT 字幕（与云端ASR互斥）
-        tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=10, pady=2)
+        tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
         self.srt_var = tk.StringVar(value="留空 = 自动语音识别")
         self.srt_path = ""
         tk.Label(asr_hdr, text="SRT:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
@@ -444,6 +444,9 @@ class App:
         tk.Button(asr_hdr, text="清除", font=FNT_S, fg=C["dim"], bg=C["card"],
                   relief="flat", cursor="hand2", padx=4,
                   command=self._clear_srt).pack(side="left")
+        tk.Button(asr_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
+                  relief="flat", cursor="hand2", padx=8,
+                  command=self._save_ai).pack(side="right")
 
         # ASR预设下拉
         self.asr_preset_row = tk.Frame(asr_card, bg=C["card"])
@@ -574,10 +577,16 @@ class App:
         tk.Button(act_row, text="打开", font=FNT_S, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=8,
                   command=self._open_output).pack(side="right", padx=(2,0))
-        tk.Label(act_row, textvariable=self.output_var, font=FNT_S, fg=C["dim"],
-                 bg=C["bg"]).pack(side="right", fill="x", padx=(8,8))
         tk.Label(act_row, text="输出:", font=FNT_S, fg=C["dim"],
                  bg=C["bg"]).pack(side="right")
+        tk.Label(act_row, textvariable=self.output_var, font=FNT_S, fg=C["dim"],
+                 bg=C["bg"]).pack(side="right", fill="x", padx=(8,8))
+        tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
+        self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
+        tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
+                       font=FNT_S, fg=C["text"], bg=C["bg"],
+                       selectcolor=C["inp"], activebackground=C["bg"],
+                       cursor="hand2").pack(side="right", padx=4)
         self.btn = tk.Button(act_row, text="▶ 开始切割", font=FNT_B,
                          fg="white", bg=C["btn_go"], activebackground=C["btn_go2"],
                          activeforeground="white", relief="flat", cursor="hand2",
@@ -1148,6 +1157,8 @@ class App:
                 self.volc_tos_sk_var.set(s["volc_tos_sk"])
             if s.get("volc_bucket"):
                 self.volc_bucket_var.set(s["volc_bucket"])
+            if "whisper_model" in s:
+                self._whisper_model_var.set(s["whisper_model"])
             self.asr_enabled_var.set(bool(s.get("volc_enabled", False) or s.get("asr_enabled", False)))
 
             # 自动匹配已有配置对应的预设
@@ -1206,6 +1217,7 @@ class App:
             "volc_tos_ak": self.volc_tos_ak_var.get().strip(),
             "volc_tos_sk": self.volc_tos_sk_var.get().strip(),
             "volc_bucket": self.volc_bucket_var.get().strip(),
+            "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
         }
         if save_settings(settings):
             self._log("AI 设置已保存", "ok")

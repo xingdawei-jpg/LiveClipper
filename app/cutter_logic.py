@@ -1005,7 +1005,18 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log("启动本地语音识别 (Whisper)...")
             try:
                 from stt import generate_srt
-                temp_srt = generate_srt(video_path, log_fn=_log)
+                # Read whisper model preference from settings
+                _wmodel = "small"
+                try:
+                    import json as _json
+                    _spath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+                    if os.path.exists(_spath):
+                        with open(_spath, "r", encoding="utf-8-sig") as _sf:
+                            _sdata = _json.load(_sf)
+                        _wmodel = _sdata.get("whisper_model", "small")
+                except Exception:
+                    pass
+                temp_srt = generate_srt(video_path, log_fn=_log, whisper_model=_wmodel)
             except Exception as _whisper_err:
                 _err_str = str(_whisper_err).lower()
                 if "huggingface" in _err_str or "hf_hub" in _err_str:
@@ -1144,7 +1155,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             # [v9.2] 只留尾部缓冲，不做前向缓冲（前向缓冲会延伸到未选中的内容）
             start_buf = 0
-            end_buf = 0.3
+            end_buf = 0
             # 尾部缓冲不能超过时间轴上下一个片段的开头
             later_clips = [c for c in ordered_clips if c[2] > end]
             if later_clips:
