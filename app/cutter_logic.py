@@ -10,6 +10,9 @@ import sys
 import re
 import time
 import shutil
+
+# 多版本缓存：process_video 写入，process_video_multi 读取
+_multi_result_cache = {}
 import subprocess
 import json
 import glob
@@ -1072,6 +1075,18 @@ def process_video(video_path, srt_path=None, output_path=None,
             from stt import cleanup_srt; cleanup_srt(temp_srt)
         return False
 
+    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
+    try:
+        global _multi_result_cache
+        if isinstance(_multi_result_cache, dict):
+            _multi_result_cache['clips'] = list(ordered_clips)
+            # 保存SRT内容
+            if srt_path and os.path.exists(srt_path):
+                with open(srt_path, "r", encoding="utf-8") as _f:
+                    _multi_result_cache['srt_text'] = _f.read()
+    except Exception:
+        pass
+
     # 4. 切割 + 去重 + 字幕叠加
     ffmpeg = get_ffmpeg_cmd()
     cfg = VIDEO_CONFIG
@@ -1156,7 +1171,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             # [v9.2] 只留尾部缓冲，不做前向缓冲（前向缓冲会延伸到未选中的内容）
             start_buf = 0
-            end_buf = 0
+            end_buf = 0.5 if 'close' in c_type.lower() else 0  # close加0.5s防吃字
             # 尾部缓冲不能超过时间轴上下一个片段的开头
             later_clips = [c for c in ordered_clips if c[2] > end]
             if later_clips:
@@ -1177,6 +1192,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             mirror_vf = ""
             if random.random() < 0.5:
                 mirror_vf = "hflip"
+            clip_duration = end - start
             aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
             vf_parts = [aspect_vf]
             if mirror_vf:
@@ -1185,7 +1201,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             cmd = [ffmpeg, "-y"]
             cmd += ["-ss", f"{start:.3f}", "-i", video_path]
-            cmd += ["-ss", "0", "-t", f"{end - start:.3f}"]
+            cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
             cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
@@ -1198,7 +1214,6 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             try:
                 popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if sys.platform == "win32":
                 proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
                 rc = proc.wait(timeout=120)
                 _log(f"[T] [{time.strftime('%H:%M:%S')}] rc={rc}")
@@ -1547,9 +1562,8 @@ def _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size=0.
     ]
 
     popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-    if sys.platform == "win32":
 
-    _log(f"\u53e0\u52a0\u753b\u4e2d\u753b: {os.path.basename(pip_path)}")
+    _log(f"叠加画中画: {os.path.basename(pip_path)}")
     try:
         proc = subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW)
         _, stderr = proc.communicate(timeout=300)
@@ -1580,7 +1594,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     extract_cmd = [ffmpeg, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path]
     try:
         popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if sys.platform == "win32":
         proc = subprocess.Popen(extract_cmd, **popen_kw, creationflags=_NO_WINDOW)
         rc = proc.wait(timeout=60)
         if rc != 0 or not os.path.exists(wav_path):
@@ -2079,7 +2092,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 
             popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
-            if sys.platform == "win32":
             # Windows 下禁用 fontconfig，避免 drawtext 初始化失败
             fc_env = None
             if sys.platform == "win32":
@@ -2116,7 +2128,12 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         log_fn=None, force_category=None, cancel_event=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                         num_versions=1):
-    """多版本输出：同一素材生成多个不同版本的切片"""
+    """多版本输出：同一素材生成多个不同版本的切片
+    
+    策略：先跑一次 process_video 拿到 AI 选片的全部候选片段，
+    然后用 multi_version 分成多个版本，每个版本单独处理。
+    不再要求预上传 SRT 文件。
+    """
     def _log(msg):
         if log_fn: log_fn(msg)
     
@@ -2128,54 +2145,85 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     
     _log(f"🎬 多版本模式: 将生成 {num_versions} 个版本")
     
-    # Step 1: Get AI-selected clips
-    from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
+    # Step 1: 检查AI模式
+    from ai_clipper import is_enabled as ai_is_enabled
     if not ai_is_enabled():
-        _log("多版本需要AI模式")
+        _log("多版本需要AI模式，降级为单版本")
         return process_video(video_path, srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos)
     
-    # Get SRT text
-    if not srt_path:
-        _log("多版本需要字幕文件")
-        return process_video(video_path, srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+    # Step 2: 第一次完整处理（ASR + AI全量选片 + 生成v1）
+    # process_video 会把选片结果存到 _multi_result_cache
+    global _multi_result_cache
+    _multi_result_cache = {}
     
-    with open(srt_path, "r", encoding="utf-8") as f:
-        srt_text = f.read()
+    # 设置全量选片模式：不限定偏好，选出更多不同类型的片段
+    import ai_clipper as _ai_mod
+    _ai_mod._skip_focus = True
     
-    # Get all candidate clips from AI
-    all_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category)
-    if not all_clips or len(all_clips) < 2:
-        _log("候选片段不足，无法生成多版本")
-        return process_video(video_path, srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+    _log("🎬 多版本: 第一次AI全量选片+处理（v1）...")
+    first_result = process_video(video_path, srt_path, output_path,
+                 dedup_preset, subtitle_overlay, log_fn,
+                 force_category, cancel_event,
+                 pip_path, pip_size, pip_opacity, pip_pos,
+                 )
     
-    # Step 2: Generate multiple versions from candidates
+    # 恢复偏好模式
+    _ai_mod._skip_focus = False
+    
+    _recorded_clips = _multi_result_cache.get('clips', [])
+    _recorded_srt_text = _multi_result_cache.get('srt_text')
+    
+    # 将保存的 SRT 内容写入固定文件，供后续版本复用（跳过ASR）
+    _multi_srt_path = srt_path  # 如果用户预上传了SRT，直接用
+    if not _multi_srt_path and _recorded_srt_text:
+        # 把 SRT 内容保存到一个不会被 process_video 删除的路径
+        _multi_srt_path = os.path.join(
+            os.path.dirname(video_path),
+            f"_multi_version_{os.path.splitext(os.path.basename(video_path))[0]}.srt"
+        )
+        with open(_multi_srt_path, "w", encoding="utf-8") as f:
+            f.write(_recorded_srt_text)
+        _log(f"🎬 多版本: SRT已保存，后续版本复用（跳过ASR）")
+    
+    if not _recorded_clips or len(_recorded_clips) < 2:
+        _log(f"候选片段不足({len(_recorded_clips)}条)，无法生成多版本")
+        return {"ok": True, "版本数": 1}
+    
+    _log(f"🎬 多版本: 获取到 {len(_recorded_clips)} 个候选片段")
+    
+    # Step 3: 生成多个版本
     from multi_version import generate_multi_versions
-    versions = generate_multi_versions(all_clips, num_versions, log_fn=_log)
+    versions = generate_multi_versions(_recorded_clips, num_versions, log_fn=_log)
     
     if len(versions) <= 1:
-        _log("只能生成1个版本")
-        return process_video(video_path, srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+        _log("只能生成1个版本，输出单版本")
+        return {"ok": True, "版本数": 1}
     
-    # Step 3: Process each version
-    # Determine base output path
+    # Step 4: 每个版本单独处理（版本1已经由第一次 process_video 生成）
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_dir = os.path.join(os.path.dirname(video_path), "output")
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
+    
+    # 重命名第一个输出为 _v1
+    if output_path and os.path.exists(output_path):
+        v1_path = os.path.join(output_dir, f"{video_name}_切片_v1.mp4")
+        try:
+            import shutil
+            shutil.move(output_path, v1_path)
+            _log(f"版本1已输出: {os.path.basename(v1_path)}")
+        except Exception:
+            v1_path = output_path
+        results.append({"ok": True})
+    
+    # 处理后续版本
     for vi, ver_clips in enumerate(versions):
+        if vi == 0:
+            continue  # 跳过 v1（已处理）
         if cancel_event and cancel_event.is_set():
             break
         
@@ -2183,12 +2231,10 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         for ct, text, s, e, sc, d in ver_clips:
             _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text[:30]}")
         
-        # Save this version's clips to a temp file for process_video to use
         v_output = os.path.join(output_dir, f"{video_name}_切片_v{vi+1}.mp4")
         
-        # Process this version by injecting clips
         result = _process_version_with_clips(
-            video_path, srt_path, v_output,
+            video_path, _multi_srt_path, v_output,
             ver_clips, dedup_preset, subtitle_overlay,
             log_fn, cancel_event,
             pip_path, pip_size, pip_opacity, pip_pos
@@ -2196,6 +2242,15 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         results.append(result)
     
     _log(f"\n✅ 多版本输出完成: {len(results)} 个版本")
+    
+    # 清理临时 SRT 文件
+    if _multi_srt_path and _multi_srt_path != srt_path:
+        try:
+            if os.path.exists(_multi_srt_path):
+                os.remove(_multi_srt_path)
+        except Exception:
+            pass
+    
     return {"ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results), "版本数": len(results)}
 
 

@@ -7,6 +7,8 @@ import re
 import subprocess
 import tempfile
 
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 sys_path = os.path.dirname(os.path.abspath(__file__))
 if sys_path not in __import__('sys').path:
     __import__('sys').path.insert(0, sys_path)
@@ -199,7 +201,6 @@ def generate_srt(video_path, log_fn=None, whisper_model="small"):
 
     # 生成临时文件名（用系统临时目录避免中文路径）
     import hashlib
-_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
     wav_path = os.path.join(temp_dir, f"audio_{video_hash}.wav")
     srt_path = os.path.join(temp_dir, f"sub_{video_hash}.srt")

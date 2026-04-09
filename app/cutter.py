@@ -19,10 +19,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
 from config import (
-_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     CLIP_KEYWORDS, CLIP_ORDER, VIDEO_CONFIG, FFMPEG_PATH,
     DEDUP_CONFIG, DEDUP_PRESET,
 )
+
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 # ============================================================

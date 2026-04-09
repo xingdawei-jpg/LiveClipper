@@ -433,6 +433,10 @@ class DownloadDialog(tk.Toplevel):
             return
 
         file_list = list(files_info.items())
+        # Move updater.py to last: avoid self-update crash (old code may have bugs)
+        updater_items = [x for x in file_list if x[0] == "updater.py"]
+        other_items = [x for x in file_list if x[0] != "updater.py"]
+        file_list = other_items + updater_items
         total = len(file_list)
         success_count = 0
         fail_count = 0
