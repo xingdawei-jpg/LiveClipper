@@ -30,6 +30,8 @@ from config import (
 )
 
 
+
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 def get_ffmpeg_cmd():
     from platform_config import FFMPEG_CMD
     if os.path.exists(FFMPEG_CMD):
@@ -958,8 +960,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                         _ff2 = get_ffmpeg_cmd()
                         _ext_cmd = [_ff2, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav2]
                         _pk2 = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if sys.platform == "win32": _pk2["creationflags"] = 0x08000000
-                        _p2 = subprocess.Popen(_ext_cmd, **_pk2)
+                        _p2 = subprocess.Popen(_ext_cmd, **_pk2, creationflags=_NO_WINDOW)
                         _p2.wait(timeout=120)
                         if _p2.returncode == 0 and _os2.path.exists(_wav2):
                             _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, log_fn=_log)
@@ -1080,7 +1081,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     _ffprobe = os.path.join(_ff_dir, "ffprobe" + (".exe" if sys.platform == "win32" else ""))
     _probe = [_ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "v:0", "-i", video_path]
     try:
-        _pr = subprocess.run(_probe, capture_output=True, text=True, timeout=10)
+        _pr = subprocess.run(_probe, capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         _prj = json.loads(_pr.stdout)
         _vs = _prj.get("streams", [{}])[0]
         _sw, _sh = int(_vs.get("width", 0)), int(_vs.get("height", 0))
@@ -1122,7 +1123,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         _log(f"FFmpeg: {ffmpeg_cmd}")
         probe_cmd = [ffmpeg_cmd, "-i", video_path]
         proc = subprocess.Popen(probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace")
+                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
         _, stderr_data = proc.communicate(timeout=30)
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", stderr_data)
@@ -1184,7 +1185,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             cmd = [ffmpeg, "-y"]
             cmd += ["-ss", f"{start:.3f}", "-i", video_path]
-            cmd += ["-t", f"{end - start:.3f}"]
+            cmd += ["-ss", "0", "-t", f"{end - start:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
             cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
@@ -1198,8 +1199,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if sys.platform == "win32":
-                    popen_kwargs["creationflags"] = 0x08000000
-                proc = subprocess.Popen(cmd, **popen_kwargs)
+                proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
                 rc = proc.wait(timeout=120)
                 _log(f"[T] [{time.strftime('%H:%M:%S')}] rc={rc}")
             except subprocess.TimeoutExpired:
@@ -1258,7 +1258,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     try:
         proc = subprocess.Popen(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace")
+                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
         _, stderr_data = proc.communicate(timeout=120)
     except subprocess.TimeoutExpired:
         proc.kill()
@@ -1364,7 +1364,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
         try:
             proc = subprocess.Popen(dedup_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    text=True, encoding="utf-8", errors="replace")
+                                    text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
             _, stderr_data = proc.communicate(timeout=600)
             if proc.returncode != 0:
                 _log(f"去重FFmpeg返回 {proc.returncode}")
@@ -1506,7 +1506,7 @@ def _get_video_duration(path, ffmpeg_cmd):
         ffprobe = "ffprobe"
     cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", path]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         data = json.loads(proc.stdout)
         return float(data.get("format", {}).get("duration", 0))
     except Exception:
@@ -1548,11 +1548,10 @@ def _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size=0.
 
     popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     if sys.platform == "win32":
-        popen_kw["creationflags"] = 0x08000000
 
     _log(f"\u53e0\u52a0\u753b\u4e2d\u753b: {os.path.basename(pip_path)}")
     try:
-        proc = subprocess.Popen(cmd, **popen_kw)
+        proc = subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW)
         _, stderr = proc.communicate(timeout=300)
         if proc.returncode == 0 and os.path.exists(output_path):
             _log("\u753b\u4e2d\u753b\u53e0\u52a0\u6210\u529f!")
@@ -1582,8 +1581,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     try:
         popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if sys.platform == "win32":
-            popen_kw["creationflags"] = 0x08000000
-        proc = subprocess.Popen(extract_cmd, **popen_kw)
+        proc = subprocess.Popen(extract_cmd, **popen_kw, creationflags=_NO_WINDOW)
         rc = proc.wait(timeout=60)
         if rc != 0 or not os.path.exists(wav_path):
             _log("音频提取失败，跳过字幕")
@@ -1710,7 +1708,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 mp3_p = wav_path.replace(".wav", "_ref.mp3")
                 ffmpeg = get_ffmpeg_cmd()
                 kw = dict(stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-                if sys.platform == "win32": kw["creationflags"] = 0x08000000
                 p = _sp.Popen([ffmpeg, "-y", "-i", video_path, "-vn", "-acodec",
                               "libmp3lame", "-ar", "16000", "-ac", "1", "-q:a", "4", mp3_p], **kw)
                 p.wait(timeout=60)
@@ -2083,7 +2080,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
             if sys.platform == "win32":
-                popen_kw["creationflags"] = 0x08000000
             # Windows 下禁用 fontconfig，避免 drawtext 初始化失败
             fc_env = None
             if sys.platform == "win32":
@@ -2092,7 +2088,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig></fontconfig>\n')
                 popen_kw["env"] = dict(os.environ)
                 popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
-            proc = subprocess.Popen(sub_cmd, **popen_kw)
+            proc = subprocess.Popen(sub_cmd, **popen_kw, creationflags=_NO_WINDOW)
             _, stderr_data = proc.communicate(timeout=300)
             if proc.returncode != 0 or not os.path.exists(output_path):
                 _log("字幕烧录失败，输出无字幕版本")
@@ -2113,3 +2109,133 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         import shutil as _shutil; _shutil.copy2(video_path, output_path)
 
     _log("字幕处理完成")
+
+
+def process_video_multi(video_path, srt_path=None, output_path=None,
+                        dedup_preset="medium", subtitle_overlay=True,
+                        log_fn=None, force_category=None, cancel_event=None,
+                        pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
+                        num_versions=1):
+    """多版本输出：同一素材生成多个不同版本的切片"""
+    def _log(msg):
+        if log_fn: log_fn(msg)
+    
+    if num_versions <= 1:
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    
+    _log(f"🎬 多版本模式: 将生成 {num_versions} 个版本")
+    
+    # Step 1: Get AI-selected clips
+    from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
+    if not ai_is_enabled():
+        _log("多版本需要AI模式")
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    
+    # Get SRT text
+    if not srt_path:
+        _log("多版本需要字幕文件")
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    
+    with open(srt_path, "r", encoding="utf-8") as f:
+        srt_text = f.read()
+    
+    # Get all candidate clips from AI
+    all_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category)
+    if not all_clips or len(all_clips) < 2:
+        _log("候选片段不足，无法生成多版本")
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    
+    # Step 2: Generate multiple versions from candidates
+    from multi_version import generate_multi_versions
+    versions = generate_multi_versions(all_clips, num_versions, log_fn=_log)
+    
+    if len(versions) <= 1:
+        _log("只能生成1个版本")
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    
+    # Step 3: Process each version
+    # Determine base output path
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    output_dir = os.path.join(os.path.dirname(video_path), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    results = []
+    for vi, ver_clips in enumerate(versions):
+        if cancel_event and cancel_event.is_set():
+            break
+        
+        _log(f"\n🎬 === 版本 {vi+1}/{len(versions)} ===")
+        for ct, text, s, e, sc, d in ver_clips:
+            _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text[:30]}")
+        
+        # Save this version's clips to a temp file for process_video to use
+        v_output = os.path.join(output_dir, f"{video_name}_切片_v{vi+1}.mp4")
+        
+        # Process this version by injecting clips
+        result = _process_version_with_clips(
+            video_path, srt_path, v_output,
+            ver_clips, dedup_preset, subtitle_overlay,
+            log_fn, cancel_event,
+            pip_path, pip_size, pip_opacity, pip_pos
+        )
+        results.append(result)
+    
+    _log(f"\n✅ 多版本输出完成: {len(results)} 个版本")
+    return {"ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results), "版本数": len(results)}
+
+
+def _process_version_with_clips(video_path, srt_path, output_path,
+                                 clips, dedup_preset="medium",
+                                 subtitle_overlay=True, log_fn=None,
+                                 cancel_event=None, pip_path=None,
+                                 pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
+    """Process a single version with pre-determined clips (bypass AI selection)"""
+    import time as _time
+    from ai_clipper import is_enabled as ai_is_enabled
+    
+    def _log(msg):
+        if log_fn: log_fn(msg)
+    
+    def _cancelled():
+        return cancel_event and cancel_event.is_set()
+    
+    if _cancelled():
+        return {"ok": False, "error": "cancelled"}
+    
+    # This is a simplified version of process_video that skips AI selection
+    # and uses the provided clips directly
+    # We need to call the internal cutting/dedup/subtitle logic
+    
+    # For now, we use a workaround: temporarily patch ai_analyze_clips to return our clips
+    import ai_clipper as _ai
+    _original_fn = _ai.ai_analyze_clips
+    
+    def _mock_analyze(*args, **kwargs):
+        return clips
+    
+    _ai.ai_analyze_clips = _mock_analyze
+    
+    try:
+        result = process_video(video_path, srt_path, output_path,
+                              dedup_preset, subtitle_overlay, log_fn,
+                              None, cancel_event,  # force_category=None (already filtered)
+                              pip_path, pip_size, pip_opacity, pip_pos)
+        return result
+    finally:
+        _ai.ai_analyze_clips = _original_fn
+

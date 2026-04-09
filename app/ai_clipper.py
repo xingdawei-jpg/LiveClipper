@@ -2631,4 +2631,6 @@ def fallback_clips(srt_path, log_fn=None, force_category=None):
 
 def is_enabled():
     settings = load_settings()
-    return bool(settings.get("api_key") and settings.get("enabled", False))
+    # 有 API Key 就启用 AI，不需要额外勾选
+    # 之前要求 enabled=True，导致很多用户填了 Key 但没勾启用，走关键词兜底产出垃圾
+    return bool(settings.get("api_key"))

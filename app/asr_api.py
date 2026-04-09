@@ -89,7 +89,7 @@ def _get_audio_duration(audio_path):
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
             capture_output=True, text=True, encoding="utf-8", timeout=10
-        )
+        , creationflags=_NO_WINDOW)
         return float(r.stdout.strip())
     except Exception:
         return 0
@@ -160,7 +160,7 @@ def _split_audio_ffmpeg(audio_path, chunk_sec, overlap_sec, log_fn):
             "-acodec", "copy",
             chunk_path
         ]
-        rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode
+        rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, creationflags=_NO_WINDOW).returncode
         if rc == 0 and os.path.exists(chunk_path):
             result.append((chunk_path, s))
         else:
@@ -275,7 +275,7 @@ def _call_asr_api(audio_path, settings, log_fn):
             "-H", f"Content-Type: multipart/form-data; boundary={boundary}",
             "-d", "@" + tmp_body.name,
         ]
-        r = subprocess.run(curl_cmd, capture_output=True, timeout=300)
+        r = subprocess.run(curl_cmd, capture_output=True, timeout=300, creationflags=_NO_WINDOW)
         if r.returncode != 0:
             raise Exception(f"curl failed: {r.stderr.decode('utf-8', errors='replace')[:200]}")
         result = json.loads(r.stdout.decode("utf-8", errors="replace"))
@@ -298,6 +298,7 @@ def _call_asr_api(audio_path, settings, log_fn):
 def _text_to_segments(text):
     """当 API 只返回纯文本时，按句号分段生成伪 segments"""
     import re
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     sentences = re.split(r'[。！？\n]', text)
     sentences = [s.strip() for s in sentences if s.strip()]
 

@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
 from config import (
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     CLIP_KEYWORDS, CLIP_ORDER, VIDEO_CONFIG, FFMPEG_PATH,
     DEDUP_CONFIG, DEDUP_PRESET,
 )
@@ -297,8 +298,8 @@ def cut_video(video_path, ordered_clips, output_path):
 
         # 构建命令
         cmd = [ffmpeg, "-y"]
-        cmd += ["-ss", f"{start:.3f}", "-to", f"{end:.3f}"]
-        cmd += ["-i", video_path]
+        cmd += ["-ss", f"{start:.3f}", "-i", video_path]
+        cmd += ["-ss", "0", "-t", f"{end - start:.3f}"]
         cmd += ["-vf", vf]
         cmd += ["-r", str(cfg["fps"])]
         cmd += ["-b:v", cfg["bitrate_v"]]
@@ -312,7 +313,7 @@ def cut_video(video_path, ordered_clips, output_path):
         cmd += ["-avoid_negative_ts", "make_zero"]
         cmd += [temp_file]
 
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=_NO_WINDOW)
 
         applied_str = ",".join(dedup["applied"]) if dedup["applied"] else "none"
 
@@ -324,15 +325,15 @@ def cut_video(video_path, ordered_clips, output_path):
             print(f"    FAIL [{c_type:<14s}] {start:.2f}s-{end:.2f}s | dedup: {applied_str}")
             # 如果去重导致失败，回退到无去重版本
             cmd_clean = [ffmpeg, "-y"]
-            cmd_clean += ["-ss", f"{start:.3f}", "-to", f"{end:.3f}"]
-            cmd_clean += ["-i", video_path]
+            cmd_clean += ["-ss", f"{start:.3f}", "-i", video_path]
+            cmd_clean += ["-ss", "0", "-t", f"{end - start:.3f}"]
             cmd_clean += ["-vf", base_vf]
             cmd_clean += ["-r", str(cfg["fps"]), "-b:v", cfg["bitrate_v"]]
             cmd_clean += ["-c:v", cfg["codec_v"], "-preset", cfg["preset"]]
             cmd_clean += ["-c:a", cfg["codec_a"], "-b:a", cfg["bitrate_a"]]
             cmd_clean += ["-avoid_negative_ts", "make_zero"]
             cmd_clean += [temp_file]
-            result2 = subprocess.run(cmd_clean, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result2 = subprocess.run(cmd_clean, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=_NO_WINDOW)
             if result2.returncode == 0 and os.path.exists(temp_file):
                 size_mb = os.path.getsize(temp_file) / (1024 * 1024)
                 print(f"    RETRY OK (no dedup) -> {size_mb:.1f}MB")
@@ -359,7 +360,7 @@ def cut_video(video_path, ordered_clips, output_path):
         output_path
     ]
 
-    result = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=_NO_WINDOW)
 
     if result.returncode == 0 and os.path.exists(output_path):
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -442,7 +443,7 @@ def main():
     # 验证 FFmpeg
     ffmpeg = get_ffmpeg_cmd()
     try:
-        subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=5)
+        subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
         print(f"  ffmpeg: OK")
     except Exception:
         print(f"  [error] FFmpeg not available! check FFMPEG_PATH in config.py")

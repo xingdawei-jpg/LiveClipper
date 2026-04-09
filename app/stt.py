@@ -41,7 +41,7 @@ def extract_audio(video_path, output_wav, log_fn=None):
     result = subprocess.run(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace"
-    )
+    , creationflags=_NO_WINDOW)
 
     if result.returncode != 0 or not os.path.exists(output_wav):
         _log(f"音频提取失败: {result.stderr[:200]}")
@@ -199,6 +199,7 @@ def generate_srt(video_path, log_fn=None, whisper_model="small"):
 
     # 生成临时文件名（用系统临时目录避免中文路径）
     import hashlib
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
     wav_path = os.path.join(temp_dir, f"audio_{video_hash}.wav")
     srt_path = os.path.join(temp_dir, f"sub_{video_hash}.srt")

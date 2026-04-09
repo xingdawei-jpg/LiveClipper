@@ -33,7 +33,7 @@ import tkinter.ttk as ttk
 import queue
 
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
-from cutter_logic import process_video
+from cutter_logic import process_video, process_video_multi
 from license_client import check_activation, activate_with_code, check_trial, consume_trial_use
 # 样式
 C = {
@@ -156,7 +156,7 @@ def _friendly_error(err_msg):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("直播带货切片工具 v5.3.10")
+        self.root.title("直播带货切片工具 v8.4.0")
         self.root.geometry("800x820")
         self.root.configure(bg=C["bg"])
         self.root.minsize(550, 650)
@@ -166,7 +166,7 @@ class App:
         self._log_queue = queue.Queue()
         self._build()
         self._poll_queue()  # 启动队列轮询
-        self._log(f"[v5.3.10] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
+        self._log(f"[v8.4.0] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
 
     def _build(self):
         m = tk.Frame(self.root, bg=C["bg"])
@@ -180,7 +180,7 @@ class App:
         tk.Button(hdr, text="💬 反馈", font=FNT_S, fg=C["dim"], bg=C["inp"],
                   relief="flat", cursor="hand2", padx=10, pady=2,
                   command=self._show_feedback).pack(side="right")
-        tk.Label(hdr, text="选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v5.3.10",
+        tk.Label(hdr, text="选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v8.4.0",
                  font=FNT_S, fg=C["dim"], bg=C["bg"]).pack(side="left", padx=(12,0))
 
         # 视频选择
@@ -581,6 +581,14 @@ class App:
                  bg=C["bg"]).pack(side="right")
         tk.Label(act_row, textvariable=self.output_var, font=FNT_S, fg=C["dim"],
                  bg=C["bg"]).pack(side="right", fill="x", padx=(8,8))
+        tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
+        # 版本数量选择
+        tk.Label(act_row, text="版本:", font=FNT_S, fg=C["dim"],
+                 bg=C["bg"]).pack(side="right")
+        self.num_versions_var = tk.StringVar(value="1")
+        ttk.Combobox(act_row, textvariable=self.num_versions_var,
+                     values=["1", "2", "3"], width=3,
+                     font=FNT_S, state="readonly").pack(side="right", padx=(2,4))
         tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
         self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
         tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
@@ -1497,7 +1505,9 @@ class App:
 
                 srt = self.srt_path if self.srt_path else None
                 try:
-                    ok = process_video(
+                    _nver = int(self.num_versions_var.get())
+                    _process_fn = process_video_multi if _nver > 1 else process_video
+                    ok = _process_fn(
                         video_path=video_path, srt_path=srt, output_path=output,
                         dedup_preset=_dedup,
                         subtitle_overlay=_subtitle,
@@ -1507,6 +1517,7 @@ class App:
                         pip_size=int(self.pip_size_var.get().replace("%",""))/100,
                         pip_opacity=int(self.pip_opacity_var.get().replace("%",""))/100,
                         pip_pos=self.pip_pos_var.get(),
+                        num_versions=_nver,
                         log_fn=lambda msg, _idx=idx, _total=total: self._batch_log(msg, _idx, _total)
                     )
                 except Exception as e:

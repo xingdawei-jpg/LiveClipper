@@ -29,7 +29,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "8.3.0"
+CURRENT_VERSION = "8.4.0"
 
 
 
@@ -174,7 +174,7 @@ def download_file(url, dest_path, progress_callback=None):
 
     # 用 curl 下载
     process = subprocess.Popen(
-        ["curl.exe", "-s", "-k", "-L", "-o", dest_path, url],
+        ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "120", "-o", dest_path, url],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
@@ -213,21 +213,39 @@ def check_update():
     if not url:
         return None
 
-    try:
-        result = subprocess.run(
-            ["curl.exe", "-s", "-k", "--max-time", "10", url],
-            capture_output=True, encoding="utf-8", timeout=15
-        )
-        data = json.loads(result.stdout)
+    # 构建镜像URL列表（国内用户直连GitHub不通）
+    mirror_prefixes = [
+        "https://gh-proxy.com/https://",
+        "https://ghfast.top/https://",
+    ]
+    urls_to_try = []
+    for prefix in mirror_prefixes:
+        urls_to_try.append(prefix + url.replace("https://", ""))
+    urls_to_try.append(url)  # direct as fallback
 
-        remote_ver = data.get("version", "")
-        if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
-            return None
+    for try_url in urls_to_try:
+        try:
+            # 加时间戳防CDN缓存
+            sep = "&" if "?" in try_url else "?"
+            full_url = try_url + sep + "_t=" + str(int(time.time()))
+            result = subprocess.run(
+                ["curl.exe", "-s", "-k", "--max-time", "10", full_url],
+                capture_output=True, encoding="utf-8", timeout=15
+            )
+            if not result.stdout or result.stdout.strip().startswith("<!"):
+                continue
+            data = json.loads(result.stdout)
 
-        return data
+            remote_ver = data.get("version", "")
+            if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
+                return None
 
-    except Exception:
-        return None
+            return data
+
+        except Exception:
+            continue
+
+    return None
 
 
 # ============ GUI 组件 ============
@@ -433,7 +451,7 @@ class DownloadDialog(tk.Toplevel):
                 # Update progress
                 pct = (idx / total) * 100
                 self.after(0, lambda p=pct, f=fname: (
-                    self.progress_var.set(p),
+                    self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * p / 100), 20),
                     self.status_label.config(text=f"({idx+1}/{total}) {f}")
                 ))
 
@@ -502,7 +520,7 @@ class DownloadDialog(tk.Toplevel):
             if new_ver:
                 _set_installed_version(new_ver)
 
-            self.after(0, lambda: self.progress_var.set(100))
+            self.after(0, lambda: self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * 100 / 100), 20))
             self.after(0, lambda: self.status_label.config(text="更新完成"))
 
             if fail_count == 0:
@@ -520,7 +538,30 @@ class DownloadDialog(tk.Toplevel):
         threading.Thread(target=update_thread, daemon=True).start()
 
     def _do_full_download(self, download_url):
-        """全量下载（zip/exe包）"""
+        """全量下载（zip/exe包）- 尝试镜像加速"""
+        # 尝试用镜像替代直连GitHub
+        mirror_prefixes = [
+            "https://gh-proxy.com/https://",
+            "https://ghfast.top/https://",
+        ]
+        mirror_url = None
+        for prefix in mirror_prefixes:
+            if "github.com" in download_url or "githubusercontent.com" in download_url:
+                test_url = prefix + download_url.replace("https://", "")
+                try:
+                    result = subprocess.run(
+                        ["curl.exe", "-s", "-k", "-L", "-I", "--max-time", "5", test_url],
+                        capture_output=True, timeout=8
+                    )
+                    if result.returncode == 0:
+                        mirror_url = test_url
+                        break
+                except Exception:
+                    continue
+        
+        if mirror_url:
+            download_url = mirror_url
+
         expected_sha = self.version_info.get("sha256", "")
         self._is_incremental_update = False
 
@@ -529,7 +570,7 @@ class DownloadDialog(tk.Toplevel):
                 return
             if total > 0:
                 pct = downloaded / total * 100
-                self.progress_var.set(pct)
+                self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * pct / 100), 20)
                 self.status_label.config(
                     text=f"{self._format_size(downloaded)} / {self._format_size(total)}"
                 )
@@ -632,21 +673,35 @@ def _on_download_complete(filepath, filename, is_incremental=False):
                     icon="error"
                 )
         else:
-            # Full update: prompt user to run installer
-            result = messagebox.askyesno(
-                "下载完成",
-                f"更新包已下载完成。\n\n文件: {filename}\n\n点击「是」将关闭当前程序并运行安装包。\n也可以稍后手动运行。",
-                icon="info"
-            )
-            if result:
-                subprocess.Popen([filepath], shell=True)
-                try:
-                    root = tk._default_root
-                    if root:
-                        root.quit()
-                except Exception:
-                    pass
-                sys.exit(0)
+            # Full update: auto-apply zip update
+            success = _apply_update(filepath)
+            try:
+                os.remove(filepath)
+                os.rmdir(os.path.dirname(filepath))
+            except Exception:
+                pass
+            if success:
+                result = messagebox.askyesno(
+                    "更新完成",
+                    "更新已安装成功！\n\n需要重启程序以应用更新。\n\n点击「是」立即重启。",
+                    icon="info"
+                )
+                if result:
+                    exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+                    subprocess.Popen([exe])
+                    try:
+                        root = tk._default_root
+                        if root:
+                            root.quit()
+                    except Exception:
+                        pass
+                    sys.exit(0)
+            else:
+                messagebox.showerror(
+                    "更新失败",
+                    "自动安装更新失败，请手动下载最新版本。",
+                    icon="error"
+                )
     except Exception:
         pass
 
@@ -668,39 +723,78 @@ def _get_install_base():
 
 
 def _apply_update(zip_path):
-    """Extract update zip via bat script to handle locked exe"""
-    import zipfile, tempfile
+    """Extract update zip and replace app files, handle GitHub zip structure"""
+    import zipfile, tempfile, shutil as _shutil
     base = _get_install_base()
+    
     try:
-        # Extract to a temp staging directory first
+        # Extract to temp staging
         staging = os.path.join(tempfile.gettempdir(), "liveclipper_update_staging")
         if os.path.exists(staging):
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
+            _shutil.rmtree(staging, ignore_errors=True)
         os.makedirs(staging, exist_ok=True)
-        
+
         with zipfile.ZipFile(zip_path, 'r') as zf:
             zf.extractall(staging)
-        
 
-        # Handle GitHub zip structure: LiveClipper-main/app/...
+        # Find app directory - handle GitHub zip structure (LiveClipper-main/app/)
         app_src = None
+        # Check common patterns
+        candidates = []
         for root, dirs, fns in os.walk(staging):
             if "ai_clipper.py" in fns and "gui.py" in fns:
-                app_src = root
-                break
-        if not app_src:
-            alt = os.path.join(staging, "_internal", "app")
-            if os.path.isdir(alt) and os.path.exists(os.path.join(alt, "gui.py")):
-                app_src = alt
+                candidates.append(root)
+        
+        if candidates:
+            # Prefer the one closest to staging root
+            app_src = min(candidates, key=lambda x: len(x))
+        
         if not app_src:
             return False
 
-        # Read version from version.json
+        # Determine target app directory
+        if getattr(sys, 'frozen', False):
+            # PyInstaller build: _internal/app/
+            target_app = os.path.join(base, "_internal", "app")
+        else:
+            # Dev mode: same directory
+            target_app = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(target_app) != "app":
+                target_app = os.path.join(target_app, "app")
+
+        if not os.path.isdir(target_app):
+            os.makedirs(target_app, exist_ok=True)
+
+        # Copy all .py and .json files from app_src to target
+        copied = 0
+        for fname in os.listdir(app_src):
+            if fname.endswith(('.py', '.json')):
+                src_f = os.path.join(app_src, fname)
+                dst_f = os.path.join(target_app, fname)
+                try:
+                    _shutil.copy2(src_f, dst_f)
+                    copied += 1
+                except Exception:
+                    pass
+
+        # Also copy from LiveClipper-main/app/ if different from app_src
+        gh_app = os.path.join(staging, "LiveClipper-main", "app")
+        if os.path.isdir(gh_app) and gh_app != app_src:
+            for fname in os.listdir(gh_app):
+                if fname.endswith(('.py', '.json')):
+                    src_f = os.path.join(gh_app, fname)
+                    dst_f = os.path.join(target_app, fname)
+                    try:
+                        _shutil.copy2(src_f, dst_f)
+                        copied += 1
+                    except Exception:
+                        pass
+
+        # Update installed version
         try:
             vj_paths = [
                 os.path.join(app_src, "version.json"),
-                os.path.join(staging, "_internal", "version.json"),
+                os.path.join(staging, "LiveClipper-main", "app", "version.json"),
             ]
             for vj in vj_paths:
                 if os.path.exists(vj):
@@ -713,71 +807,17 @@ def _apply_update(zip_path):
                     break
         except Exception:
             pass
-        
-        # Copy app files directly if not frozen, otherwise use bat script
-        if not getattr(sys, 'frozen', False):
-            # Dev mode: just copy files directly
-            import shutil as _shutil
-            target_app = app_src  # same directory
-            for fname in os.listdir(app_src):
-                if fname.endswith(('.py', '.json')):
-                    src_f = os.path.join(app_src, fname)
-                    dst_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
-                    try:
-                        _shutil.copy2(src_f, dst_f)
-                    except Exception:
-                        pass
-            return True
 
-        if getattr(sys, 'frozen', False):
-            exe_name = os.path.basename(sys.executable)
-        else:
-            exe_name = None
-        
-        bat_path = os.path.join(tempfile.gettempdir(), "liveclipper_update.bat")
-        bat_lines = [
-            "@echo off",
-            "chcp 65001 >nul 2>&1",
-            "echo Updating LiveClipper...",
-        ]
-        if exe_name:
-            # Wait for the exe process to exit
-            bat_lines.append('taskkill /IM "' + exe_name + '" /F >nul 2>&1')
-            bat_lines.append("timeout /t 2 /nobreak >nul")
-        
-        # Copy all files from staging to install dir
-            bat_lines.append('xcopy "' + staging + '\\*" "' + base + '\\" /E /Y /Q >nul 2>&1')
-        
-        # Cleanup staging
-            bat_lines.append('rmdir /S /Q "' + staging + '" >nul 2>&1')
-        
-        # Restart app
-        if exe_name:
-            bat_lines.append('start "" "' + os.path.join(base, exe_name) + '"')
-        
-        # Self-delete the bat
-        bat_lines.append('del "%~f0"')
-        
-        with open(bat_path, 'w', encoding='utf-8') as bf:
-            bf.write("\n".join(bat_lines))
-        
-        # Launch the bat and exit current app
-        import subprocess
-        subprocess.Popen([bat_path], shell=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
-        
-        # Exit current app
+        # Clean up staging
         try:
-            root = tk._default_root
-            if root:
-                root.quit()
+            _shutil.rmtree(staging, ignore_errors=True)
         except Exception:
             pass
-        sys.exit(0)
-        
-    except Exception as e:
+
+        return copied > 0
+
+    except Exception:
         return False
-
-
 def _restart_app():
     """Restart the application"""
     try:
