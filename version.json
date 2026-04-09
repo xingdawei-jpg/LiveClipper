@@ -1,25 +1,23 @@
 {
-  "version": "8.4.0",
+  "version": "8.4.2",
   "files": {
-    "ai_clipper.py": "2545f9106867c6965e3b133827f77b8792d86cb557744e0a7ded282262a7183b",
-    "ai_settings.json": "9561bc383fa034c96172d8e4a101b66a4dd7b85207fcc1e03611bd56b44d1f1f",
-    "asr_api.py": "c7c5da6ba3d6319ddbf81519fd96b13de556ac70e4031c8f616105ff527759bc",
+    "ai_clipper.py": "b6ce9ad4f51499b78e48f93d610f02a220a85d0f4c726f323bc5524bdb9d7f7c",
+    "cutter_logic.py": "590ba89c7c2fe2bd18c3ffa24e274d87064039eccf965d73100adece414f6e22",
+    "gui.py": "2f04b79930002002d1276c2b377e86bcb92313374e140515ba09e854d3345bc7",
+    "stt.py": "b6cd80865539e08cb3e3e3abb906c743e037f70f526560585f8c3c2f2bb833f2",
+    "tighten.py": "78d4de21696a55ea447ca1791f4373477f30c269bd269d14398770d22efd835e",
+    "srt_splitter.py": "80b2d538f5e2cff87dc32756c6bf3da22c48bb9c7e49d6179332520a00e8d930",
+    "trim_long.py": "36c35ba83e4a126d47c3a38e2af09b2b4b8a79d0caf952cf0d990d8cb6ff7936",
+    "asr_api.py": "967e291724810db805ce9ccf5d11c331d2bbb1fbda5ed1d6e6b782a0cda06375",
     "config.py": "8d2fd0bb96cb7fa9ea13975ee0ffad33680ed64d7ce9aa041adcd85edc49ebf7",
-    "cutter.py": "07eb7b7da0f4d3b459c5b0cfe48f52669b8f78d9d064c1520e634b0eb23023c3",
-    "cutter_logic.py": "8dbe7b0a6867166621a2632cb88a0e03b29644605d85da878f35512ec5ba2a26",
-    "gui.py": "9d719dc6094c33df2ef5f8e7e0a471e1852d69688d886fa2f6944ba833018939",
-    "keywords.json": "bde3c0a549ca8bb20371381fcd26af2f3aa548d3ccd11d1f4569e6fa785c7ca1",
+    "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
     "license_client.py": "98e783537ac78ad609694c74c03d83a2dcaf7efb51128fa83ab2901ea00e282e",
+    "multi_version.py": "20766e8234cae707ca981145b5a8883bcd41d8896060d5dbcdba865acd2f6be8",
     "platform_config.py": "b2963b288c1231ce2d6694072bd87125a3478b9cf6febfbc800d09afdb1ae595",
     "run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
     "srt_parser.py": "229bb03b151bc9f49db1038a451d270307155be324c5f721fe0d1a7131a82c3c",
-    "stt.py": "126fcbddf52a1ee34bf3ead1f6440a948e631aaeff205c452fb89e1a613755dd",
-    "updater.py": "4f9a9821f71cd3029f0ddf499f0f4cdfdd3a580cb08d051bca191f7232317adb",
-    "version.json": "38fbc2f3778028d79eea1986de1bc853e8158a1da72f4e4f0e3f9f93bd163baa",
-    "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573",
-    "multi_version.py": "20766e8234cae707ca981145b5a8883bcd41d8896060d5dbcdba865acd2f6be8"
+    "updater.py": "f58d63ec11a5f28f01114a243b286116d289d5a8f18c187b7414da6e16d291c9",
+    "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
-  "release_notes": "v8.4.0: AI选片自动启用+多版本输出+价格硬过滤+Whisper可选+界面优化",
-  "latest_version": "8.4.0",
-  "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
+  "changelog": "Prompt优化:片段5-8秒完整句子,SRT拆分,tighten收紧,黑窗口修复,ASR修复,设置持久化"
 }

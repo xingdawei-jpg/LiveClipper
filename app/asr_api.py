@@ -22,6 +22,8 @@ import tempfile
 import urllib.request
 import urllib.error
 
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 
 # ============ 分段识别参数 ============
 CHUNK_SECONDS = 120      # 每段最大时长（秒）（DashScope Whisper 支持 120s）
@@ -298,7 +300,6 @@ def _call_asr_api(audio_path, settings, log_fn):
 def _text_to_segments(text):
     """当 API 只返回纯文本时，按句号分段生成伪 segments"""
     import re
-_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     sentences = re.split(r'[。！？\n]', text)
     sentences = [s.strip() for s in sentences if s.strip()]
 

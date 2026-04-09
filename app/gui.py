@@ -166,7 +166,21 @@ class App:
         self._log_queue = queue.Queue()
         self._build()
         self._poll_queue()  # 启动队列轮询
+        # 启动时恢复AI和ASR启用状态
+        self.root.after(100, self._restore_toggle_states)
         self._log(f"[v8.4.0] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
+
+    def _restore_toggle_states(self):
+        """启动时恢复AI选片和云端ASR的启用状态"""
+        try:
+            from ai_clipper import load_settings
+            s = load_settings()
+            if s.get("enabled"):
+                self.ai_enabled_var.set(True)
+                self._toggle_ai()
+            # 不自动恢复ASR启用——需要API Key，不应静默开启
+        except Exception:
+            pass
 
     def _build(self):
         m = tk.Frame(self.root, bg=C["bg"])
@@ -218,6 +232,13 @@ class App:
                                           values=["自动检测","上衣","裤子","裙子","外套","套装","鞋子","配饰"],
                                           width=10, font=FNT_S, state="readonly")
         self.main_category_combo.pack(side="left", pady=(4,0))
+        # 剪辑数量
+        tk.Label(vf, text="  剪辑数量:", font=FNT_S, fg=C["dim"],
+                 bg=C["card"]).pack(side="left", padx=(4,2), pady=(4,0))
+        self.num_versions_var = tk.StringVar(value="1")
+        ttk.Combobox(vf, textvariable=self.num_versions_var,
+                     values=["1", "2", "3"], width=3,
+                     font=FNT_S, state="readonly").pack(side="left", pady=(4,0))
 
         # 画中画已移到去重行
         # SRT 字幕（藏到去重面板里，不单独显示）
@@ -581,14 +602,6 @@ class App:
                  bg=C["bg"]).pack(side="right")
         tk.Label(act_row, textvariable=self.output_var, font=FNT_S, fg=C["dim"],
                  bg=C["bg"]).pack(side="right", fill="x", padx=(8,8))
-        tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
-        # 版本数量选择
-        tk.Label(act_row, text="版本:", font=FNT_S, fg=C["dim"],
-                 bg=C["bg"]).pack(side="right")
-        self.num_versions_var = tk.StringVar(value="1")
-        ttk.Combobox(act_row, textvariable=self.num_versions_var,
-                     values=["1", "2", "3"], width=3,
-                     font=FNT_S, state="readonly").pack(side="right", padx=(2,4))
         tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
         self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
         tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
@@ -1169,6 +1182,10 @@ class App:
                 self._whisper_model_var.set(s["whisper_model"])
             self.asr_enabled_var.set(bool(s.get("volc_enabled", False) or s.get("asr_enabled", False)))
 
+            # 恢复AI选片启用状态
+            if "enabled" in s:
+                self.ai_enabled_var.set(bool(s["enabled"]))
+
             # 自动匹配已有配置对应的预设
             matched = "自定义"
             for name, cfg in AI_PRESETS.items():
@@ -1507,7 +1524,7 @@ class App:
                 try:
                     _nver = int(self.num_versions_var.get())
                     _process_fn = process_video_multi if _nver > 1 else process_video
-                    ok = _process_fn(
+                    _kwargs = dict(
                         video_path=video_path, srt_path=srt, output_path=output,
                         dedup_preset=_dedup,
                         subtitle_overlay=_subtitle,
@@ -1517,9 +1534,11 @@ class App:
                         pip_size=int(self.pip_size_var.get().replace("%",""))/100,
                         pip_opacity=int(self.pip_opacity_var.get().replace("%",""))/100,
                         pip_pos=self.pip_pos_var.get(),
-                        num_versions=_nver,
                         log_fn=lambda msg, _idx=idx, _total=total: self._batch_log(msg, _idx, _total)
                     )
+                    if _nver > 1:
+                        _kwargs["num_versions"] = _nver
+                    ok = _process_fn(**_kwargs)
                 except Exception as e:
                     import traceback
                     err_msg = str(e)
