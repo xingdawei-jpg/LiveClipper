@@ -197,7 +197,7 @@ class App:
         tk.Button(hdr, text="💬 反馈", font=FNT_S, fg=C["dim"], bg=C["inp"],
                   relief="flat", cursor="hand2", padx=10, pady=2,
                   command=self._show_feedback).pack(side="right")
-        tk.Label(hdr, text="选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v8.4.0",
+        tk.Label(hdr, text=f"选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v{_get_installed_version()}",
                  font=FNT_S, fg=C["dim"], bg=C["bg"]).pack(side="left", padx=(12,0))
 
         # 视频选择
@@ -345,13 +345,14 @@ class App:
         self._ai_toggle_lbl.bind("<Button-1>", self._toggle_ai_collapse)
         tk.Label(ai_hdr, text="🤖 AI 智能选片（可选）", font=FNT_B, fg=C["text"],
              bg=C["card"]).pack(side="left")
-        self.ai_toggle = tk.Checkbutton(ai_hdr, text="启用", variable=self.ai_enabled_var,
-              font=FNT_S, fg="#4fc3f7", bg=C["card"], selectcolor="#1a1a2e",
-              command=self._toggle_ai)
+        self.ai_toggle = tk.Button(ai_hdr, text="启用", font=FNT_S,
+              fg="#4fc3f7", bg=C["card"], relief="flat", cursor="hand2", padx=6,
+              command=self._toggle_ai_toggle)
         self.ai_toggle.pack(side="left", padx=(8,0))
         tk.Button(ai_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
               relief="flat", cursor="hand2", padx=8,
               command=self._save_ai).pack(side="left", padx=(8,0))
+
         # 关键词管理按钮（始终可见，不依赖AI面板展开）
         tk.Button(ai_hdr, text="📝 关键词管理", font=FNT_S, fg="white", bg="#5b21b6",
               relief="flat", cursor="hand2", padx=10,
@@ -393,7 +394,7 @@ class App:
               relief="flat", cursor="hand2", padx=6, pady=0,
               command=self._test_ai_connection).pack(side="right", padx=(2,0))
         self.ai_key_entry.bind("<FocusIn>", lambda e: self.ai_key_entry.configure(highlightbackground=C["btn_sel"]))
-        self.ai_key_entry.bind("<FocusOut>", lambda e: self.ai_key_entry.configure(highlightbackground=C["inp"]))
+        self.ai_key_entry.bind("<FocusOut>", lambda e: (self.ai_key_entry.configure(highlightbackground=C["inp"])))
         tk.Button(ai_row1, text="👁", font=FNT_S, fg=C["dim"], bg=C["card"],
               relief="flat", cursor="hand2", padx=4, pady=0,
               command=self._toggle_key_vis).pack(side="right")
@@ -410,7 +411,7 @@ class App:
               highlightbackground=C["inp"], highlightcolor=C["btn_sel"])
         self.ai_url_entry.pack(side="left", fill="x", expand=True, padx=(4,0))
         self.ai_url_entry.bind("<FocusIn>", lambda e: self.ai_url_entry.configure(highlightbackground=C["btn_sel"]))
-        self.ai_url_entry.bind("<FocusOut>", lambda e: self.ai_url_entry.configure(highlightbackground=C["inp"]))
+        self.ai_url_entry.bind("<FocusOut>", lambda e: (self.ai_url_entry.configure(highlightbackground=C["inp"])))
 
         # 模型（聚焦边框变色）
         ai_row3 = tk.Frame(self.ai_detail, bg=C["card"])
@@ -424,7 +425,7 @@ class App:
               highlightbackground=C["inp"], highlightcolor=C["btn_sel"])
         self.ai_model_entry.pack(side="left", fill="x", expand=True, padx=(4,0))
         self.ai_model_entry.bind("<FocusIn>", lambda e: self.ai_model_entry.configure(highlightbackground=C["btn_sel"]))
-        self.ai_model_entry.bind("<FocusOut>", lambda e: self.ai_model_entry.configure(highlightbackground=C["inp"]))
+        self.ai_model_entry.bind("<FocusOut>", lambda e: (self.ai_model_entry.configure(highlightbackground=C["inp"])))
 
         # 默认隐藏 AI 详情和云端识别详情
         self.ai_detail.pack_forget()
@@ -443,10 +444,13 @@ class App:
         self.asr_enabled_var = tk.BooleanVar(value=False)
         tk.Label(asr_hdr, text="☁️ 云端ASR（替代 Whisper）", font=FNT_S, fg="#81c784", bg=C["card"],
                  anchor="w").pack(side="left")
-        tk.Checkbutton(asr_hdr, text="启用", variable=self.asr_enabled_var,
-              font=FNT_S, fg="#4fc3f7", bg=C["card"],
-              selectcolor=C["inp"], activebackground=C["card"],
-              cursor="hand2", command=self._toggle_asr).pack(side="left")
+        self.asr_toggle = tk.Button(asr_hdr, text="启用", font=FNT_S,
+              fg="#4fc3f7", bg=C["card"], relief="flat", cursor="hand2", padx=6,
+              command=self._toggle_asr_toggle)
+        self.asr_toggle.pack(side="left", padx=(8,0))
+        tk.Button(asr_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
+              relief="flat", cursor="hand2", padx=8,
+              command=self._save_ai).pack(side="left", padx=(8,0))
         # Whisper模型选择
         tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
         tk.Label(asr_hdr, text="Whisper:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
@@ -468,9 +472,7 @@ class App:
         tk.Button(asr_hdr, text="清除", font=FNT_S, fg=C["dim"], bg=C["card"],
                   relief="flat", cursor="hand2", padx=4,
                   command=self._clear_srt).pack(side="left")
-        tk.Button(asr_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
-                  relief="flat", cursor="hand2", padx=8,
-                  command=self._save_ai).pack(side="right")
+
 
         # ASR预设下拉
         self.asr_preset_row = tk.Frame(asr_card, bg=C["card"])
@@ -1163,6 +1165,12 @@ class App:
 
     # ---- AI 设置 ----
 
+    def _toggle_ai_toggle(self):
+        """切换AI启用状态（按钮触发）"""
+        self.ai_enabled_var.set(not self.ai_enabled_var.get())
+        self._save_ai()  # save FIRST, so _toggle_ai reads correct state
+        self._toggle_ai()
+
     def _toggle_ai(self):
         # Update toggle button appearance
         if self.ai_enabled_var.get():
@@ -1207,10 +1215,12 @@ class App:
             if "whisper_model" in s:
                 self._whisper_model_var.set(s["whisper_model"])
             self.asr_enabled_var.set(bool(s.get("volc_enabled", False) or s.get("asr_enabled", False)))
+            self._toggle_asr()  # 更新ASR按钮外观
 
             # 恢复AI选片启用状态
             if "enabled" in s:
                 self.ai_enabled_var.set(bool(s["enabled"]))
+                self._toggle_ai()  # 更新AI按钮外观
 
             # 自动匹配已有配置对应的预设
             matched = "自定义"
@@ -1415,8 +1425,19 @@ class App:
         tk.Button(btn_row, text="保存", font=FNT_B, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=20, command=_save_keywords).pack(side="right", padx=(0, 8))
 
+    def _toggle_asr_toggle(self):
+        """切换ASR启用状态（按钮触发）"""
+        self.asr_enabled_var.set(not self.asr_enabled_var.get())
+        self._save_ai()  # save FIRST
+        self._toggle_asr()
+
     def _toggle_asr(self):
         """切换云端ASR字段显示"""
+        # Update toggle button appearance
+        if self.asr_enabled_var.get():
+            self.asr_toggle.configure(text="✅ 启用", fg="#4caf50")
+        else:
+            self.asr_toggle.configure(text="启用", fg="#4fc3f7")
         if self.asr_enabled_var.get():
             self._asr_collapsed = False
             self._asr_toggle_lbl.configure(text="▼")

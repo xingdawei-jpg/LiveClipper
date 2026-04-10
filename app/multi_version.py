@@ -71,32 +71,25 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
             bridge = bridges[v % len(bridges)]
             version_clips.append(bridge)
         
-        # ── Product ──（核心！每个版本 3-5 个 product）
-        # 策略：先分配独占的（其他版本没用过的），再补充共享的
+        # ── Product ──（核心！每个版本差异化分配 product）
+        # 策略：round-robin 轮流挑选，保证每个版本拿到不同的核心 product
         if products:
-            # 找出其他版本已独占的时间区间
+            current_dur = sum(c[5] for c in version_clips)
+            close_dur = closes[0][5] if closes else 5
+            target_product_dur = max(55 - current_dur - close_dur, 20)
+            
+            # 找出其他版本已选的 product 时间区间
             other_times = set()
             for ov, ot in assigned_product_times.items():
                 if ov != v:
                     other_times.update(ot)
             
-            # 独占 product（时间区间不被其他版本占用）
-            exclusive = [p for p in products if p[2] not in other_times]
-            # 共享 product（评分高的也可以用）
-            shared = [p for p in products if p[2] in other_times]
-            
-            # 目标时长：55s - hook - bridge - close ≈ 需要 35-40s product
-            current_dur = sum(c[5] for c in version_clips)
-            close_dur = closes[0][5] if closes else 5
-            target_product_dur = max(55 - current_dur - close_dur, 20)
-            
             added_starts = {c[2] for c in version_clips}
             dur = 0
             
-            # 先加独占的
+            # 第一轮：优先选其他版本没用的（独占）
+            exclusive = [p for p in products if p[2] not in other_times and p[2] not in added_starts]
             for p in exclusive:
-                if p[2] in added_starts:
-                    continue
                 if dur + p[5] <= target_product_dur + 8:
                     version_clips.append(p)
                     v_product_times.add(p[2])
@@ -105,28 +98,31 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
                 if dur >= target_product_dur:
                     break
             
-            # 独占不够，补充共享的（按评分从高到低）
+            # 第二轮：如果独占不够，从所有 product 中按 offset 轮流选
+            # offset 让不同版本从不同位置开始挑选，避免都选评分最高的
             if dur < target_product_dur:
-                for p in shared:
-                    if p[2] in added_starts:
-                        continue
-                    if dur + p[5] <= target_product_dur + 8:
+                offset = v * 3  # 每个版本跳过不同的前几个
+                remaining = [p for p in products if p[2] not in added_starts]
+                if offset < len(remaining):
+                    remaining = remaining[offset:] + remaining[:offset]
+                for p in remaining:
+                    if dur + p[5] <= target_product_dur + 10:
                         version_clips.append(p)
+                        v_product_times.add(p[2])
                         added_starts.add(p[2])
                         dur += p[5]
                     if dur >= target_product_dur:
                         break
             
-            # 还是太短，放宽时长限制再补
+            # 第三轮：实在不够就全加
             if dur < target_product_dur * 0.7:
                 for p in products:
-                    if p[2] in added_starts:
-                        continue
-                    version_clips.append(p)
-                    added_starts.add(p[2])
-                    dur += p[5]
-                    if dur >= target_product_dur * 0.8:
-                        break
+                    if p[2] not in added_starts:
+                        version_clips.append(p)
+                        added_starts.add(p[2])
+                        dur += p[5]
+                        if dur >= target_product_dur * 0.8:
+                            break
         
         # ── Close ──
         close = None
@@ -141,7 +137,7 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
             version_clips.append(close)
         
         # ── 排列 ──
-        version_clips = _arrange_version(version_clips, log_fn)
+        version_clips = _arrange_version(version_clips, log_fn, style=v)
         
         # ── 去重 ──
         if version_clips:
@@ -183,7 +179,7 @@ def _semantic_dedup_version(clips, log_fn=None):
         return clips
     
     _stop = set("的 了 在 是 我 有 和 就 都 也 不 人 这 那 他 到 说 要 会 着 过 把 得 能 可以 很 被 让 给 比 从 向 还 又 而 但".split())
-    _punct = set("，。！？、；："''（）…—·")
+    _punct = set("，。！？、；：“”‘’（）…—·")
     
     def _kw(text):
         return set(c for c in text if c not in _stop and c not in _punct and c.strip())
@@ -192,6 +188,9 @@ def _semantic_dedup_version(clips, log_fn=None):
     kept_kws = []
     for clip in clips:
         ct, text, start, end, score, dur = clip
+        # 保护hook和close不被语义去重删掉
+        if 'hook' in ct.lower() or 'close' in ct.lower():
+            keep.append(clip); kept_kws.append(_kw(text)); continue
         kw = _kw(text)
         if len(kw) < 2:
             keep.append(clip); kept_kws.append(kw); continue
@@ -218,9 +217,12 @@ def _semantic_dedup_version(clips, log_fn=None):
     return keep
 
 
-def _arrange_version(clips, log_fn=None):
+def _arrange_version(clips, log_fn=None, style=0):
     """
     将一组片段排列成 hook→bridge→product→close 的顺序
+    style=0: hook→bridge→products按时间→close
+    style=1: hook→products按评分→close（最高分product紧跟hook）
+    style=2: hook→products按时间倒序→close（先讲细节再讲面料）
     """
     hooks = []
     bridges = []
@@ -260,6 +262,14 @@ def _arrange_version(clips, log_fn=None):
             others = [o for o in others if o not in closes]
     
     # 组装：hook → bridge → products → others → close
+    # 不同style用不同product排列，产生版本差异
+    if style == 1:
+        products.sort(key=lambda c: c[4], reverse=True)  # 按评分降序
+    elif style == 2:
+        products.sort(key=lambda c: c[2], reverse=True)  # 按时间倒序
+    else:
+        products.sort(key=lambda c: c[2])  # 按时间正序（默认）
+    
     arranged = []
     arranged.extend(hooks)
     arranged.extend(bridges)
@@ -271,16 +281,28 @@ def _arrange_version(clips, log_fn=None):
 
 
 def _dedup_by_time(clips):
-    """Remove clips that overlap in time, keeping the one with higher score"""
+    """Remove clips that overlap in time, keeping the one with higher score.
+    Preserves the original order (narrative arrangement from _arrange_version)."""
     if not clips:
         return clips
-    sorted_clips = sorted(clips, key=lambda c: c[2])
-    result = [sorted_clips[0]]
-    for clip in sorted_clips[1:]:
-        last = result[-1]
-        if clip[2] < last[3]:  # overlap
-            if clip[4] > last[4]:
-                result[-1] = clip
-        else:
+    # Don't re-sort! Keep the narrative order from _arrange_version.
+    # Build overlap groups, keep highest score per group, maintain original order.
+    result = []
+    removed_starts = set()
+    for i, clip in enumerate(clips):
+        if clip[2] in removed_starts:
+            continue
+        # Check if this clip overlaps with any later clip
+        for j, other in enumerate(clips):
+            if i == j or other[2] in removed_starts:
+                continue
+            if clip[2] < other[3] and clip[3] > other[2]:
+                # Overlap: keep the one with higher score
+                if other[4] > clip[4]:
+                    removed_starts.add(clip[2])
+                    break
+                else:
+                    removed_starts.add(other[2])
+        if clip[2] not in removed_starts:
             result.append(clip)
     return result

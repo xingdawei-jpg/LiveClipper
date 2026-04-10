@@ -34,7 +34,12 @@ def split_long_srt_entries(srt_text, max_duration=5.0, log_fn=None):
         dur = end_s - start_s
 
         if dur <= max_duration:
-            entries.append(block)
+            # Strip original index line so renumbering doesn't duplicate it
+            entry_lines = block.strip().split('\n')
+            if len(entry_lines) >= 3 and entry_lines[0].strip().isdigit():
+                entries.append('\n'.join(entry_lines[1:]))
+            else:
+                entries.append(block)
             continue
 
         # 长条目：按标点拆分
