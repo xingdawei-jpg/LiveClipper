@@ -1990,8 +1990,8 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
         if len(fixed_clips) >= 2:
             overlap_fixed = 0
             for i in range(len(fixed_clips) - 1):
-                ct1, t1, s1, e1, sc1, d1 = fixed_clips[i]
-                ct2, t2, s2, e2, sc2, d2 = fixed_clips[i + 1]
+                ct1, t1, s1, e1, sc1, d1 = fixed_clips[i][:6]
+                ct2, t2, s2, e2, sc2, d2 = fixed_clips[i + 1][:6]
                 if e1 > s2:  # 重叠
                     mid = (e1 + s2) / 2
                     fixed_clips[i] = (ct1, t1, s1, mid, sc1, mid - s1)
@@ -2012,7 +2012,7 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
     # [增强] 结尾完整性检查
     if fixed_clips:
         last = fixed_clips[-1]
-        ct, text, start, end, score, dur = last
+        ct, text, start, end, score, dur = last[:6]
         t = text.rstrip()
         is_incomplete = False
         # 规则1: 以语气词/助词结尾且句子较短
