@@ -68,7 +68,7 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
 
     tightened = []
     for clip in clips:
-        c_type, c_text, c_start, c_end, c_score, c_dur = clip
+        c_type, c_text, c_start, c_end, c_score, c_dur = clip[:6]
         clean_ai = _clean(c_text)
 
         # 找与片段重叠的SRT条目
@@ -107,7 +107,7 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
             tightened.append(clip)
         elif abs(new_start - c_start) > 0.3 or abs(new_end - c_end) > 0.3:
             _log(f"tighten [{c_type}]: {c_start:.1f}-{c_end:.1f}s -> {new_start:.1f}-{new_end:.1f}s ({new_dur:.1f}s)")
-            tightened.append((c_type, c_text, new_start, new_end, c_score, new_dur))
+            tightened.append((c_type, c_text, new_start, new_end, c_score, new_dur, *clip[6:]))
         else:
             tightened.append(clip)
 
