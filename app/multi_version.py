@@ -299,13 +299,8 @@ def _arrange_version(clips, log_fn=None, style=0):
             others = [o for o in others if o not in closes]
     
     # 组装：hook → bridge → products → others → close
-    # 不同style用不同product排列，产生版本差异
-    if style == 1:
-        products.sort(key=lambda c: c[4], reverse=True)  # 按评分降序
-    elif style == 2:
-        products.sort(key=lambda c: c[2], reverse=True)  # 按时间倒序
-    else:
-        products.sort(key=lambda c: c[2])  # 按时间正序（默认）
+    # 不重排products！保持AI叙事顺序，版本差异化靠选不同片段实现
+    # （之前按时间/评分排序会破坏AI编排的叙事逻辑）
     
     arranged = []
     arranged.extend(hooks)
