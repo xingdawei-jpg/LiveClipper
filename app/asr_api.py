@@ -22,8 +22,6 @@ import tempfile
 import urllib.request
 import urllib.error
 
-_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-
 
 # ============ 分段识别参数 ============
 CHUNK_SECONDS = 120      # 每段最大时长（秒）（DashScope Whisper 支持 120s）

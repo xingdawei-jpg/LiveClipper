@@ -2,36 +2,23 @@
 """
 Multi-version output for LiveClipper
 
-Strategy: AI selects all candidate clips once, then code generates multiple versions
-by picking different hooks and rearranging product/close segments.
-
-Implementation plan:
-1. Add `multi_version` parameter to ai_analyze_clips (return ALL candidates, not just best)
-2. Add `generate_multi_versions()` function that takes all candidates and creates 2-3 versions
-3. Add `num_versions` parameter to process_video
-4. GUI: add a spinbox for number of versions (1-3, default 1)
-
-Each version strategy:
-- V1: Best hook + all product clips + best close (current behavior, "safest")
-- V2: Different hook + subset of product clips + alternative close  
-- V3: Most dramatic hook + different product order + urgency close
+Strategy:
+1. AI selects ALL good clips once (just identifies good content)
+2. Split clips into versions (alternating by score, no overlap)
+3. Each version arranges its own clips into hook→product→close order
 
 Key: clips tuple is (category, text, start, end, score, duration)
 """
-import os, re, random, itertools
+import os, re, random
 
 def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     """
     From all AI-selected clips, generate multiple version playlists.
     
-    all_clips: list of (category, text, start, end, score, duration)
-    Returns: list of clip lists, each being a version
-    
-    Strategy:
-    - Separate clips by type: hooks, products, closes, bridges
-    - V1: highest-scored hook + all products + highest-scored close
-    - V2: different hook (if available) + rotated products + alt close
-    - V3: remaining hook + remaining products (different combination)
+    策略：
+    1. 每个版本从全量候选中选取，允许重叠
+    2. 但核心片段（开场hook + 主打product）必须不同
+    3. 保证每个版本都像完整的切片视频
     """
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -39,29 +26,13 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     if not all_clips or num_versions <= 1:
         return [all_clips] if all_clips else []
     
-    # Categorize clips
-    hooks = [c for c in all_clips if c[0] in ('HOOK', 'hook', 'Hook', '爆料hook', '痛点hook', '信任hook', '夸奖hook', '场景hook')]
-    products = [c for c in all_clips if c[0] in ('PRODUCT', 'product', 'Product', '版型', '面料', '细节', '穿搭', '对比', '产品展示')]
-    closes = [c for c in all_clips if c[0] in ('CLOSE', 'close', 'Close', '促单', '尺码', '信任强化', '风格定位', '收尾')]
-    bridges = [c for c in all_clips if c[0] in ('BRIDGE', 'bridge', 'Bridge', '过渡', '提问', '科普')]
+    # 分类
+    hooks = [c for c in all_clips if _is_hook(c[0])]
+    products = [c for c in all_clips if _is_product(c[0])]
+    closes = [c for c in all_clips if _is_close(c[0])]
+    bridges = [c for c in all_clips if _is_bridge(c[0])]
     
-    # Fallback: if category names don't match, sort by score
-    if not hooks and not products and not closes:
-        # All clips are same type or unknown - just split by position
-        _log(f"多版本: 无法按类型分组，按评分排序分配")
-        hooks = [c for c in all_clips if 'hook' in c[0].lower() or c[0] in ('爆料', '痛点', '信任', '夸奖', '场景')]
-        products = [c for c in all_clips if c[0] not in ('HOOK', 'hook', 'CLOSE', 'close') and 'hook' not in c[0].lower() and 'close' not in c[0].lower()]
-        closes = [c for c in all_clips if 'close' in c[0].lower() or c[0] in ('促单', '尺码', '收尾')]
-        
-        # If still nothing categorized, treat first as hook, last as close, middle as product
-        if not hooks and not products and not closes and len(all_clips) >= 3:
-            hooks = [all_clips[0]]
-            products = all_clips[1:-1]
-            closes = [all_clips[-1]]
-        elif not hooks and not products:
-            return [all_clips]
-    
-    # Sort by score (higher is better)
+    # 按评分排序
     hooks.sort(key=lambda c: c[4], reverse=True)
     products.sort(key=lambda c: c[4], reverse=True)
     closes.sort(key=lambda c: c[4], reverse=True)
@@ -69,68 +40,162 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     
     _log(f"多版本: {len(hooks)}个Hook, {len(products)}个产品, {len(closes)}个收尾, {len(bridges)}个过渡")
     
-    versions = []
+    # 每个版本分配不同的"核心片段"
+    # 核心片段 = 开场片段(hook或高评分product) + 1-2个独占product
+    # 其余product允许重叠
+    exclusive_products = set()  # 被某版本独占的product起始时间
     
+    versions = []
     for v in range(min(num_versions, 3)):
         version_clips = []
         
-        # Pick hook for this version
-        hook_idx = v % len(hooks) if hooks else -1
-        if hook_idx >= 0:
-            version_clips.append(hooks[hook_idx])
-            # If only 1 hook, reuse it for all versions
-            if len(hooks) == 1 and v > 0:
-                pass  # same hook, different products make it different enough
+        # 开场片段：V1用正式hook，V2+用不同hook或高评分product
+        if v == 0 and hooks:
+            version_clips.append(hooks[0])
+        elif v > 0 and len(hooks) > v:
+            version_clips.append(hooks[v])
+        elif hooks:
+            # 只有1个hook，V2+也用它（允许重叠）
+            version_clips.append(hooks[0])
         
-        # Add bridge (if available, rotate)
+        # bridge（允许重叠）
         if bridges:
-            bridge_idx = v % len(bridges)
-            version_clips.append(bridges[bridge_idx])
+            version_clips.append(bridges[v % len(bridges)])
         
-        # Pick product clips (rotate subset)
+        # product：每个版本独占1-2个不同的，其余共享
         if products:
-            # V1: top products, V2: rotated, V3: different subset
-            if v == 0:
-                # Top products by score
-                version_clips.extend(products[:min(3, len(products))])
-            elif v == 1 and len(products) >= 2:
-                # Rotate: skip first, add rest, wrap around
-                rotated = products[1:] + products[:1]
-                version_clips.extend(rotated[:min(3, len(rotated))])
-            else:
-                # Random-ish subset
-                shuffled = products[:]
-                random.shuffle(shuffled)
-                version_clips.extend(shuffled[:min(3, len(shuffled))])
+            # 找这个版本的独占product（未被其他版本占的）
+            my_exclusive = [p for p in products if p[2] not in exclusive_products]
+            # 分配1-2个独占
+            assigned = 0
+            for p in my_exclusive:
+                if assigned >= 2:
+                    break
+                version_clips.append(p)
+                exclusive_products.add(p[2])
+                assigned += 1
+            
+            # 再从全量product里按评分补齐到目标时长
+            current_dur = sum(c[5] for c in version_clips)
+            close_dur = sum(c[5] for c in closes[:2]) if len(closes) >= 2 else (closes[0][5] if closes else 0)
+            target_dur = 55
+            need_dur = max(target_dur - current_dur - close_dur, 10)
+            
+            added_starts = {c[2] for c in version_clips}
+            dur = 0
+            for p in products:
+                if p[2] not in added_starts and dur + p[5] <= need_dur + 5:
+                    version_clips.append(p)
+                    added_starts.add(p[2])
+                    dur += p[5]
+                if dur >= need_dur:
+                    break
         
-        # Pick close
-        close_idx = v % len(closes) if closes else -1
-        if close_idx >= 0:
+        # close（允许重叠，但尽量用不同的）
+        if closes:
+            close_idx = v % len(closes)
             version_clips.append(closes[close_idx])
+            if len(closes) >= 2:
+                second_idx = (close_idx + 1) % len(closes)
+                if second_idx != close_idx and closes[second_idx][2] not in {c[2] for c in version_clips}:
+                    version_clips.append(closes[second_idx])
         elif closes:
             version_clips.append(closes[0])
         
+        # 排列：hook→bridge→product→close
+        version_clips = _arrange_version(version_clips, log_fn)
+        
         if version_clips:
-            # Deduplicate by time overlap
             version_clips = _dedup_by_time(version_clips)
             versions.append(version_clips)
-            _log(f"版本{v+1}: {len(version_clips)}片段, Hook={hooks[hook_idx][0] if hook_idx >= 0 else '无'}, 时长={sum(c[5] for c in version_clips):.1f}s")
+            hook_type = version_clips[0][0] if version_clips else '无'
+            _log(f"版本{v+1}: {len(version_clips)}片段, 开场={hook_type}, 时长={sum(c[5] for c in version_clips):.1f}s")
     
     return versions
+
+
+def _is_hook(cat):
+    cat = cat.lower()
+    return 'hook' in cat or cat in ('爆料', '痛点', '信任', '夸奖', '场景')
+
+def _is_product(cat):
+    cat = cat.lower()
+    return 'product' in cat or cat in ('版型', '面料', '细节', '穿搭', '对比', '产品展示')
+
+def _is_close(cat):
+    cat = cat.lower()
+    return 'close' in cat or cat in ('促单', '尺码', '信任强化', '风格定位', '收尾')
+
+def _is_bridge(cat):
+    cat = cat.lower()
+    return 'bridge' in cat or cat in ('过渡', '提问', '科普')
+
+
+def _arrange_version(clips, log_fn=None):
+    """
+    将一组片段排列成 hook→bridge→product→close 的顺序
+    """
+    def _log(msg):
+        if log_fn: log_fn(msg)
+    
+    hooks = []
+    bridges = []
+    products = []
+    closes = []
+    others = []
+    
+    for c in clips:
+        cat = c[0].lower()
+        if 'hook' in cat or cat in ('爆料', '痛点', '信任', '夸奖', '场景'):
+            hooks.append(c)
+        elif 'close' in cat or cat in ('促单', '尺码', '信任强化', '风格定位', '收尾'):
+            closes.append(c)
+        elif 'bridge' in cat or cat in ('过渡', '提问', '科普'):
+            bridges.append(c)
+        elif 'product' in cat or cat in ('版型', '面料', '细节', '穿搭', '对比', '产品展示'):
+            products.append(c)
+        else:
+            others.append(c)
+    
+    # 如果没有明确的hook，用评分最高的product/other当开场
+    if not hooks:
+        candidates = products + others
+        if candidates:
+            candidates.sort(key=lambda c: c[4], reverse=True)
+            hooks.append(candidates.pop(0))
+            # 更新products
+            products = [p for p in products if p not in hooks]
+            others = [o for o in others if o not in hooks]
+    
+    # 如果没有明确的close，用最后一个product/other当收尾
+    if not closes:
+        candidates = products + others
+        if candidates:
+            candidates.sort(key=lambda c: c[4])  # 评分最低的当close
+            closes.append(candidates.pop(0))
+            products = [p for p in products if p not in closes]
+            others = [o for o in others if o not in closes]
+    
+    # 组装：hook → bridge → products → others → close
+    arranged = []
+    arranged.extend(hooks)
+    arranged.extend(bridges)
+    arranged.extend(products)
+    arranged.extend(others)
+    arranged.extend(closes)
+    
+    return arranged
 
 
 def _dedup_by_time(clips):
     """Remove clips that overlap in time, keeping the one with higher score"""
     if not clips:
         return clips
-    # Sort by start time
     sorted_clips = sorted(clips, key=lambda c: c[2])
     result = [sorted_clips[0]]
     for clip in sorted_clips[1:]:
-        # Check overlap with last added clip
         last = result[-1]
         if clip[2] < last[3]:  # overlap
-            # Keep the one with higher score
             if clip[4] > last[4]:
                 result[-1] = clip
         else:
