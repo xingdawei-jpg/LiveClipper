@@ -145,6 +145,7 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
         
         # ── 去重 ──
         if version_clips:
+            version_clips = _semantic_dedup_version(version_clips, log_fn)
             version_clips = _dedup_by_time(version_clips)
         
         if version_clips:
@@ -171,6 +172,50 @@ def _is_close(cat):
 def _is_bridge(cat):
     cat = cat.lower()
     return 'bridge' in cat or cat in ('过渡', '提问', '科普')
+
+
+def _semantic_dedup_version(clips, log_fn=None):
+    """版本内语义去重：同一版本内如果两段话关键词重叠>60%，只保留评分高的那段"""
+    def _log(msg):
+        if log_fn: log_fn(msg)
+    
+    if len(clips) < 3:
+        return clips
+    
+    _stop = set("的 了 在 是 我 有 和 就 都 也 不 人 这 那 他 到 说 要 会 着 过 把 得 能 可以 很 被 让 给 比 从 向 还 又 而 但".split())
+    _punct = set("，。！？、；："''（）…—·")
+    
+    def _kw(text):
+        return set(c for c in text if c not in _stop and c not in _punct and c.strip())
+    
+    keep = []
+    kept_kws = []
+    for clip in clips:
+        ct, text, start, end, score, dur = clip
+        kw = _kw(text)
+        if len(kw) < 2:
+            keep.append(clip); kept_kws.append(kw); continue
+        dup = False
+        for pi, pk in enumerate(kept_kws):
+            if len(pk) < 2:
+                continue
+            ov = len(kw & pk)
+            r = ov / min(len(kw), len(pk)) if min(len(kw), len(pk)) > 0 else 0
+            if r > 0.6 and ov >= 3:
+                # 重复了，保留评分高的
+                if score > keep[pi][4]:
+                    keep[pi] = clip
+                    kept_kws[pi] = kw
+                dup = True
+                break
+        if not dup:
+            keep.append(clip)
+            kept_kws.append(kw)
+    
+    removed = len(clips) - len(keep)
+    if removed > 0:
+        _log(f"版本内去重: {len(clips)}→{len(keep)} (移除{removed}段重复)")
+    return keep
 
 
 def _arrange_version(clips, log_fn=None):

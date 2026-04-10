@@ -34,7 +34,7 @@ import queue
 
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
 from cutter_logic import process_video, process_video_multi
-from license_client import check_activation, activate_with_code, check_trial, consume_trial_use
+from license_client import check_activation, activate_with_code, check_trial, consume_trial_use, deactivate_device
 # 样式
 C = {
     "bg":"#1C1C1E","card":"#2C2C3A","text":"#E5E5EA","dim":"#9898A8",
@@ -191,6 +191,9 @@ class App:
         hdr.pack(fill="x", padx=16, pady=(16,4))
         tk.Label(hdr, text="直播带货切片工具", font=FNT_T,
                  fg=C["text"], bg=C["bg"]).pack(side="left")
+        tk.Button(hdr, text="🔓 解绑", font=FNT_S, fg=C["dim"], bg=C["inp"],
+                  relief="flat", cursor="hand2", padx=10, pady=2,
+                  command=self._deactivate_device).pack(side="right")
         tk.Button(hdr, text="💬 反馈", font=FNT_S, fg=C["dim"], bg=C["inp"],
                   relief="flat", cursor="hand2", padx=10, pady=2,
                   command=self._show_feedback).pack(side="right")
@@ -999,6 +1002,24 @@ class App:
             self.output_dir = p
             self.output_var.set(p)
 
+    def _deactivate_device(self):
+        """解绑当前设备"""
+        from license_client import deactivate_device as _deact, check_activation as _check
+        status = _check()
+        if not status.get("activated"):
+            self._log("当前未激活，无需解绑", "warn")
+            return
+        if messagebox.askyesno("解绑确认", "解绑后当前设备将恢复试用模式，\n可在新设备上重新激活。\n\n确定要解绑吗？"):
+            self._log("正在解绑设备...")
+            result = _deact()
+            if result["ok"]:
+                self._log("✅ " + result["msg"], "ok")
+                messagebox.showinfo("解绑成功", result["msg"] + "\n\n程序将退出，请重新启动。")
+                self.root.quit()
+            else:
+                self._log("解绑失败: " + result["msg"], "err")
+                messagebox.showerror("解绑失败", result["msg"])
+
     def _show_feedback(self):
         """提交反馈弹窗"""
         dlg = tk.Toplevel(self.root)
@@ -1738,6 +1759,24 @@ def _show_activate_dialog(root):
         command=on_close,
         font=("Microsoft YaHei UI", 10)
     ).pack(side="left", padx=5)
+
+    # 解绑设备按钮（已激活时显示）
+    if check_activation().get("activated"):
+        def do_deactivate():
+            if messagebox.askyesno("解绑确认", "解绑后当前设备将无法使用，确定要解绑吗？"):
+                result = deactivate_device()
+                if result["ok"]:
+                    messagebox.showinfo("解绑成功", result["msg"])
+                    dlg.destroy()
+                    root.quit()
+                    root.destroy()
+                else:
+                    messagebox.showerror("解绑失败", result["msg"])
+        tk.Button(
+            btn_frame, text="解绑设备", width=10,
+            command=do_deactivate,
+            font=("Microsoft YaHei UI", 10), fg="#FF453A"
+        ).pack(side="left", padx=5)
 
     dlg.protocol("WM_DELETE_WINDOW", on_close)
 
