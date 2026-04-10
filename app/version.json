@@ -1,16 +1,18 @@
 {
   "version": "8.4.2",
   "files": {
+    ".installed_version": "4438667684990be59733948d176a749d12ba91d7396ea6442e2a1a199d2b25f1",
     "ai_clipper.py": "b6ce9ad4f51499b78e48f93d610f02a220a85d0f4c726f323bc5524bdb9d7f7c",
-    "ai_settings.json": "60b8b258c1c51adbfc1f9e1bdad2cb2f3472ad2f17c1f6af5fd5435f26910f94",
-    "asr_api.py": "967e291724810db805ce9ccf5d11c331d2bbb1fbda5ed1d6e6b782a0cda06375",
+    "ai_settings.json": "7fb9376eef203e1b1cde948603c16f506b44c99dd3cac9002825ce1ca7811eaf",
+    "aliyun_asr.py": "c0595cfdebae8689cd2c989b67f9a8c1a927022a27e0ce55f4aba1d30f936935",
+    "asr_api.py": "d03fc441abd1d3ff8c016e079375e0abb5875fcab2f2985194a5b2f936bc7a80",
     "config.py": "8d2fd0bb96cb7fa9ea13975ee0ffad33680ed64d7ce9aa041adcd85edc49ebf7",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
     "cutter_logic.py": "590ba89c7c2fe2bd18c3ffa24e274d87064039eccf965d73100adece414f6e22",
-    "gui.py": "023fc5ddb556fb03246170b8c01fde8ab92e9b9d8d91818e55fbd0e8aab8a79b",
-    "keywords.json": "bde3c0a549ca8bb20371381fcd26af2f3aa548d3ccd11d1f4569e6fa785c7ca1",
+    "gui.py": "fbcdeed9f38da83b848a056f7329f53b970a45eb616e7844e9c15bfa293ccef4",
+    "keywords.json": "40c563faec63588bef386dcd1fe1eb5fa0c5b9ca2521ecc1d12984584e5966ed",
     "license_client.py": "98e783537ac78ad609694c74c03d83a2dcaf7efb51128fa83ab2901ea00e282e",
-    "multi_version.py": "20766e8234cae707ca981145b5a8883bcd41d8896060d5dbcdba865acd2f6be8",
+    "multi_version.py": "0f03ada7c86927ba68db9cc204e11be8cb4df9c1c7eaf434afcf19a27cbf0d37",
     "platform_config.py": "b2963b288c1231ce2d6694072bd87125a3478b9cf6febfbc800d09afdb1ae595",
     "run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
     "srt_parser.py": "229bb03b151bc9f49db1038a451d270307155be324c5f721fe0d1a7131a82c3c",
@@ -19,10 +21,10 @@
     "tighten.py": "78d4de21696a55ea447ca1791f4373477f30c269bd269d14398770d22efd835e",
     "trim_long.py": "36c35ba83e4a126d47c3a38e2af09b2b4b8a79d0caf952cf0d990d8cb6ff7936",
     "updater.py": "95879780caca134aa106039fb920cb42098f361286d0d17a62c0a9b405624adf",
-    "version.json": "859a80cc981bdf68568c545be0234506f3934af4a6729893bccced420869d2ab",
+    "version.json": "f399411f4e64c4934b7c4f4f368568b7fc0d8553f281221c8306df5f9b4e9f89",
     "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
-  "release_notes": "v8.4.2: GUI版本号动态读取，更新后自动显示最新版本",
+  "release_notes": "v8.4.2: GUI版本号动态读取 + AI启用状态显示 + 字幕位置修复",
   "latest_version": "8.4.2",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
 }

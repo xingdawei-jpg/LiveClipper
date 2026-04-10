@@ -343,7 +343,7 @@ class App:
         tk.Label(ai_hdr, text="🤖 AI 智能选片（可选）", font=FNT_B, fg=C["text"],
              bg=C["card"]).pack(side="left")
         self.ai_toggle = tk.Checkbutton(ai_hdr, text="启用", variable=self.ai_enabled_var,
-              font=FNT_S, fg="#4fc3f7", bg=C["card"],
+              font=FNT_S, fg="#4fc3f7", bg=C["card"], selectcolor="#1a1a2e",
               command=self._toggle_ai)
         self.ai_toggle.pack(side="left", padx=(8,0))
         tk.Button(ai_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
@@ -1143,6 +1143,11 @@ class App:
     # ---- AI 设置 ----
 
     def _toggle_ai(self):
+        # Update toggle button appearance
+        if self.ai_enabled_var.get():
+            self.ai_toggle.configure(text="✅ 启用", fg="#4caf50")
+        else:
+            self.ai_toggle.configure(text="启用", fg="#4fc3f7")
         if self.ai_enabled_var.get():
             self._ai_collapsed = False
             self._ai_toggle_lbl.configure(text="▾ ")
