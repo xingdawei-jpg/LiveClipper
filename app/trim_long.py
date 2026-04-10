@@ -49,7 +49,7 @@ def trim_long_clips(clips, srt_text, max_dur=7.0, log_fn=None):
 
     result = []
     for clip in clips:
-        c_type, c_text, c_start, c_end, c_score, c_dur = clip
+        c_type, c_text, c_start, c_end, c_score, c_dur = clip[:6]
 
         if c_dur <= max_dur:
             result.append(clip)

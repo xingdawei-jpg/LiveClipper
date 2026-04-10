@@ -1111,8 +1111,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             # 叙事连贯性检查
             clips = _check_narrative_coherence(clips, log_fn)
             # ASR纠错:修正文案中的常见识别错误
-            clips = [(ct, _apply_asr_corrections(text, log_fn), s, e, sc, d)
-                     for ct, text, s, e, sc, d in clips]
+            clips = [(ct, _apply_asr_corrections(text, log_fn), s, e, sc, d, focus)
+                     for ct, text, s, e, sc, d, focus in (c[:7] if len(c) > 6 else (*c, "") for c in clips)]
             # 主播互动废话过滤
             clips = _filter_host_interaction(clips, log_fn)
             # 语义重复过滤(代码层兜底)
@@ -1173,8 +1173,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
         clips = _dedup_clip_text_overlap(best_clips, log_fn)
         clips = _post_filter_cross_category(clips, cleaned_srt, log_fn)
         clips = _check_narrative_coherence(clips, log_fn)
-        clips = [(ct, _apply_asr_corrections(text, log_fn), s, e, sc, d)
-                 for ct, text, s, e, sc, d in clips]
+        clips = [(ct, _apply_asr_corrections(text, log_fn), s, e, sc, d, focus)
+                 for ct, text, s, e, sc, d, focus in (c[:7] if len(c) > 6 else (*c, "") for c in clips)]
         clips = _filter_host_interaction(clips, log_fn)
         # 价格/CTA硬过滤（AI Prompt拦不住的用代码拦）
         clips = _filter_price_and_cta(clips, log_fn)
@@ -1855,7 +1855,7 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None):
 
     trimmed = []
     trim_count = 0
-    for ct, text, start, end, score, dur in clips:
+    for ct, text, start, end, score, dur, *_ in clips:
         new_start = start
         # 找片段开头连续的语气词SRT条目
         for s, e, norm in entries:
@@ -1875,9 +1875,9 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None):
         new_dur = end - new_start
         if new_dur < 2.0:
             # 裁掉语气词后太短，保留原样
-            trimmed.append((ct, text, start, end, score, dur))
+            trimmed.append((ct, text, start, end, score, dur, *_))
         else:
-            trimmed.append((ct, text, new_start, end, score, new_dur))
+            trimmed.append((ct, text, new_start, end, score, new_dur, *_))
 
     if trim_count:
         _log(f"语气词裁剪: 裁掉 {trim_count} 个片段开头的语气词")
@@ -1929,7 +1929,7 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
     fixed_clips = []
     fix_count = 0
 
-    for ct, text, start, end, score, dur in clips:
+    for ct, text, start, end, score, dur, *_ in clips:
         new_start = start
         new_end = end
 
@@ -1978,7 +1978,7 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
                 continue
 
         new_dur = new_end - new_start
-        fixed_clips.append((ct, text, new_start, new_end, score, new_dur))
+        fixed_clips.append((ct, text, new_start, new_end, score, new_dur, *_))
 
     if fix_count:
         total_before = sum(c[5] for c in clips)
@@ -2218,7 +2218,7 @@ def _filter_price_and_cta(clips, log_fn=None):
                 reason.append("价格模式")
             _log(f'  价格过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
             continue
-        filtered.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
+        filtered.append((ct, text, s, e, sc, d, *_))
 
     if removed:
         _log(f"价格硬过滤: 删除 {removed} 段含价格/CTA的片段，剩余 {len(filtered)} 段")
@@ -2247,7 +2247,7 @@ def _filter_host_interaction(clips, log_fn=None):
             removed += 1
             _log(f"废话过滤: 移除 '{text[:20]}'({d:.1f}s，主播回弹幕)")
         else:
-            cleaned.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
+            cleaned.append((ct, text, s, e, sc, d, *_))
 
     if removed:
         _log(f"废话过滤: 共移除 {removed} 个片段")
@@ -2394,11 +2394,11 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn):
             has_main = any(kw in text for kw in main_kws)
             if has_main:
                 # 同时有主品类和次品类 → 可能是搭配说明，保留
-                kept.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
+                kept.append((ct, text, s, e, sc, d, *_))
             else:
                 removed += 1
         else:
-            kept.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
+            kept.append((ct, text, s, e, sc, d, *_))
 
     if removed:
         _log(f"跨品类扫描: 踢出 {removed} 个非{main_cat}片段，保留 {len(kept)} 个")
