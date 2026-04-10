@@ -2,7 +2,7 @@
   "version": "8.5.0",
   "files": {
     ".installed_version": "4438667684990be59733948d176a749d12ba91d7396ea6442e2a1a199d2b25f1",
-    "ai_clipper.py": "e42346f73b39fc37c3535c86e0b7c0ede7a049b2f2dd94e5746e2b2e1edf6222",
+    "ai_clipper.py": "75225ba4084d305bd652af9ae65605efa317e46c4842929a3c423ff5b97eb3f4",
     "ai_settings.json": "7fb9376eef203e1b1cde948603c16f506b44c99dd3cac9002825ce1ca7811eaf",
     "aliyun_asr.py": "c0595cfdebae8689cd2c989b67f9a8c1a927022a27e0ce55f4aba1d30f936935",
     "asr_api.py": "d03fc441abd1d3ff8c016e079375e0abb5875fcab2f2985194a5b2f936bc7a80",
@@ -21,7 +21,7 @@
     "tighten.py": "78d4de21696a55ea447ca1791f4373477f30c269bd269d14398770d22efd835e",
     "trim_long.py": "36c35ba83e4a126d47c3a38e2af09b2b4b8a79d0caf952cf0d990d8cb6ff7936",
     "updater.py": "f58e479b7b151492c36eac3d401d53947229100d0ee7ac29608b08daa34ec5f0",
-    "version.json": "a5b3c45ed6b2300f2982253256b67e09d6d25cc31a67c4b3b469eed51dc55481",
+    "version.json": "f39f5ceb36c71d57d1ad6ac5b8ce724c972ea0df29eba296dbfd82a7be788fe7",
     "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
   "release_notes": "v8.5.0: 设备绑定+解绑+多版本优化+结尾吃字修复+AI启用状态+版本号动态",
