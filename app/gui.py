@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from updater import check_and_prompt_update
+from updater import check_and_prompt_update, _get_installed_version
 import tkinter.ttk as ttk
 import queue
 
@@ -156,7 +156,7 @@ def _friendly_error(err_msg):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("直播带货切片工具 v8.4.0")
+        self.root.title(f"直播带货切片工具 v{_get_installed_version()}")
         self.root.geometry("800x820")
         self.root.configure(bg=C["bg"])
         self.root.minsize(550, 650)
@@ -168,7 +168,7 @@ class App:
         self._poll_queue()  # 启动队列轮询
         # 启动时恢复AI和ASR启用状态
         self.root.after(100, self._restore_toggle_states)
-        self._log(f"[v8.4.0] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
+        self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
 
     def _restore_toggle_states(self):
         """启动时恢复AI选片和云端ASR的启用状态"""

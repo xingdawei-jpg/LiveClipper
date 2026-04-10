@@ -29,7 +29,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "8.4.0"
+CURRENT_VERSION = "8.4.2"
 
 
 
@@ -433,10 +433,6 @@ class DownloadDialog(tk.Toplevel):
             return
 
         file_list = list(files_info.items())
-        # Move updater.py to last: avoid self-update crash (old code may have bugs)
-        updater_items = [x for x in file_list if x[0] == "updater.py"]
-        other_items = [x for x in file_list if x[0] != "updater.py"]
-        file_list = other_items + updater_items
         total = len(file_list)
         success_count = 0
         fail_count = 0
