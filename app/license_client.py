@@ -185,33 +185,64 @@ def _query_device_binding(code):
                 mid = fields.get("设备ID", "")
                 if isinstance(mid, list):
                     mid = mid[0].get("text", "") if mid else ""
-                return {"record_id": rec["record_id"], "machine_id": str(mid).strip()}
+                activate_date = fields.get("激活日期", 0)
+                if isinstance(activate_date, list):
+                    activate_date = activate_date[0] if activate_date else 0
+                return {"record_id": rec["record_id"], "machine_id": str(mid).strip(), "activate_date": int(activate_date) if activate_date else 0}
         return None
     except Exception:
         return None
 
+def _parse_code_dates(code):
+    """从激活码中解析出激活日期和到期日期（毫秒时间戳，供飞书日期字段使用）"""
+    try:
+        raw = code.replace("-", "").strip().lower()
+        if len(raw) != 32:
+            return None, None
+        expires_hex = raw[2:10]
+        expires_at = int(expires_hex, 16)
+        now = int(time.time())
+        # 激活日期=今天，到期日期=激活码中的expires
+        activate_ts = now * 1000  # 毫秒时间戳
+        expire_ts = expires_at * 1000
+        return activate_ts, expire_ts
+    except Exception:
+        return None, None
+
 def _bind_device(code, machine_id, device_info=""):
-    """绑定设备（写入或更新多维表格记录）"""
+    """绑定设备（写入或更新多维表格记录，含激活/到期日期）"""
     try:
         raw_code = code.replace("-", "").strip().lower()
         existing = _query_device_binding(code)
+        activate_ts, expire_ts = _parse_code_dates(code)
+        
+        # 日期字段（飞书多维表格日期类型需要毫秒时间戳）
+        date_fields = {}
+        if activate_ts:
+            date_fields["激活日期"] = activate_ts
+        if expire_ts:
+            date_fields["到期日期"] = expire_ts
 
         if existing:
             # 更新
+            fields = {"设备ID": machine_id, "设备信息": device_info}
+            fields.update(date_fields)
             resp = _feishu_request("PUT",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
-                {"fields": {"设备ID": machine_id, "设备信息": device_info}})
+                {"fields": fields})
             return resp and resp.get("code") == 0
         else:
             # 新增
+            fields = {
+                "多行文本": f"用户_{machine_id[:8]}",
+                "激活码": raw_code,
+                "设备ID": machine_id,
+                "设备信息": device_info,
+            }
+            fields.update(date_fields)
             resp = _feishu_request("POST",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
-                {"fields": {
-                    "多行文本": f"用户_{machine_id[:8]}",
-                    "激活码": raw_code,
-                    "设备ID": machine_id,
-                    "设备信息": device_info,
-                }})
+                {"fields": fields})
             return resp and resp.get("code") == 0
     except Exception:
         return False
@@ -317,21 +348,15 @@ def validate_code(code):
         ).hexdigest()[:20]
         if not hmac.compare_digest(signature, expected_sig):
             return {"ok": False, "msg": "激活码无效（签名错误）"}
-        expires_at = int(expires_hex, 16)
-        now = int(time.time())
-        if now > expires_at:
-            expired_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
-            return {"ok": False, "msg": f"激活码已于 {expired_date} 过期"}
-        days_left = (expires_at - now) // 86400
-        expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
+        # 方案B：到期时间从飞书多维表格的"激活日期+套餐天数"计算，不再用码里的expires_at
+        # 激活码里的expires_hex仅作为生成时的参考上限，实际到期以激活日期为准
+        expires_at_in_code = int(expires_hex, 16)  # 码里的生成时过期时间（参考）
         return {
             "ok": True,
             "plan": {"01": "monthly", "02": "quarterly", "03": "yearly"}.get(plan_hex, "monthly"),
             "plan_name": PLAN_NAMES[plan_hex],
             "days": PLAN_DAYS[plan_hex],
-            "expires_at": expires_at,
-            "expires_date": expires_date,
-            "days_left": days_left,
+            "plan_hex": plan_hex,
         }
     except Exception as e:
         return {"ok": False, "msg": f"激活码解析失败: {str(e)}"}
@@ -365,14 +390,19 @@ def activate_with_code(code):
             }
 
     # Step 3: 本地保存
+    # 方案B：到期时间 = 激活日期 + 套餐天数
+    plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+    activated_at = int(time.time())
+    expires_at = activated_at + plan_days * 86400
+    expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     _save_license_code(code)
     _save_cache({
         "code": code,
         "plan": result["plan"],
         "plan_name": result["plan_name"],
-        "expires_at": result["expires_at"],
-        "expires_date": result["expires_date"],
-        "activated_at": int(time.time()),
+        "expires_at": expires_at,
+        "expires_date": expires_date,
+        "activated_at": activated_at,
         "machine_id": current_mid,
     })
 
@@ -427,6 +457,33 @@ def check_activation():
         code = cache["code"]
         result = validate_code(code)
         if result["ok"]:
+            # 方案B：到期时间 = activated_at + 套餐天数（优先从缓存读）
+            activated_at = cache.get("activated_at", 0)
+            plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+            if activated_at > 0:
+                expires_at = activated_at + plan_days * 86400
+            else:
+                # 老缓存没有activated_at，尝试从飞书读激活日期
+                try:
+                    binding = _query_device_binding(code)
+                    if binding and binding.get("activate_date", 0) > 0:
+                        activated_at = binding["activate_date"] // 1000
+                        expires_at = activated_at + plan_days * 86400
+                        # 更新缓存
+                        cache["activated_at"] = activated_at
+                        _save_cache(cache)
+                    else:
+                        expires_at = cache.get("expires_at", 0)
+                except Exception:
+                    expires_at = cache.get("expires_at", 0)
+            
+            now = int(time.time())
+            days_left = max(0, (expires_at - now) // 86400)
+            expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
+            
+            if now > expires_at:
+                return {"need_activate": True, "reason": f"激活码已于 {expires_date} 过期，请续费"}
+            
             # 启动时静默校验服务端设备绑定
             try:
                 binding = _query_device_binding(code)
@@ -441,8 +498,8 @@ def check_activation():
             return {
                 "activated": True,
                 "plan_name": result["plan_name"],
-                "days_left": result["days_left"],
-                "expires_date": result["expires_date"],
+                "days_left": days_left,
+                "expires_date": expires_date,
             }
 
     code = _load_license_code()
@@ -454,13 +511,18 @@ def check_activation():
         if prev_mid and prev_mid != current_mid:
             return {"need_activate": True, "reason": "设备已更换，请重新激活"}
         if result["ok"]:
+            # 方案B：到期时间 = 激活时间 + 套餐天数
+            plan_days_s = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+            activated_at_s = int(time.time())
+            expires_at_s = activated_at_s + plan_days_s * 86400
+            expires_date_s = datetime.fromtimestamp(expires_at_s).strftime("%Y-%m-%d")
             _save_cache({
                 "code": code,
                 "plan": result["plan"],
                 "plan_name": result["plan_name"],
-                "expires_at": result["expires_at"],
-                "expires_date": result["expires_date"],
-                "activated_at": int(time.time()),
+                "expires_at": expires_at_s,
+                "expires_date": expires_date_s,
+                "activated_at": activated_at_s,
                 "machine_id": current_mid,
             })
             # 同步服务端绑定
@@ -468,11 +530,12 @@ def check_activation():
                 _bind_device(code, current_mid, _get_device_info())
             except Exception:
                 pass
+            days_left_s = max(0, (expires_at_s - int(time.time())) // 86400)
             return {
                 "activated": True,
                 "plan_name": result["plan_name"],
-                "days_left": result["days_left"],
-                "expires_date": result["expires_date"],
+                "days_left": days_left_s,
+                "expires_date": expires_date_s,
             }
 
     trial = check_trial()

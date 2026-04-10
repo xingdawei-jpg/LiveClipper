@@ -632,10 +632,7 @@ def generate_ass(clips, width, height, output_path):
         # 合并关键词列表（AI标注 + 静态配置）
         all_keywords = list(set(ai_keywords + SUBTITLE_KEYWORDS))
         # 按短句数分配时间
-        # 最后一个片段多分配0.5s，确保最后的字能完整显示
-        is_last = (c_type, text, start, end) == (clips[-1][0], clips[-1][1], clips[-1][2], clips[-1][3])
-        extra = 0.5 if is_last else 0
-        seg_dur = (duration + extra) / len(segments)
+        seg_dur = duration / len(segments)
         for i, seg in enumerate(segments):
             seg_start = current_time + i * seg_dur
             seg_end = current_time + (i + 1) * seg_dur
@@ -1172,17 +1169,11 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log(f"切割 [{i+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
             temp_file = os.path.join(temp_dir, f"clip_{i:02d}.mp4")
 
-            # [v9.3] 尾部缓冲：所有片段加0.3s防吃字，最后一个片段加0.8s
+            # [v9.5] 尾部缓冲0.3s（约一个汉字时长），防最后几个字被截
             start_buf = 0
-            is_last_clip = (i == total_clips - 1)
-            if is_last_clip:
-                end_buf = 0.8  # 最后一个片段多留缓冲，确保结尾字完整
-            elif 'close' in c_type.lower():
-                end_buf = 0.5
-            else:
-                end_buf = 0.3  # 所有片段都留一点尾部缓冲防吃字
-            # 尾部缓冲不能超过时间轴上下一个片段的开头
-            later_clips = [c for c in ordered_clips if c[2] > end]
+            end_buf = 0.3
+            # 不能超过下一个片段的起始时间（防止拖入其他片段内容）
+            later_clips = [c for c in ordered_clips if c[2] >= end]
             if later_clips:
                 next_start = min(c[2] for c in later_clips)
                 end_buf = min(end_buf, max(next_start - end, 0))

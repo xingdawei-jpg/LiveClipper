@@ -186,7 +186,7 @@ def _pre_clean_srt(srt_text, log_fn=None):
                 if i + 2 < len(lines):
                     time_line = lines[i + 1].strip()
                     text_line = lines[i + 2].strip() if i + 2 < len(lines) else ""
-                    j = i + 2
+                    j = i + 3
                     while j < len(lines) and lines[j].strip() and not re.match(r'^\d+$', lines[j].strip()):
                         text_line += lines[j].strip()
                         j += 1
@@ -243,6 +243,62 @@ def _pre_clean_srt(srt_text, log_fn=None):
     if len(entries) < 10:
         entries = _parse_and_filter(all_lines, 0.5, 20, 3, 0)
         _log(f"二级降级(仅黑名单): {len(entries)} 条通过")
+
+    # 相邻片段重叠检测：Whisper medium 会在片段边界重复识别
+    if entries:
+        merged = []
+        for entry in entries:
+            if not merged:
+                merged.append(entry)
+                continue
+            prev_text, prev_start, prev_end, prev_dur = merged[-1]
+            curr_text, curr_start, curr_end, curr_dur = entry
+            prev_clean = prev_text.replace(" ", "").replace("\u3000", "")
+            curr_clean = curr_text.replace(" ", "").replace("\u3000", "")
+            should_merge = False
+            if prev_clean and curr_clean:
+                # 时间重叠：前片段还没结束，后片段已开始
+                time_overlap = max(0, prev_end - curr_start) / min(prev_dur, curr_dur) if min(prev_dur, curr_dur) > 0 else 0
+                # 找最长公共子串
+                overlap_chars = 0
+                shorter = prev_clean if len(prev_clean) <= len(curr_clean) else curr_clean
+                longer = curr_clean if len(prev_clean) <= len(curr_clean) else prev_clean
+                for length in range(min(len(shorter), 10), 2, -1):
+                    for si in range(len(shorter) - length + 1):
+                        sub = shorter[si:si+length]
+                        if sub in longer:
+                            overlap_chars = length
+                            break
+                    if overlap_chars > 0:
+                        break
+                # Whisper边界重复特征：时间交叀 + 少量文本重叠
+                should_merge = (time_overlap > 0.3 and overlap_chars >= 3)
+            if should_merge:
+                new_start = min(prev_start, curr_start)
+                new_end = max(prev_end, curr_end)
+                # Merge text: remove overlapping part from curr, then append
+                if overlap_chars >= 3:
+                    # Find the overlapping tail of prev and head of curr
+                    overlap_str = ""
+                    for length in range(min(len(prev_clean), overlap_chars + 2), max(overlap_chars - 1, 2), -1):
+                        tail = prev_clean[-length:]
+                        if tail in curr_clean[:length + 2]:
+                            overlap_str = tail
+                            break
+                    if overlap_str:
+                        idx = curr_clean.find(overlap_str)
+                        new_text = prev_text + curr_text[idx + len(overlap_str):]
+                    else:
+                        new_text = prev_text
+                else:
+                    new_text = prev_text
+                merged[-1] = (new_text, new_start, new_end, new_end - new_start)
+            else:
+                merged.append(entry)
+        if len(merged) < len(entries):
+            import builtins
+            builtins._merge_count = len(entries) - len(merged)
+        entries = merged
 
     # 重建 SRT
     output = []
@@ -989,8 +1045,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
 
     cleaned_srt = _pre_clean_srt(srt_text, log_fn)
     if not cleaned_srt.strip():
-        _log("AI: 清洗后无有效字幕")
-        return []
+        _log("AI: 清洗后无有效字幕，尝试使用原始SRT...")
+        cleaned_srt = srt_text
+        if not cleaned_srt.strip():
+            _log("AI: 原始SRT也为空")
+            return []
 
     # SRT预去重: 去除主播重复讲述的段落
     cleaned_srt = _dedup_srt_repeated_sections(cleaned_srt, log_fn)
@@ -1018,6 +1077,25 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
         removed_from_dedup = []
         clips = _dedup_clips(clips, log_fn)
         removed_from_dedup = [c for c in original_clips if c not in clips]
+        # [v9.5] 多版本模式：去重后如果片段不足12个，回收被去除的片段
+        if _skip_focus and len(clips) < 12 and removed_from_dedup:
+            # 按评分排序回收，优先补回高分的
+            removed_sorted = sorted(removed_from_dedup, key=lambda c: c[4], reverse=True)
+            added = 0
+            for rc in removed_sorted:
+                # 避免时间重叠（和已有片段间隔>2s）
+                overlap = False
+                for ec in clips:
+                    if abs(rc[2] - ec[2]) < 2 or abs(rc[3] - ec[3]) < 2:
+                        overlap = True; break
+                if not overlap:
+                    clips.append(rc)
+                    removed_from_dedup.remove(rc)
+                    added += 1
+                    if len(clips) >= 12:
+                        break
+            if added > 0:
+                _log(f"多版本回收: 补回{added}个片段，当前{len(clips)}个")
         if not clips:
             continue
         # [增强] 内容去重
@@ -2117,6 +2195,8 @@ def _filter_price_and_cta(clips, log_fn=None):
     forbidden_words = [
         '购物车', '小黄车', '左下角', '链接', '下单', '拍下', '去拍',
         '下单', '领券', '满减', '立减', '321上', '321冲',
+        'free', 'Free', 'FREE', '免费', '抽奖', '赠品', '送你',
+        '榜二', '置顶视频', '拼手速', '抢购', '限量',
     ]
 
     filtered = []
