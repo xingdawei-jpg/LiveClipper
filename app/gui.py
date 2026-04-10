@@ -171,16 +171,76 @@ class App:
         self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
 
     def _restore_toggle_states(self):
-        """启动时恢复AI选片和云端ASR的启用状态"""
+        """启动时恢复所有设置到UI（不触发自动保存）"""
         try:
             from ai_clipper import load_settings
             s = load_settings()
+
+            # --- 恢复 AI 设置 ---
+            if s.get("api_key"):
+                self.ai_key_var.set(s["api_key"])
+            if s.get("base_url"):
+                self.ai_url_var.set(s["base_url"])
+            if s.get("model"):
+                self.ai_model_var.set(s["model"])
+
+            # AI 预设（优先用保存的名称，否则按 url/model 匹配）
+            ai_matched = s.get("ai_preset", "")
+            if not ai_matched or ai_matched not in AI_PRESETS:
+                ai_matched = "\u81ea\u5b9a\u4e49"
+                for name, cfg in AI_PRESETS.items():
+                    if name == "\u81ea\u5b9a\u4e49":
+                        continue
+                    if (s.get("base_url","") == cfg["base_url"] and
+                        s.get("model","") == cfg["model"]):
+                        ai_matched = name
+                        break
+            self.ai_preset_var.set(ai_matched)
+
+            # AI 启用状态
             if s.get("enabled"):
                 self.ai_enabled_var.set(True)
-                self._toggle_ai()
-            # 不自动恢复ASR启用——需要API Key，不应静默开启
+                self._toggle_ai()  # 只展开UI + 更新按钮外观
+
+            # --- 恢复 ASR 设置 ---
+            if s.get("asr_api_key"):
+                self.asr_key_var.set(s["asr_api_key"])
+            if s.get("asr_base_url"):
+                self.asr_url_var.set(s["asr_base_url"])
+            if s.get("asr_model"):
+                self.asr_model_var.set(s["asr_model"])
+            if s.get("volc_app_id"):
+                self.volc_app_id_var.set(s["volc_app_id"])
+            if s.get("volc_access_token"):
+                self.volc_token_var.set(s["volc_access_token"])
+            if s.get("volc_tos_ak"):
+                self.volc_tos_ak_var.set(s["volc_tos_ak"])
+            if s.get("volc_tos_sk"):
+                self.volc_tos_sk_var.set(s["volc_tos_sk"])
+            if s.get("volc_bucket"):
+                self.volc_bucket_var.set(s["volc_bucket"])
+            if "whisper_model" in s:
+                self._whisper_model_var.set(s["whisper_model"])
+
+            # ASR 预设
+            asr_matched = s.get("asr_preset", "") or s.get("asr_provider", "")
+            if asr_matched:
+                self.asr_preset_var.set(asr_matched)
+
+            # ASR 启用状态（静默恢复）
+            asr_on = bool(s.get("asr_enabled", False))
+            if asr_on:
+                self.asr_enabled_var.set(True)
+                self._toggle_asr()  # 只展开UI + 更新按钮外观
+
+            # --- 恢复完成，启用保存 ---
+            self._init_done = True
+            self._save_ai()  # 确保文件包含所有恢复的值
+
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()
+            self._init_done = True  # 即使出错也允许保存
 
     def _build(self):
         m = tk.Frame(self.root, bg=C["bg"])
@@ -338,6 +398,7 @@ class App:
         ai_hdr = tk.Frame(self.ai_frame, bg=C["card"])
         ai_hdr.pack(fill="x")
         self._ai_collapsed = True
+        self._init_done = False  # block auto-save until startup restoration completes
         self._ai_toggle_lbl = tk.Label(ai_hdr, text="▶", font=FNT_S,
                                      fg=C["btn_sel"], bg=C["inp"], cursor="hand2",
                                      padx=6, pady=2)
@@ -459,6 +520,7 @@ class App:
                                 values=["small", "medium"],
                                 width=7, font=FNT_S, state="readonly")
         wm_combo.pack(side="left", padx=2)
+        wm_combo.bind("<<ComboboxSelected>>", lambda e: self._save_ai())
         # SRT 字幕（与云端ASR互斥）
         tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
         self.srt_var = tk.StringVar(value="留空 = 自动语音识别")
@@ -1172,7 +1234,7 @@ class App:
         self._toggle_ai()
 
     def _toggle_ai(self):
-        # Update toggle button appearance
+        """只管 UI 展开/折叠 + 按钮外观，不再加载设置"""
         if self.ai_enabled_var.get():
             self.ai_toggle.configure(text="✅ 启用", fg="#4caf50")
         else:
@@ -1181,59 +1243,6 @@ class App:
             self._ai_collapsed = False
             self._ai_toggle_lbl.configure(text="▾ ")
             self.ai_detail.pack(fill="x")
-            # 加载已保存的设置到输入框（始终从文件加载）
-            from ai_clipper import load_settings
-            s = load_settings()
-            if s.get("api_key"):
-                self.ai_key_var.set(s["api_key"])
-            if s.get("base_url"):
-                self.ai_url_var.set(s["base_url"])
-            if s.get("model"):
-                self.ai_model_var.set(s["model"])
-            # ASR 设置
-            if s.get("asr_api_key"):
-                self.asr_key_var.set(s["asr_api_key"])
-            if s.get("asr_base_url"):
-                self.asr_url_var.set(s["asr_base_url"])
-            if s.get("asr_model"):
-                self.asr_model_var.set(s["asr_model"])
-            self.asr_enabled_var.set(bool(s.get("asr_enabled", False)))
-
-            # ASR设置
-            if s.get("asr_provider"):
-                self.asr_preset_var.set(s["asr_provider"])
-            if s.get("volc_app_id"):
-                self.volc_app_id_var.set(s["volc_app_id"])
-            if s.get("volc_access_token"):
-                self.volc_token_var.set(s["volc_access_token"])
-            if s.get("volc_tos_ak"):
-                self.volc_tos_ak_var.set(s["volc_tos_ak"])
-            if s.get("volc_tos_sk"):
-                self.volc_tos_sk_var.set(s["volc_tos_sk"])
-            if s.get("volc_bucket"):
-                self.volc_bucket_var.set(s["volc_bucket"])
-            if "whisper_model" in s:
-                self._whisper_model_var.set(s["whisper_model"])
-            self.asr_enabled_var.set(bool(s.get("volc_enabled", False) or s.get("asr_enabled", False)))
-            self._toggle_asr()  # 更新ASR按钮外观
-
-            # 恢复AI选片启用状态
-            if "enabled" in s:
-                self.ai_enabled_var.set(bool(s["enabled"]))
-                self._toggle_ai()  # 更新AI按钮外观
-
-            # 恢复AI预设（优先用保存的预设名，否则按url/model匹配）
-            matched = s.get("ai_preset", "")
-            if not matched or matched not in AI_PRESETS:
-                matched = "自定义"
-                for name, cfg in AI_PRESETS.items():
-                    if name == "自定义":
-                        continue
-                    if (s.get("base_url","") == cfg["base_url"] and
-                        s.get("model","") == cfg["model"]):
-                        matched = name
-                        break
-            self.ai_preset_var.set(matched)
         else:
             self.ai_detail.pack_forget()
 
@@ -1264,6 +1273,8 @@ class App:
             self._log(f"加载自定义去重配置失败: {e}", "err")
 
     def _save_ai(self):
+        if not getattr(self, "_init_done", True):
+            return  # skip saves before startup finishes
         from ai_clipper import save_settings
         settings = {
             "api_key": self.ai_key_var.get().strip(),
@@ -1274,7 +1285,6 @@ class App:
             "asr_api_key": self.asr_key_var.get().strip(),
             "asr_base_url": self.asr_url_var.get().strip(),
             "asr_model": self.asr_model_var.get().strip(),
-            "asr_provider": self.asr_preset_var.get().strip(),
             "volc_app_id": self.volc_app_id_var.get().strip(),
             "volc_access_token": self.volc_token_var.get().strip(),
             "volc_tos_ak": self.volc_tos_ak_var.get().strip(),
@@ -1283,6 +1293,7 @@ class App:
             "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
             "ai_preset": self.ai_preset_var.get() if hasattr(self, "ai_preset_var") else "",
             "asr_preset": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
+            "asr_provider": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
         }
         if save_settings(settings):
             self._log("AI 设置已保存", "ok")
