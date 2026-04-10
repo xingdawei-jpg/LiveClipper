@@ -2,24 +2,46 @@
 """
 Multi-version output for LiveClipper
 
-Strategy (v2):
-1. AI selects ALL good clips once (no dedup yet)
-2. Each version picks from the FULL pool with different preferences
-3. V1: balanced (hook + best products + close)
-4. V2: different hook if available, different product focus
-5. V3: remaining strong clips, ensure completeness
+Strategy (v3): Angle-based differentiation
+1. AI selects ALL good clips once (with focus tags)
+2. Group products by focus/angle (面料/功能/风格/版型/工艺 etc.)
+3. Each version picks a DIFFERENT angle as primary focus
+4. Hook + Close shared, but products tell different stories
 
-Key: clips tuple is (category, text, start, end, score, duration)
+Key: clips tuple is (category, text, start, end, score, duration, focus)
 """
 import os, re, random
+
+# Angle grouping rules
+ANGLE_GROUPS = {
+    "功能": ["防晒", "降温", "导热", "透气", "吸汗", "防紫外线", "保暖", "速干", "防水", "抗菌", "功能"],
+    "面料": ["面料", "材质", "成分", "亚麻", "棉", "真丝", "羊毛", "雪纺", "天丝", "莫代尔", "支数", "纱线", "编织", "工艺", "双色麻"],
+    "风格": ["风格", "老钱", "气质", "洋气", "高级", "质感", "调性", "品味", "时髦", "复古", "法式", "韩系", "简约", "麻褶", "褶感", "皱"],
+    "版型": ["版型", "剪裁", "显瘦", "修身", "宽松", "廓形", "垂感", "遮肉", "收腰", "A字", "直筒", "高腰"],
+    "价格": ["性价比", "划算", "折扣", "优惠", "八五折", "打折", "活动", "周年"],
+    "信任": ["自留", "回购", "盲拍", "不搞虚", "真的", "亲测", "实测"],
+}
+
+def _detect_angle(text, focus_hint=""):
+    """Detect which angle a clip belongs to based on text + focus hint"""
+    combined = focus_hint + " " + text
+    best_angle = "其他"
+    best_count = 0
+    for angle, keywords in ANGLE_GROUPS.items():
+        count = sum(1 for kw in keywords if kw in combined)
+        if count > best_count:
+            best_count = count
+            best_angle = angle
+    return best_angle
+
 
 def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     """
     From all AI-selected clips, generate multiple version playlists.
     
-    策略：每个版本从全量候选池中独立挑选，保证时长和完整性。
-    - Hook: 各版本尽量用不同的（有的话），没有就共享
-    - Product: 各版本核心 product 不同，但允许补充共享的
+    策略：每个版本聚焦不同卖点角度，讲不同的故事。
+    - Hook: 各版本尽量用不同的
+    - Product: 按角度分组，各版本主打不同角度
     - Close: 各版本尽量用不同的
     - 目标：每个版本 55-60s，至少 6-8 个片段
     """
@@ -29,31 +51,55 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     if not all_clips or num_versions <= 1:
         return [all_clips] if all_clips else []
     
+    # Unpack clips (support both 6-tuple and 7-tuple)
+    def _focus(c):
+        return c[6] if len(c) > 6 else ""
+    
+    def _dur(c):
+        return c[5]
+    
     # 分类 + 按评分排序
     hooks = sorted([c for c in all_clips if _is_hook(c[0])], key=lambda c: c[4], reverse=True)
     products = sorted([c for c in all_clips if _is_product(c[0])], key=lambda c: c[4], reverse=True)
     closes = sorted([c for c in all_clips if _is_close(c[0])], key=lambda c: c[4], reverse=True)
     bridges = sorted([c for c in all_clips if _is_bridge(c[0])], key=lambda c: c[4], reverse=True)
     
-    _log(f"多版本候选池: {len(hooks)}个Hook, {len(products)}个产品, {len(closes)}个收尾, {len(bridges)}个过渡")
+    # 给每个 product 打角度标签
+    product_angles = {}
+    for p in products:
+        angle = _detect_angle(p[1], _focus(p))
+        product_angles[id(p)] = angle
     
-    # 去重辅助：按时间区间判断是否同一段
-    def _time_key(c):
-        return (round(c[2], 1), round(c[3], 1))
+    # 统计角度分布
+    angle_counts = {}
+    for p in products:
+        a = product_angles[id(p)]
+        angle_counts[a] = angle_counts.get(a, 0) + 1
+    _log(f"多版本候选池: {len(hooks)}个Hook, {len(products)}个产品, {len(closes)}个收尾, {len(bridges)}个过渡")
+    _log(f"角度分布: {dict(sorted(angle_counts.items(), key=lambda x: -x[1]))}")
+    
+    # 确定每个版本主打的角度（按产品数量排序，最丰富的角度优先）
+    available_angles = sorted(angle_counts.keys(), key=lambda a: -angle_counts[a])
+    # 过滤掉只有1个产品的角度（太单薄，不适合做主打）
+    main_angles = [a for a in available_angles if angle_counts[a] >= 2]
+    if not main_angles:
+        main_angles = available_angles[:1]  # 至少有一个主打角度
     
     versions = []
     used_hook_indices = set()
     used_close_indices = set()
-    # 核心product分配：每个版本独占一批product的时间区间
-    assigned_product_times = {}  # version_index -> set of start times
     
     for v in range(min(num_versions, 3)):
         version_clips = []
-        v_product_times = set()
-        assigned_product_times[v] = v_product_times
+        
+        # ── 本版本主打角度 ──
+        primary_angle = main_angles[v % len(main_angles)]
+        # 次要角度：其他角度轮换
+        other_angles = [a for a in available_angles if a != primary_angle]
+        
+        _log(f"版本{v+1}主打角度: {primary_angle}")
         
         # ── Hook ──
-        # 优先选没用过的hook
         hook = None
         for hi, h in enumerate(hooks):
             if hi not in used_hook_indices:
@@ -61,68 +107,59 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
                 used_hook_indices.add(hi)
                 break
         if hook is None and hooks:
-            # 没有独占hook了，用最好的（允许重叠）
             hook = hooks[v % len(hooks)]
         if hook:
             version_clips.append(hook)
         
-        # ── Bridge ──（0-1个，允许重叠）
+        # ── Bridge ──（0-1个）
         if bridges:
             bridge = bridges[v % len(bridges)]
             version_clips.append(bridge)
         
-        # ── Product ──（核心！每个版本差异化分配 product）
-        # 策略：round-robin 轮流挑选，保证每个版本拿到不同的核心 product
+        # ── Product ──（核心！按角度分配）
         if products:
-            current_dur = sum(c[5] for c in version_clips)
+            current_dur = sum(_dur(c) for c in version_clips)
             close_dur = closes[0][5] if closes else 5
             target_product_dur = max(55 - current_dur - close_dur, 20)
-            
-            # 找出其他版本已选的 product 时间区间
-            other_times = set()
-            for ov, ot in assigned_product_times.items():
-                if ov != v:
-                    other_times.update(ot)
             
             added_starts = {c[2] for c in version_clips}
             dur = 0
             
-            # 第一轮：优先选其他版本没用的（独占）
-            exclusive = [p for p in products if p[2] not in other_times and p[2] not in added_starts]
-            for p in exclusive:
-                if dur + p[5] <= target_product_dur + 8:
+            # 第一轮：主打角度的 product（核心差异化）
+            primary_products = [p for p in products 
+                               if product_angles[id(p)] == primary_angle 
+                               and p[2] not in added_starts]
+            for p in primary_products:
+                if dur + _dur(p) <= target_product_dur + 5:
                     version_clips.append(p)
-                    v_product_times.add(p[2])
                     added_starts.add(p[2])
-                    dur += p[5]
+                    dur += _dur(p)
+            
+            # 第二轮：补充其他角度的产品（丰富内容，但不喧宾夺主）
+            # 每个其他角度最多补1-2个，避免偏离主打
+            for angle in other_angles:
                 if dur >= target_product_dur:
                     break
-            
-            # 第二轮：如果独占不够，从所有 product 中按 offset 轮流选
-            # offset 让不同版本从不同位置开始挑选，避免都选评分最高的
-            if dur < target_product_dur:
-                offset = v * 3  # 每个版本跳过不同的前几个
-                remaining = [p for p in products if p[2] not in added_starts]
-                if offset < len(remaining):
-                    remaining = remaining[offset:] + remaining[:offset]
-                for p in remaining:
-                    if dur + p[5] <= target_product_dur + 10:
+                angle_products = [p for p in products 
+                                 if product_angles[id(p)] == angle 
+                                 and p[2] not in added_starts]
+                # 每个角度最多补2个
+                for p in angle_products[:2]:
+                    if dur + _dur(p) <= target_product_dur + 8:
                         version_clips.append(p)
-                        v_product_times.add(p[2])
                         added_starts.add(p[2])
-                        dur += p[5]
-                    if dur >= target_product_dur:
-                        break
+                        dur += _dur(p)
             
-            # 第三轮：实在不够就全加
+            # 第三轮：如果还不够，从剩余产品中补充
             if dur < target_product_dur * 0.7:
-                for p in products:
-                    if p[2] not in added_starts:
+                remaining = [p for p in products if p[2] not in added_starts]
+                for p in remaining:
+                    if dur + _dur(p) <= target_product_dur + 10:
                         version_clips.append(p)
                         added_starts.add(p[2])
-                        dur += p[5]
-                        if dur >= target_product_dur * 0.8:
-                            break
+                        dur += _dur(p)
+                    if dur >= target_product_dur * 0.8:
+                        break
         
         # ── Close ──
         close = None
@@ -146,9 +183,9 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
         
         if version_clips:
             versions.append(version_clips)
-            total_dur = sum(c[5] for c in version_clips)
+            total_dur = sum(_dur(c) for c in version_clips)
             hook_type = version_clips[0][0] if version_clips else '无'
-            _log(f"版本{v+1}: {len(version_clips)}片段, 开场={hook_type}, 时长={total_dur:.1f}s")
+            _log(f"版本{v+1}: {len(version_clips)}片段, 开场={hook_type}, 主打={primary_angle}, 时长={total_dur:.1f}s")
     
     return versions
 
@@ -179,7 +216,7 @@ def _semantic_dedup_version(clips, log_fn=None):
         return clips
     
     _stop = set("的 了 在 是 我 有 和 就 都 也 不 人 这 那 他 到 说 要 会 着 过 把 得 能 可以 很 被 让 给 比 从 向 还 又 而 但".split())
-    _punct = set("，。！？、；：“”‘’（）…—·")
+    _punct = set("，。！？、；：""''（）…—·")
     
     def _kw(text):
         return set(c for c in text if c not in _stop and c not in _punct and c.strip())
@@ -187,7 +224,7 @@ def _semantic_dedup_version(clips, log_fn=None):
     keep = []
     kept_kws = []
     for clip in clips:
-        ct, text, start, end, score, dur = clip
+        ct, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
         # 保护hook和close不被语义去重删掉
         if 'hook' in ct.lower() or 'close' in ct.lower():
             keep.append(clip); kept_kws.append(_kw(text)); continue
@@ -285,19 +322,15 @@ def _dedup_by_time(clips):
     Preserves the original order (narrative arrangement from _arrange_version)."""
     if not clips:
         return clips
-    # Don't re-sort! Keep the narrative order from _arrange_version.
-    # Build overlap groups, keep highest score per group, maintain original order.
     result = []
     removed_starts = set()
     for i, clip in enumerate(clips):
         if clip[2] in removed_starts:
             continue
-        # Check if this clip overlaps with any later clip
         for j, other in enumerate(clips):
             if i == j or other[2] in removed_starts:
                 continue
             if clip[2] < other[3] and clip[3] > other[2]:
-                # Overlap: keep the one with higher score
                 if other[4] > clip[4]:
                     removed_starts.add(clip[2])
                     break

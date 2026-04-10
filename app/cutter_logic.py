@@ -620,7 +620,7 @@ def generate_ass(clips, width, height, output_path):
     ]
 
     current_time = 0.0
-    for c_type, text, start, end, score, dur in clips:
+    for c_type, text, start, end, score, dur, *_ in clips:
         duration = end - start
         # 去除AI标注的【】标记，提取重点词
         ai_keywords = re.findall(r'【(.*?)】', text)
@@ -724,7 +724,7 @@ def _build_cut_report(ordered_clips, success_count, total_clips, output_path, si
     hook_found = None
     for clip in ordered_clips:
         if isinstance(clip, (list, tuple)) and len(clip) >= 6:
-            c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
+            c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]  # clip[6]=focus ignored here
         elif isinstance(clip, dict):
             c_type = clip.get("type", "")
             start = clip.get("start", 0)
@@ -1162,7 +1162,8 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
     try:
-        for i, (c_type, text, start, end, score, dur) in enumerate(ordered_clips):
+        for i, clip in enumerate(ordered_clips):
+            c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
             _log(f"[T] [{time.strftime('%H:%M:%S')}] loop i={i}")
             if _cancelled():
                 _log("已取消，跳过剩余切割。"); break
@@ -2202,33 +2203,28 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         _log("只能生成1个版本，输出单版本")
         return {"ok": True, "版本数": 1}
     
-    # Step 4: 每个版本单独处理（版本1已经由第一次 process_video 生成）
+    # Step 4: 每个版本单独处理（包括V1也重新生成，不用全量倾倒）
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     output_dir = os.path.join(os.path.dirname(video_path), "output")
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
     
-    # 重命名第一个输出为 _v1
+    # 删除第一次 process_video 的全量输出（不符合目标时长）
     if output_path and os.path.exists(output_path):
-        v1_path = os.path.join(output_dir, f"{video_name}_切片_v1.mp4")
         try:
-            import shutil
-            shutil.move(output_path, v1_path)
-            _log(f"版本1已输出: {os.path.basename(v1_path)}")
+            os.remove(output_path)
+            _log(f"已删除全量输出（{len(_recorded_clips)}段，不符合目标时长），将用精选版本替代")
         except Exception:
-            v1_path = output_path
-        results.append({"ok": True})
+            pass
     
-    # 处理后续版本
+    # 所有版本都从 multi_version 的精选结果中生成
     for vi, ver_clips in enumerate(versions):
-        if vi == 0:
-            continue  # 跳过 v1（已处理）
         if cancel_event and cancel_event.is_set():
             break
         
         _log(f"\n🎬 === 版本 {vi+1}/{len(versions)} ===")
-        for ct, text, s, e, sc, d in ver_clips:
+        for ct, text, s, e, sc, d, *_ in ver_clips:
             _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text[:30]}")
         
         v_output = os.path.join(output_dir, f"{video_name}_切片_v{vi+1}.mp4")
