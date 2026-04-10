@@ -1222,15 +1222,17 @@ class App:
                 self.ai_enabled_var.set(bool(s["enabled"]))
                 self._toggle_ai()  # 更新AI按钮外观
 
-            # 自动匹配已有配置对应的预设
-            matched = "自定义"
-            for name, cfg in AI_PRESETS.items():
-                if name == "自定义":
-                    continue
-                if (s.get("base_url","") == cfg["base_url"] and
-                    s.get("model","") == cfg["model"]):
-                    matched = name
-                    break
+            # 恢复AI预设（优先用保存的预设名，否则按url/model匹配）
+            matched = s.get("ai_preset", "")
+            if not matched or matched not in AI_PRESETS:
+                matched = "自定义"
+                for name, cfg in AI_PRESETS.items():
+                    if name == "自定义":
+                        continue
+                    if (s.get("base_url","") == cfg["base_url"] and
+                        s.get("model","") == cfg["model"]):
+                        matched = name
+                        break
             self.ai_preset_var.set(matched)
         else:
             self.ai_detail.pack_forget()
@@ -1279,6 +1281,8 @@ class App:
             "volc_tos_sk": self.volc_tos_sk_var.get().strip(),
             "volc_bucket": self.volc_bucket_var.get().strip(),
             "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
+            "ai_preset": self.ai_preset_var.get() if hasattr(self, "ai_preset_var") else "",
+            "asr_preset": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
         }
         if save_settings(settings):
             self._log("AI 设置已保存", "ok")

@@ -9,7 +9,7 @@
     "config.py": "8d2fd0bb96cb7fa9ea13975ee0ffad33680ed64d7ce9aa041adcd85edc49ebf7",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
     "cutter_logic.py": "2f6e821058da9daa65f72e20242444b06cc37eef047c07922c20d72de4d60f3f",
-    "gui.py": "c52043b6a15add41e68eb458fddb938a7ba40b6782aad0dfd4503e003ed4c747",
+    "gui.py": "6017006cb3834b28c4295afb825617b493ec836d903009252112912553835f51",
     "keywords.json": "40c563faec63588bef386dcd1fe1eb5fa0c5b9ca2521ecc1d12984584e5966ed",
     "license_client.py": "40354a2b4b4eae073ed57d1a26d045ef02e6583d9b10db81c0f1a408588982bc",
     "multi_version.py": "ace65fb92089e577272cee1a539936f6ade696c185a36b3746b55e3232081b2b",
@@ -21,7 +21,7 @@
     "tighten.py": "78d4de21696a55ea447ca1791f4373477f30c269bd269d14398770d22efd835e",
     "trim_long.py": "36c35ba83e4a126d47c3a38e2af09b2b4b8a79d0caf952cf0d990d8cb6ff7936",
     "updater.py": "f58e479b7b151492c36eac3d401d53947229100d0ee7ac29608b08daa34ec5f0",
-    "version.json": "662b124a18ba663b65be87a6debaffb88d4f91207b0b43cc8f09e6945dbc5d12",
+    "version.json": "b040a403755ce21ae80be34fa06905117bcb39b9cd667190ccd8e26ad00c0328",
     "volcengine_asr.py": "e834b0ee1ff8ecc826952f702182a83ffcbbbb7a049e3631c37ce2de42138573"
   },
   "release_notes": "v8.5.0",
