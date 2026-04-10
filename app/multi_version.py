@@ -85,6 +85,15 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
     if not main_angles:
         main_angles = available_angles[:1]  # 至少有一个主打角度
     
+    # 为每个版本分配不同的主打角度，不够时循环+偏移
+    version_angles = []
+    for v in range(min(num_versions, 3)):
+        if v < len(main_angles):
+            version_angles.append(main_angles[v])
+        else:
+            # 角度不够时，用可用角度轮换+偏移
+            version_angles.append(available_angles[v % len(available_angles)])
+    
     versions = []
     used_hook_indices = set()
     used_close_indices = set()
@@ -93,7 +102,7 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
         version_clips = []
         
         # ── 本版本主打角度 ──
-        primary_angle = main_angles[v % len(main_angles)]
+        primary_angle = version_angles[v]
         # 次要角度：其他角度轮换
         other_angles = [a for a in available_angles if a != primary_angle]
         
@@ -121,43 +130,54 @@ def generate_multi_versions(all_clips, num_versions=3, log_fn=None):
             current_dur = sum(_dur(c) for c in version_clips)
             close_dur = closes[0][5] if closes else 5
             target_product_dur = max(55 - current_dur - close_dur, 20)
+            MAX_PRODUCTS = 8  # 每个版本最多8个产品片段，防止碎片化
             
             added_starts = {c[2] for c in version_clips}
             dur = 0
+            product_count = 0
             
-            # 第一轮：主打角度的 product（核心差异化）
+            # 第一轮：主打角度的 product（核心差异化，最多5个）
             primary_products = [p for p in products 
                                if product_angles[id(p)] == primary_angle 
-                               and p[2] not in added_starts]
+                               and p[2] not in added_starts
+                              ]
             for p in primary_products:
+                if product_count >= 5:
+                    break
                 if dur + _dur(p) <= target_product_dur + 5:
                     version_clips.append(p)
                     added_starts.add(p[2])
                     dur += _dur(p)
+                    product_count += 1
             
-            # 第二轮：补充其他角度的产品（丰富内容，但不喧宾夺主）
-            # 每个其他角度最多补1-2个，避免偏离主打
+            # 第二轮：补充其他角度的产品（每个角度最多1个，总计最多2个）
+            other_added = 0
             for angle in other_angles:
-                if dur >= target_product_dur:
+                if other_added >= 2 or product_count >= MAX_PRODUCTS - 1:
                     break
                 angle_products = [p for p in products 
                                  if product_angles[id(p)] == angle 
-                                 and p[2] not in added_starts]
-                # 每个角度最多补2个
-                for p in angle_products[:2]:
+                                 and p[2] not in added_starts
+                                ]
+                for p in angle_products[:1]:
                     if dur + _dur(p) <= target_product_dur + 8:
                         version_clips.append(p)
                         added_starts.add(p[2])
                         dur += _dur(p)
+                        product_count += 1
+                        other_added += 1
             
-            # 第三轮：如果还不够，从剩余产品中补充
-            if dur < target_product_dur * 0.7:
+            # 第三轮：如果产品<4个且时长不足，从剩余产品中补充
+            if product_count < 4 and dur < target_product_dur * 0.5:
                 remaining = [p for p in products if p[2] not in added_starts]
                 for p in remaining:
-                    if dur + _dur(p) <= target_product_dur + 10:
+                    if product_count >= MAX_PRODUCTS:
+                        break
+                    if dur + _dur(p) <= target_product_dur + 5:
                         version_clips.append(p)
                         added_starts.add(p[2])
                         dur += _dur(p)
+                        product_count += 1
                     if dur >= target_product_dur * 0.8:
                         break
         
