@@ -1445,11 +1445,11 @@ def _dedup_clip_text_overlap(clips, log_fn):
     for i in range(len(clips)):
         if i in removed:
             continue
-        ci_type, ci_text, ci_start, ci_end, ci_score, ci_dur = clips[i]
+        ci_type, ci_text, ci_start, ci_end, ci_score, ci_dur = clips[i][:6]
         for j in range(i + 1, len(clips)):
             if j in removed:
                 continue
-            cj_type, cj_text, cj_start, cj_end, cj_score, cj_dur = clips[j]
+            cj_type, cj_text, cj_start, cj_end, cj_score, cj_dur = clips[j][:6]
 
             # Calculate overlap
             overlap_start = max(ci_start, cj_start)
@@ -1511,7 +1511,7 @@ def _dedup_clips(clips, log_fn):
     _log(f"AI: 解析到 {original} 个片段，开始去重...")
     no_overlap = []
     for clip in clips:
-        ct, text, start, end, score, dur = clip
+        ct, text, start, end, score, dur = clip[:6]
         overlap = False
         for ex in no_overlap:
             ov_s, ov_e = max(start, ex[2]), min(end, ex[3])
@@ -1533,7 +1533,7 @@ def _dedup_clips(clips, log_fn):
     seen_bigrams = set()
     seen_texts = []
     for clip in clips:
-        ct, text, start, end, score, dur = clip
+        ct, text, start, end, score, dur = clip[:6]
         chars, bigrams = extract_keys(text)
         is_dup = False
         # 短句高度重复检查
@@ -2157,7 +2157,7 @@ def _filter_semantic_repeat(clips, log_fn=None):
     keep = []
     kept_kws = []
     for clip in clips:
-        ct, text, start, end, score, dur = clip
+        ct, text, start, end, score, dur = clip[:6]
         kw = _kw(text)
         if len(kw) < 2:
             keep.append(clip); kept_kws.append(kw); continue
@@ -2278,8 +2278,8 @@ def _check_narrative_coherence(clips, log_fn):
     i = 0
     removed_dup = 0
     while i < len(clips) - 1:
-        _, t1, _, _, _, _ = clips[i]
-        _, t2, _, _, _, _ = clips[i + 1]
+        _, t1, _, _, _, _ = clips[i][:6]
+        _, t2, _, _, _, _ = clips[i + 1][:6]
         sim = _text_similarity(t1, t2)
         if sim > 0.6:
             # 保留时长更长的那个
