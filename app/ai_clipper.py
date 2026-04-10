@@ -2771,7 +2771,7 @@ def fallback_clips(srt_path, log_fn=None, force_category=None):
     if result:
         total = sum(c[5] for c in result)
         _log(f"兜底: {len(result)} 片段, 总时长 {total:.1f}s")
-        for ct, text, s, e, sc, d in result:
+        for ct, text, s, e, sc, d, *_ in result:
             _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text}")
     return result
 

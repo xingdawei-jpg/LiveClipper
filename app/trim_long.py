@@ -75,7 +75,7 @@ def trim_long_clips(clips, srt_text, max_dur=7.0, log_fn=None):
             new_start = c_start + c_dur * 0.15
             new_end = new_start + new_dur
             _log(f"trim [{c_type}]: {c_start:.1f}-{c_end:.1f}s ({c_dur:.1f}s) -> {new_start:.1f}-{new_end:.1f}s ({new_dur:.1f}s) [proportional]")
-            result.append((c_type, c_text, new_start, new_end, c_score, new_dur))
+            result.append((c_type, c_text, new_start, new_end, c_score, new_dur, *clip[6:]))
             continue
 
         # 多条SRT：只保留与AI文本重叠的条目
@@ -101,6 +101,6 @@ def trim_long_clips(clips, srt_text, max_dur=7.0, log_fn=None):
             _log(f"trim skip [{c_type}]: too short after trim")
         else:
             _log(f"trim [{c_type}]: {c_start:.1f}-{c_end:.1f}s ({c_dur:.1f}s) -> {new_start:.1f}-{new_end:.1f}s ({new_dur:.1f}s) [{len(matched)}/{len(in_range)} SRT]")
-            result.append((c_type, c_text, new_start, new_end, c_score, new_dur))
+            result.append((c_type, c_text, new_start, new_end, c_score, new_dur, *clip[6:]))
 
     return result
