@@ -845,7 +845,8 @@ def _print_cut_report(report, _log):
 def process_video(video_path, srt_path=None, output_path=None,
                    dedup_preset="medium", subtitle_overlay=True,
                    log_fn=None, force_category=None, cancel_event=None,
-                   pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
+                   pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
+                   _clips_only=False):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -1086,6 +1087,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _multi_result_cache['srt_text'] = _f.read()
     except Exception:
         pass
+
+    # 多版本模式：只做AI选片，跳过切割/去重/字幕（省30-60秒）
+    if _clips_only:
+        _log("🎬 多版本: AI选片完成，跳过全量处理（节省时间）")
+        return {"ok": True, "clips_cached": True}
 
     # 4. 切割 + 去重 + 字幕叠加
     ffmpeg = get_ffmpeg_cmd()
@@ -2159,11 +2165,12 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     import ai_clipper as _ai_mod
     _ai_mod._skip_focus = True
     
-    _log("🎬 多版本: 第一次AI全量选片+处理（v1）...")
+    _log("🎬 多版本: AI全量选片（仅选片，不切割）...")
     first_result = process_video(video_path, srt_path, output_path,
                  dedup_preset, subtitle_overlay, log_fn,
                  force_category, cancel_event,
                  pip_path, pip_size, pip_opacity, pip_pos,
+                 _clips_only=True,
                  )
     
     # 恢复偏好模式
@@ -2208,14 +2215,6 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
-    
-    # 删除第一次 process_video 的全量输出（不符合目标时长）
-    if output_path and os.path.exists(output_path):
-        try:
-            os.remove(output_path)
-            _log(f"已删除全量输出（{len(_recorded_clips)}段，不符合目标时长），将用精选版本替代")
-        except Exception:
-            pass
     
     # 所有版本都从 multi_version 的精选结果中生成
     for vi, ver_clips in enumerate(versions):
