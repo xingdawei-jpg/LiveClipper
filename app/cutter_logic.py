@@ -1170,14 +1170,9 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log(f"切割 [{i+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
             temp_file = os.path.join(temp_dir, f"clip_{i:02d}.mp4")
 
-            # [v9.5] 尾部缓冲0.3s（约一个汉字时长），防最后几个字被截
+            # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
-            end_buf = 0.3
-            # 不能超过下一个片段的起始时间（防止拖入其他片段内容）
-            later_clips = [c for c in ordered_clips if c[2] >= end]
-            if later_clips:
-                next_start = min(c[2] for c in later_clips)
-                end_buf = min(end_buf, max(next_start - end, 0))
+            end_buf = 0
             start = max(0, start - start_buf)
             end = min(video_duration, end + end_buf)
 
@@ -2205,7 +2200,11 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     
     # Step 4: 每个版本单独处理（包括V1也重新生成，不用全量倾倒）
     video_name = os.path.splitext(os.path.basename(video_path))[0]
-    output_dir = os.path.join(os.path.dirname(video_path), "output")
+    # 使用GUI指定的输出目录，而非硬编码到视频同目录
+    if output_path:
+        output_dir = os.path.dirname(output_path)
+    else:
+        output_dir = os.path.join(os.path.dirname(video_path), "output")
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
