@@ -1104,7 +1104,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             best_clips = clips[:]
         if _validate_clips(clips, log_fn):
             _log(f"AI: 校验通过，{len(clips)} 个片段")
-            for ct, text, s, e, sc, d in clips:
+            for ct, text, s, e, sc, d, *_ in clips:
                 _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text}")
             # 跨品类扫描(第二道防线)
             clips = _post_filter_cross_category(clips, cleaned_srt, log_fn)
@@ -1403,7 +1403,8 @@ def _parse_ai_response(content, log_fn):
             skipped_no_text += 1; continue
         if end <= start:
             skipped_bad_time += 1; continue
-        clips.append((ct, text, start, end, 50, end - start))
+        focus = str(item.get("focus", "")).strip()
+        clips.append((ct, text, start, end, 50, end - start, focus))
     if not clips:
         _log(f"AI: {len(data)}项中有效0(无文本:{skipped_no_text}, 时间错误:{skipped_bad_time})")
     return clips
@@ -2201,7 +2202,7 @@ def _filter_price_and_cta(clips, log_fn=None):
 
     filtered = []
     removed = 0
-    for ct, text, s, e, sc, d in clips:
+    for ct, text, s, e, sc, d, *_ in clips:
         clean = re.sub(r'【|】', '', text)
         # 检查禁止词
         has_forbidden = any(w in clean for w in forbidden_words)
@@ -2217,7 +2218,7 @@ def _filter_price_and_cta(clips, log_fn=None):
                 reason.append("价格模式")
             _log(f'  价格过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
             continue
-        filtered.append((ct, text, s, e, sc, d))
+        filtered.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
 
     if removed:
         _log(f"价格硬过滤: 删除 {removed} 段含价格/CTA的片段，剩余 {len(filtered)} 段")
@@ -2233,7 +2234,7 @@ def _filter_host_interaction(clips, log_fn=None):
 
     cleaned = []
     removed = 0
-    for ct, text, s, e, sc, d in clips:
+    for ct, text, s, e, sc, d, *_ in clips:
         is_noise = False
         # 短片段(<3秒)更容易是废话
         if d < 4.0:
@@ -2246,7 +2247,7 @@ def _filter_host_interaction(clips, log_fn=None):
             removed += 1
             _log(f"废话过滤: 移除 '{text[:20]}'({d:.1f}s，主播回弹幕)")
         else:
-            cleaned.append((ct, text, s, e, sc, d))
+            cleaned.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
 
     if removed:
         _log(f"废话过滤: 共移除 {removed} 个片段")
@@ -2371,7 +2372,7 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn):
     # 扫描每个片段
     kept = []
     removed = 0
-    for ct, text, s, e, sc, d in clips:
+    for ct, text, s, e, sc, d, *_ in clips:
         # 检查是否包含非主品类关键词
         has_other = False
         other_cat = None
@@ -2393,11 +2394,11 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn):
             has_main = any(kw in text for kw in main_kws)
             if has_main:
                 # 同时有主品类和次品类 → 可能是搭配说明，保留
-                kept.append((ct, text, s, e, sc, d))
+                kept.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
             else:
                 removed += 1
         else:
-            kept.append((ct, text, s, e, sc, d))
+            kept.append(tuple(c) if isinstance(c, (list,tuple)) and len(c)>6 else (ct, text, s, e, sc, d, ""))
 
     if removed:
         _log(f"跨品类扫描: 踢出 {removed} 个非{main_cat}片段，保留 {len(kept)} 个")
@@ -2495,7 +2496,7 @@ def _enforce_product_coherence(clips, log_fn):
 
     # 统计每个品类出现次数
     cat_count = {}
-    for ct, text, s, e, sc, d in clips:
+    for ct, text, s, e, sc, d, *_ in clips:
         cat = _detect_product_category(text)
         if cat:
             cat_count[cat] = cat_count.get(cat, 0) + 1
@@ -2576,7 +2577,7 @@ def _remove_orphan_cross_category(clips, log_fn):
     cleaned = []
     removed_texts = []
     for c in clips:
-        ct, text, s, e, sc, d = c
+        ct, text, s, e, sc, d = c[0], c[1], c[2], c[3], c[4], c[5]
         other_cat = _detect_product_category(text)
         if other_cat and other_cat != main_cat:
             # 跨品类 → 必须有主品类词+搭配词才合法
@@ -2686,7 +2687,7 @@ def _supplement_clips(existing_clips, cleaned_srt, log_fn, min_total=4):
     for cand in candidates:
         if len(existing) >= min_total:
             break
-        ct, text, s, e, sc, d = cand
+        ct, text, s, e, sc, d = cand[0], cand[1], cand[2], cand[3], cand[4], cand[5]
         # 检查重叠
         overlap = False
         for ex in existing:
