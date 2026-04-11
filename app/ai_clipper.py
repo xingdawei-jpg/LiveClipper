@@ -1407,7 +1407,8 @@ def _parse_ai_response(content, log_fn):
         data = json.loads(cleaned)
     except json.JSONDecodeError:
         # 用 rfind 从后往前找 JSON 数组，跳过推理文本中的方括号
-        idx = cleaned.rfind('[{"')
+        m = re.search(r'\[\s*\{', cleaned)
+        idx = m.start() if m else -1
         if idx >= 0:
             sub = cleaned[idx:]
             last_bracket = sub.rfind(']')
