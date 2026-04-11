@@ -1202,8 +1202,15 @@ def process_video(video_path, srt_path=None, output_path=None,
             combined_vf = ",".join(vf_parts)
 
             cmd = [ffmpeg, "-y"]
-            cmd += ["-ss", f"{start:.3f}", "-i", video_path]
-            cmd += ["-t", f"{clip_duration:.3f}"]
+            if 'hook' in c_type.lower():
+                # Hook片段: output seeking (-ss在-i后面), 帧级精确，避免关键帧对齐多出画面
+                cmd += ["-i", video_path]
+                cmd += ["-ss", f"{start:.3f}"]
+                cmd += ["-t", f"{clip_duration:.3f}"]
+            else:
+                # 非Hook片段: input seeking (-ss在-i前面), 速度快
+                cmd += ["-ss", f"{start:.3f}", "-i", video_path]
+                cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
             cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
