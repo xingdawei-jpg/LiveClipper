@@ -1058,7 +1058,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         try:
             with open(srt_path, "r", encoding="utf-8") as f:
                 srt_text = f.read()
-            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category)
+            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only)
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
                 ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
@@ -1202,21 +1202,16 @@ def process_video(video_path, srt_path=None, output_path=None,
             combined_vf = ",".join(vf_parts)
 
             cmd = [ffmpeg, "-y"]
-            if 'hook' in c_type.lower():
-                # Hook片段: output seeking (-ss在-i后面), 帧级精确，避免关键帧对齐多出画面
-                cmd += ["-i", video_path]
-                cmd += ["-ss", f"{start:.3f}"]
-                cmd += ["-t", f"{clip_duration:.3f}"]
-            else:
-                # 非Hook片段: input seeking (-ss在-i前面), 速度快
-                cmd += ["-ss", f"{start:.3f}", "-i", video_path]
-                cmd += ["-t", f"{clip_duration:.3f}"]
+            # 所有片段统一 input seeking（重新编码下帧级精确，output seeking导致音频时间戳不同步→开头静音）
+            cmd += ["-ss", f"{start:.3f}", "-i", video_path]
+            cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
             cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
             cmd += ["-vf", combined_vf]
             cmd += ["-pix_fmt", "yuv420p"]
-            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1"]
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+                   "-af", f"afade=t=in:st=0:d=0.15,afade=t=out:st={clip_duration-0.3:.2f}:d=0.3"]
             cmd += ["-movflags", "+faststart"]
             cmd += [temp_file]
             _log(f"[T] [{time.strftime('%H:%M:%S')}] Popen start")
@@ -1755,11 +1750,28 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     # 先尝试火山引擎 ASR，失败则降级到 Whisper + 云端ASR
     import threading
 
-    # 字幕阶段：强制用本地 Whisper（云端ASR仅用于AI选片阶段，短音频Whisper效果更好）
-    _log("字幕阶段使用本地 Whisper 识别（跳过云端ASR）")
-    t1 = threading.Thread(target=_run_whisper)
-    t1.start()
-    t1.join(timeout=180)
+    # [v8.5] 字幕阶段：开了云端ASR才用火山引擎，否则直接Whisper
+    _use_cloud_sub = False
+    try:
+        with open(sp, "r", encoding="utf-8-sig") as _cf:
+            _use_cloud_sub = _json.load(_cf).get("asr_enabled", False)
+    except:
+        pass
+    if _use_cloud_sub:
+        _log("字幕阶段：云端ASR已启用，优先火山引擎")
+        t_volc = threading.Thread(target=_run_volcengine_asr)
+        t_volc.start()
+        t_volc.join(timeout=120)
+        if not volcengine_success:
+            _log("火山引擎ASR失败，降级到本地Whisper")
+            t1 = threading.Thread(target=_run_whisper)
+            t1.start()
+            t1.join(timeout=180)
+    else:
+        _log("字幕阶段：云端ASR未启用，使用本地Whisper")
+        t1 = threading.Thread(target=_run_whisper)
+        t1.start()
+        t1.join(timeout=180)
 
     if not volcengine_success:
         if not raw_segments:

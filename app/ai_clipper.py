@@ -1164,7 +1164,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _log("AI: 去重后无剩余")
                 continue
             # [v8.5] 时长硬顶：先截断再检查重叠，避免巨型片段吞掉其他片段
-            clips = _cap_clip_duration(clips, log_fn)
+            clips = _cap_clip_duration(clips, log_fn, srt_text=srt_text)
             # 片段边界修复:确保首尾对齐到完整句子
             # clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)  # [DISABLED] 延伸打乱节奏
             # [v9.2] 裁掉片段开头的语气词(对/嗯/呃等)对应的画面和音频
@@ -2472,8 +2472,8 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn):
     return kept
 
 
-def _cap_clip_duration(clips, log_fn=None):
-    """时长硬顶：超过上限的片段切尾，保持节奏紧凑"""
+def _cap_clip_duration(clips, log_fn=None, srt_text=None):
+    """时长硬顶：超过上限的片段切尾，按SRT句子边界切，保证一句话完整"""
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -2488,6 +2488,24 @@ def _cap_clip_duration(clips, log_fn=None):
         "trend": 6,
     }
 
+    # 解析SRT获取句子结束时间点
+    srt_ends = []
+    if srt_text:
+        for block in srt_text.strip().split('\n\n'):
+            lines_b = block.strip().split('\n')
+            if len(lines_b) >= 2:
+                times = lines_b[1]
+                if '-->' in times:
+                    try:
+                        parts = times.split('-->')
+                        end_str = parts[1].strip().split(',')[0]
+                        h, m, s = end_str.split(':')
+                        end_s = int(h)*3600 + int(m)*60 + float(s)
+                        srt_ends.append(end_s)
+                    except:
+                        pass
+    srt_ends.sort()
+
     capped = []
     trim_count = 0
     for ct, text, start, end, score, dur, *_ in clips:
@@ -2498,11 +2516,26 @@ def _cap_clip_duration(clips, log_fn=None):
                 limit = val
                 break
         if limit and dur > limit:
-            new_end = start + limit
-            new_dur = limit
+            hard_end = start + limit
+            # 找hard_end之前最近的SRT句子结束点（保证一句话完整）
+            best_end = hard_end
+            if srt_ends:
+                # 在 [start+2, hard_end] 范围内找最近的句子结束点
+                candidates = [e for e in srt_ends if start + 2 <= e <= hard_end]
+                if candidates:
+                    best_end = candidates[-1]  # 取范围内最后一个句子结束点
+                    _log(f"时长硬顶: [{ct}] 在 {hard_end:.1f}s 前找到句子边界 {best_end:.1f}s")
+                else:
+                    # 没找到句子边界，稍微超出上限也行（最多+1.5s）
+                    after = [e for e in srt_ends if hard_end < e <= hard_end + 1.5]
+                    if after:
+                        best_end = after[0]
+                        _log(f"时长硬顶: [{ct}] 硬切点无句子边界，延长到 {best_end:.1f}s 保证完整")
+                    # else: 实在找不到，硬切
+            new_dur = best_end - start
             trim_count += 1
-            _log(f"时长硬顶: [{ct}] {dur:.1f}s > {limit}s, 切尾到 {start:.1f}-{new_end:.1f}s")
-            capped.append((ct, text, start, new_end, score, new_dur, *_))
+            _log(f"时长硬顶: [{ct}] {dur:.1f}s > {limit}s, 切尾到 {start:.1f}-{best_end:.1f}s ({new_dur:.1f}s)")
+            capped.append((ct, text, start, best_end, score, new_dur, *_))
         else:
             capped.append((ct, text, start, end, score, dur, *_))
 
