@@ -70,6 +70,11 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
     for clip in clips:
         c_type, c_text, c_start, c_end, c_score, c_dur = clip[:6]
         clean_ai = _clean(c_text)
+        # Hook片段不做任何边界调整，保持AI选的精确时间
+        if 'hook' in c_type.lower():
+            tightened.append(clip)
+            continue
+
 
         # 找与片段重叠的SRT条目
         in_range = [(s, e, t) for s, e, t in srt_entries
