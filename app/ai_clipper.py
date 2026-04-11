@@ -1063,7 +1063,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
 # ============================================================
 # 核心:调用 AI + 前置清洗 + 重试
 # ============================================================
-def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
+def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False):
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -1112,7 +1112,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             continue
         original_clips = list(clips)
         removed_from_dedup = []
-        clips = _dedup_clips(clips, log_fn)
+        clips = _dedup_clips(clips, log_fn, multi_version=multi_version)
         removed_from_dedup = [c for c in original_clips if c not in clips]
         # [v9.5] 多版本模式：去重后如果片段不足12个，回收被去除的片段
         if _skip_focus and len(clips) < 12 and removed_from_dedup:
@@ -1139,7 +1139,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
         # 记住最好的结果
         if len(clips) > len(best_clips):
             best_clips = clips[:]
-        if _validate_clips(clips, log_fn):
+        if _validate_clips(clips, log_fn, multi_version=multi_version):
             _log(f"AI: 校验通过，{len(clips)} 个片段")
             for ct, text, s, e, sc, d, *_ in clips:
                 _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text}")
@@ -1153,7 +1153,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             # 主播互动废话过滤
             clips = _filter_host_interaction(clips, log_fn)
             # 语义重复过滤(代码层兜底)
-            clips = _filter_semantic_repeat(clips, log_fn)
+            if not multi_version: clips = _filter_semantic_repeat(clips, log_fn)
             # 明星名字过滤
             clips = _filter_celebrity(clips, log_fn)
             # CTA误判校验
@@ -1163,6 +1163,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             if not clips:
                 _log("AI: 去重后无剩余")
                 continue
+            # [v8.5] 时长硬顶：先截断再检查重叠，避免巨型片段吞掉其他片段
+            clips = _cap_clip_duration(clips, log_fn)
             # 片段边界修复:确保首尾对齐到完整句子
             # clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)  # [DISABLED] 延伸打乱节奏
             # [v9.2] 裁掉片段开头的语气词(对/嗯/呃等)对应的画面和音频
@@ -1170,8 +1172,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
             # [v9.3] 用SRT时间戳收紧AI选片范围，去掉多选的废话
             from tighten import tighten_clip_boundaries
             clips = tighten_clip_boundaries(clips, srt_text, log_fn)
-            # [v8.5] 时长硬顶：超上限切尾
-            clips = _cap_clip_duration(clips, log_fn)
             # [DISABLED] trim_long_clips - 让Prompt控制时长，后处理不要切更碎
             # from trim_long import trim_long_clips
             # clips = trim_long_clips(clips, srt_text, max_dur=7.0, log_fn=log_fn)
@@ -1218,7 +1218,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None):
         # 价格/CTA硬过滤（AI Prompt拦不住的用代码拦）
         clips = _filter_price_and_cta(clips, log_fn)
         # 语义重复过滤(代码层兜底)
-        clips = _filter_semantic_repeat(clips, log_fn)
+        if not multi_version: clips = _filter_semantic_repeat(clips, log_fn)
         # 明星名字过滤
         clips = _filter_celebrity(clips, log_fn)
         # CTA误判校验
@@ -1562,7 +1562,7 @@ def _dedup_clip_text_overlap(clips, log_fn):
     return result
 
 
-def _dedup_clips(clips, log_fn):
+def _dedup_clips(clips, log_fn, multi_version=False):
 
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -1648,10 +1648,7 @@ def _dedup_clips(clips, log_fn):
 
     size_clips = [c for c in clips if any(kw in c[1] for kw in size_keywords)]
     other_clips = [c for c in clips if c not in size_clips]
-    # [v9.2] 尺码去重：多个尺码片段只保留最后一个（尺码只报一次）
-    if len(size_clips) > 1:
-        _log(f"尺码去重: {len(size_clips)} 个尺码片段，只保留最后1个")
-        size_clips = [size_clips[-1]]
+    # [v9.2] 尺码不去重：让价格过滤器删含价格的，文本去重删重复的，不含价格的尺码片段保留当close
     if size_clips:
         clips = other_clips + size_clips
         _log(f"尺码后置: {len(size_clips)} 个尺码片段移到末尾")
@@ -1668,12 +1665,15 @@ def _dedup_clips(clips, log_fn):
 
     # [v9.2] 价格/购物车片段直接排除(用户要求成品不报价格)
     price_keywords = [
-        "折后", "到手", "价格", "多少钱", "减", "优惠", "限时价", "到手价", "开价",
-        "购物车", "链接", "上车", "拍", "下单", "抢",
-        "原价", "现价", "划算", "性价比",
-        "小黄车", "左下角", "去拍", "直播间", "小车",
+        # 硬价格词（代码层过滤）
+        "折后", "到手", "价格", "多少钱", "优惠", "限时价", "到手价", "开价",
+        "购物车", "链接", "上车", "下单",
+        "原价", "现价",
+        "小黄车", "左下角", "直播间", "小车",
         "挂车", "加购", "拼单", "福利", "赠品", "包邮",
-        "满减", "专区", "特价", "限时", "截止",
+        "满减", "专区", "特价", "截止",
+        # 注意："拍"误杀尺码推荐(卡码往大拍)，"抢"误杀互动(抢人了)，
+        # "限时"太宽泛，"划算/性价比"含主观判断——这些由Prompt层控制
     ]
     price_clips = [c for c in clips if any(kw in c[1] for kw in price_keywords)]
     if price_clips:
@@ -1787,7 +1787,7 @@ def _detect_focus_point(text):
 # ============================================================
 # 硬校验(最少7段)
 # ============================================================
-def _validate_clips(clips, log_fn):
+def _validate_clips(clips, log_fn, multi_version=False):
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -1806,8 +1806,9 @@ def _validate_clips(clips, log_fn):
     #     _log("校验失败: 顺序错误"); return False
 
     total = sum(c[5] for c in clips)
-    if total < 20 or total > 120:
-        _log(f"校验失败: 总时长 {total:.1f}s 异常")
+    max_total = 240 if multi_version else 120  # 多版本模式需要3倍素材
+    if total < 20 or total > max_total:
+        _log(f"校验失败: 总时长 {total:.1f}s 异常(上限{max_total}s)")
         return False
 
     if len(clips) < 3:
