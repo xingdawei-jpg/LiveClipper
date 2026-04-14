@@ -1233,7 +1233,8 @@ class App:
                 r = subprocess.run(
                     ["curl.exe", "-s", "-X", "POST", "-H", "Content-Type: application/json",
                      "-d", payload, webhook],
-                    capture_output=True, timeout=10, encoding="utf-8")
+                    capture_output=True, timeout=10, encoding="utf-8",
+                    creationflags=0x08000000 if sys.platform == "win32" else 0)
                 ok = '"StatusCode":0' in (r.stdout or "")
             except Exception:
                 ok = False
