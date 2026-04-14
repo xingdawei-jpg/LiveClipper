@@ -746,7 +746,13 @@ def check_activation():
                     # 检查设备绑定
                     bound_mid = binding.get("machine_id", "")
                     if bound_mid and bound_mid != _get_machine_id():
-                        return {"need_activate": True, "reason": "该激活码已在其他设备激活，请重新激活或联系管理员"}
+                        # 飞书设备不匹配时，检查本地缓存的machine_id
+                        # 本地匹配则放行（飞书可能未同步成功）
+                        local_mid = cache.get("machine_id", "")
+                        if local_mid and local_mid == _get_machine_id():
+                            pass  # 本地验证通过，忽略飞书不一致
+                        else:
+                            return {"need_activate": True, "reason": "该激活码已在其他设备激活，请重新激活或联系管理员"}
                 else:
                     # 老用户首次更新：自动绑定当前设备
                     _bind_device(code, _get_machine_id(), _get_device_info())
