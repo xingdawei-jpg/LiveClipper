@@ -846,7 +846,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                    dedup_preset="medium", subtitle_overlay=True,
                    log_fn=None, force_category=None, cancel_event=None,
                    pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                   _clips_only=False):
+                   _clips_only=False, _asr_only=False, focus_hint="自动"):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -945,6 +945,71 @@ def process_video(video_path, srt_path=None, output_path=None,
                 if _os2.path.exists(_sp2):
                     with open(_sp2, "r", encoding="utf-8-sig") as f2:
                         _cfg2 = _json2.load(f2)
+                    # --- 阿里云 ASR ---
+                    _asr_preset = _cfg2.get("asr_preset", "") or _cfg2.get("asr_provider", "")
+                    if _asr_preset == "阿里云" and not _volc_used:
+                        _ali_api_key = _cfg2.get("aliyun_api_key", "")
+                        _ali_oss_ak = _cfg2.get("aliyun_oss_ak", "")
+                        _ali_oss_sk = _cfg2.get("aliyun_oss_sk", "")
+                        _ali_bucket = _cfg2.get("aliyun_bucket", "")
+                        _ali_endpoint = _cfg2.get("aliyun_endpoint", "oss-cn-beijing.aliyuncs.com")
+                        _ali_model = _cfg2.get("asr_model", "paraformer-v2") or "paraformer-v2"
+                        if _ali_api_key and _ali_oss_ak and _ali_oss_sk and _ali_bucket:
+                            _log("启动阿里云语音识别...")
+                            try:
+                                from aliyun_asr import aliyun_asr
+                                import tempfile as _tf_ali, hashlib as _hl_ali
+                                _td_ali = _os2.path.join(_tf_ali.gettempdir(), "live_cutter_stt")
+                                _os2.makedirs(_td_ali, exist_ok=True)
+                                _vh_ali = _hl_ali.md5(video_path.encode("utf-8")).hexdigest()[:8]
+                                _wav_ali = _os2.path.join(_td_ali, f"audio_{_vh_ali}.wav")
+                                _srt_ali = _os2.path.join(_td_ali, f"sub_{_vh_ali}.srt")
+                                _ff_ali = get_ffmpeg_cmd()
+                                _ext_ali = [_ff_ali, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav_ali]
+                                _pk_ali = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                _p_ali = subprocess.Popen(_ext_ali, **_pk_ali, creationflags=_NO_WINDOW)
+                                _p_ali.wait(timeout=120)
+                                if _p_ali.returncode == 0 and _os2.path.exists(_wav_ali):
+                                    _segs_ali = aliyun_asr(_wav_ali, app_key=_ali_api_key, model=_ali_model,
+                                                           oss_ak=_ali_oss_ak, oss_sk=_ali_oss_sk,
+                                                           oss_bucket=_ali_bucket, oss_endpoint=_ali_endpoint,
+                                                           log_fn=_log)
+                                    if _segs_ali:
+                                        _srt_ali_lines = []
+                                        for _i_ali, _seg_ali in enumerate(_segs_ali, 1):
+                                            _st_ali = float(_seg_ali.get("start", 0))
+                                            _et_ali = float(_seg_ali.get("end", _st_ali + 3))
+                                            _txt_ali = _seg_ali.get("text", "").strip()
+                                            for _ch in "，。！？、；：“”‘’（）《》【】…—·,.!?:;'\"()[]{}<>":
+                                                _txt_ali = _txt_ali.replace(_ch, "")
+                                            _txt_ali = _txt_ali.strip()
+                                            _txt_ali = _txt_ali.strip()
+                                            if not _txt_ali:
+                                                continue
+                                            _srt_ali_lines.append(str(_i_ali))
+                                            _srt_ali_lines.append(
+                                                f"{int(_st_ali//3600):02d}:{int((_st_ali%3600)//60):02d}:{int(_st_ali%60):02d},{int((_st_ali%1)*1000):03d}"
+                                                f" --> "
+                                                f"{int(_et_ali//3600):02d}:{int((_et_ali%3600)//60):02d}:{int(_et_ali%60):02d},{int((_et_ali%1)*1000):03d}"
+                                            )
+                                            _srt_ali_lines.append(_txt_ali)
+                                            _srt_ali_lines.append("")
+                                        with open(_srt_ali, "w", encoding="utf-8") as _f_ali:
+                                            _f_ali.write(chr(10).join(_srt_ali_lines))
+                                        srt_path = _srt_ali
+                                        auto_srt = True
+                                        _volc_used = True
+                                        temp_srt = _srt_ali
+                                        _log(f"阿里云语音识别成功: {len(_segs_ali)} 条语音段")
+                                    else:
+                                        _log("阿里云 ASR 识别失败，将降级")
+                                else:
+                                    _log("音频提取失败，降级到本地 Whisper")
+                            except Exception as _e_ali:
+                                _log(f"阿里云 ASR 异常: {_e_ali}")
+                        else:
+                            _log("阿里云 ASR 配置不完整（需要 API Key + OSS AK/SK/Bucket），降级")
+                    # --- 以下是火山引擎 ASR（仅在阿里云未成功时执行） ---
                     _v2_app_id = _cfg2.get("volc_app_id", "")
                     _v2_token = _cfg2.get("volc_access_token", "")
                     _v2_tos_ak = _cfg2.get("volc_tos_ak", "")
@@ -1049,6 +1114,21 @@ def process_video(video_path, srt_path=None, output_path=None,
         output_path = os.path.join(output_dir, f"{video_name}_爆款切片.mp4")
 
     # 3. 解析字幕（AI 模式 或 关键词模式）
+    # 多版本缓存（global声明，供_asr_only和_clips_only使用）
+    global _multi_result_cache
+    # _asr_only: 只做ASR，跳过AI选片
+    if _asr_only:
+        if isinstance(_multi_result_cache, dict):
+            _srt_file = srt_path
+            if _srt_file and os.path.exists(_srt_file):
+                try:
+                    with open(_srt_file, 'r', encoding='utf-8') as _f:
+                        _multi_result_cache['srt_text'] = _f.read()
+                except Exception:
+                    pass
+        _log("ASR完成，跳过AI选片（_asr_only模式）")
+        return {"ok": True, "asr_only": True}
+
     from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
     if _cancelled():
         _log("已取消。"); return {"ok": False, "error": "cancelled"}
@@ -1058,7 +1138,9 @@ def process_video(video_path, srt_path=None, output_path=None,
         try:
             with open(srt_path, "r", encoding="utf-8") as f:
                 srt_text = f.read()
-            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only)
+            # 单版本：focus_hint传给AI（"自动"=随机偏好，指定=用指定偏好）
+            _fh = focus_hint if focus_hint and focus_hint != "自动" else None
+            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only, focus_hint=_fh)
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
                 ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
@@ -1078,7 +1160,6 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
     try:
-        global _multi_result_cache
         if isinstance(_multi_result_cache, dict):
             _multi_result_cache['clips'] = list(ordered_clips)
             # 保存SRT内容
@@ -1202,7 +1283,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             combined_vf = ",".join(vf_parts)
 
             cmd = [ffmpeg, "-y"]
-            # 所有片段统一 input seeking（重新编码下帧级精确，output seeking导致音频时间戳不同步→开头静音）
+            # input seeking（-ss放-i前面）：重新编码下帧级精确
             cmd += ["-ss", f"{start:.3f}", "-i", video_path]
             cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
@@ -1753,7 +1834,12 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     # [v8.5] 字幕阶段：开了云端ASR才用火山引擎，否则直接Whisper
     _use_cloud_sub = False
     try:
-        with open(sp, "r", encoding="utf-8-sig") as _cf:
+        if getattr(sys, "frozen", False):
+            _sub_sd = os.path.dirname(sys.executable)
+        else:
+            _sub_sd = os.path.dirname(os.path.abspath(__file__))
+        _sub_sp = os.path.join(_sub_sd, "ai_settings.json")
+        with open(_sub_sp, "r", encoding="utf-8-sig") as _cf:
             _use_cloud_sub = _json.load(_cf).get("asr_enabled", False)
     except:
         pass
@@ -2148,12 +2234,11 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         dedup_preset="medium", subtitle_overlay=True,
                         log_fn=None, force_category=None, cancel_event=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                        num_versions=1):
-    """多版本输出：同一素材生成多个不同版本的切片
+                        num_versions=1, focus_hint="自动"):
+    """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
-    策略：先跑一次 process_video 拿到 AI 选片的全部候选片段，
-    然后用 multi_version 分成多个版本，每个版本单独处理。
-    不再要求预上传 SRT 文件。
+    策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
+    比旧方案（一次选片+代码拆分）叙事更完整、版本差异化更好。
     """
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -2164,7 +2249,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos)
     
-    _log(f"🎬 多版本模式: 将生成 {num_versions} 个版本")
+    _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
     # Step 1: 检查AI模式
     from ai_clipper import is_enabled as ai_is_enabled
@@ -2175,58 +2260,65 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos)
     
-    # Step 2: 第一次完整处理（ASR + AI全量选片 + 生成v1）
-    # process_video 会把选片结果存到 _multi_result_cache
+    # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
     _multi_result_cache = {}
     
-    # 设置全量选片模式：不限定偏好，选出更多不同类型的片段
-    import ai_clipper as _ai_mod
-    _ai_mod._skip_focus = True
-    
-    _log("🎬 多版本: AI全量选片（仅选片，不切割）...")
-    first_result = process_video(video_path, srt_path, output_path,
+    _log("🎬 多版本: 运行ASR（跳过单版本AI选片）...")
+    asr_result = process_video(video_path, srt_path, output_path,
                  dedup_preset, subtitle_overlay, log_fn,
                  force_category, cancel_event,
                  pip_path, pip_size, pip_opacity, pip_pos,
-                 _clips_only=True,
-                 )
+                 _asr_only=True)
     
-    # 恢复偏好模式
-    _ai_mod._skip_focus = False
+    _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
-    _recorded_clips = _multi_result_cache.get('clips', [])
-    _recorded_srt_text = _multi_result_cache.get('srt_text')
-    
-    # 将保存的 SRT 内容写入固定文件，供后续版本复用（跳过ASR）
-    _multi_srt_path = srt_path  # 如果用户预上传了SRT，直接用
-    if not _multi_srt_path and _recorded_srt_text:
-        # 把 SRT 内容保存到一个不会被 process_video 删除的路径
+    # 保存SRT到固定文件，供后续版本复用
+    _multi_srt_path = srt_path
+    if not _recorded_srt_text:
+        _log("ASR失败（无SRT文本），降级为单版本")
+        return process_video(video_path, srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
+    if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
             f"_multi_version_{os.path.splitext(os.path.basename(video_path))[0]}.srt"
         )
         with open(_multi_srt_path, "w", encoding="utf-8") as f:
             f.write(_recorded_srt_text)
-        _log(f"🎬 多版本: SRT已保存，后续版本复用（跳过ASR）")
+        _log(f"🎬 多版本: SRT已保存")
     
-    if not _recorded_clips or len(_recorded_clips) < 2:
-        _log(f"候选片段不足({len(_recorded_clips)}条)，无法生成多版本")
-        return {"ok": True, "版本数": 1}
+    # Step 3: 用AI多版本选片（直接出3个独立方案）
+    if _recorded_srt_text:
+        from ai_clipper import ai_analyze_multi_versions
+        _log("🎬 多版本: AI重新选片（3个独立方案）...")
+        multi_result = ai_analyze_multi_versions(_recorded_srt_text, log_fn=_log, force_category=force_category, focus_hint=focus_hint, num_versions=num_versions)
+    else:
+        multi_result = {"versions": []}
+    versions_data = multi_result.get("versions", [])
     
-    _log(f"🎬 多版本: 获取到 {len(_recorded_clips)} 个候选片段")
+    if not versions_data:
+        _log("AI多版本选片失败，降级为旧方案（代码拆分）")
+        # Fallback: 输出单版本
+        _log("🎬 多版本: 选片失败，降级为单版本输出")
+        return process_video(video_path, _multi_srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
     
-    # Step 3: 生成多个版本
-    from multi_version import generate_multi_versions
-    versions = generate_multi_versions(_recorded_clips, num_versions, log_fn=_log)
+    if len(versions_data) < 1:
+        _log("无有效版本，输出单版本")
+        return process_video(video_path, _multi_srt_path, output_path,
+                           dedup_preset, subtitle_overlay, log_fn,
+                           force_category, cancel_event,
+                           pip_path, pip_size, pip_opacity, pip_pos)
     
-    if len(versions) <= 1:
-        _log("只能生成1个版本，输出单版本")
-        return {"ok": True, "版本数": 1}
+    _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
-    # Step 4: 每个版本单独处理（包括V1也重新生成，不用全量倾倒）
+    # Step 4: 每个版本单独裁切
     video_name = os.path.splitext(os.path.basename(video_path))[0]
-    # 使用GUI指定的输出目录，而非硬编码到视频同目录
     if output_path:
         output_dir = os.path.dirname(output_path)
     else:
@@ -2234,13 +2326,14 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
-    
-    # 所有版本都从 multi_version 的精选结果中生成
-    for vi, ver_clips in enumerate(versions):
+    for vi, ver in enumerate(versions_data):
         if cancel_event and cancel_event.is_set():
             break
         
-        _log(f"\n🎬 === 版本 {vi+1}/{len(versions)} ===")
+        angle = ver.get("angle", f"方案{vi+1}")
+        ver_clips = ver.get("clips", [])
+        
+        _log(f"\n🎬 === 版本 {vi+1}/{len(versions_data)} [{angle}] ===")
         for ct, text, s, e, sc, d, *_ in ver_clips:
             _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text[:30]}")
         

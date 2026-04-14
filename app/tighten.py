@@ -103,9 +103,29 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
             if est < c_end - 0.5 and est > new_start:
                 new_end = est
 
-        # close额外+0.5s防吃字
+        # close额外+0.5s防吃字，但检查延伸部分是否含非主品类内容
         if 'close' in c_type.lower():
-            new_end += 0.5
+            # 检查延伸0.5s后的SRT条目是否含非主品类关键词
+            extend_end = new_end + 0.5
+            extend_srts = [(s, e, t) for s, e, t in in_range
+                          if s < extend_end and e > new_end]
+            _skip_extend = False
+            try:
+                from config import ALL_CATEGORIES
+                for _s, _e, _t in extend_srts:
+                    for _cat, _kws in ALL_CATEGORIES.items():
+                        if _cat != '上衣':  # 硬编码主品类判断不够好，但tighten拿不到主品类信息
+                            for _kw in _kws:
+                                if _kw in _t:
+                                    # 延伸部分含其他品类，不延伸
+                                    _skip_extend = True
+                                    break
+                            if _skip_extend:
+                                break
+            except ImportError:
+                pass
+            if not _skip_extend:
+                new_end += 0.5
 
         new_dur = new_end - new_start
         if new_dur < 2.0:
