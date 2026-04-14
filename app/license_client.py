@@ -18,6 +18,7 @@ import os
 import sys
 import platform
 import uuid
+import subprocess
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -168,7 +169,7 @@ def _feishu_request(method, path, body=None):
 
 
 def _query_device_binding(code):
-    """查询激活码的设备绑定，返回 {record_id, machine_id} 或 None"""
+    """查询激活码的设备绑定，返回 {record_id, machine_id, activate_date, status, distributor_id} 或 None"""
     try:
         raw_code = code.replace("-", "").strip().lower()
         # 飞书 filter 必须用字段名（中文），不能用 field_id
@@ -188,7 +189,19 @@ def _query_device_binding(code):
                 activate_date = fields.get("激活日期", 0)
                 if isinstance(activate_date, list):
                     activate_date = activate_date[0] if activate_date else 0
-                return {"record_id": rec["record_id"], "machine_id": str(mid).strip(), "activate_date": int(activate_date) if activate_date else 0}
+                status = fields.get("状态", "")
+                if isinstance(status, list):
+                    status = status[0].get("text", "") if status else ""
+                distributor = fields.get("分销商ID", "")
+                if isinstance(distributor, list):
+                    distributor = distributor[0].get("text", "") if distributor else ""
+                return {
+                    "record_id": rec["record_id"],
+                    "machine_id": str(mid).strip(),
+                    "activate_date": int(activate_date) if activate_date else 0,
+                    "status": str(status).strip(),
+                    "distributor_id": str(distributor).strip(),
+                }
         return None
     except Exception:
         return None
@@ -209,12 +222,17 @@ def _parse_code_dates(code):
     except Exception:
         return None, None
 
-def _bind_device(code, machine_id, device_info=""):
-    """绑定设备（写入或更新多维表格记录，含激活/到期日期）"""
+def _bind_device(code, machine_id, device_info="", status="已激活"):
+    """绑定设备（写入或更新多维表格记录，含激活/到期日期/状态/分销商ID）"""
     try:
         raw_code = code.replace("-", "").strip().lower()
         existing = _query_device_binding(code)
         activate_ts, expire_ts = _parse_code_dates(code)
+        
+        # 解析分销商ID（34位码含dist_id，32位码无）
+        dist_id = ""
+        if len(raw_code) == 34:
+            dist_id = raw_code[2:4]
         
         # 日期字段（飞书多维表格日期类型需要毫秒时间戳）
         date_fields = {}
@@ -225,7 +243,9 @@ def _bind_device(code, machine_id, device_info=""):
 
         if existing:
             # 更新
-            fields = {"设备ID": machine_id, "设备信息": device_info}
+            fields = {"设备ID": machine_id, "设备信息": device_info, "状态": status}
+            if dist_id:
+                fields["分销商ID"] = dist_id
             fields.update(date_fields)
             resp = _feishu_request("PUT",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
@@ -238,7 +258,10 @@ def _bind_device(code, machine_id, device_info=""):
                 "激活码": raw_code,
                 "设备ID": machine_id,
                 "设备信息": device_info,
+                "状态": status,
             }
+            if dist_id:
+                fields["分销商ID"] = dist_id
             fields.update(date_fields)
             resp = _feishu_request("POST",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
@@ -261,8 +284,65 @@ def _unbind_device(code):
         return False
 
 def _get_machine_id():
-    raw = f"{platform.processor()}-{platform.node()}-{os.getenv('USERNAME', 'user')}-{uuid.getnode()}"
-    return hashlib.md5(raw.encode()).hexdigest()[:16]
+    """生成硬件指纹（CPU+硬盘+主板+MAC），跨平台兼容"""
+    parts = []
+    
+    # CPU序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "cpu", "get", "ProcessorId"],
+                             capture_output=True, text=True, timeout=5)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "ProcessorId"]
+            if lines:
+                parts.append(lines[0])
+        else:
+            # macOS: sysctl or system_profiler
+            r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                             capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                parts.append(r.stdout.strip())
+    except Exception:
+        pass
+    
+    # 硬盘序列号（系统盘）
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "diskdrive", "get", "SerialNumber"],
+                             capture_output=True, text=True, timeout=5)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "SerialNumber"]
+            if lines:
+                parts.append(lines[0])
+        else:
+            # macOS: diskutil info
+            r = subprocess.run(["diskutil", "info", "/"],
+                             capture_output=True, text=True, timeout=5)
+            for line in r.stdout.split("\n"):
+                if "Volume UUID" in line:
+                    parts.append(line.split(":")[-1].strip())
+                    break
+    except Exception:
+        pass
+    
+    # 主板序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "baseboard", "get", "SerialNumber"],
+                             capture_output=True, text=True, timeout=5)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "SerialNumber"]
+            if lines and lines[0] and lines[0] != "Default string":
+                parts.append(lines[0])
+    except Exception:
+        pass
+    
+    # MAC地址（兜底）
+    mac = uuid.getnode()
+    parts.append(f"{mac:012x}")
+    
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
 def _get_device_info():
@@ -270,6 +350,100 @@ def _get_device_info():
         return f"{platform.node()} | {platform.system()} {platform.release()} | {os.getenv('USERNAME', '')}"
     except Exception:
         return "unknown"
+
+
+# ============================================================
+# 服务器验证配置
+# ============================================================
+# 阿里云函数计算 API 地址（部署后填入）
+_VERIFY_API_URL = ""  # 例: https://1234567890.cn-hangzhou.fc.aliyuncs.com/verify
+_OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
+_REVOKED_MARKER = ".revoked"  # 熔断标记文件名
+
+
+def _verify_online(code, machine_id):
+    """联网验证激活码（调用云函数API）
+    返回: {valid, expires, days_left, revoked, plan, msg} 或 None（网络失败）
+    """
+    if not _VERIFY_API_URL:
+        return None  # 未配置API地址，跳过联网验证
+    
+    try:
+        import urllib.parse as _urlp
+        params = _urlp.urlencode({"code": code.replace("-", "").strip().lower(),
+                                  "machine_id": machine_id})
+        url = f"{_VERIFY_API_URL}?{params}"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result
+    except Exception:
+        return None  # 网络失败，走离线宽限
+
+
+def _get_last_online_verify():
+    """获取上次联网验证成功的时间戳"""
+    cache = _load_cache()
+    return cache.get("last_online_verify", 0)
+
+
+def _update_online_verify_time():
+    """更新联网验证时间"""
+    cache = _load_cache() or {}
+    cache["last_online_verify"] = int(time.time())
+    _save_cache(cache)
+
+
+def _is_offline_grace_expired():
+    """检查离线宽限期是否已过"""
+    last = _get_last_online_verify()
+    if last == 0:
+        return False  # 从未联网验证过（老用户），不强制
+    elapsed_hours = (int(time.time()) - last) / 3600
+    return elapsed_hours > _OFFLINE_GRACE_HOURS
+
+
+def _check_revoked_marker():
+    """检查本地熔断标记"""
+    path = os.path.join(_get_data_path(), _REVOKED_MARKER)
+    return os.path.exists(path)
+
+
+def _write_revoked_marker():
+    """写入熔断标记（远程熔断时调用）"""
+    path = os.path.join(_get_data_path(), _REVOKED_MARKER)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"revoked_at": int(time.time()), "machine_id": _get_machine_id()}))
+    except Exception:
+        pass
+
+
+def _clear_revoked_marker():
+    """清除熔断标记（重新激活时调用）"""
+    path = os.path.join(_get_data_path(), _REVOKED_MARKER)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _revoke_device(code):
+    """吊销激活码（在飞书多维表格标记为"已吊销"）
+    管理员在飞书多维表格中将状态改为"已吊销"，
+    客户端下次联网验证时会收到revoked=true并写入本地熔断标记
+    """
+    try:
+        existing = _query_device_binding(code)
+        if existing:
+            resp = _feishu_request("PUT",
+                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
+                {"fields": {"状态": "已吊销", "设备ID": "", "设备信息": ""}})
+            return resp and resp.get("code") == 0
+        return False
+    except Exception:
+        return False
 
 
 # ============================================================
@@ -333,30 +507,41 @@ def validate_code(code):
     if not code:
         return {"ok": False, "msg": "激活码为空"}
     raw = code.replace("-", "").strip().lower()
-    if len(raw) != 32:
+    # 兼容两种格式: 32位(旧版无分销商) / 34位(含distributor_id)
+    if len(raw) not in (32, 34):
         return {"ok": False, "msg": "激活码格式错误"}
     try:
-        plan_hex = raw[0:2]
-        expires_hex = raw[2:10]
-        nonce_hex = raw[10:12]
-        signature = raw[12:32]
+        if len(raw) == 34:
+            # 新版34位: plan(2) + dist_id(2) + expires(8) + nonce(2) + sig(20)
+            plan_hex = raw[0:2]
+            dist_id = raw[2:4]
+            expires_hex = raw[4:12]
+            nonce_hex = raw[12:14]
+            signature = raw[14:34]
+            payload = plan_hex + dist_id + expires_hex + nonce_hex
+        else:
+            # 旧版32位: plan(2) + expires(8) + nonce(2) + sig(20)
+            plan_hex = raw[0:2]
+            dist_id = ""
+            expires_hex = raw[2:10]
+            nonce_hex = raw[10:12]
+            signature = raw[12:32]
+            payload = plan_hex + expires_hex + nonce_hex
+        
         if plan_hex not in PLAN_NAMES:
             return {"ok": False, "msg": "激活码无效（未知套餐）"}
-        payload = plan_hex + expires_hex + nonce_hex
         expected_sig = hmac.new(
             SECRET_KEY.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()[:20]
         if not hmac.compare_digest(signature, expected_sig):
             return {"ok": False, "msg": "激活码无效（签名错误）"}
-        # 方案B：到期时间从飞书多维表格的"激活日期+套餐天数"计算，不再用码里的expires_at
-        # 激活码里的expires_hex仅作为生成时的参考上限，实际到期以激活日期为准
-        expires_at_in_code = int(expires_hex, 16)  # 码里的生成时过期时间（参考）
         return {
             "ok": True,
             "plan": {"01": "monthly", "02": "quarterly", "03": "yearly"}.get(plan_hex, "monthly"),
             "plan_name": PLAN_NAMES[plan_hex],
             "days": PLAN_DAYS[plan_hex],
             "plan_hex": plan_hex,
+            "dist_id": dist_id,
         }
     except Exception as e:
         return {"ok": False, "msg": f"激活码解析失败: {str(e)}"}
@@ -389,8 +574,19 @@ def activate_with_code(code):
                 "msg": "该激活码已绑定其他设备，请先在原设备解绑，或联系管理员",
             }
 
-    # Step 3: 本地保存
-    # 方案B：到期时间 = 激活日期 + 套餐天数
+    # Step 3: 清除旧熔断标记
+    _clear_revoked_marker()
+
+    # Step 4: 联网服务器注册（新增）
+    online_result = _verify_online(code.replace("-", "").strip().lower(), current_mid)
+    if online_result is not None:
+        if online_result.get("revoked"):
+            return {"ok": False, "msg": "该激活码已被吊销，无法激活"}
+        if online_result.get("valid") == False:
+            return {"ok": False, "msg": online_result.get("msg", "服务器验证失败")}
+        _update_online_verify_time()
+
+    # Step 5: 本地保存
     plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
     activated_at = int(time.time())
     expires_at = activated_at + plan_days * 86400
@@ -406,7 +602,7 @@ def activate_with_code(code):
         "machine_id": current_mid,
     })
 
-    # Step 4: 服务端绑定（非阻塞，失败不回滚本地）
+    # Step 6: 飞书服务端绑定（兼容旧版，非阻塞）
     device_info = _get_device_info()
     _bind_device(code, current_mid, device_info)
 
@@ -450,26 +646,51 @@ def deactivate_device():
 
 
 def check_activation():
-    """检查当前激活状态（启动时调用）"""
+    """检查当前激活状态（启动时调用）
+    
+    验证顺序：
+    1. 本地熔断标记检查（最快，防断网绕过）
+    2. 本地 HMAC 验证
+    3. 联网服务器验证（非阻塞，失败走离线宽限）
+    4. 飞书多维表格设备绑定校验（兼容旧版）
+    5. 离线宽限期检查
+    """
+    # Step 0: 检查熔断标记（联网时查飞书状态，已激活则自动恢复）
+    if _check_revoked_marker():
+        # 尝试联网查飞书状态——管理员可能已改回"已激活"
+        try:
+            cache = _load_cache()
+            code = cache.get("code", "") if cache else ""
+            if code:
+                binding = _query_device_binding(code)
+                if binding and binding.get("status") != "已吊销":
+                    # 飞书状态已恢复 → 清除本地熔断标记，继续验证
+                    _clear_revoked_marker()
+                else:
+                    return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
+            else:
+                return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
+        except Exception:
+            # 联网失败，熔断标记仍生效（防止断网绕过）
+            return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
+
     cache = _load_cache()
 
     if cache and cache.get("code"):
         code = cache["code"]
         result = validate_code(code)
         if result["ok"]:
-            # 方案B：到期时间 = activated_at + 套餐天数（优先从缓存读）
+            # 方案B：到期时间 = activated_at + 套餐天数
             activated_at = cache.get("activated_at", 0)
             plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
             if activated_at > 0:
                 expires_at = activated_at + plan_days * 86400
             else:
-                # 老缓存没有activated_at，尝试从飞书读激活日期
                 try:
                     binding = _query_device_binding(code)
                     if binding and binding.get("activate_date", 0) > 0:
                         activated_at = binding["activate_date"] // 1000
                         expires_at = activated_at + plan_days * 86400
-                        # 更新缓存
                         cache["activated_at"] = activated_at
                         _save_cache(cache)
                     else:
@@ -482,19 +703,56 @@ def check_activation():
             expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
             
             if now > expires_at:
+                # 过期也写熔断标记，防止改系统时间绕过
+                _write_revoked_marker()
                 return {"need_activate": True, "reason": f"激活码已于 {expires_date} 过期，请续费"}
             
-            # 启动时静默校验服务端设备绑定
+            # Step: 联网服务器验证（新增）
+            online_result = _verify_online(code, _get_machine_id())
+            if online_result is not None:
+                # 联网成功
+                _update_online_verify_time()
+                
+                if online_result.get("revoked"):
+                    # 服务器说已吊销 → 写入本地熔断标记
+                    _write_revoked_marker()
+                    return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
+                
+                if online_result.get("valid") == False:
+                    return {"need_activate": True, "reason": online_result.get("msg", "激活码无效")}
+                
+                # 服务器验证通过，同步过期信息
+                server_expires = online_result.get("expires", 0)
+                if server_expires and server_expires != expires_at:
+                    # 服务器有过期时间且与本地不同，以服务器为准
+                    expires_at = server_expires
+                    days_left = max(0, (expires_at - now) // 86400)
+                    expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
+                    cache["expires_at"] = expires_at
+                    _save_cache(cache)
+            else:
+                # 联网失败，检查离线宽限期
+                if _is_offline_grace_expired():
+                    return {"need_activate": True, "reason": f"已离线超过{_OFFLINE_GRACE_HOURS}小时，请联网验证"}
+            
+            # Step: 飞书多维表格校验（状态+设备绑定）
             try:
                 binding = _query_device_binding(code)
-                if binding and binding.get("machine_id"):
-                    if binding["machine_id"] != _get_machine_id():
+                if binding:
+                    # 检查是否已吊销
+                    if binding.get("status") == "已吊销":
+                        _write_revoked_marker()
+                        return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
+                    # 检查设备绑定
+                    bound_mid = binding.get("machine_id", "")
+                    if bound_mid and bound_mid != _get_machine_id():
                         return {"need_activate": True, "reason": "该激活码已在其他设备激活，请重新激活或联系管理员"}
-                elif not binding:
-                    # 老用户首次更新：自动绑定当前设备到服务端
+                else:
+                    # 老用户首次更新：自动绑定当前设备
                     _bind_device(code, _get_machine_id(), _get_device_info())
             except Exception:
                 pass
+            
             return {
                 "activated": True,
                 "plan_name": result["plan_name"],
