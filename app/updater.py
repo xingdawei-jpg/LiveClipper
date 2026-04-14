@@ -18,6 +18,8 @@ from tkinter import ttk
 from tkinter import messagebox
 from pathlib import Path
 
+_NO_WINDOW = 0x08000000
+
 
 # ============ 配置（发布时修改） ============
 
@@ -29,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "8.5.0"
+CURRENT_VERSION = "8.5.1"
 
 
 
@@ -161,7 +163,7 @@ def download_file(url, dest_path, progress_callback=None):
         result = subprocess.run(
             ["curl.exe", "-s", "-k", "-L", "-I", url],
             capture_output=True, encoding="utf-8", timeout=15
-        )
+, creationflags=_NO_WINDOW)
         # 取最后一次重定向后的 Content-Length
         for line in reversed(result.stdout.splitlines()):
             if line.lower().startswith("content-length:"):
@@ -176,7 +178,7 @@ def download_file(url, dest_path, progress_callback=None):
     process = subprocess.Popen(
         ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "120", "-o", dest_path, url],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+, creationflags=_NO_WINDOW)
 
     # 轮询文件大小上报进度
     while process.poll() is None:
@@ -231,7 +233,7 @@ def check_update():
             result = subprocess.run(
                 ["curl.exe", "-s", "-k", "--max-time", "10", full_url],
                 capture_output=True, encoding="utf-8", timeout=15
-            )
+, creationflags=_NO_WINDOW)
             if not result.stdout or result.stdout.strip().startswith("<!"):
                 continue
             data = json.loads(result.stdout)
@@ -469,7 +471,7 @@ class DownloadDialog(tk.Toplevel):
                         result = subprocess.run(
                             ["curl.exe", "-s", "-k", "--max-time", "15", mirror_url],
                             capture_output=True, timeout=20
-                        )
+, creationflags=_NO_WINDOW)
                         if result.stdout and len(result.stdout) > 10:
                             # Check it's not HTML error page
                             preview = result.stdout[:50]
@@ -485,7 +487,7 @@ class DownloadDialog(tk.Toplevel):
                         result = subprocess.run(
                             ["curl.exe", "-s", "-k", "--max-time", "15", base + "?_t=" + str(int(time.time()))],
                             capture_output=True, timeout=20
-                        )
+, creationflags=_NO_WINDOW)
                         if result.stdout and len(result.stdout) > 10:
                             preview = result.stdout[:50]
                             if not preview.startswith(b"<!"):
@@ -552,7 +554,7 @@ class DownloadDialog(tk.Toplevel):
                     result = subprocess.run(
                         ["curl.exe", "-s", "-k", "-L", "-I", "--max-time", "5", test_url],
                         capture_output=True, timeout=8
-                    )
+, creationflags=_NO_WINDOW)
                     if result.returncode == 0:
                         mirror_url = test_url
                         break
@@ -688,7 +690,7 @@ def _on_download_complete(filepath, filename, is_incremental=False):
                 )
                 if result:
                     exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-                    subprocess.Popen([exe])
+                    subprocess.Popen([exe], creationflags=_NO_WINDOW)
                     try:
                         root = tk._default_root
                         if root:
@@ -825,7 +827,7 @@ def _restart_app():
             exe = sys.executable
         else:
             exe = sys.argv[0]
-        subprocess.Popen([exe], shell=True)
+        subprocess.Popen([exe], shell=True, creationflags=_NO_WINDOW)
     except Exception:
         pass
     try:

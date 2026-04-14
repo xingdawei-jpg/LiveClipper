@@ -25,6 +25,23 @@ from datetime import datetime
 
 
 # ============================================================
+# 调试日志（激活问题排查，排查完后删除）
+# ============================================================
+import os as _dbg_os
+
+_NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW - hide console window
+
+def _dbg_log(msg):
+    try:
+        _dbg_path = _dbg_os.path.join(_dbg_os.environ.get("APPDATA", _dbg_os.path.expanduser("~")), "LiveClipper", "license_debug.log")
+        with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
+            from datetime import datetime as _dbg_dt
+            _dbg_f.write(f"[{_dbg_dt.now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
+# ============================================================
 # 密钥（与 license_generator.py 一致）
 # ============================================================
 _K1 = "6c63386633613265"
@@ -210,9 +227,14 @@ def _parse_code_dates(code):
     """从激活码中解析出激活日期和到期日期（毫秒时间戳，供飞书日期字段使用）"""
     try:
         raw = code.replace("-", "").strip().lower()
-        if len(raw) != 32:
+        if len(raw) == 34:
+            # 34位码：plan(2) + dist_id(2) + expires(8) + nonce(2) + sig(20)
+            expires_hex = raw[4:12]
+        elif len(raw) == 32:
+            # 32位码：plan(2) + expires(8) + nonce(2) + sig(20)
+            expires_hex = raw[2:10]
+        else:
             return None, None
-        expires_hex = raw[2:10]
         expires_at = int(expires_hex, 16)
         now = int(time.time())
         # 激活日期=今天，到期日期=激活码中的expires
@@ -291,7 +313,7 @@ def _get_machine_id():
     try:
         if platform.system() == "Windows":
             r = subprocess.run(["wmic", "cpu", "get", "ProcessorId"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
             lines = [l.strip() for l in r.stdout.strip().split("\n")
                      if l.strip() and l.strip() != "ProcessorId"]
             if lines:
@@ -299,7 +321,7 @@ def _get_machine_id():
         else:
             # macOS: sysctl or system_profiler
             r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
             if r.stdout.strip():
                 parts.append(r.stdout.strip())
     except Exception:
@@ -309,7 +331,7 @@ def _get_machine_id():
     try:
         if platform.system() == "Windows":
             r = subprocess.run(["wmic", "diskdrive", "get", "SerialNumber"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
             lines = [l.strip() for l in r.stdout.strip().split("\n")
                      if l.strip() and l.strip() != "SerialNumber"]
             if lines:
@@ -317,7 +339,7 @@ def _get_machine_id():
         else:
             # macOS: diskutil info
             r = subprocess.run(["diskutil", "info", "/"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
             for line in r.stdout.split("\n"):
                 if "Volume UUID" in line:
                     parts.append(line.split(":")[-1].strip())
@@ -329,7 +351,7 @@ def _get_machine_id():
     try:
         if platform.system() == "Windows":
             r = subprocess.run(["wmic", "baseboard", "get", "SerialNumber"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
             lines = [l.strip() for l in r.stdout.strip().split("\n")
                      if l.strip() and l.strip() != "SerialNumber"]
             if lines and lines[0] and lines[0] != "Default string":
@@ -591,6 +613,7 @@ def activate_with_code(code):
     activated_at = int(time.time())
     expires_at = activated_at + plan_days * 86400
     expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
+    _dbg_log(f"activate_with_code: saving cache, code={code[:8]}..., mid={current_mid}")
     _save_license_code(code)
     _save_cache({
         "code": code,
@@ -675,10 +698,12 @@ def check_activation():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
     cache = _load_cache()
+    _dbg_log(f"check_activation: cache={cache}")
 
     if cache and cache.get("code"):
         code = cache["code"]
         result = validate_code(code)
+        _dbg_log(f"validate_code result: {result}")
         if result["ok"]:
             # 方案B：到期时间 = activated_at + 套餐天数
             activated_at = cache.get("activated_at", 0)
@@ -735,30 +760,24 @@ def check_activation():
                 if _is_offline_grace_expired():
                     return {"need_activate": True, "reason": f"已离线超过{_OFFLINE_GRACE_HOURS}小时，请联网验证"}
             
-            # Step: 飞书多维表格校验（状态+设备绑定）
+            # Step: 飞书多维表格校验（防盗2.0暂时关闭，仅保留吊销检测）
             try:
                 binding = _query_device_binding(code)
+                _dbg_log(f"Feishu binding: {binding}")
                 if binding:
-                    # 检查是否已吊销
+                    # 仅检查吊销状态，不做设备绑定校验
                     if binding.get("status") == "已吊销":
                         _write_revoked_marker()
                         return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
-                    # 检查设备绑定
-                    bound_mid = binding.get("machine_id", "")
-                    if bound_mid and bound_mid != _get_machine_id():
-                        # 飞书设备不匹配时，检查本地缓存的machine_id
-                        # 本地匹配则放行（飞书可能未同步成功）
-                        local_mid = cache.get("machine_id", "")
-                        if local_mid and local_mid == _get_machine_id():
-                            pass  # 本地验证通过，忽略飞书不一致
-                        else:
-                            return {"need_activate": True, "reason": "该激活码已在其他设备激活，请重新激活或联系管理员"}
+                    # 静默更新设备绑定（不阻塞）
+                    _bind_device(code, _get_machine_id(), _get_device_info())
                 else:
-                    # 老用户首次更新：自动绑定当前设备
+                    # 无记录时自动绑定
                     _bind_device(code, _get_machine_id(), _get_device_info())
             except Exception:
                 pass
             
+            _dbg_log("check_activation: returning activated=True")
             return {
                 "activated": True,
                 "plan_name": result["plan_name"],

@@ -1464,7 +1464,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     return relaxed if relaxed else []
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3):
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -1581,7 +1581,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 "流行趋势": "侧重流行趋势，优先选当季流行,设计感的片段",
                 "面料质感": "侧重面料卖点，优先选面料手感,质感相关的片段",
             }
-            focus = _focus_hint_map_full.get(_best_focus, _focus_hints_map_full[_best_focus])
+            focus = _focus_hint_map_full.get(_best_focus, _focus_hint_map_full[_best_focus])
             _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
         else:
             focus_hints = [
@@ -1620,7 +1620,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
     if _skip_focus:
         # 多版本模式：要求AI输出3个独立叙事方案
-        user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中选出3个不同角度的剪辑方案，每个方案独立完整。
+        user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中选出{num_versions}个不同角度的剪辑方案，每个方案独立完整。
 
 要求:
 1. {_dedup_rule}
@@ -1644,13 +1644,13 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
   ⑤ 爆料型: "XX%是假的"、"行业秘密" → 强停留
   ⑥ 信任型: "被扣爆了"、"卖疯了"、"盲拍" → 拉信任
   ⑦ 夸奖型: "太好看"、"绝绝子" → 最弱但可用
-- ★3个方案必须用不同类型的Hook★
+- ★各方案必须用不同类型的Hook★
 - ★绝对禁止★: 用产品/面料做Hook(如"这个西装"、"面料很好")、接续句("然后..."、"所以呢...")
 
-9. ★3个方案的Product片段条目编号尽量不重复(同一条目最多出现在1个方案)★
+9. ★各方案的Product片段条目编号尽量不重复(同一条目最多出现在1个方案)★
 10. ★每个方案必须独立完整: 1 Hook + 3-5 Product + 1 Close★
-11. ★如果素材只够2个完整方案就只输出2个，不要凑第3个★
-{f"12. ★方案1必须围绕「{focus}」角度展开（Hook+前2个Product体现{focus}），方案2/3由你自由选择其他不同角度" if focus else "12. 3个方案的角度由你根据直播内容自行判断，选择素材最丰富的3个不同角度"}
+11. ★如果素材不够组成完整的方案，就只输出能凑齐的方案数，不要凑数★
+{f"12. ★方案1必须围绕「{focus}」角度展开（Hook+前2个Product体现{focus}），其他方案由你自由选择其他不同角度" if focus else "12. 各方案的角度由你根据直播内容自行判断，选择素材最丰富的不同角度"}
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目（数组），不要填start/end时间戳。★每个片段只选1个条目(条目太短才选2个)，确保单片段5-10秒，禁止选3个以上★:
 {{
@@ -2124,7 +2124,8 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
                         srt_entries=_indexed_srt_entries,
                         hook_candidates_hint=_hook_hint if _hook_hint else None,
                         multi_version=True,
-                        return_raw=True)
+                        return_raw=True,
+                        num_versions=num_versions)
 
     if not raw_data:
         _log("AI: 多版本调用失败，降级到3次单版本调用...")
@@ -2144,7 +2145,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
 
     # ★对每个版本应用后处理★
     processed_versions = []
-    for vi, ver in enumerate(all_versions["versions"]):
+    for vi, ver in enumerate(all_versions["versions"][:num_versions]):
         clips = ver.get("clips", [])
         if not clips or len(clips) < 3:
             _log(f"方案{vi+1} [{ver.get('angle', '?')}]: 不足3段，跳过")
