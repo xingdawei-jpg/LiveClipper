@@ -151,10 +151,13 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             status_code = resp.headers.get("X-Api-Status-Code", "")
             message = resp.headers.get("X-Api-Message", "")
 
-            # 先检查错误状态（优先于Processing判断）
+            # 先判断处理中状态（20000001=处理中，20000000=完成）
+            if status_code in ("20000001", "20000002") or "Processing" in message or "PENDING" in str(message).upper():
+                # 正常处理中，继续轮询
+                continue
             # 429限流：指数退避而不是立即放弃
-            if "429" in str(status_code) or "429" in message or "rate" in message.lower() or "limit" in message.lower():
-                poll_interval = min(poll_interval * 2, 30)  # 指数退避，最长30秒
+            elif "429" in str(status_code) or "429" in message or "rate" in message.lower() or "limit" in message.lower():
+                poll_interval = min(poll_interval * 2, 30)
                 _log(f"volcengine_asr: 请求频率超限(429)，退避到{poll_interval}s后重试...")
                 continue
             elif status_code and status_code != "20000000":

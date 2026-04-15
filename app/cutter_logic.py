@@ -1015,7 +1015,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _v2_tos_ak = _cfg2.get("volc_tos_ak", "")
                     _v2_tos_sk = _cfg2.get("volc_tos_sk", "")
                     _v2_bucket = _cfg2.get("volc_bucket", "livec")
-                    if all([_v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk]):
+                    if not _volc_used and all([_v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk]):
                         _log("启动火山引擎语音识别...")
                         from volcengine_asr import volcengine_asr
                         import tempfile as _tf2
@@ -1065,6 +1065,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                                 _log("⚠️ 云端语音识别失败，已自动切换到本地识别")
                         else:
                             _log("音频提取失败，降级到本地 Whisper")
+                    elif _volc_used:
+                        pass  # 阿里云已成功
                     else:
                         _log("未配置云端语音识别，使用本地识别")
             except Exception as _e2:
