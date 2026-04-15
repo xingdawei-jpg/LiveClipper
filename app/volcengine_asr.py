@@ -124,7 +124,9 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         _log(f"volcengine_asr: 任务已提交, id={task_id}")
     except Exception as e:
         _log(f"volcengine_asr: 提交异常: {e}")
-        if "401" in str(e):
+        if "429" in str(e):
+            _log("⚠️ 火山引擎请求频率超限(429)，请稍后再试或联系火山引擎提升配额")
+        elif "401" in str(e):
             _log("⚠️ 401认证失败！请检查语音识别控制台的 App ID 和 Access Token 是否正确，教程：https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
         _cleanup_tos(client, bucket, obj_key, _log)
         return None
@@ -132,7 +134,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
     # --- 3. 轮询结果 ---
     query_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
     start_time = time.time()
-    poll_interval = 5
+    poll_interval = 10  # 火山引擎QPS低，10秒轮询避免429
+    _empty_count = 0
 
     while time.time() - start_time < timeout:
         time.sleep(poll_interval)
@@ -148,16 +151,35 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             status_code = resp.headers.get("X-Api-Status-Code", "")
             message = resp.headers.get("X-Api-Message", "")
 
-            if "Processing" in message or "PENDING" in str(message).upper():
+            # 先检查错误状态（优先于Processing判断）
+            # 429限流：指数退避而不是立即放弃
+            if "429" in str(status_code) or "429" in message or "rate" in message.lower() or "limit" in message.lower():
+                poll_interval = min(poll_interval * 2, 30)  # 指数退避，最长30秒
+                _log(f"volcengine_asr: 请求频率超限(429)，退避到{poll_interval}s后重试...")
                 continue
+            elif status_code and status_code != "20000000":
+                _log(f"volcengine_asr: 查询失败: status={status_code} msg={message}")
+                _cleanup_tos(client, bucket, obj_key, _log)
+                return None
             elif "silence" in message.lower() or "no valid speech" in message.lower():
                 _log(f"volcengine_asr: 音频无有效语音: {message}")
                 _cleanup_tos(client, bucket, obj_key, _log)
                 return None
-            elif status_code != "20000000":
-                _log(f"volcengine_asr: 查询失败: status={status_code} msg={message}")
+            elif "error" in message.lower() or "fail" in message.lower():
+                # 防止"Error processing"等含Processing的错误消息被误判为继续轮询
+                _log(f"volcengine_asr: 查询返回错误: status={status_code} msg={message}")
                 _cleanup_tos(client, bucket, obj_key, _log)
                 return None
+            elif message and ("Processing" in message or "PENDING" in str(message).upper()):
+                continue
+            # status_code为空且message为空：可能是异常响应，最多等3轮
+            elif not status_code and not message:
+                _empty_count += 1
+                if _empty_count >= 3:
+                    _log("volcengine_asr: 连续3次空响应，终止轮询")
+                    _cleanup_tos(client, bucket, obj_key, _log)
+                    return None
+                continue
             
             # --- 4. 解析结果 ---
             _log("volcengine_asr: 识别完成，解析结果...")
@@ -181,7 +203,11 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             return segments if segments else None
 
         except Exception as e:
-            _log(f"volcengine_asr: 轮询异常: {e}")
+            if "429" in str(e):
+                poll_interval = min(poll_interval * 2, 30)
+                _log(f"volcengine_asr: 轮询被限流(429)，退避到{poll_interval}s...")
+            else:
+                _log(f"volcengine_asr: 轮询异常: {e}")
             continue
 
     _log(f"volcengine_asr: 超时 ({timeout}s)")
