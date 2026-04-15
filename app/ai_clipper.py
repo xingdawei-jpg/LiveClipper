@@ -1254,6 +1254,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _dedup_clips(clips, log_fn, multi_version=multi_version, focus_hint=focus_hint)
         # 从Product中提取Hook（如果AI没选Hook）
         clips = _extract_hook_from_products(clips, cleaned_srt, log_fn)
+        clips = _force_short_hook(clips, cleaned_srt, log_fn)
         removed_from_dedup = [c for c in original_clips if c not in clips]
         # [v9.5] 多版本模式：去重后如果片段不足12个，回收被去除的片段
         if _skip_focus and len(clips) < 12 and removed_from_dedup:
@@ -1464,6 +1465,127 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     return relaxed if relaxed else []
 
 
+
+def _force_short_hook(clips, srt_text, log_fn=None):
+    """Hook > 5秒时，从SRT短条目中找1-4秒爆点词替换原Hook。
+    原Hook降为Product，新Hook用SRT精确时间戳，保证1-3秒。
+    """
+    MAX_HOOK_SEC = 5.0  # Hook超过此秒数则强制替换
+
+    def _log(msg):
+        if log_fn: log_fn(msg)
+
+    if not clips or not srt_text:
+        return clips
+
+    # 找现有Hook
+    hook_idx = None
+    for i, clip in enumerate(clips):
+        if clip[0] == "hook":
+            hook_idx = i
+            break
+
+    if hook_idx is None:
+        return clips  # 没有Hook，不管
+
+    hook_clip = clips[hook_idx]
+    hook_dur = float(hook_clip[5]) if isinstance(hook_clip[5], (int, float, str)) else 0
+
+    if hook_dur <= MAX_HOOK_SEC:
+        _log(f"短Hook检测: Hook {hook_dur:.1f}s ≤ {MAX_HOOK_SEC}s，无需替换")
+        return clips  # 已经够短
+
+    _log(f"短Hook检测: Hook {hook_dur:.1f}s > {MAX_HOOK_SEC}s，扫描SRT找爆点词...")
+
+    # 加载爆点词库
+    _kw_data = load_keywords()
+    _hook_kw = _kw_data.get("hook_keywords", [])
+    # 强爆点词（权重更高）
+    _strong_kw = ["美爆了", "绝了", "太漂亮", "不敢信", "封神", "神仙",
+                  "超级超级", "太显瘦", "卖疯了", "天花板", "炸了", "爆了",
+                  "太惊艳", "盲拍", "闭眼入", "太绝了", "特别特别", "真的真的"]
+
+    # 解析SRT条目
+    _srt_entries = []
+    for block in srt_text.strip().split(chr(10) + chr(10)):
+        bl = block.strip().split(chr(10))
+        if len(bl) >= 2 and '-->' in bl[0]:
+            try:
+                parts = bl[0].split('-->')
+                h1, m1, s1 = parts[0].strip().replace(',', '.').split(':')
+                h2, m2, s2 = parts[1].strip().replace(',', '.').split(':')
+                es = int(h1)*3600 + int(m1)*60 + float(s1)
+                ee = int(h2)*3600 + int(m2)*60 + float(s2)
+                txt = ' '.join(bl[1:]).strip()
+                _srt_entries.append((es, ee, txt))
+            except Exception:
+                pass
+
+    if not _srt_entries:
+        _log("短Hook检测: 无SRT条目可扫描")
+        return clips
+
+    # 收集已占用的时间范围（排除原Hook）
+    _used_ranges = []
+    for i, clip in enumerate(clips):
+        if i != hook_idx:
+            _used_ranges.append((float(clip[2]), float(clip[3])))
+
+    # 扫描SRT条目，找含爆点词的短条目(1-4秒)
+    candidates = []  # (start, end, text, duration, score)
+    for es, ee, txt in _srt_entries:
+        dur = ee - es
+        if dur < 0.8 or dur > 4.0:
+            continue  # 太短(<0.8s)或太长(>4s)都不要
+
+        # 检查爆点词
+        best_match_score = 0
+        for kw in _hook_kw:
+            if kw in txt:
+                # 强爆点词加分
+                is_strong = any(sk in kw or kw in sk for sk in _strong_kw)
+                score = 20 if is_strong else 10
+                # 越短越好
+                score += (4.0 - dur) * 2
+                # 越靠前越好（优先用视频前段的爆点）
+                score += max(0, 30 - es) * 0.1
+                if score > best_match_score:
+                    best_match_score = score
+                break  # 一个词匹配就够了
+
+        if best_match_score > 0:
+            # 检查是否和已有片段重叠（允许和原Hook重叠，因为我们要替换它）
+            overlaps = False
+            for us, ue in _used_ranges:
+                if es < ue and ee > us:
+                    overlaps = True
+                    break
+            if not overlaps:
+                candidates.append((es, ee, txt, dur, best_match_score))
+
+    if not candidates:
+        _log("短Hook检测: 未找到不重叠的短爆点条目")
+        return clips
+
+    # 按分数排序，取最佳
+    candidates.sort(key=lambda x: x[4], reverse=True)
+    best = candidates[0]
+    new_start, new_end, new_txt, new_dur, _ = best
+
+    # 原Hook降为Product
+    old = clips[hook_idx]
+    clips[hook_idx] = ("product", old[1], old[2], old[3], old[4], old[5],
+                        old[6] if len(old) > 6 else "")
+    _log(f"短Hook检测: 原Hook '{old[1][:25]}...' ({hook_dur:.1f}s) → Product")
+
+    # 新Hook插到最前面
+    new_hook = ("hook", new_txt, new_start, new_end, 9.0, new_dur, "爆点裁切")
+    clips.insert(0, new_hook)
+    _log(f"短Hook检测: 替换为 '{new_txt}' ({new_dur:.1f}s)")
+
+    return clips
+
+
 def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3):
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -1530,67 +1652,77 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             _log("AI: 多版本模式（全量选片）")
     else:
         # ★智能偏好选择：分析SRT内容，选最匹配的偏好★
-        _kw_data_focus = load_keywords()
-        _focus_scores = {}
-        _focus_hints_map = {
-            "版型显瘦": ["显瘦", "遮肉", "藏肉", "修饰", "收腰", "包容", "不挑", "微胖", "版型", "修身",
-                         "遮胯", "遮肚", "收腹", "提臀", "显高", "小个子", "梨形", "苹果型", "腿粗", "拜拜肉",
-                         "瘦十斤", "小一圈", "秒变", "立瘦", "藏得住", "遮得住", "显腿长", "显腰细", "比例好", "拉长"],
-            "颜色显白": ["显白", "提亮", "抬气色", "显肤色", "黄皮", "黑皮", "颜色", "色系", "色调", "配色",
-                         "撞色", "百搭色", "衬肤色", "不挑肤色", "冷白皮", "暖白皮", "高级灰", "显气质", "衬人", "提气色",
-                         "莫兰迪", "奶油色", "燕麦色", "雾霾蓝", "牛油果", "气色好"],
-            "穿着场景": ["通勤", "约会", "度假", "日常", "出门", "上班", "逛街", "实穿", "职场", "聚会",
-                         "见客", "拍照", "旅游", "出差", "搭牛仔裤", "搭半身裙", "搭阔腿裤", "配大衣", "叠穿",
-                         "内搭", "外穿", "单穿", "一年四季", "穿去", "出门穿", "上班穿", "随手穿", "懒人", "一套搞定"],
-            "性价比": ["划算", "超值", "性价比", "值", "块钱", "便宜", "品质", "质感", "做工", "同款",
-                       "外面买不到", "大牌平替", "代工厂", "专柜", "商场", "闭眼入", "不踩雷", "回购",
-                       "老客", "回头客", "物超所值", "对得起", "比外面", "比商场", "同品质", "这个价"],
-            "紧迫稀缺": ["限量", "库存", "最后", "抢", "秒", "不多", "少数", "断货", "售罄", "抢完",
-                         "没了", "没码", "补货", "少量", "限时", "马上", "赶紧", "手慢无", "错过", "不再有",
-                         "冲", "拍", "上车", "入手", "闭眼冲", "独家", "不撞款", "定制", "稀缺", "抢不到"],
-            "情绪感染": ["绝了", "太漂亮", "美爆", "太好看", "太爱", "神仙", "封神", "超级超级", "特别特别",
-                         "真的真的", "非常非常", "天呐", "哇", "我的天", "受不了", "爱了爱了", "绝绝子", "yyds",
-                         "炸了", "无敌", "帅爆", "信我", "相信我", "不骗你", "真心", "真的", "自留",
-                         "我自己也", "美哭", "好看哭", "太绝了", "太好看了"],
-            "流行趋势": ["流行", "当季", "新款", "设计", "原创", "不撞款", "独家", "爆款", "热门", "趋势",
-                         "法式", "韩系", "日系", "欧美", "ins风", "极简", "复古", "国风", "新中式", "街头",
-                         "设计感", "小心机", "细节", "独特", "特别", "小众", "轻奢", "高级感", "时髦", "慵懒风"],
-            "面料质感": ["面料", "手感", "亲肤", "质感", "桑蚕丝", "冰感", "软糯", "透气", "真丝", "羊毛",
-                         "羊绒", "纯棉", "雪纺", "缎面", "蕾丝", "牛仔", "针织", "垂感", "弹力", "滑",
-                         "柔", "糯", "高级", "做工", "走线", "不起球", "不褪色", "抗皱", "免熨", "贴身穿"],
-        }
-        # 统计SRT中每种偏好的关键词命中数
-        _srt_lower = srt_text
-        for _fname, _fkws in _focus_hints_map.items():
-            _score = sum(1 for _kw in _fkws if _kw in _srt_lower)
-            if _score > 0:
-                _focus_scores[_fname] = _score
-        
-        if _focus_scores:
-            # 选得分最高的偏好
-            _best_focus = max(_focus_scores, key=_focus_scores.get)
-            _best_score = _focus_scores[_best_focus]
-            # 从all_angle_hints找对应的完整提示
-            _focus_hint_map_full = {
-                "版型显瘦": "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
-                "颜色显白": "侧重颜色显白，优先选显白,抬亮肤色,色彩相关的片段",
-                "穿着场景": "侧重穿着场景，优先选通勤,约会,出门等场景化片段",
-                "性价比": "侧重性价比，优先选到手价,划算,超值的片段",
-                "紧迫稀缺": "侧重紧迫感，优先选限量,库存,限时相关的片段",
-                "情绪感染": "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
-                "流行趋势": "侧重流行趋势，优先选当季流行,设计感的片段",
-                "面料质感": "侧重面料卖点，优先选面料手感,质感相关的片段",
+        try:
+            _kw_data_focus = load_keywords()
+            _focus_scores = {}
+            _focus_hints_map = {
+                "版型显瘦": ["显瘦", "遮肉", "藏肉", "修饰", "收腰", "包容", "不挑", "微胖", "版型", "修身",
+                             "遮胯", "遮肚", "收腹", "提臀", "显高", "小个子", "梨形", "苹果型", "腿粗", "拜拜肉",
+                             "瘦十斤", "小一号", "秒变", "立瘦", "藏得住", "遮得住", "显腿长", "显腰细", "比例好", "拉长"],
+                "颜色显白": ["显白", "提亮", "抬气色", "显肤色", "黄皮", "黑皮", "颜色", "色系", "色调", "配色",
+                             "撞色", "百搭色", "衬肤色", "不挑肤色", "冷白皮", "暖白皮", "高级感", "显气质", "衬人", "提气色",
+                             "莫兰迪", "奶油色", "燕麦色", "雾霾蓝", "牛油果", "气色好"],
+                "穿着场景": ["通勤", "约会", "度假", "日常", "出门", "上班", "逛街", "实穿", "职场", "聚会",
+                             "见客", "拍照", "旅游", "出差", "搭牛仔裤", "搭半身裙", "搭阔腿裤", "配大衣", "叠穿",
+                             "内搭", "外穿", "单穿", "一年四季", "穿去", "出门穿", "上班穿", "随手穿", "懒人", "一套搞定"],
+                "性价比": ["划算", "超值", "性价比", "贵", "块钱", "便宜", "品质", "质感", "做工", "同款",
+                           "外面买不到", "大牌平替", "代工厂", "专柜", "商场", "闭眼入", "不踩雷", "回购",
+                           "老客", "回头客", "物超所值", "对得起", "比外面", "比商场", "同品质", "这个价"],
+                "紧迫稀缺": ["限量", "库存", "最后", "秒", "抢", "不多", "少数", "断货", "售罄", "抢完",
+                             "没了", "没码", "补货", "少量", "限时", "马上", "赶紧", "手慢无", "错过", "不再有",
+                             "秒杀", "抢购", "上车", "入手", "闭眼入", "独家", "不撞款", "定制", "稀缺", "抢不到"],
+                "情绪感染": ["绝了", "太漂亮", "美爆", "太好看了", "太爱", "神仙", "封神", "超级超级", "特别特别",
+                             "真的真的", "非常非常", "天呐", "妈呀", "我的天", "受不了", "爱了爱了", "绝绝子", "yyds",
+                             "炸了", "无敌", "帅爆", "信我", "相信我", "不骗你", "真心", "真的", "自留",
+                             "我自己也", "美哭", "好看死", "太绝了", "太好看了"],
+                "流行趋势": ["流行", "当季", "新款", "设计", "原创", "不撞款", "独家", "爆款", "热门", "趋势",
+                             "法式", "韩系", "日系", "欧美", "ins风", "极简", "复古", "国风", "新中式", "街头",
+                             "设计师", "小心机", "细节", "独特", "特别", "小众", "轻奢", "高级感", "时髦", "慵懒风"],
+                "面料质感": ["面料", "手感", "亲肤", "质感", "桑蚕丝", "冰感", "软糯", "透气", "真丝", "羊毛",
+                             "羊绒", "纯棉", "雪纺", "缎面", "蕾丝", "牛仔", "针织", "垂感", "弹力", "厚实",
+                             "实心", "密", "高级", "做工", "走线", "不起球", "不褪色", "抗皱", "免熨", "贴身感"],
             }
-            focus = _focus_hint_map_full.get(_best_focus, _focus_hint_map_full[_best_focus])
-            _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
-        else:
-            focus_hints = [
+            # 统计SRT中每种偏好的关键词命中数
+            _srt_lower = srt_text
+            for _fname, _fkws in _focus_hints_map.items():
+                _score = sum(1 for _kw in _fkws if _kw in _srt_lower)
+                if _score > 0:
+                    _focus_scores[_fname] = _score
+            
+            if _focus_scores:
+                # 选得分最高的偏好
+                _best_focus = max(_focus_scores, key=_focus_scores.get)
+                _best_score = _focus_scores[_best_focus]
+                # 从all_angle_hints找对应的完整提示
+                _focus_hint_map_full = {
+                    "版型显瘦": "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
+                    "颜色显白": "侧重颜色显白，优先选显白,抬亮肤色,色彩相关的片段",
+                    "穿着场景": "侧重穿着场景，优先选通勤,约会,出门等场景化片段",
+                    "性价比": "侧重性价比，优先选到手价,划算,超值的片段",
+                    "紧迫稀缺": "侧重紧迫感，优先选限量,库存,限时相关的片段",
+                    "情绪感染": "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
+                    "流行趋势": "侧重流行趋势，优先选当季流行,设计感的片段",
+                    "面料质感": "侧重面料卖点，优先选面料手感,质感相关的片段",
+                }
+                focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
+                _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
+            else:
+                focus_hints = [
+                    "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
+                    "侧重面料卖点，优先选面料手感,质感相关的片段",
+                    "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
+                ]
+                focus = random.choice(focus_hints)
+                _log(f"AI: 随机偏好 → {focus}")
+        except Exception as _e:
+            # 防护：变量名拼写不一致或其他异常时，降级到随机偏好而非关键词兜底
+            import random as _rand
+            focus = _rand.choice([
                 "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
                 "侧重面料卖点，优先选面料手感,质感相关的片段",
                 "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
-            ]
-            focus = random.choice(focus_hints)
-            _log(f"AI: 随机偏好 → {focus}")
+            ])
+            _log(f"AI: 智能偏好异常({str(_e)})，降级随机偏好 → {focus}")
 
     # [增强] 计算 SRT 时间范围，告知 AI
     _srt_times = []
@@ -2154,6 +2286,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         # 应用与单版本相同的后处理管线
         clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log)
+        clips = _force_short_hook(clips, cleaned_srt, _log)
         clips = _post_filter_cross_category(clips, cleaned_srt, _log)
         clips = _check_narrative_coherence(clips, _log)
         clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
@@ -2257,6 +2390,7 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
 
         clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log)
+        clips = _force_short_hook(clips, cleaned_srt, _log)
         clips = _post_filter_cross_category(clips, cleaned_srt, _log)
         clips = _check_narrative_coherence(clips, _log)
         clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
