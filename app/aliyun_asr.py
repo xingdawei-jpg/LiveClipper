@@ -76,7 +76,7 @@ def _curl_post_json(url, api_key, body, timeout=30):
 
 def _upload_to_oss(audio_path, oss_config, log_fn=None):
     """
-    上传音频文件到阿里云 OSS，返回公网 URL。
+    上传音频文件到阿里云 OSS，返回签名 URL
     
     oss_config: {
         "access_key_id": "...",
@@ -89,7 +89,6 @@ def _upload_to_oss(audio_path, oss_config, log_fn=None):
         if log_fn:
             log_fn(msg)
 
-    # 生成唯一文件名
     file_hash = hashlib.md5(audio_path.encode("utf-8")).hexdigest()[:8]
     ext = os.path.splitext(audio_path)[1] or ".wav"
     object_key = f"asr/{file_hash}_{int(time.time())}{ext}"
@@ -103,70 +102,29 @@ def _upload_to_oss(audio_path, oss_config, log_fn=None):
         _log("aliyun_asr: OSS 配置不完整，需要 access_key_id/access_key_secret/bucket")
         return None
 
-    # 使用 ossutil 或 curl 上传
-    # 简化方案：用 curl + OSS REST API 上传
-    # 实际上最简单的方案是用 Python oss2 库
-    # 但为了减少依赖，我们用 curl + 签名上传
-    
-    # 更简单的方案：用 DashScope 的文件上传接口
-    # DashScope 支持 File API: POST /compatible-mode/v1/files
-    _log(f"aliyun_asr: 尝试上传音频文件到 DashScope File API...")
+    _log(f"aliyun_asr: 上传音频到 OSS ({bucket}/{object_key})...")
 
     try:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-        tmp.close()
-        try:
-            r = subprocess.run(
-                ["curl.exe", "-s", "-k", "--max-time", "60",
-                 "-X", "POST", f"{DASHSCOPE_BASE}/compatible-mode/v1/files",
-                 "-H", f"Authorization: Bearer {oss_config.get('api_key', ak)}",
-                 "-F", f"file=@{audio_path}",
-                 "-F", "purpose=file-extract"],
-                capture_output=True, timeout=65,
-                creationflags=_NO_WINDOW
-            )
-            result = json.loads(r.stdout.decode("utf-8", errors="replace"))
-            file_id = result.get("id", "")
-            if file_id:
-                _log(f"aliyun_asr: File API 上传成功, file_id={file_id}")
-                # DashScope File API 返回的文件不能用公网URL访问
-                # 还是得用 OSS
-                return None
-        except Exception as e:
-            _log(f"aliyun_asr: File API 上传失败: {e}")
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 最终方案：用 ossutil 命令行工具上传
-    # 但大多数用户不会安装 ossutil
-    # 所以我们用 Python 内置库实现最简 OSS 上传
-    _log("aliyun_asr: 尝试用 curl + OSS 签名上传...")
-
-    try:
-        return _oss_upload_curl(audio_path, ak, sk, bucket, endpoint, object_key, _log)
+        result = _oss_upload_and_sign(audio_path, ak, sk, bucket, endpoint, object_key, _log)
+        if result:
+            _log(f"aliyun_asr: OSS 上传成功，签名 URL 已生成")
+        return result
     except Exception as e:
         _log(f"aliyun_asr: OSS 上传失败: {e}")
         return None
 
 
-def _oss_upload_curl(file_path, ak, sk, bucket, endpoint, object_key, log_fn):
-    """用 curl + AWS Signature V4 签名上传文件到 OSS"""
+def _oss_upload_and_sign(file_path, ak, sk, bucket, endpoint, object_key, log_fn):
+    """上传文件到 OSS 并生成签名 URL"""
     import hmac
-    import datetime
-
-    # OSS 用 V1 签名更简单（Authorization: OSS AccessKeyId:Signature）
+    import base64
+    
     content_type = "audio/wav"
     date_str = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
     
-    # StringToSign = VERB + "\n" + Content-MD5 + "\n" + Content-Type + "\n" + Date + "\n" + CanonicalizedResource
+    # V1 签名上传
     canonicalized_resource = f"/{bucket}/{object_key}"
     string_to_sign = f"PUT\n\n{content_type}\n{date_str}\n{canonicalized_resource}"
-    
     signature = base64.b64encode(
         hmac.new(sk.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1).digest()
     ).decode("utf-8")
@@ -184,9 +142,26 @@ def _oss_upload_curl(file_path, ak, sk, bucket, endpoint, object_key, log_fn):
         creationflags=_NO_WINDOW
     )
     
-    public_url = f"https://{bucket}.{endpoint}/{object_key}"
-    log_fn(f"aliyun_asr: OSS 上传完成, URL={public_url}")
-    return public_url
+    # 检查上传结果
+    resp_text = r.stdout.decode("utf-8", errors="replace")
+    if r.returncode != 0 and "<?xml" not in resp_text:
+        # curl 本身失败
+        log_fn(f"aliyun_asr: OSS curl 失败: returncode={r.returncode}")
+        return None
+    
+    # 生成 V1 签名 URL（有效 1 小时）
+    expires = int(time.time()) + 3600
+    sign_str = f"GET\n\n\n{expires}\n{canonicalized_resource}"
+    sig = base64.b64encode(
+        hmac.new(sk.encode("utf-8"), sign_str.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("utf-8")
+    # URL encode the signature
+    import urllib.parse
+    sig_encoded = urllib.parse.quote(sig, safe="")
+    
+    signed_url = f"{url}?OSSAccessKeyId={ak}&Expires={expires}&Signature={sig_encoded}"
+    log_fn(f"aliyun_asr: OSS 上传完成，签名 URL 已生成")
+    return signed_url
 
 
 def aliyun_asr(audio_path, app_key=None, model=None, timeout=300, log_fn=None,
@@ -226,7 +201,7 @@ def aliyun_asr(audio_path, app_key=None, model=None, timeout=300, log_fn=None,
 
     _log(f"aliyun_asr: 开始处理 ({model})...")
 
-    # Step 1: 上传文件到 OSS，获取公网URL
+    # Step 1: 上传文件到 OSS，获取签名 URL
     audio_url = None
     if oss_ak and oss_sk and oss_bucket:
         oss_config = {
@@ -237,10 +212,13 @@ def aliyun_asr(audio_path, app_key=None, model=None, timeout=300, log_fn=None,
             "api_key": app_key,
         }
         audio_url = _upload_to_oss(audio_path, oss_config, _log)
+    else:
+        _log("aliyun_asr: 未配置 OSS，无法上传音频文件")
+        _log("aliyun_asr: 请在 AI 设置中配置 OSS AccessKey/Bucket/Endpoint")
+        return None
 
     if not audio_url:
-        _log("aliyun_asr: 无法获取音频公网URL，需要配置 OSS 上传")
-        _log("aliyun_asr: 请在阿里云控制台创建 OSS Bucket 并配置相关参数")
+        _log("aliyun_asr: OSS 上传失败，无法获取音频 URL")
         return None
 
     # Step 2: 提交识别任务
