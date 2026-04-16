@@ -1704,6 +1704,52 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     volcengine_success = False
     cloud_reference = ""  # 云端ASR的准确全文，用于AI修正
 
+    def _run_aliyun_asr_subtitle():
+        """阿里云 ASR：高精度字级时间戳+按标点断句"""
+        try:
+            with open(sp, "r", encoding="utf-8-sig") as _af:
+                _acfg = _json.load(_af)
+                if not _acfg.get("asr_enabled", False):
+                    _log("云端ASR未启用，跳过阿里云")
+                    return
+        except Exception:
+            pass
+        nonlocal raw_segments, volcengine_success
+        try:
+            _log("正在尝试阿里云 ASR...")
+            if getattr(sys, "frozen", False):
+                sd = os.path.dirname(sys.executable)
+            else:
+                sd = os.path.dirname(os.path.abspath(__file__))
+            sp2 = os.path.join(sd, "ai_settings.json")
+            if not os.path.exists(sp2):
+                _log("aliyun_asr: ai_settings.json 不存在，跳过")
+                return
+            with open(sp2, "r", encoding="utf-8-sig") as f:
+                cfg = _json.load(f)
+            _ali_api_key = cfg.get("aliyun_api_key", "")
+            _ali_oss_ak = cfg.get("aliyun_oss_ak", "")
+            _ali_oss_sk = cfg.get("aliyun_oss_sk", "")
+            _ali_bucket = cfg.get("aliyun_bucket", "")
+            _ali_endpoint = cfg.get("aliyun_endpoint", "oss-cn-beijing.aliyuncs.com")
+            _ali_model = cfg.get("asr_model", "paraformer-v2") or "paraformer-v2"
+            if not all([_ali_api_key, _ali_oss_ak, _ali_oss_sk, _ali_bucket]):
+                _log("aliyun_asr: 未配置阿里云参数，跳过")
+                return
+            from aliyun_asr import aliyun_asr
+            segs = aliyun_asr(wav_path, app_key=_ali_api_key, model=_ali_model,
+                             oss_ak=_ali_oss_ak, oss_sk=_ali_oss_sk,
+                             oss_bucket=_ali_bucket, oss_endpoint=_ali_endpoint,
+                             log_fn=_log)
+            if segs:
+                raw_segments = segs
+                volcengine_success = True
+                _log(f"阿里云 ASR 成功: {len(raw_segments)} 条语音段")
+            else:
+                _log("阿里云 ASR 失败，将降级")
+        except Exception as e:
+            _log(f"阿里云 ASR 异常: {e}")
+
     def _run_volcengine_asr():
         """火山引擎大模型 ASR：高精度时间戳+断句"""
         # 仅当云端ASR启用时才执行
@@ -1833,7 +1879,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     # 先尝试火山引擎 ASR，失败则降级到 Whisper + 云端ASR
     import threading
 
-    # [v8.5] 字幕阶段：开了云端ASR才用火山引擎，否则直接Whisper
+    # 字幕阶段：跟随用户ASR选项（阿里云/火山引擎）
+    _asr_preset_sub = ""
     _use_cloud_sub = False
     try:
         if getattr(sys, "frozen", False):
@@ -1842,19 +1889,32 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             _sub_sd = os.path.dirname(os.path.abspath(__file__))
         _sub_sp = os.path.join(_sub_sd, "ai_settings.json")
         with open(_sub_sp, "r", encoding="utf-8-sig") as _cf:
-            _use_cloud_sub = _json.load(_cf).get("asr_enabled", False)
+            _sub_cfg = _json.load(_cf)
+            _use_cloud_sub = _sub_cfg.get("asr_enabled", False)
+            _asr_preset_sub = _sub_cfg.get("asr_preset", "") or _sub_cfg.get("asr_provider", "")
     except:
         pass
     if _use_cloud_sub:
-        _log("字幕阶段：云端ASR已启用，优先火山引擎")
-        t_volc = threading.Thread(target=_run_volcengine_asr)
-        t_volc.start()
-        t_volc.join(timeout=120)
-        if not volcengine_success:
-            _log("火山引擎ASR失败，降级到本地Whisper")
-            t1 = threading.Thread(target=_run_whisper)
-            t1.start()
-            t1.join(timeout=180)
+        if _asr_preset_sub == "阿里云":
+            _log("字幕阶段：云端ASR已启用，优先阿里云")
+            t_ali = threading.Thread(target=_run_aliyun_asr_subtitle)
+            t_ali.start()
+            t_ali.join(timeout=180)
+            if not volcengine_success:
+                _log("阿里云ASR失败，降级到本地Whisper")
+                t1 = threading.Thread(target=_run_whisper)
+                t1.start()
+                t1.join(timeout=180)
+        else:
+            _log("字幕阶段：云端ASR已启用，优先火山引擎")
+            t_volc = threading.Thread(target=_run_volcengine_asr)
+            t_volc.start()
+            t_volc.join(timeout=120)
+            if not volcengine_success:
+                _log("火山引擎ASR失败，降级到本地Whisper")
+                t1 = threading.Thread(target=_run_whisper)
+                t1.start()
+                t1.join(timeout=180)
     else:
         _log("字幕阶段：云端ASR未启用，使用本地Whisper")
         t1 = threading.Thread(target=_run_whisper)

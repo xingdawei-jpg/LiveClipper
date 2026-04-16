@@ -306,44 +306,46 @@ def _parse_result(status_data, log_fn=None):
 
         # 解析 transcripts
         transcripts = trans_data.get("transcripts", [])
+        # 断句标点集合：句号/问号/感叹号/逗号/顿号/分号
+        _SPLIT_PUNCS = set("。！？，、；")
         for transcript in transcripts:
-            # 句级 segments
-            sentences = transcript.get("sentences", [])
-            for sent in sentences:
-                text = sent.get("text", "").strip()
-                if not text:
-                    continue
-                segments.append({
-                    "start": sent.get("begin_time", 0) / 1000.0,  # 毫秒转秒
-                    "end": sent.get("end_time", 0) / 1000.0,
-                    "text": text,
-                })
-
-            # 如果没有 sentences，用 words 拼接
-            if not sentences:
-                words = transcript.get("words", [])
-                if words:
-                    current_text = ""
-                    start_time = None
-                    for w in words:
-                        if start_time is None:
-                            start_time = w.get("begin_time", 0) / 1000.0
-                        current_text += w.get("text", "")
-                        # 句号/问号/感叹号断句
-                        if w.get("text", "") in "。！？":
-                            segments.append({
-                                "start": start_time,
-                                "end": w.get("end_time", 0) / 1000.0,
-                                "text": current_text.strip(),
-                            })
-                            current_text = ""
-                            start_time = None
-                    if current_text.strip() and start_time is not None:
+            # 优先用 words（字级时间戳）按标点细切，断句更精确
+            words = transcript.get("words", [])
+            if words:
+                current_text = ""
+                start_time = None
+                for w in words:
+                    if start_time is None:
+                        start_time = w.get("begin_time", 0) / 1000.0
+                    current_text += w.get("text", "")
+                    # 遇到断句标点就切分
+                    if w.get("text", "") in _SPLIT_PUNCS:
                         segments.append({
                             "start": start_time,
-                            "end": words[-1].get("end_time", 0) / 1000.0,
+                            "end": w.get("end_time", 0) / 1000.0,
                             "text": current_text.strip(),
                         })
+                        current_text = ""
+                        start_time = None
+                # 剩余未断句的内容
+                if current_text.strip() and start_time is not None:
+                    segments.append({
+                        "start": start_time,
+                        "end": words[-1].get("end_time", 0) / 1000.0,
+                        "text": current_text.strip(),
+                    })
+            else:
+                # 没有 words 时回退到 sentences（句级，粒度较粗）
+                sentences = transcript.get("sentences", [])
+                for sent in sentences:
+                    text = sent.get("text", "").strip()
+                    if not text:
+                        continue
+                    segments.append({
+                        "start": sent.get("begin_time", 0) / 1000.0,
+                        "end": sent.get("end_time", 0) / 1000.0,
+                        "text": text,
+                    })
 
     if log_fn:
         log_fn(f"aliyun_asr: 解析完成，{len(segments)} 条语音段")

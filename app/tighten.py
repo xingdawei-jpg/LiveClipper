@@ -70,7 +70,7 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
     for clip in clips:
         c_type, c_text, c_start, c_end, c_score, c_dur = clip[:6]
         clean_ai = _clean(c_text)
-        # Hook片段不做任何边界调整，保持AI选的精确时间
+        # Hook片段不做任何边界调整
         if 'hook' in c_type.lower():
             tightened.append(clip)
             continue
@@ -102,31 +102,39 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
             est = _find_sub_time(last_srt[0], last_srt[1], last_clean, clean_ai, 'end')
             if est < c_end - 0.5 and est > new_start:
                 new_end = est
-
-        # close额外+0.5s防吃字，但检查延伸部分是否含非主品类内容
+        # Close片段：跳过start/end收紧，只加+0.5s防吃字缓冲
         if 'close' in c_type.lower():
-            # 检查延伸0.5s后的SRT条目是否含非主品类关键词
-            extend_end = new_end + 0.5
-            extend_srts = [(s, e, t) for s, e, t in in_range
-                          if s < extend_end and e > new_end]
-            _skip_extend = False
-            try:
-                from config import ALL_CATEGORIES
-                for _s, _e, _t in extend_srts:
-                    for _cat, _kws in ALL_CATEGORIES.items():
-                        if _cat != '上衣':  # 硬编码主品类判断不够好，但tighten拿不到主品类信息
-                            for _kw in _kws:
-                                if _kw in _t:
-                                    # 延伸部分含其他品类，不延伸
-                                    _skip_extend = True
+            # 找与片段重叠的SRT条目
+            _close_range = [(s, e, t) for s, e, t in srt_entries
+                          if s < c_end + 1 and e > c_start - 1]
+            if _close_range:
+                extend_end = c_end + 0.5
+                extend_srts = [(s, e, t) for s, e, t in _close_range
+                              if s < extend_end and e > c_end]
+                _skip_extend = False
+                try:
+                    from config import ALL_CATEGORIES
+                    for _s, _e, _t in extend_srts:
+                        for _cat, _kws in ALL_CATEGORIES.items():
+                            if _cat != '上衣':
+                                for _kw in _kws:
+                                    if _kw in _t:
+                                        _skip_extend = True
+                                        break
+                                if _skip_extend:
                                     break
-                            if _skip_extend:
-                                break
-            except ImportError:
-                pass
-            if not _skip_extend:
-                new_end += 0.5
-
+                except ImportError:
+                    pass
+                if not _skip_extend:
+                    c_end = c_end + 0.5
+                    c_dur = c_end - c_start
+                    _log(f"tighten [{c_type}]: +0.5s缓冲 -> {c_start:.1f}-{c_end:.1f}s")
+                    tightened.append((c_type, c_text, c_start, c_end, c_score, c_dur, *clip[6:]))
+                else:
+                    tightened.append(clip)
+            else:
+                tightened.append(clip)
+            continue
         new_dur = new_end - new_start
         if new_dur < 2.0:
             tightened.append(clip)
