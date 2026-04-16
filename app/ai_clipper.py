@@ -391,8 +391,8 @@ def _pre_clean_srt(srt_text, log_fn=None):
         i = 0
         while i < len(entries):
             text, start_s, end_s, dur = entries[i]
-            # 如果当前条目>=5秒，直接保留
-            if dur >= 5.0:
+            # 如果当前条目>=3秒，直接保留（阿里云ASR按标点切分后3-5秒已够精确）
+            if dur >= 3.0:
                 merged_short.append(entries[i])
                 i += 1
                 continue
@@ -400,7 +400,7 @@ def _pre_clean_srt(srt_text, log_fn=None):
             combined_text = text
             combined_end = end_s
             j = i + 1
-            while j < len(entries) and (combined_end - start_s) < 8.0:
+            while j < len(entries) and (combined_end - start_s) < 5.0:
                 next_text, next_start, next_end, next_dur = entries[j]
                 # 间隔>2秒视为话题断裂，不再合并
                 if next_start - combined_end > 2.0:
@@ -410,12 +410,12 @@ def _pre_clean_srt(srt_text, log_fn=None):
                 combined_end = next_end
                 j += 1
                 # 达到5秒目标就停
-                if combined_end - start_s >= 5.0:
+                if combined_end - start_s >= 3.0:
                     break
             merged_short.append((combined_text, start_s, combined_end, combined_end - start_s))
             i = j
         if len(merged_short) != len(entries):
-            _log(f"SRT短条目合并: {len(entries)} → {len(merged_short)} 条 (目标5-8秒/条)")
+            _log(f"SRT短条目合并: {len(entries)} → {len(merged_short)} 条 (目标3-5秒/条)")
         entries = merged_short
 
     # 重建 SRT
@@ -1421,7 +1421,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # [v9.4] Close片段语句完整性保障
         clips = _ensure_close_complete(clips, cleaned_srt, log_fn)
         clips = _split_long_clips(clips, _indexed_srt_entries, log_fn)
-        clips = _trim_filler_prefix(clips, _indexed_srt_entries, log_fn)
+        clips = _trim_filler_start(clips, srt_text, log_fn)
         # 重叠清理：_split_long_clips和_trim_filler_prefix可能引入重叠
         clips = _remove_overlaps(clips, log_fn)
         # clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)  # [DISABLED] 延伸打乱节奏
@@ -3209,7 +3209,7 @@ def _ensure_close_complete_impl(clips, cleaned_srt, log_fn=None):
 
 
 def _trim_filler_start(clips, cleaned_srt, log_fn=None):
-    """裁掉片段开头的语气词SRT条目，把start推迟到第一个非语气词条目的起始时间"""
+    """裁掉片段开头的废话：1)整条SRT是废话词 2)SRT文本以废话前缀开头(按字符比例裁时间)"""
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -3218,6 +3218,8 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None):
 
     _kw_local_fb = _get_keywords()
     FILLER_WORDS = set(_kw_local_fb["filler_words"])
+    # 构建按长度降序排列的废话前缀列表(长前缀优先匹配)
+    _sorted_filler = sorted(FILLER_WORDS, key=len, reverse=True)
 
     # 解析 SRT 为 entries
     entries = []
@@ -3249,6 +3251,7 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None):
 
     trimmed = []
     trim_count = 0
+    prefix_trim_count = 0
     for ct, text, start, end, score, dur, *_ in clips:
         new_start = start
         # Hook片段不做任何调整，保持AI选的精确时间
@@ -3256,30 +3259,55 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None):
             trimmed.append((ct, text, start, end, score, dur, *_))
             continue
 
-        # 找片段开头连续的语气词SRT条目
+        # 第一步：跳过片段开头整条是废话的SRT条目
         for s, e, norm in entries:
             if e <= start:
-                continue  # 在片段之前
+                continue
             if s >= end:
-                break  # 超出片段范围
-            # 条目跟片段重叠
+                break
             if s < start:
-                continue  # 条目在片段中间开始，跳过
-            # 条目从片段开头开始，检查是否是语气词
+                continue
             if norm in FILLER_WORDS or (len(norm) <= 2 and norm in FILLER_WORDS):
-                new_start = e  # 跳过这个语气词条目，start设为条目结尾
+                new_start = e
                 trim_count += 1
             else:
-                break  # 遇到非语气词，停止
+                break
+
+        # 第二步：检测片段文本是否以废话前缀开头
+        # 如 "我讲上这套的特点啊如果你是早起遛狗..." → 裁掉 "我讲上这套的特点啊"
+        norm_text = re.sub(r'[^\u4e00-\u9fff\w]', '', text.strip())
+        filler_prefix_len = 0
+        for fw in _sorted_filler:
+            if not fw:
+                continue
+            if norm_text.startswith(fw):
+                filler_prefix_len = len(fw)
+                break  # 长前缀优先，第一个匹配就是最长的
+
+        if filler_prefix_len > 0 and len(norm_text) > filler_prefix_len:
+            # 按字符比例估算裁切时间
+            total_chars = len(norm_text)
+            ratio = filler_prefix_len / total_chars
+            # 只裁不超过条目40%的部分，避免裁太多
+            if ratio <= 0.4:
+                clip_dur = end - new_start
+                trim_seconds = clip_dur * ratio
+                candidate_start = new_start + trim_seconds
+                new_dur = end - candidate_start
+                if new_dur >= 2.0:
+                    new_start = candidate_start
+                    prefix_trim_count += 1
+
         new_dur = end - new_start
         if new_dur < 2.0:
-            # 裁掉语气词后太短，保留原样
             trimmed.append((ct, text, start, end, score, dur, *_))
         else:
             trimmed.append((ct, text, new_start, end, score, new_dur, *_))
 
     if trim_count:
-        _log(f"语气词裁剪: 裁掉 {trim_count} 个片段开头的语气词")
+        _log(f"废话裁剪: 跳过 {trim_count} 个整条废话SRT")
+    if prefix_trim_count:
+        _log(f"废话裁剪: 裁掉 {prefix_trim_count} 个片段开头的废话前缀")
 
     return trimmed
 

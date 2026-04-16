@@ -1,4 +1,4 @@
-"""
+﻿"""
 LiveClipper 自动更新模块
 - 启动时后台检查 GitHub Releases 是否有新版本
 - 支持强制更新、下载进度、SHA256 校验
@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "8.5.1"
+CURRENT_VERSION = "8.5.2"
 
 
 

@@ -1765,13 +1765,10 @@ def _show_activation_check(root):
         if status.get("activated"):
             pass  # 已激活，静默通过
         elif status.get("trial"):
-            # 试用中，首次启动显示激活弹窗（带试用按钮）
+            # 试用中：不弹激活码输入框，只在剩余≤3次时提醒
             uses = status["uses_left"]
-            # 读取本地缓存判断是否首次启动
-            from platform_config import LICENSE_CACHE_FILE
-            is_first_launch = not os.path.exists(LICENSE_CACHE_FILE)
-            if is_first_launch or uses <= _lc.TRIAL_USES:
-                _show_activate_dialog(root)
+            if uses <= 3:
+                _show_trial_dialog(root, uses, force=(uses <= 0))
         elif status.get("need_activate"):
             _show_activate_dialog(root)
     except Exception:
