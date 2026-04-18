@@ -544,11 +544,26 @@ def _split_subtitle_text(text, max_chars=12):
         if len(seg) <= max_chars:
             result.append(seg)
         else:
-            # 尝试在逗号等位置拆
-            for i in range(0, len(seg), max_chars):
-                chunk = seg[i:i+max_chars]
+            # 尝试在词边界拆，避免截断词语
+            i = 0
+            while i < len(seg):
+                end = min(i + max_chars, len(seg))
+                # 如果不是切到末尾，尝试微调到词边界
+                if end < len(seg):
+                    # 向前找助词/连词位置
+                    adjusted = end
+                    for offset in range(0, 3):
+                        pos = end - offset
+                        if pos <= i:
+                            break
+                        if seg[pos-1] in '的了着过是在也都还很最把被让给和与但而':
+                            adjusted = pos
+                            break
+                    end = adjusted
+                chunk = seg[i:end]
                 if chunk:
                     result.append(chunk)
+                i = end
     return result
 
 
@@ -2104,15 +2119,52 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     if pos > 0 and pos + len(word) <= max_sub + 1:
                         cut = pos + len(word)
                         break
-            # 仍找不到则硬切，但保证前后都不太短
+            # 仍找不到则硬切，在词边界处切，避免截断词语
             if cut <= 0:
-                # 尝试在 max_sub 处切，如果剩余太短就适当延长
                 cut = max_sub
                 remaining = len(text) - cut
                 if remaining > 0 and remaining < min_sub:
                     cut = len(text) - min_sub
-            if cut <= 0:
-                cut = len(text)
+                # 词边界检测：向前/向后扫描找助词/连词位置（在助词后断句）
+                if 0 < cut < len(text):
+                    best = cut
+                    # 向前扫：找到「的了着过是在也都还很最把被让给和与但而」结尾位置
+                    for offset in range(0, 6):
+                        pos = cut - offset
+                        if pos <= 1:
+                            break
+                        if text[pos-1] in '的了着过是在也都还很最把被让给和与但而':
+                            if len(text) - pos >= min_sub:
+                                best = pos
+                                break
+                    # 向后扫：如果向前没找到，向后找下一个助词位置
+                    if best == cut and len(text) > cut:
+                        for offset in range(1, 6):
+                            pos = cut + offset
+                            if pos >= len(text):
+                                break
+                            if text[pos-1] in '的了着过是在也都还很最把被让给和与但而':
+                                if len(text) - pos >= min_sub:
+                                    best = pos
+                                    break
+                    cut = best
+                    # 检查是否切断了常见双字词（如"特点"→"特"+"点"）
+                    if 0 < cut < len(text):
+                        pair = text[cut-1:cut+1]
+                        _common_pairs = {'特点','特色','特别','非常','相当','所以','因为','但是',
+                            '然后','而且','或者','以及','已经','正在','可以','能够','应该',
+                            '我们','这个','那个','整个','全部','完全','很多','很好','最好',
+                            '最后','出来','起来','下来','一点','一下','一直','一切','衣服',
+                            '面料','颜色','尺码','版型','款式','腰线','领口','袖子','下摆',
+                            '细节','设计','汉麻','天丝','真丝','棉麻','雪纺','女装','新款',
+                            '老款','补货','现货','差不多','不少','不行','不能','好的','行了'}
+                        if pair in _common_pairs:
+                            if cut - 1 >= 4 and len(text) - (cut - 1) >= min_sub:
+                                cut = cut - 1
+                            elif cut + 1 < len(text) and len(text) - (cut + 1) >= min_sub:
+                                cut = cut + 1
+                if cut <= 0 or cut >= len(text):
+                    cut = min(max_sub, len(text))
             parts.append(text[:cut])
             text = text[cut:]
         if text.strip():
@@ -2144,6 +2196,24 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     if len(split_segments) != len(fixed_segments):
         _log(f"长句拆分: {len(fixed_segments)} → {len(split_segments)} 条")
     fixed_segments = split_segments
+
+    # --- 字幕文本 ASR 修正（修正识别错误） ---
+    try:
+        from config import ASR_CORRECTIONS as _asr_corrections
+        if _asr_corrections:
+            _asr_fixed = 0
+            for seg in fixed_segments:
+                t = seg["text"]
+                for wrong, right in _asr_corrections.items():
+                    if wrong in t:
+                        t = t.replace(wrong, right)
+                if t != seg["text"]:
+                    seg["text"] = t
+                    _asr_fixed += 1
+            if _asr_fixed:
+                _log(f"字幕ASR修正: {len(fixed_segments)} 条中修正了 {_asr_fixed} 条")
+    except ImportError:
+        pass  # ASR_CORRECTIONS not defined in config
 
     # --- 4d+4e: drawtext 逐条烧录字幕 ---
     # 不用 subtitles/ass 滤镜（Windows 上 fontconfig 不可靠）
