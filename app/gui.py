@@ -1794,14 +1794,14 @@ def _show_activate_dialog(root):
     """激活码输入对话框"""
     dlg = tk.Toplevel(root)
     dlg.title("激活 LiveClipper")
-    dlg.geometry("380x300")
+    dlg.geometry("440x300")
     dlg.resizable(False, False)
     dlg.transient(root)
     dlg.grab_set()
 
     # 居中
     dlg.update_idletasks()
-    x = root.winfo_x() + (root.winfo_width() - 380) // 2
+    x = root.winfo_x() + (root.winfo_width() - 440) // 2
     y = root.winfo_y() + (root.winfo_height() - 260) // 2
     dlg.geometry(f"+{max(0,x)}+{max(0,y)}")
 
@@ -1823,7 +1823,7 @@ def _show_activate_dialog(root):
 
     tk.Label(entry_frame, text="激活码:", font=("Microsoft YaHei UI", 10)).pack(side="left", padx=(0, 8))
     code_var = tk.StringVar()
-    entry = tk.Entry(entry_frame, textvariable=code_var, width=30, font=("Consolas", 11))
+    entry = tk.Entry(entry_frame, textvariable=code_var, width=38, font=("Consolas", 11))
     entry.pack(side="left")
     entry.focus_set()
 
@@ -1861,14 +1861,17 @@ def _show_activate_dialog(root):
         root.quit()
         root.destroy()
 
-    # 检查是否还在试用期内
+    # 始终显示试用按钮（新用户首次启动也会看到）
     trial = check_trial()
-    if trial.get("in_trial"):
-        tk.Button(
-            btn_frame, text="试用使用", width=10,
-            command=skip_trial,
-            font=("Microsoft YaHei UI", 10)
-        ).pack(side="left", padx=5)
+    # 无论是否在试用期，都显示试用按钮（首次启动时check_trial会自动初始化试用）
+    trial_label = ""
+    if trial.get("in_trial") and trial.get("uses_left", 0) > 0:
+        trial_label = f"（剩余{trial['uses_left']}次）"
+    tk.Button(
+        btn_frame, text=f"试用{trial_label}", width=12,
+        command=skip_trial,
+        font=("Microsoft YaHei UI", 10)
+    ).pack(side="left", padx=5)
 
     tk.Button(
         btn_frame, text="退出", width=10,

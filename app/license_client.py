@@ -78,8 +78,21 @@ CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
 TRIAL_USES = 10
 
-PLAN_NAMES = {"01": "月付", "02": "季付", "03": "年付"}
-PLAN_DAYS = {"01": 30, "02": 90, "03": 365}
+PLAN_NAMES = {"01": "月付", "02": "季付", "03": "年付", "04": "永久"}
+PLAN_DAYS = {"01": 30, "02": 90, "03": 365, "04": 36500}  # 04=永久, 36500天=100年
+
+B36_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def _decode_b36(s):
+    """Base36 decode"""
+    s = s.upper().strip()
+    v = 0
+    for c in s:
+        idx = B36_CHARS.find(c)
+        if idx < 0:
+            return 0
+        v = v * 36 + idx
+    return v
 
 
 def _get_base_path():
@@ -227,7 +240,10 @@ def _parse_code_dates(code):
     """从激活码中解析出激活日期和到期日期（毫秒时间戳，供飞书日期字段使用）"""
     try:
         raw = code.replace("-", "").strip().lower()
-        if len(raw) == 34:
+        if len(raw) == 36:
+            # 36位码：plan(2) + dist_id(4base36) + expires(8) + nonce(2) + sig(20)
+            expires_hex = raw[6:14]
+        elif len(raw) == 34:
             # 34位码：plan(2) + dist_id(2) + expires(8) + nonce(2) + sig(20)
             expires_hex = raw[4:12]
         elif len(raw) == 32:
@@ -251,9 +267,11 @@ def _bind_device(code, machine_id, device_info="", status="已激活"):
         existing = _query_device_binding(code)
         activate_ts, expire_ts = _parse_code_dates(code)
         
-        # 解析分销商ID（34位码含dist_id，32位码无）
+        # 解析分销商ID（36位码含4位base36, 34位码含2位hex, 32位码无）
         dist_id = ""
-        if len(raw_code) == 34:
+        if len(raw_code) == 36:
+            dist_id = raw_code[2:6].upper()
+        elif len(raw_code) == 34:
             dist_id = raw_code[2:4]
         
         # 日期字段（飞书多维表格日期类型需要毫秒时间戳）
@@ -528,26 +546,37 @@ def check_trial():
 def validate_code(code):
     if not code:
         return {"ok": False, "msg": "激活码为空"}
-    raw = code.replace("-", "").strip().lower()
-    # 兼容两种格式: 32位(旧版无分销商) / 34位(含distributor_id)
-    if len(raw) not in (32, 34):
+    raw = code.replace("-", "").strip()
+    # 兼容三种格式: 32位(旧版无分销商) / 34位(含distributor_id)
+    if len(raw) not in (32, 34, 36):
         return {"ok": False, "msg": "激活码格式错误"}
     try:
-        if len(raw) == 34:
-            # 新版34位: plan(2) + dist_id(2) + expires(8) + nonce(2) + sig(20)
-            plan_hex = raw[0:2]
-            dist_id = raw[2:4]
-            expires_hex = raw[4:12]
-            nonce_hex = raw[12:14]
-            signature = raw[14:34]
+        if len(raw) == 36:
+            # v3.0 36位: plan(2hex) + dist_id(4base36) + expires(8hex) + nonce(2hex) + sig(20hex)
+            plan_hex = raw[0:2].lower()
+            dist_b36 = raw[2:6].upper()
+            expires_hex = raw[6:14].lower()
+            nonce_hex = raw[14:16].lower()
+            signature = raw[16:36].lower()
+            payload = plan_hex + dist_b36 + expires_hex + nonce_hex
+            dist_id = dist_b36
+        elif len(raw) == 34:
+            # v2.0 34位: plan(2) + dist_id(2hex) + expires(8) + nonce(2) + sig(20)
+            raw_lower = raw.lower()
+            plan_hex = raw_lower[0:2]
+            dist_id = raw_lower[2:4]
+            expires_hex = raw_lower[4:12]
+            nonce_hex = raw_lower[12:14]
+            signature = raw_lower[14:34]
             payload = plan_hex + dist_id + expires_hex + nonce_hex
         else:
             # 旧版32位: plan(2) + expires(8) + nonce(2) + sig(20)
-            plan_hex = raw[0:2]
+            raw_lower = raw.lower()
+            plan_hex = raw_lower[0:2]
             dist_id = ""
-            expires_hex = raw[2:10]
-            nonce_hex = raw[10:12]
-            signature = raw[12:32]
+            expires_hex = raw_lower[2:10]
+            nonce_hex = raw_lower[10:12]
+            signature = raw_lower[12:32]
             payload = plan_hex + expires_hex + nonce_hex
         
         if plan_hex not in PLAN_NAMES:
@@ -559,7 +588,7 @@ def validate_code(code):
             return {"ok": False, "msg": "激活码无效（签名错误）"}
         return {
             "ok": True,
-            "plan": {"01": "monthly", "02": "quarterly", "03": "yearly"}.get(plan_hex, "monthly"),
+            "plan": {"01": "monthly", "02": "quarterly", "03": "yearly", "04": "permanent"}.get(plan_hex, "monthly"),
             "plan_name": PLAN_NAMES[plan_hex],
             "days": PLAN_DAYS[plan_hex],
             "plan_hex": plan_hex,
@@ -728,9 +757,13 @@ def check_activation():
             expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
             
             if now > expires_at:
-                # 过期也写熔断标记，防止改系统时间绕过
-                _write_revoked_marker()
-                return {"need_activate": True, "reason": f"激活码已于 {expires_date} 过期，请续费"}
+                # 永久版永不过期
+                if result.get("plan_hex") == "04":
+                    pass  # 永久版跳过过期检查
+                else:
+                    # 过期也写熔断标记，防止改系统时间绕过
+                    _write_revoked_marker()
+                    return {"need_activate": True, "reason": f"激活码已于 {expires_date} 过期，请续费"}
             
             # Step: 联网服务器验证（新增）
             online_result = _verify_online(code, _get_machine_id())
@@ -825,9 +858,17 @@ def check_activation():
     if trial["in_trial"]:
         return {"trial": True, "uses_left": trial["uses_left"]}
 
-    if not _get_trial_info():
+    # 没有试用记录 → 开始试用
+    trial_info = _get_trial_info()
+    if not trial_info:
         _start_trial()
         return {"trial": True, "uses_left": TRIAL_USES}
+
+    # 机器ID不匹配但从未激活过 → 允许新机器试用
+    if trial_info.get("trial_machine_id") and trial_info.get("trial_machine_id") != _get_machine_id():
+        if not cache.get("activation_code"):
+            _start_trial()
+            return {"trial": True, "uses_left": TRIAL_USES}
 
     return {"need_activate": True, "reason": "试用次数已用完，请激活"}
 
