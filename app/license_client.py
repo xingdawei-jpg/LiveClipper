@@ -27,18 +27,9 @@ from datetime import datetime
 # ============================================================
 # 调试日志（激活问题排查，排查完后删除）
 # ============================================================
-import os as _dbg_os
 
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW - hide console window
 
-def _dbg_log(msg):
-    try:
-        _dbg_path = _dbg_os.path.join(_dbg_os.environ.get("APPDATA", _dbg_os.path.expanduser("~")), "LiveClipper", "license_debug.log")
-        with open(_dbg_path, "a", encoding="utf-8") as _dbg_f:
-            from datetime import datetime as _dbg_dt
-            _dbg_f.write(f"[{_dbg_dt.now().strftime('%H:%M:%S')}] {msg}\n")
-    except Exception:
-        pass
 
 
 # ============================================================
@@ -392,27 +383,146 @@ def _get_device_info():
         return "unknown"
 
 
+def _get_fingerprints():
+    """收集7组件硬件指纹（防盗2.0加强版）
+    返回 dict: {cpu_id, disk_serial, baseboard_serial, mac, bios_serial, volume_serial, ram_total}
+    """
+    fps = {}
+    
+    # 1. CPU ProcessorId
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "cpu", "get", "ProcessorId"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "ProcessorId"]
+            if lines:
+                fps["cpu_id"] = lines[0]
+        else:
+            r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                             capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                fps["cpu_id"] = r.stdout.strip()
+    except Exception:
+        pass
+    
+    # 2. 硬盘序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "diskdrive", "get", "SerialNumber"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "SerialNumber"]
+            if lines:
+                fps["disk_serial"] = lines[0]
+        else:
+            r = subprocess.run(["diskutil", "info", "/"],
+                             capture_output=True, text=True, timeout=5)
+            for line in r.stdout.split("\n"):
+                if "Volume UUID" in line:
+                    fps["disk_serial"] = line.split(":")[-1].strip()
+                    break
+    except Exception:
+        pass
+    
+    # 3. 主板序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "baseboard", "get", "SerialNumber"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "SerialNumber"]
+            if lines and lines[0] and lines[0] != "Default string":
+                fps["baseboard_serial"] = lines[0]
+    except Exception:
+        pass
+    
+    # 4. MAC地址
+    try:
+        mac = uuid.getnode()
+        fps["mac"] = f"{mac:012x}"
+    except Exception:
+        pass
+    
+    # 5. BIOS序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "bios", "get", "SerialNumber"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "SerialNumber"]
+            if lines and lines[0]:
+                fps["bios_serial"] = lines[0]
+        else:
+            # macOS: IOPlatformSerialNumber
+            r = subprocess.run(["ioreg", "-l"],
+                             capture_output=True, text=True, timeout=5)
+            for line in r.stdout.split("\n"):
+                if "IOPlatformSerialNumber" in line:
+                    parts = line.split('"')
+                    if len(parts) >= 4:
+                        fps["bios_serial"] = parts[-2]
+                    break
+    except Exception:
+        pass
+    
+    # 6. 系统盘卷序列号
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "logicaldisk", "where", "DeviceID='C:'", "get", "VolumeSerialNumber"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "VolumeSerialNumber"]
+            if lines and lines[0]:
+                fps["volume_serial"] = lines[0]
+    except Exception:
+        pass
+    
+    # 7. 内存总量
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["wmic", "computersystem", "get", "TotalPhysicalMemory"],
+                             capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+            lines = [l.strip() for l in r.stdout.strip().split("\n")
+                     if l.strip() and l.strip() != "TotalPhysicalMemory"]
+            if lines and lines[0]:
+                fps["ram_total"] = lines[0]
+        else:
+            r = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                fps["ram_total"] = r.stdout.strip()
+    except Exception:
+        pass
+    
+    return fps
+
+
 # ============================================================
 # 服务器验证配置
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
-_VERIFY_API_URL = ""  # 例: https://1234567890.cn-hangzhou.fc.aliyuncs.com/verify
+_VERIFY_API_URL = "https://license-server-tsigpdxecv.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
 _OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
 _REVOKED_MARKER = ".revoked"  # 熔断标记文件名
 
 
 def _verify_online(code, machine_id):
-    """联网验证激活码（调用云函数API）
-    返回: {valid, expires, days_left, revoked, plan, msg} 或 None（网络失败）
+    """联网验证激活码（防盗2.0：调用阿里云FC API + 7组件指纹匹配）
+    返回: {valid, expires, revoked, plan, msg} 或 None（网络失败）
     """
     if not _VERIFY_API_URL:
         return None  # 未配置API地址，跳过联网验证
     
     try:
         import urllib.parse as _urlp
-        params = _urlp.urlencode({"code": code.replace("-", "").strip().lower(),
-                                  "machine_id": machine_id})
-        url = f"{_VERIFY_API_URL}?{params}"
+        fingerprints = _get_fingerprints()
+        params = _urlp.urlencode({
+            "code": code.replace("-", "").strip().lower(),
+            "machine_id": machine_id,
+            "fingerprints": json.dumps(fingerprints),
+        })
+        url = f"{_VERIFY_API_URL}/verify?{params}"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=8) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -421,6 +531,53 @@ def _verify_online(code, machine_id):
         return None  # 网络失败，走离线宽限
 
 
+
+
+def _fc_activate(code, machine_id, result_info, expires_at):
+    """调用FC /activate 注册设备绑定"""
+    if not _VERIFY_API_URL:
+        return False
+    try:
+        fingerprints = _get_fingerprints()
+        body = json.dumps({
+            "code": code.replace("-", "").strip().lower(),
+            "machine_id": machine_id,
+            "fingerprints": fingerprints,
+            "device_info": _get_device_info(),
+            "plan": result_info.get("plan", ""),
+            "plan_name": result_info.get("plan_name", ""),
+            "plan_hex": result_info.get("plan_hex", ""),
+            "expires_at": expires_at,
+        }).encode("utf-8")
+        url = f"{_VERIFY_API_URL}/activate"
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result.get("valid", False)
+    except Exception:
+        return False
+
+
+def _fc_unbind(code, machine_id):
+    """调用FC /unbind 解绑设备"""
+    if not _VERIFY_API_URL:
+        return False
+    try:
+        fingerprints = _get_fingerprints()
+        body = json.dumps({
+            "code": code.replace("-", "").strip().lower(),
+            "machine_id": machine_id,
+            "fingerprints": fingerprints,
+        }).encode("utf-8")
+        url = f"{_VERIFY_API_URL}/unbind"
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result.get("ok", False)
+    except Exception:
+        return False
 def _get_last_online_verify():
     """获取上次联网验证成功的时间戳"""
     cache = _load_cache()
@@ -642,7 +799,6 @@ def activate_with_code(code):
     activated_at = int(time.time())
     expires_at = activated_at + plan_days * 86400
     expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
-    _dbg_log(f"activate_with_code: saving cache, code={code[:8]}..., mid={current_mid}")
     _save_license_code(code)
     _save_cache({
         "code": code,
@@ -654,7 +810,14 @@ def activate_with_code(code):
         "machine_id": current_mid,
     })
 
-    # Step 6: 飞书服务端绑定（兼容旧版，非阻塞）
+    # Step 6: 防盗2.0 FC注册（优先）
+    plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+    fc_expires_at = activated_at + plan_days * 86400
+    fc_ok = _fc_activate(code, current_mid, result, fc_expires_at)
+    if fc_ok:
+        _update_online_verify_time()
+
+    # Step 7: 飞书服务端绑定（兼容旧版，非阻塞）
     device_info = _get_device_info()
     _bind_device(code, current_mid, device_info)
 
@@ -679,8 +842,11 @@ def deactivate_device():
         if cached_mid and cached_mid != current_mid:
             return {"ok": False, "msg": "当前设备与绑定设备不匹配"}
 
-    # 服务端解绑
-    unbind_ok = _unbind_device(code)
+    # 防盗2.0 FC解绑（优先）
+    fc_ok = _fc_unbind(code, current_mid)
+    
+    # 飞书服务端解绑（兼容旧版）
+    unbind_ok = _unbind_device(code) if not fc_ok else True
 
     # 清空本地
     _save_cache({})
@@ -727,12 +893,10 @@ def check_activation():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
     cache = _load_cache()
-    _dbg_log(f"check_activation: cache={cache}")
 
     if cache and cache.get("code"):
         code = cache["code"]
         result = validate_code(code)
-        _dbg_log(f"validate_code result: {result}")
         if result["ok"]:
             # 方案B：到期时间 = activated_at + 套餐天数
             activated_at = cache.get("activated_at", 0)
@@ -777,7 +941,13 @@ def check_activation():
                     return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
                 
                 if online_result.get("valid") == False:
-                    return {"need_activate": True, "reason": online_result.get("msg", "激活码无效")}
+                    # not_found = 本地有缓存但FC没记录（迁移场景），自动注册
+                    if online_result.get("not_found"):
+                        plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+                        fc_exp = cache.get("activated_at", int(time.time())) + plan_days * 86400
+                        _fc_activate(code, _get_machine_id(), result, fc_exp)
+                    else:
+                        return {"need_activate": True, "reason": online_result.get("msg", "激活码无效")}
                 
                 # 服务器验证通过，同步过期信息
                 server_expires = online_result.get("expires", 0)
@@ -796,7 +966,6 @@ def check_activation():
             # Step: 飞书多维表格校验（防盗2.0暂时关闭，仅保留吊销检测）
             try:
                 binding = _query_device_binding(code)
-                _dbg_log(f"Feishu binding: {binding}")
                 if binding:
                     # 仅检查吊销状态，不做设备绑定校验
                     if binding.get("status") == "已吊销":
@@ -810,7 +979,6 @@ def check_activation():
             except Exception:
                 pass
             
-            _dbg_log("check_activation: returning activated=True")
             return {
                 "activated": True,
                 "plan_name": result["plan_name"],

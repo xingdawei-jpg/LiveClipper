@@ -237,7 +237,7 @@ def ensure_sentence_complete(clips, srt_text, log_fn=None):
         else:
             end_limits[idx] = 99999
 
-    MAX_EXTENSION = 5.0
+    MAX_EXTENSION = 8.0
     result = list(clips)
     extended_count = 0
 
@@ -546,6 +546,7 @@ def trim_tail_filler(clips, srt_text, log_fn=None):
         
         if not c_text:
             continue
+        if 'close' in c_type.lower(): continue
         
         trim_end = None
         
