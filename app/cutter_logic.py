@@ -1231,6 +1231,24 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     will_subtitle = subtitle_overlay and SUBTITLE_OVERLAY.get("enabled")
     _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置Whisper+DeepSeek修复）' if will_subtitle else '关'}")
+    # [v9.6] Parse SRT boundaries for hook tail buffer
+    _srt_boundaries = []
+    try:
+        import re as _re
+        with open(srt_path, "r", encoding="utf-8") as _sf:
+            _srt_text = _sf.read()
+        for _m in _re.finditer(r"(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})", _srt_text):
+            _ts = _m.group(1).replace(",", ".").strip()
+            _te = _m.group(2).replace(",", ".").strip()
+            _h, _mi, _s = _ts.split(":")
+            _start = int(_h)*3600 + int(_mi)*60 + float(_s)
+            _h2, _mi2, _s2 = _te.split(":")
+            _end = int(_h2)*3600 + int(_mi2)*60 + float(_s2)
+            _srt_boundaries.append((_start, _end))
+        _srt_boundaries.sort()
+    except Exception:
+        pass
+
     _log(f"开始切割 {total_clips} 个片段...")
 
     # 获取视频时长
@@ -1277,6 +1295,17 @@ def process_video(video_path, srt_path=None, output_path=None,
             # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
             end_buf = 0
+            # [v9.6] Hook尾部ASR补偿：SRT时间戳常比实际语音早0.2-0.4s
+            # 用下一条SRT的start卡上限，不跨入下一句
+            if 'hook' in c_type.lower() and _srt_boundaries:
+                _next_srt = None
+                for _ts, _te in _srt_boundaries:
+                    if _ts > end + 0.01:
+                        _next_srt = _ts
+                        break
+                _max_ext = min(0.5, _next_srt - end) if _next_srt else 0.5
+                if _max_ext > 0:
+                    end = min(video_duration, end + _max_ext)
             start = max(0, start - start_buf)
             end = min(video_duration, end + end_buf)
 
@@ -1309,7 +1338,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             cmd += ["-vf", combined_vf]
             cmd += ["-pix_fmt", "yuv420p"]
             cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
-                   "-af", f"afade=t=in:st=0:d=0.15,afade=t=out:st={clip_duration-0.3:.2f}:d=0.3"]
+                   "-af", f"afade=t=in:st=0:d=0.15"]
             cmd += ["-movflags", "+faststart"]
             cmd += [temp_file]
             _log(f"[T] [{time.strftime('%H:%M:%S')}] Popen start")
@@ -2230,7 +2259,10 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     else:
         _drawtext_font = DRAWTEXT_FONT_PATH  # fallback
     sc = SUBTITLE_OVERLAY
-    font_size = sc.get("font_size", 48)
+    font_size = sc.get("font_size", 52)
+    # 根据视频宽度自适应缩放字号（基准1080px）
+    if w and w > 0:
+        font_size = max(28, int(font_size * w / 1080))
     outline_w = sc.get("outline_width", 4)
     margin_v = sc.get("margin_v", 270) + 100  # 上移100
 

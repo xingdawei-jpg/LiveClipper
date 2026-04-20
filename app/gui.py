@@ -2189,7 +2189,49 @@ def main():
     except ImportError:
         root = tk.Tk()
     try:
-        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
+        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(2)
+    except:
+        try:
+            from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
+        except: pass
+    # 根据显示器DPI自动缩放UI
+    try:
+        import ctypes
+        # 优先用 GetDpiForSystem (Win10 1607+)，比 GetDeviceCaps 更准
+        dpi = 0
+        try:
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+        except:
+            pass
+        if dpi <= 0:
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+        if dpi > 0:
+            scale = dpi / 96.0
+            root.tk.call('tk', 'scaling', scale)
+    except: pass
+    # 字体强制放大：DPI缩放后字体太小
+    try:
+        from tkinter import font as tkfont
+        _FORCE_FONT = ('Microsoft YaHei UI', 14)
+        _FORCE_MONO = ('Consolas', 14)
+        def _set_fonts(widget):
+            try:
+                wtype = widget.winfo_class()
+                if wtype in ('Text',):
+                    widget.configure(font=_FORCE_MONO)
+                elif wtype not in ('Canvas', 'Scrollbar', 'Scale', 'TScale'):
+                    try:
+                        widget.configure(font=_FORCE_FONT)
+                    except:
+                        pass
+            except:
+                pass
+            for child in widget.winfo_children():
+                _set_fonts(child)
+        # 延迟执行，等所有widget创建完
+        root.after(100, lambda: _set_fonts(root))
     except: pass
     # 启动时检查激活状态
     _show_activation_check(root)
