@@ -522,6 +522,15 @@ class DownloadDialog(tk.Toplevel):
             if new_ver:
                 _set_installed_version(new_ver)
 
+            # Clear __pycache__ so new .py files take effect immediately
+            try:
+                import shutil
+                _cache_dir = _os.path.join(app_dir, "__pycache__")
+                if _os.path.isdir(_cache_dir):
+                    shutil.rmtree(_cache_dir)
+            except Exception:
+                pass
+
             self.after(0, lambda: self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * 100 / 100), 20))
             self.after(0, lambda: self.status_label.config(text="更新完成"))
 
