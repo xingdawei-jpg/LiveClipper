@@ -2188,40 +2188,16 @@ def main():
         import tkinterdnd2; root = tkinterdnd2.Tk()
     except ImportError:
         root = tk.Tk()
-    # DPI awareness disabled: let Windows handle auto-scaling
-    # (slightly blurry but correctly sized on high-DPI screens)
-    try:
-        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(0)
-    except:
-        pass
-    # DPI scaling: let Windows handle it (Awareness=0)
-    # tk scaling is set to a comfortable default
-    try:
-        root.tk.call('tk', 'scaling', 1.25)
-    except:
-        pass
-    # 字体强制放大：DPI缩放后字体太小
+    # DPI: use system default (no override)
+    # tk scaling: system default
+    # 字体设置：修改默认字体（瞬间生效，不递归遍历）
     try:
         from tkinter import font as tkfont
-        _FORCE_FONT = ('Microsoft YaHei UI', 14)
-        _FORCE_MONO = ('Consolas', 14)
-        def _set_fonts(widget):
-            try:
-                wtype = widget.winfo_class()
-                if wtype in ('Text',):
-                    widget.configure(font=_FORCE_MONO)
-                elif wtype not in ('Canvas', 'Scrollbar', 'Scale', 'TScale'):
-                    try:
-                        widget.configure(font=_FORCE_FONT)
-                    except:
-                        pass
-            except:
-                pass
-            for child in widget.winfo_children():
-                _set_fonts(child)
-        # 延迟执行，等所有widget创建完
-        root.after(100, lambda: _set_fonts(root))
-    except: pass
+        tkfont.nametofont('TkDefaultFont').configure(family='Microsoft YaHei UI', size=11)
+        tkfont.nametofont('TkTextFont').configure(family='Microsoft YaHei UI', size=11)
+        tkfont.nametofont('TkFixedFont').configure(family='Consolas', size=11)
+    except:
+        pass
     # 启动时检查激活状态
     _show_activation_check(root)
     # 首次启动引导
