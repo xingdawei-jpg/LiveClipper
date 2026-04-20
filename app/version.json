@@ -1,15 +1,15 @@
 {
-  "version": "8.5.1",
+  "version": "8.5.2",
   "files": {
-    "ai_clipper.py": "f52644e0d16b31925a5f41f58406049a991ee758facaf15c12b4d5e3bb938b58",
+    "ai_clipper.py": "9fe682308689055090433db1d40a9a0cda535fec6caef04e80b2e08baee97ecb",
     "ai_settings.json": "258683a7d9a9be747e59a7363dc64dd4e9d5b9f120d089fa3fbee9fa23d5631b",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
     "asr_api.py": "d03fc441abd1d3ff8c016e079375e0abb5875fcab2f2985194a5b2f936bc7a80",
     "clip_tuple_check.py": "dda93214bd48d48a40d542fff3cf1c5636e024c3d243b056dfff4951e2961d22",
     "config.py": "56c4b10f843a3e68c8ee2afa9e2b634ec0b73b43812306ec2c45bb72b0807e38",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
-    "cutter_logic.py": "cd5c21a6cb16f0ef382186ea8a2edad541f0b2a8acf8d65e2f929315f8d6becd",
-    "gui.py": "d43af709cfc3db789c6b80cd4576e94aa0cb4b23f2346d90098c7259d3de0df6",
+    "cutter_logic.py": "f63f9bdf5c1df867f77f5fcd51c7c22c3dae53c734fb7acc2268e76f43c8d7f4",
+    "gui.py": "39b82508840415a996218c6a25dfbfe4773fe9dc2cb23276ac14a2dd680f3190",
     "keywords.json": "ec97580a790bd51dfb0e576b423949ab15af0131ff90a8a3ef99e0ca57678f12",
     "license_client.py": "f1bb2a9a8153b70ff4fd1bf199a65f6f48fb499798dac21a82fd1cb6e902a1c1",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
@@ -22,9 +22,10 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "38f918c5040b428e299fabd8cae484dce7a197f27d92f6ecad0723ac45510efe",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
-    "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3"
+    "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3",
+    "version.json": "5d06a92a4971bad0c8bd93d5f05a409da2d06885ccb83bb4f4614192ad80ec45"
   },
-  "release_notes": "v8.5.0",
+  "release_notes": "v8.5.2",
   "latest_version": "8.5.2",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
 }
