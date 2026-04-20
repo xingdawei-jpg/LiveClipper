@@ -725,6 +725,14 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
 
+        # 阿里云测试连接按钮
+        _ar_test = tk.Frame(self.aliyun_fields, bg=C["card"])
+        _ar_test.pack(fill="x", pady=(4,0))
+        tk.Label(_ar_test, text="", font=FNT_S, bg=C["card"], width=10).pack(side="left")
+        tk.Button(_ar_test, text="✓ 测试阿里云连接", font=FNT_S, fg=C["ok"], bg=C["card"],
+              relief="flat", cursor="hand2", padx=8, pady=2,
+              command=self._test_aliyun_connection).pack(side="left", padx=(4,0))
+
         # 默认隐藏所有ASR字段（勾选checkbox后才显示）
         self.asr_preset_row.pack_forget()
         self.asr_fields.pack_forget()
@@ -1072,6 +1080,84 @@ class App:
                     messagebox.showwarning("测试连接", f"⚠️ HTTP {http_code}\n{body[:200]}")
         except Exception as e:
             messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
+
+
+    def _test_aliyun_connection(self):
+        """Test Alibaba Cloud ASR connectivity"""
+        api_key = self.aliyun_api_key_var.get().strip()
+        oss_ak = self.aliyun_oss_ak_var.get().strip()
+        oss_sk = self.aliyun_oss_sk_var.get().strip()
+        bucket = self.aliyun_bucket_var.get().strip().rstrip("/")
+        endpoint = self.aliyun_endpoint_var.get().strip()
+
+        if not api_key:
+            messagebox.showwarning("测试连接", "API Key 为空")
+            return
+        if not oss_ak or not oss_sk:
+            messagebox.showwarning("测试连接", "OSS AK/SK 为空")
+            return
+        if not bucket:
+            messagebox.showwarning("测试连接", "OSS 桶名为空")
+            return
+
+        errors = []
+
+        # Test 1: DashScope API Key
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "-w", "\n%{http_code}",
+                 "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+                 "-X", "POST",
+                 "-H", "Content-Type: application/json",
+                 "-H", "Authorization: Bearer " + api_key,
+                 "-d", '{"model":"qwen-turbo","input":{"messages":[{"role":"user","content":"hi"}]}}'],
+                capture_output=True, text=True, timeout=15,
+                creationflags=0x08000000 if sys.platform == "win32" else 0
+            )
+            rlines = result.stdout.strip().split("\n")
+            http_code = rlines[-1] if rlines else "0"
+            if http_code == "200":
+                pass
+            elif http_code in ("401", "403"):
+                errors.append("❌ API Key 无效（HTTP " + http_code + "）" + chr(10) + "请检查 API Key 是否正确，以及是否开通了 DashScope 服务")
+            else:
+                errors.append("⚠️ API Key 验证返回 HTTP " + http_code)
+        except Exception as e:
+            errors.append("❌ API Key 测试异常: " + str(e))
+
+        # Test 2: OSS Bucket
+        try:
+            import oss2
+            auth = oss2.Auth(oss_ak, oss_sk)
+            bucket_obj = oss2.Bucket(auth, endpoint, bucket)
+            bucket_obj.list_objects(max_keys=1)
+        except ImportError:
+            try:
+                check_url = "https://" + bucket + "." + endpoint + "/"
+                result = subprocess.run(
+                    ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", check_url],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=0x08000000 if sys.platform == "win32" else 0
+                )
+                code = result.stdout.strip()
+                if code not in ("200", "403", "404"):
+                    errors.append("⚠️ OSS 连接返回 HTTP " + code)
+            except Exception as e2:
+                errors.append("⚠️ OSS 测试异常: " + str(e2))
+        except Exception as e:
+            err_str = str(e)
+            if "NoSuchBucket" in err_str:
+                errors.append("❌ OSS 桶不存在！" + chr(10) + "请检查桶名是否正确、Endpoint 是否匹配、桶是否已创建")
+            elif "AccessDenied" in err_str or "SignatureDoesNotMatch" in err_str:
+                errors.append("❌ OSS AK/SK 错误或权限不足！" + chr(10) + "请检查 AK/SK 是否正确，RAM 用户是否有 OSS 读写权限")
+            else:
+                errors.append("❌ OSS 连接失败: " + err_str[:200])
+
+        if not errors:
+            messagebox.showinfo("测试连接", "✅ 阿里云配置有效！" + chr(10) + "• API Key 有效" + chr(10) + "• OSS 桶可访问" + chr(10) + "可以正常使用阿里云语音识别")
+        else:
+            messagebox.showerror("测试连接", "阿里云配置问题：" + chr(10) + chr(10) + chr(10).join(errors))
+
 
     def _on_preset_change(self, value):
         preset = AI_PRESETS.get(value, {})
@@ -1473,6 +1559,44 @@ class App:
         t3.insert("1.0", "\n".join(filler))
         text_widgets["filler_words"] = t3
 
+
+        # === Tab 4: 偏好关键词 ===
+        tab4 = tk.Frame(nb, bg=C["card"])
+        nb.add(tab4, text=" 偏好关键词 ")
+        tk.Label(tab4, text="AI选片偏好匹配词，每行格式：偏好名=关键词\n例如：版型显瘦=显瘦  |  情绪感染=绝了",
+                 font=FNT_S, fg=C["dim"], bg=C["card"], justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        t4 = tk.Text(tab4, font=("Consolas", 10), fg=C["text"], bg=C["inp"],
+                     relief="flat", padx=6, pady=4, wrap="word", height=18)
+        t4.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        # 填充当前偏好关键词（内嵌默认值，避免导入ai_clipper失败）
+        _default_pref_kw = {
+            "版型显瘦": "显瘦,遮肉,藏肉,收腰,包容,不挑人,微胖,遮胯,遮肚,收腹,提臀,显高,小个子,梨形,苹果型,腿粗,拜拜肉,瘦十斤,小一号,秒变,立瘦,显腿长,显腰细,比例好,拉长比例,遮得住,收腰显瘦,遮副乳,托胸,胯宽,大骨架,纸片人,小肚腩,背厚,肩宽",
+            "颜色氛围": "显白,提亮,抬气色,显肤色,黄皮,黑皮,衬肤色,不挑肤色,冷白皮,暖白皮,气色好,衬人白,高级灰,显嫩,温柔色,显贵色,不挑皮,上镜色,拍照好看,老钱风,奶油色,燕麦色,雾霾蓝,牛油果,奶茶色,焦糖色,香芋紫,橡皮粉,百搭色,抬肤色",
+            "穿着场景": "通勤,约会,度假,日常,出门,上班,逛街,实穿,职场,聚会,拍照,旅游,出差,叠穿,内搭,外穿,单穿,一年四季,懒人,一套搞定,见家长,见前男友,同学聚会,相亲,年会,踏青,遛娃,送孩子,百搭,穿得出去",
+            "性价比": "划算,超值,性价比,品质,质感,做工,同款,外面买不到,大牌平替,代工厂,专柜,商场,物超所值,比外面,比商场,同品质,这个价,这个品质,商场同款,自己家工厂,源头,出厂价,直播间专属,老粉,闭眼冲,不踩坑,买过都说好,回购率,对得起这个价,回头客",
+            "紧迫稀缺": "限量,库存,最后,抢,不多,少数,断货,售罄,抢完,没了,没码,补货,少量,限时,赶紧,手慢无,错过,独家,不撞款,定制,稀缺,马上,不等人,只剩,不多了,剩最后,这一批,下次不知道,不会再上,手速",
+            "情绪感染": "绝了,太漂亮,美爆,太好看了,太爱,神仙,封神,超级超级,特别特别,真的真的,非常非常,天呐,妈呀,我的天,受不了,爱了爱了,绝绝子,yyds,信我,相信我,不骗你,真心,自留,我自己也,美哭,好看死,太绝了,我天,天哪,疯了吧,哇塞,我自己都",
+            "流行趋势": "流行,当季,新款,设计,原创,不撞款,爆款,热门,趋势,法式,韩系,日系,欧美,ins风,极简,复古,国风,新中式,设计师,小心机,细节,小众,轻奢,时髦,小香风,千金风,老钱,清冷感,氛围感,松弛感,财阀千金,甜酷,美拉德,多巴胺,静奢",
+            "面料质感": "面料,手感,亲肤,质感,桑蚕丝,冰感,软糯,透气,真丝,羊毛,羊绒,纯棉,雪纺,缎面,蕾丝,牛仔,针织,垂感,弹力,厚实,做工,走线,不起球,不褪色,抗皱,免熨,垂坠,丝滑,软乎乎,厚薄适中,垂坠感,糯糯的,像云朵,婴儿肌,裸感",
+        }
+        saved_pref = kw_data.get("preference_keywords", {})
+        lines4 = []
+        # 合并：代码默认 + 用户自定义（用户自定义优先）
+        all_pref_names = list(dict.fromkeys(list(_default_pref_kw.keys()) + list(saved_pref.keys())))
+        for pname in all_pref_names:
+            if pname in saved_pref:
+                pkws = saved_pref[pname]
+            else:
+                pkws = _default_pref_kw.get(pname, "").split(",")
+            lines4.append(f"# 【{pname}】")
+            for kw in pkws:
+                if kw.strip():
+                    lines4.append(f"{pname}={kw.strip()}")
+            lines4.append("")
+        t4.insert("1.0", "\n".join(lines4))
+        text_widgets["preference_keywords"] = t4
+
+
         # 底部按钮
         btn_row = tk.Frame(win, bg=C["bg"])
         btn_row.pack(fill="x", padx=12, pady=10)
@@ -1501,6 +1625,22 @@ class App:
             # 解析废话词
             raw3 = text_widgets["filler_words"].get("1.0", "end").strip()
             result["filler_words"] = [l.strip() for l in raw3.split("\n") if l.strip()]
+
+            # 解析偏好关键词
+            pref_kw = {}
+            if "preference_keywords" in text_widgets:
+                raw4 = text_widgets["preference_keywords"].get("1.0", "end").strip()
+                for line in raw4.split("\n"):
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        pname, kw = line.split("=", 1)
+                        pname = pname.strip()
+                        kw = kw.strip()
+                        if pname and kw:
+                            pref_kw.setdefault(pname, []).append(kw)
+            result["preference_keywords"] = pref_kw
 
             try:
                 with open(kw_path, "w", encoding="utf-8") as f:
@@ -1635,6 +1775,18 @@ class App:
 
         self.btn.configure(text="■  停止", bg=C["btn_no"])
         self._set_bar(0)
+
+        # 【重要】剪辑前检查激活/试用状态，防止超限使用
+        try:
+            from license_client import check_activation
+            _lic = check_activation()
+            if _lic.get("need_activate"):
+                self._log("⚠ 请先激活或试用次数已用完，无法开始剪辑", "err")
+                from tkinter import messagebox
+                messagebox.showerror("提示", _lic.get("reason", "请激活后使用"))
+                return
+        except Exception:
+            pass
 
         # 先读 tkinter 变量（主线程），避免子线程报 RuntimeError
         _dedup = self.dedup.get()
@@ -1823,7 +1975,7 @@ def _show_activate_dialog(root):
 
     tk.Label(entry_frame, text="激活码:", font=("Microsoft YaHei UI", 10)).pack(side="left", padx=(0, 8))
     code_var = tk.StringVar()
-    entry = tk.Entry(entry_frame, textvariable=code_var, width=38, font=("Consolas", 11))
+    entry = tk.Entry(entry_frame, textvariable=code_var, width=50, font=("Consolas", 11))
     entry.pack(side="left")
     entry.focus_set()
 
