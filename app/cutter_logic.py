@@ -1960,8 +1960,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     _log("[PROGRESS] 0.75")
 
 # --- 4c: DeepSeek修复错别字 + 繁简转换 + 长句切分 ---
-    if volcengine_success:
-        _log("火山引擎断句已足够精确，跳过 DeepSeek 修复")
+    if False:  # 始终走DeepSeek修复
+        _log("云端ASR也需要DeepSeek修复")
         # 仍然清理标点符号和语气词（不跳过）
         _punct_re = re.compile(r"[，。！？、；：“”‘’（）《》【】…—·,.!?;:\'\"()\[\]{}<>]")
         _filler_re = re.compile(r"^[啊呢嗯哦哈]+|[啊呢嗯哦哈]+$")
