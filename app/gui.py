@@ -2188,29 +2188,18 @@ def main():
         import tkinterdnd2; root = tkinterdnd2.Tk()
     except ImportError:
         root = tk.Tk()
+    # DPI awareness disabled: let Windows handle auto-scaling
+    # (slightly blurry but correctly sized on high-DPI screens)
     try:
-        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(2)
+        from ctypes import windll; windll.shcore.SetProcessDpiAwareness(0)
     except:
-        try:
-            from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
-        except: pass
-    # 根据显示器DPI自动缩放UI
+        pass
+    # DPI scaling: let Windows handle it (Awareness=0)
+    # tk scaling is set to a comfortable default
     try:
-        import ctypes
-        # 优先用 GetDpiForSystem (Win10 1607+)，比 GetDeviceCaps 更准
-        dpi = 0
-        try:
-            dpi = ctypes.windll.user32.GetDpiForSystem()
-        except:
-            pass
-        if dpi <= 0:
-            hdc = ctypes.windll.user32.GetDC(0)
-            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
-            ctypes.windll.user32.ReleaseDC(0, hdc)
-        if dpi > 0:
-            scale = dpi / 96.0
-            root.tk.call('tk', 'scaling', scale)
-    except: pass
+        root.tk.call('tk', 'scaling', 1.25)
+    except:
+        pass
     # 字体强制放大：DPI缩放后字体太小
     try:
         from tkinter import font as tkfont
