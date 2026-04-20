@@ -10,7 +10,7 @@
     "config.py": "56c4b10f843a3e68c8ee2afa9e2b634ec0b73b43812306ec2c45bb72b0807e38",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
     "cutter_logic.py": "d23de6d803d2356f303f11c74223d7acf3d044d0a865a0f0303ffbf0be7c3e45",
-    "gui.py": "75d3e7c152f86a047d05519bc451577aeda5bdbd3780d498197a676aaa5f8b12",
+    "gui.py": "296f8d4533e01d0ac66af3042c63d44a9157fe95f8cda40ad9dc601bb74399cd",
     "keywords.json": "f4b9c812fb10e4e5e0539915b71ddd21a30693de9b805762fd2a62c855e4d28a",
     "license_client.py": "5ba72355238b9cc9e7f338d3b2db155eaf99d5ac5a92a946a171d031425ee953",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
@@ -21,7 +21,7 @@
     "stt.py": "b6cd80865539e08cb3e3e3abb906c743e037f70f526560585f8c3c2f2bb833f2",
     "tighten.py": "a773025a1b137c451d334c108263e0e26a7386e53090b150c1578332d64394f3",
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "updater.py": "38f918c5040b428e299fabd8cae484dce7a197f27d92f6ecad0723ac45510efe",
+    "updater.py": "58b512f9d81f9c3c69dffb50922abb8ce860d7fdd025ba5f4d6995f63a82bb5d",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
     "version.json": "94b8047e8afc38ff5d0b23a0238b9faf387cfeebc0c8c38cdbb4adf4dca63fb1",
     "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3"

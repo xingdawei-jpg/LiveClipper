@@ -176,7 +176,7 @@ def download_file(url, dest_path, progress_callback=None):
 
     # 用 curl 下载
     process = subprocess.Popen(
-        ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "120", "-o", dest_path, url],
+        ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "300", "-o", dest_path, url],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
 , creationflags=_NO_WINDOW)
 
@@ -469,7 +469,7 @@ class DownloadDialog(tk.Toplevel):
                     mirror_url = prefix + base.replace("https://", "")
                     try:
                         result = subprocess.run(
-                            ["curl.exe", "-s", "-k", "--max-time", "15", mirror_url],
+                            ["curl.exe", "-s", "-k", "--max-time", "30", mirror_url],
                             capture_output=True, timeout=20
 , creationflags=_NO_WINDOW)
                         if result.stdout and len(result.stdout) > 10:
@@ -485,7 +485,7 @@ class DownloadDialog(tk.Toplevel):
                 if content is None:
                     try:
                         result = subprocess.run(
-                            ["curl.exe", "-s", "-k", "--max-time", "15", base + "?_t=" + str(int(time.time()))],
+                            ["curl.exe", "-s", "-k", "--max-time", "30", base + "?_t=" + str(int(time.time()))],
                             capture_output=True, timeout=20
 , creationflags=_NO_WINDOW)
                         if result.stdout and len(result.stdout) > 10:
