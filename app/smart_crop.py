@@ -1,21 +1,72 @@
 """
-Smart Crop 智能裁切模块 v3
-原则：只裁左右+微裁顶部，绝不裁底部（裤子/裙子不能丢）
-zoom上限1.15x
+Smart Crop 智能裁切模块 v5
+- cv2不可用时自动pip install opencv-python-headless（方案A）
+- pip安装失败则降级为随机裁切
+- 只裁左右+微裁顶部，绝不裁底部
+- zoom上限1.15x
 """
 
 import os
-import cv2
-import numpy as np
+import sys
+import subprocess
 import random
 
-_NET = None
+# 尝试导入cv2
+_CV2_AVAILABLE = False
+_CV2_AUTO_INSTALLED = False
+
+try:
+    import cv2
+    import numpy as np
+    _CV2_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def _try_install_cv2(log_fn=None):
+    """自动安装opencv-python-headless（方案A）"""
+    global _CV2_AVAILABLE, _CV2_AUTO_INSTALLED
+
+    if _CV2_AVAILABLE or _CV2_AUTO_INSTALLED:
+        return _CV2_AVAILABLE
+
+    _CV2_AUTO_INSTALLED = True  # 只尝试一次
+
+    if log_fn:
+        log_fn("SmartCrop: 正在安装OpenCV（首次使用需要下载，约40MB）...")
+
+    try:
+        # 用清华镜像加速下载
+        subprocess.check_call(
+            [sys.executable, '-m', 'pip', 'install',
+             'opencv-python-headless', '-q',
+             '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'],
+            timeout=300,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # 重新导入
+        import importlib
+        if 'cv2' in sys.modules:
+            importlib.reload(sys.modules['cv2'])
+        else:
+            import cv2
+        import numpy as np
+        _CV2_AVAILABLE = True
+        if log_fn:
+            log_fn("SmartCrop: OpenCV安装成功，智能裁切已启用")
+    except Exception as e:
+        if log_fn:
+            log_fn("SmartCrop: OpenCV安装失败，使用标准裁切（%s）" % str(e)[:50])
+
+    return _CV2_AVAILABLE
 
 
 def _detect_faces(frame, conf_threshold=0.5):
-    net = _NET
-    if net is None:
-        net = "haar"
+    if not _CV2_AVAILABLE:
+        return []
+
+    net = _NET if _NET is not None else "haar"
     h, w = frame.shape[:2]
 
     if net == "haar":
@@ -45,6 +96,13 @@ def _detect_faces(frame, conf_threshold=0.5):
 
 def prepare_face_detector(app_dir=None, log_fn=None):
     global _NET
+
+    if not _CV2_AVAILABLE:
+        # 尝试自动安装
+        _try_install_cv2(log_fn=log_fn)
+        if not _CV2_AVAILABLE:
+            return False
+
     if app_dir is None:
         app_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -64,16 +122,17 @@ def prepare_face_detector(app_dir=None, log_fn=None):
     _NET = "haar"
     if log_fn:
         log_fn("SmartCrop: 使用Haar级联检测")
-    return False
+    return True
 
 
 def batch_detect_clips(video_path, clips, log_fn=None):
-    """
-    批量检测人物位置
-    
-    Returns:
-        {clip_index: {'face_cx_ratio', 'face_cy_ratio', 'frame_w', 'frame_h'} or None}
-    """
+    if not _CV2_AVAILABLE:
+        _try_install_cv2(log_fn=log_fn)
+        if not _CV2_AVAILABLE:
+            if log_fn:
+                log_fn("SmartCrop: OpenCV不可用，使用标准裁切")
+            return {i: None for i in range(len(clips))}
+
     results = {}
     prepare_face_detector(log_fn=log_fn)
 
@@ -107,15 +166,13 @@ def batch_detect_clips(video_path, clips, log_fn=None):
             ret, frame = cap.read()
             if not ret:
                 continue
-
             faces = _detect_faces(frame)
             if faces:
                 best = max(faces, key=lambda f: f[2] * f[3])
-                face_xs.append((best[0] + best[2] / 2) / frame_w)  # 归一化
+                face_xs.append((best[0] + best[2] / 2) / frame_w)
                 face_ys.append((best[1] + best[3] / 2) / frame_h)
 
         if face_xs:
-            # 用中位数，比均值更稳
             cx = sorted(face_xs)[len(face_xs) // 2]
             cy = sorted(face_ys)[len(face_ys) // 2]
             results[i] = {
@@ -135,44 +192,28 @@ def batch_detect_clips(video_path, clips, log_fn=None):
 
 
 def compute_smart_crop(person_info, frame_w, frame_h, log_fn=None):
-    """
-    计算裁切参数
-    
-    v3原则：
-    1. 绝不裁底部 → crop底部对齐画面底部（crop_y + crop_h = 1.0）
-    2. 只裁左右+微裁顶部
-    3. zoom上限1.15x
-    """
     if person_info is None:
         return _random_crop()
 
-    cx = person_info['face_cx_ratio']  # 人脸x位置 0-1
-    cy = person_info['face_cy_ratio']  # 人脸y位置 0-1
+    cx = person_info['face_cx_ratio']
+    cy = person_info['face_cy_ratio']
 
-    # zoom: 1.05-1.15x，非常保守
     zoom = 1.0 + random.uniform(0.03, 0.12)
-    
     crop_w = 1.0 / zoom
     crop_h = 1.0 / zoom
 
-    # X方向：以人脸为中心，微偏移
     crop_x = cx - crop_w / 2 + random.uniform(-0.03, 0.03)
     crop_x = max(0, min(crop_x, 1.0 - crop_w))
 
-    # Y方向：底部对齐画面底部（绝不裁底部！）
-    # crop_y + crop_h = 1.0 → crop_y = 1.0 - crop_h
-    crop_y = 1.0 - crop_h  # 底部对齐
-
-    # 但如果人脸太靠上，稍微往下拉一点让脸可见
-    # 人脸至少要在裁切框的上70%内
+    # Y：底部对齐（绝不裁底部）
+    crop_y = 1.0 - crop_h
     face_in_crop = (cy - crop_y) / crop_h if crop_h > 0 else 0.5
     if face_in_crop > 0.7:
-        # 脸太低了（相对于裁切框），下调框
         crop_y = cy - crop_h * 0.5
         crop_y = max(0, min(crop_y, 1.0 - crop_h))
 
     if log_fn:
-        log_fn("SmartCrop: zoom=%.2fx, 人脸位置=(%.0f%%,%.0f%%)" % (zoom, cx * 100, cy * 100))
+        log_fn("SmartCrop: zoom=%.2fx" % zoom)
 
     return {
         'crop_w': crop_w,
@@ -184,11 +225,10 @@ def compute_smart_crop(person_info, frame_w, frame_h, log_fn=None):
 
 
 def _random_crop():
-    """降级：几乎不裁"""
     crop_w = random.uniform(0.88, 0.98)
     crop_h = random.uniform(0.88, 0.98)
     crop_x = random.uniform(0, 1.0 - crop_w)
-    crop_y = 1.0 - crop_h  # 底部对齐
+    crop_y = 1.0 - crop_h
     return {
         'crop_w': crop_w,
         'crop_h': crop_h,
