@@ -31,6 +31,7 @@ from config import (
     TARGET_DURATION, TARGET_DURATION_TOLERANCE, REQUIRED_CLIP_TYPES,
     TIME_WINDOW_MINUTES,
 )
+from smart_crop import batch_detect_clips, compute_smart_crop, prepare_face_detector
 
 
 
@@ -103,18 +104,11 @@ def _generate_random_dedup_params(clip_index):
     else:
         params["speed"] = 1.0
 
-    # 2. 随机微裁剪
-    if cfg.get("random_crop", {}).get("enabled"):
-        rc = cfg["random_crop"]
-        params["crop_w"] = round(rng.uniform(rc["crop_min"], rc["crop_max"]), 3)
-        params["crop_h"] = round(rng.uniform(rc["crop_min"], rc["crop_max"]), 3)
-        params["crop_x"] = round(rng.uniform(rc["offset_min"], rc["offset_max"]), 3)
-        params["crop_y"] = round(rng.uniform(rc["offset_min"], rc["offset_max"]), 3)
-    else:
-        params["crop_w"] = 1.0
-        params["crop_h"] = 1.0
-        params["crop_x"] = 0.0
-        params["crop_y"] = 0.0
+    # 2. 随机微裁剪（已被Smart Crop替代，去重阶段不做裁剪）
+    params["crop_w"] = 1.0
+    params["crop_h"] = 1.0
+    params["crop_x"] = 0.0
+    params["crop_y"] = 0.0
 
     # 3. 音频微pitch
     if cfg.get("audio_pitch", {}).get("enabled"):
@@ -1249,6 +1243,15 @@ def process_video(video_path, srt_path=None, output_path=None,
     except Exception:
         pass
 
+    # Smart Crop: 批量检测所有片段的人物信息
+    _smart_crop_results = {}
+    try:
+        prepare_face_detector(log_fn=_log)
+        _smart_crop_results = batch_detect_clips(video_path, ordered_clips, log_fn=_log)
+    except Exception as _sc_err:
+        _log(f"SmartCrop检测失败，降级为标准裁切: {_sc_err}")
+        _smart_crop_results = {}
+
     _log(f"开始切割 {total_clips} 个片段...")
 
     # 获取视频时长
@@ -1317,13 +1320,39 @@ def process_video(video_path, srt_path=None, output_path=None,
                 if end <= start:
                     continue
 
-            # [v9.2] 切割编码模式 + crop+mirror（crop过滤器规范化帧时间，避免VFR跳帧）
+            # [v9.2] 切割编码模式 + Smart Crop + mirror
             mirror_vf = ""
             if random.random() < 0.5:
                 mirror_vf = "hflip"
             clip_duration = end - start
-            aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
-            vf_parts = [aspect_vf]
+
+            # Smart Crop: 基于人物检测的智能裁切
+            _sc_info = _smart_crop_results.get(i)
+            if _sc_info:
+                _sc = compute_smart_crop(_sc_info, 1080, 1920, log_fn=_log)
+                if _sc['method'] == 'smart':
+                    cw_px = int(_sc_info['frame_w'] * _sc['crop_w'])
+                    ch_px = int(_sc_info['frame_h'] * _sc['crop_h'])
+                    cx_px = int(_sc_info['frame_w'] * _sc['crop_x'])
+                    cy_px = int(_sc_info['frame_h'] * _sc['crop_y'])
+                    # 确保 even
+                    cw_px = cw_px + (cw_px % 2)
+                    ch_px = ch_px + (ch_px % 2)
+                    if cx_px + cw_px > _sc_info['frame_w']:
+                        cx_px = _sc_info['frame_w'] - cw_px
+                    if cy_px + ch_px > _sc_info['frame_h']:
+                        cy_px = _sc_info['frame_h'] - ch_px
+                    # 先smart crop再缩放到9:16
+                    crop_vf = f"crop={cw_px}:{ch_px}:{cx_px}:{cy_px}"
+                    aspect_vf = r"scale=-2:1920:force_original_aspect_ratio=decrease,crop=1080:1920"
+                    vf_parts = [crop_vf, aspect_vf]
+                else:
+                    aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
+                    vf_parts = [aspect_vf]
+            else:
+                aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
+                vf_parts = [aspect_vf]
+
             if mirror_vf:
                 vf_parts.append(mirror_vf)
             combined_vf = ",".join(vf_parts)
@@ -2102,24 +2131,11 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             _log(f"字幕去重叠: {len(fixed_segments)} → {len(deduped)} 条")
         fixed_segments = deduped
 
-    # [修复] 连续重复行去重：相邻字幕段文本相似度>60%则删除
-    if len(fixed_segments) >= 2:
-        _cleaned = [fixed_segments[0]]
-        for _k in range(1, len(fixed_segments)):
-            _prev = re.sub(r"\s+", "", _cleaned[-1]["text"]).lower()
-            _curr = re.sub(r"\s+", "", fixed_segments[_k]["text"]).lower()
-            if not _prev or not _curr:
-                _cleaned.append(fixed_segments[_k])
-                continue
-            _sp, _sc = set(_prev), set(_curr)
-            _sim = len(_sp & _sc) / max(len(_sp | _sc), 1)
-            if _sim > 0.6:
-                _log(f"字幕去重: 删除重复行")
-            else:
-                _cleaned.append(fixed_segments[_k])
-        fixed_segments = _cleaned
+        # [已移除] 字幕阶段不做文本去重：中文口语字符集重叠率高，Jaccard>60%会误杀有效字幕行
+    # AI选片阶段已做语义去重，字幕阶段只需忠实显示ASR识别内容
+    # 2026-04-21: 修复字幕内容错位问题（误删导致后续字幕时间戳不错但文本错位）
 
-    # --- 长句拆分：把超过 max_chars 的 segment 按标点拆成多段，时间按字符比分配 ---
+# --- 长句拆分：把超过 max_chars 的 segment 按标点拆成多段，时间按字符比分配 ---
     max_sub = 14
     min_sub = 4  # 最短片段不低于4字
     split_segments = []
@@ -2243,6 +2259,12 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 _log(f"字幕ASR修正: {len(fixed_segments)} 条中修正了 {_asr_fixed} 条")
     except ImportError:
         pass  # ASR_CORRECTIONS not defined in config
+
+        # --- 去除字幕标点符号 ---
+    _punct_chars = '，。！？、；：\u201c\u201d\u2018\u2019（）《》【】…—·,.!?;:\\\'\\"()[]{}<>~～·・'
+    for seg in fixed_segments:
+        seg["text"] = seg["text"].translate(str.maketrans('', '', _punct_chars)).strip()
+    _log(f"字幕标点已清除")
 
     # --- 4d+4e: drawtext 逐条烧录字幕 ---
     # 不用 subtitles/ass 滤镜（Windows 上 fontconfig 不可靠）
