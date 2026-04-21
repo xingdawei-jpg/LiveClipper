@@ -1,20 +1,14 @@
 """
-Smart Crop 智能裁切模块 v5
-- cv2不可用时自动pip install opencv-python-headless（方案A）
-- pip安装失败则降级为随机裁切
-- 只裁左右+微裁顶部，绝不裁底部
-- zoom上限1.15x
+Smart Crop 智能裁切模块 v6
+- cv2可用（全量包内置）→ 智能裁切
+- cv2不可用 → 降级标准裁切，不卡界面
+- 绝不自动pip install（会卡死GUI）
 """
 
 import os
-import sys
-import subprocess
 import random
 
-# 尝试导入cv2
 _CV2_AVAILABLE = False
-_CV2_AUTO_INSTALLED = False
-
 try:
     import cv2
     import numpy as np
@@ -22,44 +16,7 @@ try:
 except ImportError:
     pass
 
-
-def _try_install_cv2(log_fn=None):
-    """自动安装opencv-python-headless（方案A）"""
-    global _CV2_AVAILABLE, _CV2_AUTO_INSTALLED
-
-    if _CV2_AVAILABLE or _CV2_AUTO_INSTALLED:
-        return _CV2_AVAILABLE
-
-    _CV2_AUTO_INSTALLED = True  # 只尝试一次
-
-    if log_fn:
-        log_fn("SmartCrop: 正在安装OpenCV（首次使用需要下载，约40MB）...")
-
-    try:
-        # 用清华镜像加速下载
-        subprocess.check_call(
-            [sys.executable, '-m', 'pip', 'install',
-             'opencv-python-headless', '-q',
-             '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'],
-            timeout=300,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # 重新导入
-        import importlib
-        if 'cv2' in sys.modules:
-            importlib.reload(sys.modules['cv2'])
-        else:
-            import cv2
-        import numpy as np
-        _CV2_AVAILABLE = True
-        if log_fn:
-            log_fn("SmartCrop: OpenCV安装成功，智能裁切已启用")
-    except Exception as e:
-        if log_fn:
-            log_fn("SmartCrop: OpenCV安装失败，使用标准裁切（%s）" % str(e)[:50])
-
-    return _CV2_AVAILABLE
+_NET = None
 
 
 def _detect_faces(frame, conf_threshold=0.5):
@@ -98,10 +55,9 @@ def prepare_face_detector(app_dir=None, log_fn=None):
     global _NET
 
     if not _CV2_AVAILABLE:
-        # 尝试自动安装
-        _try_install_cv2(log_fn=log_fn)
-        if not _CV2_AVAILABLE:
-            return False
+        if log_fn:
+            log_fn("SmartCrop: 智能裁切需要完整安装包（当前为增量更新，使用标准裁切）")
+        return False
 
     if app_dir is None:
         app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -127,11 +83,9 @@ def prepare_face_detector(app_dir=None, log_fn=None):
 
 def batch_detect_clips(video_path, clips, log_fn=None):
     if not _CV2_AVAILABLE:
-        _try_install_cv2(log_fn=log_fn)
-        if not _CV2_AVAILABLE:
-            if log_fn:
-                log_fn("SmartCrop: OpenCV不可用，使用标准裁切")
-            return {i: None for i in range(len(clips))}
+        if log_fn:
+            log_fn("SmartCrop: 智能裁切需要完整安装包，使用标准裁切")
+        return {i: None for i in range(len(clips))}
 
     results = {}
     prepare_face_detector(log_fn=log_fn)
@@ -205,7 +159,6 @@ def compute_smart_crop(person_info, frame_w, frame_h, log_fn=None):
     crop_x = cx - crop_w / 2 + random.uniform(-0.03, 0.03)
     crop_x = max(0, min(crop_x, 1.0 - crop_w))
 
-    # Y：底部对齐（绝不裁底部）
     crop_y = 1.0 - crop_h
     face_in_crop = (cy - crop_y) / crop_h if crop_h > 0 else 0.5
     if face_in_crop > 0.7:
