@@ -23,9 +23,9 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "b4490fd69967ded177183d8f68e9e17d8585bd1d3ca92c723ee7f768b7602266",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
-    "version.json": "6055d4a830b6f630a7db98c052ab021702cd84f49805636eab9e95f914dd1ae2",
+    "version.json": "077ec032cd778bbb1d2df1cbcfd318a641d2aa112837d219a6fc9a79e4fd1800",
     "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3",
-    "smart_crop.py": "c9d54a1dad39cd312f119f77b0aad0d0d7bc5053738b40f8922d50215018c41b"
+    "smart_crop.py": "9a0e7a34a639f03640c199aa592123fa2729c9cf4bbfc40074ef69c556df45cf"
   },
   "release_notes": "v2026.4.21",
   "latest_version": "2026.4.24",
