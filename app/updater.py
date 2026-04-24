@@ -217,8 +217,10 @@ def check_update():
 
     # 构建镜像URL列表（国内用户直连GitHub不通）
     mirror_prefixes = [
-        "https://gh-proxy.com/https://",
         "https://ghfast.top/https://",
+        "https://gh-proxy.com/https://",
+                "https://ghps.cc/https://",
+        "https://mirror.ghproxy.com/https://",
     ]
     urls_to_try = []
     for prefix in mirror_prefixes:
@@ -226,26 +228,29 @@ def check_update():
     urls_to_try.append(url)  # direct as fallback
 
     for try_url in urls_to_try:
-        try:
-            # 加时间戳防CDN缓存
-            sep = "&" if "?" in try_url else "?"
-            full_url = try_url + sep + "_t=" + str(int(time.time()))
-            result = subprocess.run(
-                ["curl.exe", "-s", "-k", "--max-time", "10", full_url],
-                capture_output=True, encoding="utf-8", timeout=15
+        for attempt in range(2):  # retry once on failure
+            try:
+                # 加时间戳防CDN缓存
+                sep = "&" if "?" in try_url else "?"
+                full_url = try_url + sep + "_t=" + str(int(time.time()))
+                result = subprocess.run(
+                    ["curl.exe", "-s", "-k", "--max-time", "15", full_url],
+                    capture_output=True, encoding="utf-8", timeout=20
 , creationflags=_NO_WINDOW)
-            if not result.stdout or result.stdout.strip().startswith("<!"):
+                if not result.stdout or result.stdout.strip().startswith("<!"):
+                    break  # HTML error, no point retrying same URL
+                data = json.loads(result.stdout)
+
+                remote_ver = data.get("version", "")
+                if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
+                    return None
+
+                return data
+
+            except Exception:
+                if attempt == 0:
+                    time.sleep(1)  # wait before retry
                 continue
-            data = json.loads(result.stdout)
-
-            remote_ver = data.get("version", "")
-            if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
-                return None
-
-            return data
-
-        except Exception:
-            continue
 
     return None
 
