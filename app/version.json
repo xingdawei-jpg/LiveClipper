@@ -9,7 +9,7 @@
     "clip_tuple_check.py": "dda93214bd48d48a40d542fff3cf1c5636e024c3d243b056dfff4951e2961d22",
     "config.py": "e42d3a1ae554acb651b6c4f45c93e5e4998356cd667092b3c60551ec339596fd",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
-    "cutter_logic.py": "c684dcc221e49b63c77f45932805f58b15c6279e2dcaec488e1ffb3a1b7f7dfd",
+    "cutter_logic.py": "8f2841349da18b60aabd49e269382ceac1bcad901bedfcfe999d1793fbe0697a",
     "gui.py": "715582750c6f07f528c362065bcab7b514b10ae475d4837bdad37f552b2cbd06",
     "keywords.json": "f4b9c812fb10e4e5e0539915b71ddd21a30693de9b805762fd2a62c855e4d28a",
     "license_client.py": "5eb092a45f5b4feb66f365340609bc5ecb64e8b306e1ac7a46cb63bed4a3fc3a",
@@ -23,9 +23,9 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "b4490fd69967ded177183d8f68e9e17d8585bd1d3ca92c723ee7f768b7602266",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
-    "version.json": "51a587764f064392cc81afc45264c8275bd6a025a6854e520eb44c357c6ea41a",
+    "version.json": "6055d4a830b6f630a7db98c052ab021702cd84f49805636eab9e95f914dd1ae2",
     "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3",
-    "smart_crop.py": "7b7e2bd298b8c259fb51b56b1340286073f101c93849e54ab83b0980cdd2b99c"
+    "smart_crop.py": "c9d54a1dad39cd312f119f77b0aad0d0d7bc5053738b40f8922d50215018c41b"
   },
   "release_notes": "v2026.4.21",
   "latest_version": "2026.4.24",

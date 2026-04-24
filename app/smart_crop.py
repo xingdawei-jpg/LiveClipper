@@ -146,7 +146,7 @@ def prepare_face_detector(app_dir=None, log_fn=None):
     return True
 
 
-def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None):
+def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=0, frame_h=0):
     """批量检测片段中的人物位置（使用FFmpeg提取帧，兼容中文路径）"""
     if not _CV2_AVAILABLE:
         if log_fn:
@@ -158,42 +158,12 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None):
 
     # \u4f18\u5148\u4f7f\u7528FFmpeg\u63d0\u53d6\u5e27\uff08\u517c\u5bb9\u4e2d\u6587\u8def\u5f84\uff09
     use_ffmpeg = ffmpeg_cmd is not None
-    frame_w = 0
-    frame_h = 0
     cap = None
 
-    if use_ffmpeg:
-        # \u7528ffprobe\u83b7\u53d6\u89c6\u9891\u5c3a\u5bf8
-        import subprocess as _sp
-        _cflags = 0x08000000 if sys.platform == "win32" else 0
-        try:
-            probe = _sp.run(
-                [ffmpeg_cmd.replace("ffmpeg.exe", "ffprobe.exe").replace("ffmpeg", "ffprobe"),
-                 "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height",
-                 "-of", "csv=s=x:p=0", video_path],
-                capture_output=True, timeout=10, creationflags=_cflags)
-            if probe.returncode == 0 and probe.stdout:
-                dims = probe.stdout.decode("utf-8", errors="ignore").strip().split("x")
-                if len(dims) == 2:
-                    frame_w = int(dims[0])
-                    frame_h = int(dims[1])
-        except Exception:
-            pass
-        if frame_w <= 0 or frame_h <= 0:
-            if log_fn:
-                log_fn("SmartCrop: \u65e0\u6cd5\u83b7\u53d6\u89c6\u9891\u5c3a\u5bf8\uff0c\u964d\u7ea7\u4e3a\u6807\u51c6\u88c1\u5207")
-            return {i: None for i in range(len(clips))}
-    else:
-        # \u5907\u7528\uff1acv2.VideoCapture\uff08\u53ef\u80fd\u4e0d\u652f\u6301\u4e2d\u6587\u8def\u5f84\uff09
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            if log_fn:
-                log_fn("SmartCrop: \u65e0\u6cd5\u6253\u5f00\u89c6\u9891\uff0c\u964d\u7ea7\u4e3a\u6807\u51c6\u88c1\u5207")
-            return {i: None for i in range(len(clips))}
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if frame_w <= 0 or frame_h <= 0:
+        if log_fn:
+            log_fn("SmartCrop: \u65e0\u89c6\u9891\u5c3a\u5bf8\uff0c\u964d\u7ea7\u4e3a\u6807\u51c6\u88c1\u5207")
+        return {i: None for i in range(len(clips))}
 
     smart_count = 0
     for i, clip in enumerate(clips):
