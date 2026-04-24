@@ -182,10 +182,14 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
         person_sizes = []
         head_tops = []
 
-        for t in sample_times:
+        for ti, t in enumerate(sample_times):
             frame = None
             if use_ffmpeg:
                 frame = _extract_frame_ffmpeg(ffmpeg_cmd, video_path, t, log_fn)
+                if log_fn and frame is None:
+                    log_fn("SmartCrop: [diag] clip=%d sample=%d t=%.1f FFmpeg\u63d0\u53d6\u8fd4\u56deNone" % (i, ti, t))
+                elif log_fn and frame is not None:
+                    log_fn("SmartCrop: [diag] clip=%d sample=%d t=%.1f frame=%dx%d" % (i, ti, t, frame.shape[1], frame.shape[0]))
             elif cap is not None:
                 fps_val = cap.get(cv2.CAP_PROP_FPS) or 30
                 frame_idx = int(t * fps_val)
@@ -193,11 +197,15 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
                 ret, frame = cap.read()
                 if not ret:
                     frame = None
+                    if log_fn:
+                        log_fn("SmartCrop: [diag] clip=%d sample=%d cv2.read failed" % (i, ti))
 
             if frame is None:
                 continue
 
             detections = _detect_persons(frame)
+            if log_fn:
+                log_fn("SmartCrop: [diag] clip=%d sample=%d detections=%d" % (i, ti, len(detections)))
             if detections:
                 best = max(detections, key=lambda d: d[2] * d[3])
                 cx = (best[0] + best[2] / 2) / frame_w
