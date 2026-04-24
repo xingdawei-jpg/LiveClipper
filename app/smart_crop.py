@@ -255,7 +255,7 @@ def _extract_frame_ffmpeg(ffmpeg_cmd, video_path, timestamp, log_fn=None):
              "-vframes", "1", tmp_path],
             capture_output=True, timeout=8, creationflags=_cflags)
         if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 100:
-            frame = cv2.imread(tmp_path)
+            frame = cv2.imdecode(np.fromfile(tmp_path, dtype=np.uint8), cv2.IMREAD_COLOR)
             return frame
         else:
             if log_fn:
