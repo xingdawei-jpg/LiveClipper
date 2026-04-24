@@ -49,7 +49,7 @@ DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BF
 # AI 预设
 AI_PRESETS = {
     "自定义":  {"base_url": "", "model": ""},
-    "DeepSeek V3": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    "DeepSeek V4": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     "豆包 Pro":  {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-1-5-pro-32k"},
     "通义千问":  {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
     "GPT-4o":    {"base_url": "https://api.openai.com/v1", "model": "gpt-4o"},

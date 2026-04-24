@@ -1271,7 +1271,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         probe_cmd = [ffmpeg_cmd, "-i", video_path]
         proc = subprocess.Popen(probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
-        _, stderr_data = proc.communicate(timeout=30)
+        _, stderr_data = proc.communicate(timeout=45)
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", stderr_data)
         if m:
@@ -1780,7 +1780,7 @@ def _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size=0.
     _log(f"叠加画中画: {os.path.basename(pip_path)}")
     try:
         proc = subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW)
-        _, stderr = proc.communicate(timeout=300)
+        _, stderr = proc.communicate(timeout=450)
         if proc.returncode == 0 and os.path.exists(output_path):
             _log("\u753b\u4e2d\u753b\u53e0\u52a0\u6210\u529f!")
         else:
@@ -2141,10 +2141,13 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     data=req_body,
                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
                 )
-                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
                     resp_data = _json.loads(resp.read().decode("utf-8"))
 
                 fixed_text = resp_data["choices"][0]["message"]["content"].strip()
+                # V4 Flash sometimes wraps in markdown code blocks
+                if fixed_text.startswith("```"):
+                    fixed_text = re.sub(r"^```[a-z]*\n?|\n?```$", "", fixed_text).strip()
                 _log("DeepSeek修复完成")
 
                 import re as _re
@@ -2448,7 +2451,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 popen_kw["env"] = dict(os.environ)
                 popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
             proc = subprocess.Popen(sub_cmd, **popen_kw, creationflags=_NO_WINDOW)
-            _, stderr_data = proc.communicate(timeout=300)
+            _, stderr_data = proc.communicate(timeout=450)
             if proc.returncode != 0 or not os.path.exists(output_path):
                 _log("字幕烧录失败，输出无字幕版本")
                 _log(f"FFmpeg exit code: {proc.returncode}")

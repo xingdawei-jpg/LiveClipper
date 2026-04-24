@@ -9,8 +9,8 @@
     "clip_tuple_check.py": "dda93214bd48d48a40d542fff3cf1c5636e024c3d243b056dfff4951e2961d22",
     "config.py": "e42d3a1ae554acb651b6c4f45c93e5e4998356cd667092b3c60551ec339596fd",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
-    "cutter_logic.py": "8f2841349da18b60aabd49e269382ceac1bcad901bedfcfe999d1793fbe0697a",
-    "gui.py": "715582750c6f07f528c362065bcab7b514b10ae475d4837bdad37f552b2cbd06",
+    "cutter_logic.py": "033f755d8793e46f2083e5611f96c49321b9f94c25cf60c6e6705d3e610f8605",
+    "gui.py": "c34e1ea36cbbbc6319387c6172695ee59e08367c3fed9cf07e8e27354aace37e",
     "keywords.json": "f4b9c812fb10e4e5e0539915b71ddd21a30693de9b805762fd2a62c855e4d28a",
     "license_client.py": "5eb092a45f5b4feb66f365340609bc5ecb64e8b306e1ac7a46cb63bed4a3fc3a",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
@@ -23,14 +23,14 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "b4490fd69967ded177183d8f68e9e17d8585bd1d3ca92c723ee7f768b7602266",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
-    "version.json": "ccac9cbc69ff739a9be4b8f74594e087cac15f05fb214238576a7d678d28533d",
+    "version.json": "5ee008b32a287136638cf9e94d1ababbe52935ad187fc08444c91bcd7e2ff392",
     "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3",
-    "smart_crop.py": "6b7292d88b3c1189da296766a2cfdd3ef6b4b361a073bf6947d4ffc94f41ffdf",
+    "smart_crop.py": "3cffe7a5e51d34d4dda96380743eb59785770bfb84d553f8941e7398f847744a",
     "haarcascade_upperbody.xml": "7328ab4fdb1592f53d98d7ea5b1b9d90e01af5d95f212af378c7eb579048bb5f",
     "haarcascade_frontalface_default.xml": "0f7d4527844eb514d4a4948e822da90fbb16a34a0bbbbc6adc6498747a5aafb0",
     "haarcascade_fullbody.xml": "041745c71eef1b5c86aef224f17ce75b042d33314cc8f6757424f8bd8cd30aa1"
   },
   "release_notes": "v2026.4.21",
-  "latest_version": "2026.4.24",
+  "latest_version": "v2026.4.25",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
 }
