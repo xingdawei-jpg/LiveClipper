@@ -128,7 +128,9 @@ def get_version_url():
 def parse_version(version_str):
     """解析语义化版本号，返回可比较的元组"""
     import re
-    match = re.match(r"(\d+)\.(\d+)\.(\d+)", str(version_str))
+    # Strip optional "v" prefix
+    vs = str(version_str).lstrip("vV")
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", vs)
     if not match:
         return (0, 0, 0)
     return tuple(int(x) for x in match.groups())
