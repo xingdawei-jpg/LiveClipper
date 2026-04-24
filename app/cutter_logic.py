@@ -1295,7 +1295,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     if smart_crop_enabled:
         try:
             from smart_crop import batch_detect_clips, compute_smart_crop, _even
-            _sc_results = batch_detect_clips(video_path, ordered_clips, log_fn=_log)
+            _sc_results = batch_detect_clips(video_path, ordered_clips, log_fn=_log, ffmpeg_cmd=ffmpeg_cmd)
         except ImportError:
             _log("SmartCrop: smart_crop.py 不可用，使用标准裁切")
             smart_crop_enabled = False
