@@ -31,7 +31,6 @@ from config import (
     TARGET_DURATION, TARGET_DURATION_TOLERANCE, REQUIRED_CLIP_TYPES,
     TIME_WINDOW_MINUTES,
 )
-from smart_crop import batch_detect_clips, compute_smart_crop, prepare_face_detector
 
 
 
@@ -104,11 +103,18 @@ def _generate_random_dedup_params(clip_index):
     else:
         params["speed"] = 1.0
 
-    # 2. 随机微裁剪（已被Smart Crop替代，去重阶段不做裁剪）
-    params["crop_w"] = 1.0
-    params["crop_h"] = 1.0
-    params["crop_x"] = 0.0
-    params["crop_y"] = 0.0
+    # 2. 随机微裁剪
+    if cfg.get("random_crop", {}).get("enabled"):
+        rc = cfg["random_crop"]
+        params["crop_w"] = round(rng.uniform(rc["crop_min"], rc["crop_max"]), 3)
+        params["crop_h"] = round(rng.uniform(rc["crop_min"], rc["crop_max"]), 3)
+        params["crop_x"] = round(rng.uniform(rc["offset_min"], rc["offset_max"]), 3)
+        params["crop_y"] = round(rng.uniform(rc["offset_min"], rc["offset_max"]), 3)
+    else:
+        params["crop_w"] = 1.0
+        params["crop_h"] = 1.0
+        params["crop_x"] = 0.0
+        params["crop_y"] = 0.0
 
     # 3. 音频微pitch
     if cfg.get("audio_pitch", {}).get("enabled"):
@@ -855,7 +861,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                    dedup_preset="medium", subtitle_overlay=True,
                    log_fn=None, force_category=None, cancel_event=None,
                    pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                   _clips_only=False, _asr_only=False, focus_hint="自动"):
+                   _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -1197,6 +1203,16 @@ def process_video(video_path, srt_path=None, output_path=None,
         _pr = subprocess.run(_probe, capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
         _prj = json.loads(_pr.stdout)
         _vs = _prj.get("streams", [{}])[0]
+        _video_fps = 30
+        _rfr = _vs.get("r_frame_rate", "30/1")
+        try:
+            if "/" in str(_rfr):
+                _n, _d = str(_rfr).split("/")
+                _video_fps = int(_n) / max(int(_d), 1)
+            else:
+                _video_fps = float(_rfr)
+        except:
+            _video_fps = 30
         _sw, _sh = int(_vs.get("width", 0)), int(_vs.get("height", 0))
         if _sw > 0 and _sh > 0:
             # 直接使用源视频分辨率，只做偶数对齐
@@ -1243,15 +1259,6 @@ def process_video(video_path, srt_path=None, output_path=None,
     except Exception:
         pass
 
-    # Smart Crop: 批量检测所有片段的人物信息
-    _smart_crop_results = {}
-    try:
-        prepare_face_detector(log_fn=_log)
-        _smart_crop_results = batch_detect_clips(video_path, ordered_clips, log_fn=_log)
-    except Exception as _sc_err:
-        _log(f"SmartCrop检测失败，降级为标准裁切: {_sc_err}")
-        _smart_crop_results = {}
-
     _log(f"开始切割 {total_clips} 个片段...")
 
     # 获取视频时长
@@ -1283,17 +1290,39 @@ def process_video(video_path, srt_path=None, output_path=None,
     temp_files = []
     success_count = 0
     _log(f"[STEP] ✂ 切割片段中 ({total_clips}段)...")
+    # ===== Smart Crop 批量检测 =====
+    _sc_results = None
+    if smart_crop_enabled:
+        try:
+            from smart_crop import batch_detect_clips, compute_smart_crop, _even
+            _sc_results = batch_detect_clips(video_path, ordered_clips, log_fn=_log)
+        except ImportError:
+            _log("SmartCrop: smart_crop.py 不可用，使用标准裁切")
+            smart_crop_enabled = False
+        except Exception as _sce:
+            _log(f"SmartCrop: 检测失败({_sce})，使用标准裁切")
+            smart_crop_enabled = False
+    else:
+        try:
+            from smart_crop import _even
+        except ImportError:
+            def _even(v): return v + (v % 2)
+
     _log(f"开始切割 {total_clips} 个片段 (FFmpeg: {ffmpeg_cmd})...")
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
     try:
-        for i, clip in enumerate(ordered_clips):
+        _clip_starts = []
+        _clip_ends = []
+        for clip_idx, clip in enumerate(ordered_clips):
             c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
-            _log(f"[T] [{time.strftime('%H:%M:%S')}] loop i={i}")
+            _log(f"[T] [{time.strftime('%H:%M:%S')}] loop clip_idx={clip_idx}")
             if _cancelled():
                 _log("已取消，跳过剩余切割。"); break
-            _log(f"切割 [{i+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
-            temp_file = os.path.join(temp_dir, f"clip_{i:02d}.mp4")
+            _log(f"切割 [{clip_idx+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
+            temp_file = os.path.join(temp_dir, f"clip_{clip_idx:02d}.mp4")
+            _clip_starts.append(start)
+            _clip_ends.append(end)
 
             # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
@@ -1326,36 +1355,30 @@ def process_video(video_path, srt_path=None, output_path=None,
                 mirror_vf = "hflip"
             clip_duration = end - start
 
-            # Smart Crop: 基于人物检测的智能裁切
-            _sc_info = _smart_crop_results.get(i)
-            if _sc_info:
-                _sc = compute_smart_crop(_sc_info, 1080, 1920, log_fn=_log)
-                if _sc['method'] == 'smart':
-                    cw_px = int(_sc_info['frame_w'] * _sc['crop_w'])
-                    ch_px = int(_sc_info['frame_h'] * _sc['crop_h'])
-                    cx_px = int(_sc_info['frame_w'] * _sc['crop_x'])
-                    cy_px = int(_sc_info['frame_h'] * _sc['crop_y'])
-                    # 确保 even
-                    cw_px = cw_px + (cw_px % 2)
-                    ch_px = ch_px + (ch_px % 2)
-                    if cx_px + cw_px > _sc_info['frame_w']:
-                        cx_px = _sc_info['frame_w'] - cw_px
-                    if cy_px + ch_px > _sc_info['frame_h']:
-                        cy_px = _sc_info['frame_h'] - ch_px
-                    # 先smart crop再缩放到9:16
-                    crop_vf = f"crop={cw_px}:{ch_px}:{cx_px}:{cy_px}"
-                    aspect_vf = r"scale=-2:1920:force_original_aspect_ratio=decrease,crop=1080:1920"
-                    vf_parts = [crop_vf, aspect_vf]
+            # Smart Crop VF
+            if smart_crop_enabled and _sc_results is not None:
+                _sc_info = _sc_results.get(clip_idx, None)
+                _sc_crop = compute_smart_crop(_sc_info, w, h, crop_level=crop_level, log_fn=_log)
+                if _sc_crop and _sc_crop.get("method") == "smart":
+                    _cw = _even(int(w * _sc_crop["crop_w"]))
+                    _ch = _even(int(h * _sc_crop["crop_h"]))
+                    _cx = _even(int(w * _sc_crop["crop_x"]))
+                    _cy = _even(int(h * _sc_crop["crop_y"]))
+                    combined_vf = "crop=%d:%d:%d:%d,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (_cw, _ch, _cx, _cy, w, h, w, h)
                 else:
-                    aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
-                    vf_parts = [aspect_vf]
+                    _rc = _sc_crop or {}
+                    _rcw = _even(int(w / _rc.get("zoom", 1.08)))
+                    _rch = _even(int(h / _rc.get("zoom", 1.08)))
+                    _rcx = _even(int((w - _rcw) / 2))
+                    _rcy = _even(int(h - _rch))  # bottom preserved
+                    combined_vf = "crop=%d:%d:%d:%d,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (_rcw, _rch, _rcx, _rcy, w, h, w, h)
             else:
                 aspect_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
-                vf_parts = [aspect_vf]
+                combined_vf = aspect_vf
 
             if mirror_vf:
-                vf_parts.append(mirror_vf)
-            combined_vf = ",".join(vf_parts)
+                combined_vf += "," + mirror_vf
+            _log("[T] VF: " + combined_vf[:200])
 
             cmd = [ffmpeg, "-y"]
             # input seeking（-ss放-i前面）：重新编码下帧级精确
@@ -1423,6 +1446,35 @@ def process_video(video_path, srt_path=None, output_path=None,
     with open(list_file, "w", encoding="utf-8") as f:
         for tf in temp_files:
             f.write(f"file '{os.path.abspath(tf).replace(chr(92), '/')}'\n")
+
+        # ===== Ken Burns second pass =====
+    if ken_burns_enabled:
+        _log("KB: second pass start")
+        _kb_ok = 0
+        for _kbi, _clip_file in enumerate(temp_files):
+            if cancel_event and cancel_event.is_set():
+                break
+            try:
+                _kb_dur = _clip_ends[_kbi] - _clip_starts[_kbi] if _kbi < len(_clip_starts) else 10.0
+                _kb_vf = ken_burns_filter(_kb_dur, w=w, h=h, fps=_video_fps, log_fn=_log)
+                _kb_out = _clip_file.replace(".mp4", "_kb.mp4")
+                _kb_cmd = [get_ffmpeg_cmd(), "-y", "-i", _clip_file,
+                           "-vf", _kb_vf,
+                           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                           "-pix_fmt", "yuv420p",
+                           "-c:a", "copy", "-movflags", "+faststart",
+                           _kb_out]
+                _kb_pr = subprocess.run(_kb_cmd, capture_output=True, timeout=120,
+                                        creationflags=_NO_WINDOW)
+                if _kb_pr.returncode == 0 and os.path.exists(_kb_out):
+                    os.replace(_kb_out, _clip_file)
+                    _kb_ok += 1
+                else:
+                    if os.path.exists(_kb_out):
+                        os.remove(_kb_out)
+            except Exception as _kbe:
+                _log(f"KB error clip {_kbi}: {_kbe}")
+        _log("KB: %d/%d done" % (_kb_ok, len(temp_files)))
 
     raw_file = os.path.join(temp_dir, "raw_concat.mp4")
     concat_cmd = [
@@ -2420,7 +2472,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         dedup_preset="medium", subtitle_overlay=True,
                         log_fn=None, force_category=None, cancel_event=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                        num_versions=1, focus_hint="自动"):
+                        num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
     """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
     策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
@@ -2433,7 +2485,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         return process_video(video_path, srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     
     _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
@@ -2444,7 +2497,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         return process_video(video_path, srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -2455,7 +2509,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                  dedup_preset, subtitle_overlay, log_fn,
                  force_category, cancel_event,
                  pip_path, pip_size, pip_opacity, pip_pos,
-                 _asr_only=True)
+                 _asr_only=True,
+                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     
     _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
@@ -2466,7 +2521,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         return process_video(video_path, srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -2492,14 +2548,16 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         return process_video(video_path, _multi_srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     
     if len(versions_data) < 1:
         _log("无有效版本，输出单版本")
         return process_video(video_path, _multi_srt_path, output_path,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
-                           pip_path, pip_size, pip_opacity, pip_pos)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
@@ -2529,7 +2587,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             video_path, _multi_srt_path, v_output,
             ver_clips, dedup_preset, subtitle_overlay,
             log_fn, cancel_event,
-            pip_path, pip_size, pip_opacity, pip_pos
+            pip_path, pip_size, pip_opacity, pip_pos,
+            smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled
         )
         results.append(result)
     
@@ -2550,7 +2609,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                  clips, dedup_preset="medium",
                                  subtitle_overlay=True, log_fn=None,
                                  cancel_event=None, pip_path=None,
-                                 pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
+                                 pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
+                                 smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
     """Process a single version with pre-determined clips (bypass AI selection)"""
     import time as _time
     from ai_clipper import is_enabled as ai_is_enabled
@@ -2581,7 +2641,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
         result = process_video(video_path, srt_path, output_path,
                               dedup_preset, subtitle_overlay, log_fn,
                               None, cancel_event,  # force_category=None (already filtered)
-                              pip_path, pip_size, pip_opacity, pip_pos)
+                              pip_path, pip_size, pip_opacity, pip_pos,
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn

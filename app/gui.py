@@ -55,6 +55,7 @@ AI_PRESETS = {
     "GPT-4o":    {"base_url": "https://api.openai.com/v1", "model": "gpt-4o"},
     "GLM-4":     {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4"},
     "DeepSeek R1": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-reasoner"},
+    "豆包Seed": {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-seed-2.0-pro-260215"},
 }
 
 # 去重等级说明
@@ -363,6 +364,28 @@ class App:
             ToolTip(rb, DEDUP_TIPS[val])
 
         # 画中画（与去重同行，| 分隔）
+        # Smart Crop 智能裁切（独立于去重）
+        tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
+        tk.Label(opt, text="🎬裁切:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
+        self.smart_crop_var = tk.BooleanVar(value=True)
+        _sc_cb = tk.Checkbutton(opt, text="开", variable=self.smart_crop_var,
+                        font=FNT_S, fg=C["btn_sel"], bg=C["card"], selectcolor=C["inp"],
+                        activebackground=C["card"], cursor="hand2")
+        _sc_cb.pack(side="left", padx=1)
+        self.crop_level_var = tk.StringVar(value="中")
+        _sc_combo = ttk.Combobox(opt, textvariable=self.crop_level_var,
+                         values=["轻", "中", "重"], width=2,
+                         font=FNT_S, state="readonly")
+        _sc_combo.pack(side="left", padx=1)
+
+        tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
+        tk.Label(opt, text="🎥缩放:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
+        self.ken_burns_var = tk.BooleanVar(value=True)
+        _kb_cb = tk.Checkbutton(opt, text="开", variable=self.ken_burns_var,
+                        font=FNT_S, fg=C["btn_sel"], bg=C["card"], selectcolor=C["inp"],
+                        activebackground=C["card"], cursor="hand2")
+        _kb_cb.pack(side="left", padx=1)
+
         tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
         tk.Label(opt, text="画中画:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
         self.pip_var = tk.StringVar(value="留空=无")
@@ -1835,6 +1858,9 @@ class App:
                         pip_size=int(self.pip_size_var.get().replace("%",""))/100,
                         pip_opacity=int(self.pip_opacity_var.get().replace("%",""))/100,
                         pip_pos=self.pip_pos_var.get(),
+                        smart_crop_enabled=self.smart_crop_var.get() if hasattr(self, "smart_crop_var") else True,
+                        crop_level={"轻":"light","中":"medium","重":"heavy"}.get(self.crop_level_var.get() if hasattr(self, "crop_level_var") else "中", "medium"),
+                        ken_burns_enabled=self.ken_burns_var.get() if hasattr(self, "ken_burns_var") else True,
                         log_fn=lambda msg, _idx=idx, _total=total: self._batch_log(msg, _idx, _total)
                     )
                     if _nver > 1:
