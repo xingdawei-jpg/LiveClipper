@@ -298,7 +298,7 @@ class UpdateDialog(tk.Toplevel):
         
         # 标题
         tk.Label(
-            self, text=f"🎉 新版本 v{version} 可用",
+            self, text=f"🎉 新版本 v{version.lstrip("vV")} 可用",
             font=("Microsoft YaHei UI", 13, "bold")
         ).pack(pady=(15, 5))
         
