@@ -240,15 +240,16 @@ def _extract_frame_ffmpeg(ffmpeg_cmd, video_path, timestamp, log_fn=None):
         proc = _sp.run(
             [ffmpeg_cmd, "-y", "-ss", "%.2f" % timestamp,
              "-i", video_path,
-             "-frames:1", "-f", "image2pipe", "-vcodec", "png",
+             "-vframes", "1", "-f", "image2pipe", "-vcodec", "png",
              "-nostdin", "pipe:1"],
             capture_output=True, timeout=5, creationflags=_cflags)
         if proc.returncode == 0 and proc.stdout:
             nparr = np.frombuffer(proc.stdout, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             return frame
-    except Exception:
-        pass
+    except Exception as _e:
+        if log_fn:
+            log_fn("SmartCrop: FFmpeg\u63d0\u53d6\u5e27\u5931\u8d25: " + str(_e))
     return None
 
 
