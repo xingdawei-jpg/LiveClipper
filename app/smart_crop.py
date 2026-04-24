@@ -68,23 +68,18 @@ def _get_cascade(name):
     return None
 
 
-_DIAG_LOGGED = False
-
 def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
-    """三级人体检测：HOG人体 → Haar上半身 → Haar人脸"""
-    global _DIAG_LOGGED
+    """四级人体检测：HOG人体 -> Haar上半身 -> Haar人脸 -> 皮肤色检测"""
     if not _CV2_AVAILABLE:
         return []
 
     h, w = frame.shape[:2]
     all_detections = []
-    _is_diag = not _DIAG_LOGGED  # only log once
 
     # Level 1: HOG 人体检测（检测全身/半身）
     hog = _get_hog()
     if hog is not None:
         try:
-            # 缩小图像加速检测
             scale = min(1.0, 640.0 / max(w, h))
             if scale < 1.0:
                 small = cv2.resize(frame, (int(w * scale), int(h * scale)))
@@ -94,11 +89,6 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
             regions, weights = hog.detectMultiScale(
                 small, winStride=(8, 8), padding=(4, 4), scale=1.05
             )
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] HOG raw=%d regions, frame=%dx%d, small=%dx%d" % (len(regions), w, h, small.shape[1], small.shape[0]))
-                if len(regions) > 0:
-                    wts = [float(weights[i][0]) if i < len(weights) else 0.0 for i in range(min(len(regions), 5))]
-                    _log_fn("SmartCrop: [DIAG] HOG weights(top5)=%s threshold=%.1f" % (str([round(wt, 3) for wt in wts]), conf_threshold))
             if len(regions) > 0:
                 for idx, (x, y, rw, rh) in enumerate(regions):
                     wt = float(weights[idx][0]) if idx < len(weights) else 0.0
@@ -108,48 +98,32 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
                             int(rw / scale), int(rh / scale),
                             wt, 'body'
                         ))
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] HOG passed_threshold=%d" % len(all_detections))
-        except Exception as _e:
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] HOG exception: %s" % str(_e))
+        except Exception:
+            pass
 
     if all_detections:
-        if _is_diag:
-            _DIAG_LOGGED = True
         return all_detections
 
     # Level 2: Haar 上半身检测
     upper_cascade = _get_cascade('haarcascade_upperbody.xml')
-    if _is_diag and _log_fn:
-        _log_fn("SmartCrop: [DIAG] Haar upper=%s path=%s" % ("OK" if upper_cascade is not None else "None", os.path.join(cv2.data.haarcascades, 'haarcascade_upperbody.xml') if hasattr(cv2, 'data') else 'N/A'))
     if upper_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(60, 60))
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] Haar upper found=%d" % len(bodies))
             for x, y, bw, bh in bodies:
                 all_detections.append((x, y, bw, bh, 0.8, 'upper'))
-        except Exception as _e:
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] Haar upper exception: %s" % str(_e))
+        except Exception:
+            pass
 
     if all_detections:
-        if _is_diag:
-            _DIAG_LOGGED = True
         return all_detections
 
-    # Level 3: Haar 人脸检测（兜底）→ 扩展为上半身估算
+    # Level 3: Haar 人脸检测（兜底）-> 扩展为上半身估算
     face_cascade = _get_cascade('haarcascade_frontalface_default.xml')
-    if _is_diag and _log_fn:
-        _log_fn("SmartCrop: [DIAG] Haar face=%s" % ("OK" if face_cascade is not None else "None"))
     if face_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] Haar face found=%d" % len(faces))
             for x, y, fw, fh in faces:
                 expand_y = int(fh * 0.5)
                 expand_h = int(fh * 3)
@@ -158,42 +132,33 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
                 new_w = int(fw * 1.6)
                 new_h = min(fh + expand_h + expand_y, h - new_y)
                 all_detections.append((new_x, new_y, new_w, new_h, 0.6, 'face_expanded'))
-        except Exception as _e:
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] Haar face exception: %s" % str(_e))
+        except Exception:
+            pass
+
+    if all_detections:
+        return all_detections
 
     # Level 4: 皮肤色检测（无需外部文件，所有OpenCV版本通用）
-    if not all_detections:
-        try:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            # 肤色HSV范围（覆盖多种肤色）
-            mask1 = cv2.inRange(hsv, np.array([0, 30, 60], dtype=np.uint8), np.array([25, 150, 255], dtype=np.uint8))
-            mask2 = cv2.inRange(hsv, np.array([170, 30, 60], dtype=np.uint8), np.array([180, 150, 255], dtype=np.uint8))
-            mask = cv2.bitwise_or(mask1, mask2)
-            # 形态学去噪
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                # 取最大的皮肤色区域
-                largest = max(contours, key=cv2.contourArea)
-                area = cv2.contourArea(largest)
-                min_area = h * w * 0.03  # 至少占3%
-                if _is_diag and _log_fn:
-                    _log_fn("SmartCrop: [DIAG] Skin contours=%d largest_area=%.0f min=%.0f" % (len(contours), area, min_area))
-                if area >= min_area:
-                    x, y, bw, bh = cv2.boundingRect(largest)
-                    all_detections.append((x, y, bw, bh, 0.5, 'skin'))
-        except Exception as _e:
-            if _is_diag and _log_fn:
-                _log_fn("SmartCrop: [DIAG] Skin exception: %s" % str(_e))
+    try:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask1 = cv2.inRange(hsv, np.array([0, 30, 60], dtype=np.uint8), np.array([25, 150, 255], dtype=np.uint8))
+        mask2 = cv2.inRange(hsv, np.array([170, 30, 60], dtype=np.uint8), np.array([180, 150, 255], dtype=np.uint8))
+        mask = cv2.bitwise_or(mask1, mask2)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest)
+            min_area = h * w * 0.03
+            if area >= min_area:
+                x, y, bw, bh = cv2.boundingRect(largest)
+                all_detections.append((x, y, bw, bh, 0.5, 'skin'))
+    except Exception:
+        pass
 
-    if _is_diag:
-        _DIAG_LOGGED = True
     return all_detections
-
-
 def prepare_face_detector(app_dir=None, log_fn=None):
     """初始化检测器（兼容旧接口）"""
     if not _CV2_AVAILABLE:
@@ -249,10 +214,6 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             frame = None
             if use_ffmpeg:
                 frame = _extract_frame_ffmpeg(ffmpeg_cmd, video_path, t, log_fn)
-                if log_fn and frame is None:
-                    log_fn("SmartCrop: [diag] clip=%d sample=%d t=%.1f FFmpeg\u63d0\u53d6\u8fd4\u56deNone" % (i, ti, t))
-                elif log_fn and frame is not None:
-                    log_fn("SmartCrop: [diag] clip=%d sample=%d t=%.1f frame=%dx%d" % (i, ti, t, frame.shape[1], frame.shape[0]))
             elif cap is not None:
                 fps_val = cap.get(cv2.CAP_PROP_FPS) or 30
                 frame_idx = int(t * fps_val)
@@ -260,15 +221,11 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
                 ret, frame = cap.read()
                 if not ret:
                     frame = None
-                    if log_fn:
-                        log_fn("SmartCrop: [diag] clip=%d sample=%d cv2.read failed" % (i, ti))
 
             if frame is None:
                 continue
 
             detections = _detect_persons(frame, _log_fn=log_fn)
-            if log_fn:
-                log_fn("SmartCrop: [diag] clip=%d sample=%d detections=%d" % (i, ti, len(detections)))
             if detections:
                 best = max(detections, key=lambda d: d[2] * d[3])
                 cx = (best[0] + best[2] / 2) / frame_w
@@ -455,7 +412,7 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
     返回: FFmpeg 滤镜字符串, 可直接用于二次编码的 -vf
     """
     direction = random.choice(['in', 'out'])
-    target_zoom = random.uniform(0.05, 0.12)  # 5-12%
+    target_zoom = random.uniform(0.08, 0.25)  # 8-25%
     total_frames = max(1, int(fps * clip_duration))
 
     if direction == 'in':
@@ -492,7 +449,7 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
     import subprocess as _sp
 
     direction = random.choice(['in', 'out'])
-    target_zoom = random.uniform(0.05, 0.12)  # 5-12%
+    target_zoom = random.uniform(0.08, 0.25)  # 8-25%
     total_frames = max(1, int(fps * clip_duration))
 
     cap = cv2.VideoCapture(clip_path)
@@ -538,11 +495,14 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
             if not ret:
                 break
 
-            # Calculate zoom for this frame
+            # Calculate zoom for this frame (ease-in-out curve)
+            progress = min(frame_idx, total_frames) / max(total_frames, 1)
+            # Smooth ease-in-out: slow start, fast middle, slow end
+            eased = 0.5 - 0.5 * (1.0 - 2.0 * progress) * abs(1.0 - 2.0 * progress) if progress < 0.5 else 0.5 + 0.5 * (2.0 * progress - 1.0) * abs(2.0 * progress - 1.0)
             if direction == 'in':
-                zoom = 1.0 + target_zoom * min(frame_idx, total_frames) / total_frames
+                zoom = 1.0 + target_zoom * eased
             else:
-                zoom = 1.0 + target_zoom * (1.0 - min(frame_idx, total_frames) / total_frames)
+                zoom = 1.0 + target_zoom * (1.0 - eased)
 
             fh, fw = frame.shape[:2]
             crop_w = int(fw / zoom)
