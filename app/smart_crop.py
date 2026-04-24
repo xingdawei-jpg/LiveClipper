@@ -58,13 +58,17 @@ def _get_cascade(name):
     return None
 
 
-def _detect_persons(frame, conf_threshold=0.3):
+_DIAG_LOGGED = False
+
+def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
     """三级人体检测：HOG人体 → Haar上半身 → Haar人脸"""
+    global _DIAG_LOGGED
     if not _CV2_AVAILABLE:
         return []
 
     h, w = frame.shape[:2]
     all_detections = []
+    _is_diag = not _DIAG_LOGGED  # only log once
 
     # Level 1: HOG 人体检测（检测全身/半身）
     hog = _get_hog()
@@ -80,44 +84,63 @@ def _detect_persons(frame, conf_threshold=0.3):
             regions, weights = hog.detectMultiScale(
                 small, winStride=(8, 8), padding=(4, 4), scale=1.05
             )
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] HOG raw=%d regions, frame=%dx%d, small=%dx%d" % (len(regions), w, h, small.shape[1], small.shape[0]))
+                if len(regions) > 0:
+                    wts = [float(weights[i][0]) if i < len(weights) else 0.0 for i in range(min(len(regions), 5))]
+                    _log_fn("SmartCrop: [DIAG] HOG weights(top5)=%s threshold=%.1f" % (str([round(wt, 3) for wt in wts]), conf_threshold))
             if len(regions) > 0:
                 for idx, (x, y, rw, rh) in enumerate(regions):
                     wt = float(weights[idx][0]) if idx < len(weights) else 0.0
                     if wt > conf_threshold:
-                        # 还原到原始尺寸
                         all_detections.append((
                             int(x / scale), int(y / scale),
                             int(rw / scale), int(rh / scale),
                             wt, 'body'
                         ))
-        except Exception:
-            pass
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] HOG passed_threshold=%d" % len(all_detections))
+        except Exception as _e:
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] HOG exception: %s" % str(_e))
 
     if all_detections:
+        if _is_diag:
+            _DIAG_LOGGED = True
         return all_detections
 
     # Level 2: Haar 上半身检测
     upper_cascade = _get_cascade('haarcascade_upperbody.xml')
+    if _is_diag and _log_fn:
+        _log_fn("SmartCrop: [DIAG] Haar upper=%s path=%s" % ("OK" if upper_cascade is not None else "None", os.path.join(cv2.data.haarcascades, 'haarcascade_upperbody.xml') if hasattr(cv2, 'data') else 'N/A'))
     if upper_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(60, 60))
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] Haar upper found=%d" % len(bodies))
             for x, y, bw, bh in bodies:
                 all_detections.append((x, y, bw, bh, 0.8, 'upper'))
-        except Exception:
-            pass
+        except Exception as _e:
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] Haar upper exception: %s" % str(_e))
 
     if all_detections:
+        if _is_diag:
+            _DIAG_LOGGED = True
         return all_detections
 
     # Level 3: Haar 人脸检测（兜底）→ 扩展为上半身估算
     face_cascade = _get_cascade('haarcascade_frontalface_default.xml')
+    if _is_diag and _log_fn:
+        _log_fn("SmartCrop: [DIAG] Haar face=%s" % ("OK" if face_cascade is not None else "None"))
     if face_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] Haar face found=%d" % len(faces))
             for x, y, fw, fh in faces:
-                # 从人脸扩展为上半身估算
                 expand_y = int(fh * 0.5)
                 expand_h = int(fh * 3)
                 new_x = max(0, x - int(fw * 0.3))
@@ -125,9 +148,12 @@ def _detect_persons(frame, conf_threshold=0.3):
                 new_w = int(fw * 1.6)
                 new_h = min(fh + expand_h + expand_y, h - new_y)
                 all_detections.append((new_x, new_y, new_w, new_h, 0.6, 'face_expanded'))
-        except Exception:
-            pass
+        except Exception as _e:
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] Haar face exception: %s" % str(_e))
 
+    if _is_diag:
+        _DIAG_LOGGED = True
     return all_detections
 
 
@@ -203,7 +229,7 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             if frame is None:
                 continue
 
-            detections = _detect_persons(frame)
+            detections = _detect_persons(frame, _log_fn=log_fn)
             if log_fn:
                 log_fn("SmartCrop: [diag] clip=%d sample=%d detections=%d" % (i, ti, len(detections)))
             if detections:
