@@ -102,38 +102,9 @@ def tighten_clip_boundaries(clips, srt_text, log_fn=None):
             est = _find_sub_time(last_srt[0], last_srt[1], last_clean, clean_ai, 'end')
             if est < c_end - 0.5 and est > new_start:
                 new_end = est
-        # Close片段：跳过start/end收紧，只加+0.5s防吃字缓冲
+        # Close片段：跳过start/end收紧，保留原始时间戳（火山引擎ASR时间戳精确，无需裁切）
         if 'close' in c_type.lower():
-            # 找与片段重叠的SRT条目
-            _close_range = [(s, e, t) for s, e, t in srt_entries
-                          if s < c_end + 1 and e > c_start - 1]
-            if _close_range:
-                extend_end = c_end + 0.5
-                extend_srts = [(s, e, t) for s, e, t in _close_range
-                              if s < extend_end and e > c_end]
-                _skip_extend = False
-                try:
-                    from config import ALL_CATEGORIES
-                    for _s, _e, _t in extend_srts:
-                        for _cat, _kws in ALL_CATEGORIES.items():
-                            if _cat != '上衣':
-                                for _kw in _kws:
-                                    if _kw in _t:
-                                        _skip_extend = True
-                                        break
-                                if _skip_extend:
-                                    break
-                except ImportError:
-                    pass
-                if not _skip_extend:
-                    c_end = c_end + 0.5
-                    c_dur = c_end - c_start
-                    _log(f"tighten [{c_type}]: +0.5s缓冲 -> {c_start:.1f}-{c_end:.1f}s")
-                    tightened.append((c_type, c_text, c_start, c_end, c_score, c_dur, *clip[6:]))
-                else:
-                    tightened.append(clip)
-            else:
-                tightened.append(clip)
+            tightened.append(clip)
             continue
         new_dur = new_end - new_start
         if new_dur < 2.0:
@@ -237,7 +208,7 @@ def ensure_sentence_complete(clips, srt_text, log_fn=None):
         else:
             end_limits[idx] = 99999
 
-    MAX_EXTENSION = 8.0
+    MAX_EXTENSION = 15.0
     result = list(clips)
     extended_count = 0
 

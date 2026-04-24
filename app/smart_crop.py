@@ -1,8 +1,11 @@
+# -*- coding: utf-8 -*-
 """
-Smart Crop 智能裁切模块 v6
-- cv2可用（全量包内置）→ 智能裁切
-- cv2不可用 → 降级标准裁切，不卡界面
-- 绝不自动pip install（会卡死GUI）
+Smart Crop 智能裁切模块 v7
+- 三级检测：HOG人体 → Haar上半身 → Haar人脸
+- 智能兜底：根据人物位置/大小自动限制最大zoom，绝不裁掉头部
+- 裁切程度可调（轻/中/重），独立于去重选项
+- 底部不裁切
+- cv2不可用 → 降级标准裁切
 """
 
 import os
@@ -16,75 +19,137 @@ try:
 except ImportError:
     pass
 
-_NET = None
+# HOG 人体检测器（OpenCV内置，无需额外文件）
+_HOG = None
+
+# Haar 级联检测器缓存
+_CASCADES = {}
+
+# 裁切程度配置
+CROP_LEVELS = {
+    'light':  {'max_zoom': 1.05, 'label': '轻'},
+    'medium': {'max_zoom': 1.12, 'label': '中'},
+    'heavy':  {'max_zoom': 1.25, 'label': '重'},
+}
 
 
-def _detect_faces(frame, conf_threshold=0.5):
+def _get_hog():
+    global _HOG
+    if _HOG is None and _CV2_AVAILABLE:
+        try:
+            _HOG = cv2.HOGDescriptor()
+            _HOG.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        except Exception:
+            _HOG = None
+    return _HOG
+
+
+def _get_cascade(name):
+    if name in _CASCADES:
+        return _CASCADES[name]
+    if not _CV2_AVAILABLE:
+        return None
+    path = os.path.join(cv2.data.haarcascades, name)
+    if os.path.exists(path):
+        cascade = cv2.CascadeClassifier(path)
+        _CASCADES[name] = cascade
+        return cascade
+    return None
+
+
+def _detect_persons(frame, conf_threshold=0.3):
+    """三级人体检测：HOG人体 → Haar上半身 → Haar人脸"""
     if not _CV2_AVAILABLE:
         return []
 
-    net = _NET if _NET is not None else "haar"
     h, w = frame.shape[:2]
+    all_detections = []
 
-    if net == "haar":
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        if not os.path.exists(cascade_path):
-            return []
-        cascade = cv2.CascadeClassifier(cascade_path)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-        return [(x, y, fw, fh, 1.0) for x, y, fw, fh in faces]
-
-    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    net.setInput(blob)
-    detections = net.forward()
-    results = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence < conf_threshold:
-            continue
-        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-        (x1, y1, x2, y2) = box.astype("int")
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        results.append((x1, y1, x2 - x1, y2 - y1, float(confidence)))
-    return results
-
-
-def prepare_face_detector(app_dir=None, log_fn=None):
-    global _NET
-
-    if not _CV2_AVAILABLE:
-        if log_fn:
-            log_fn("SmartCrop: 智能裁切需要完整安装包（当前为增量更新，使用标准裁切）")
-        return False
-
-    if app_dir is None:
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-
-    detector_dir = os.path.join(app_dir, "face_detector")
-    proto_path = os.path.join(detector_dir, "deploy.prototxt")
-    model_path = os.path.join(detector_dir, "res10_300x300_ssd_iter_140000.caffemodel")
-
-    if os.path.exists(proto_path) and os.path.exists(model_path):
+    # Level 1: HOG 人体检测（检测全身/半身）
+    hog = _get_hog()
+    if hog is not None:
         try:
-            _NET = cv2.dnn.readNetFromCaffe(proto_path, model_path)
-            if log_fn:
-                log_fn("SmartCrop: DNN人脸检测模型已就绪")
-            return True
+            # 缩小图像加速检测
+            scale = min(1.0, 640.0 / max(w, h))
+            if scale < 1.0:
+                small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            else:
+                small = frame
+                scale = 1.0
+            regions, weights = hog.detectMultiScale(
+                small, winStride=(8, 8), padding=(4, 4), scale=1.05
+            )
+            if len(regions) > 0:
+                for idx, (x, y, rw, rh) in enumerate(regions):
+                    wt = float(weights[idx][0]) if idx < len(weights) else 0.0
+                    if wt > conf_threshold:
+                        # 还原到原始尺寸
+                        all_detections.append((
+                            int(x / scale), int(y / scale),
+                            int(rw / scale), int(rh / scale),
+                            wt, 'body'
+                        ))
         except Exception:
             pass
 
-    _NET = "haar"
+    if all_detections:
+        return all_detections
+
+    # Level 2: Haar 上半身检测
+    upper_cascade = _get_cascade('haarcascade_upperbody.xml')
+    if upper_cascade is not None:
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(60, 60))
+            for x, y, bw, bh in bodies:
+                all_detections.append((x, y, bw, bh, 0.8, 'upper'))
+        except Exception:
+            pass
+
+    if all_detections:
+        return all_detections
+
+    # Level 3: Haar 人脸检测（兜底）→ 扩展为上半身估算
+    face_cascade = _get_cascade('haarcascade_frontalface_default.xml')
+    if face_cascade is not None:
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+            for x, y, fw, fh in faces:
+                # 从人脸扩展为上半身估算
+                expand_y = int(fh * 0.5)
+                expand_h = int(fh * 3)
+                new_x = max(0, x - int(fw * 0.3))
+                new_y = max(0, y - expand_y)
+                new_w = int(fw * 1.6)
+                new_h = min(fh + expand_h + expand_y, h - new_y)
+                all_detections.append((new_x, new_y, new_w, new_h, 0.6, 'face_expanded'))
+        except Exception:
+            pass
+
+    return all_detections
+
+
+def prepare_face_detector(app_dir=None, log_fn=None):
+    """初始化检测器（兼容旧接口）"""
+    if not _CV2_AVAILABLE:
+        if log_fn:
+            log_fn("SmartCrop: 需要完整安装包（当前为增量更新，使用标准裁切）")
+        return False
+
+    # 预加载 HOG
+    _get_hog()
+
     if log_fn:
-        log_fn("SmartCrop: 使用Haar级联检测")
+        log_fn("SmartCrop: 检测器就绪（HOG人体+Haar级联）")
     return True
 
 
 def batch_detect_clips(video_path, clips, log_fn=None):
+    """批量检测片段中的人物位置"""
     if not _CV2_AVAILABLE:
         if log_fn:
-            log_fn("SmartCrop: 智能裁切需要完整安装包，使用标准裁切")
+            log_fn("SmartCrop: 需要完整安装包，使用标准裁切")
         return {i: None for i in range(len(clips))}
 
     results = {}
@@ -112,26 +177,39 @@ def batch_detect_clips(video_path, clips, log_fn=None):
             start + duration * 0.8,
         ]
 
-        face_xs = []
-        face_ys = []
+        person_xs = []
+        person_ys = []
+        person_sizes = []
+        head_tops = []
+
         for t in sample_times:
             frame_idx = int(t * fps)
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret:
                 continue
-            faces = _detect_faces(frame)
-            if faces:
-                best = max(faces, key=lambda f: f[2] * f[3])
-                face_xs.append((best[0] + best[2] / 2) / frame_w)
-                face_ys.append((best[1] + best[3] / 2) / frame_h)
 
-        if face_xs:
-            cx = sorted(face_xs)[len(face_xs) // 2]
-            cy = sorted(face_ys)[len(face_ys) // 2]
+            detections = _detect_persons(frame)
+            if detections:
+                best = max(detections, key=lambda d: d[2] * d[3])
+                cx = (best[0] + best[2] / 2) / frame_w
+                cy = (best[1] + best[3] / 2) / frame_h
+                person_xs.append(cx)
+                person_ys.append(cy)
+                person_sizes.append(max(best[2], best[3]) / max(frame_w, frame_h))
+                head_tops.append(best[1] / frame_h)
+
+        if person_xs:
+            cx = sorted(person_xs)[len(person_xs) // 2]
+            cy = sorted(person_ys)[len(person_ys) // 2]
+            avg_size = sum(person_sizes) / len(person_sizes)
+            min_head_top = min(head_tops)
+
             results[i] = {
-                'face_cx_ratio': cx,
-                'face_cy_ratio': cy,
+                'person_cx_ratio': cx,
+                'person_cy_ratio': cy,
+                'person_size_ratio': avg_size,
+                'head_top_ratio': min_head_top,
                 'frame_w': frame_w,
                 'frame_h': frame_h,
             }
@@ -145,28 +223,79 @@ def batch_detect_clips(video_path, clips, log_fn=None):
     return results
 
 
-def compute_smart_crop(person_info, frame_w, frame_h, log_fn=None):
+def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_fn=None):
+    """计算智能裁切参数，含头部安全兜底
+
+    Args:
+        person_info: batch_detect_clips 的检测结果，None表示未检测到人物
+        frame_w: 视频宽度
+        frame_h: 视频高度
+        crop_level: 裁切程度 'light'(轻)/'medium'(中)/'heavy'(重)
+        log_fn: 日志函数
+    """
+    level_cfg = CROP_LEVELS.get(crop_level, CROP_LEVELS['medium'])
+    max_zoom = level_cfg['max_zoom']
+
     if person_info is None:
-        return _random_crop()
+        return _random_crop(max_zoom)
 
-    cx = person_info['face_cx_ratio']
-    cy = person_info['face_cy_ratio']
+    cx = person_info['person_cx_ratio']
+    person_size = person_info.get('person_size_ratio', 0)
+    head_top = person_info.get('head_top_ratio', 0.1)
 
-    zoom = 1.0 + random.uniform(0.03, 0.12)
+    # ====== 头部安全兜底 ======
+    # 底部不裁切：crop_y + crop_h = 1.0
+    # 需要头部在裁切区域内且上方留5%边距
+    # 即 crop_y <= head_top - 0.05
+    # 所以 crop_h >= 1.0 - (head_top - 0.05)
+    # safe_zoom = 1.0 / crop_h <= 1.0 / (1.0 - head_top + 0.05)
+    head_margin = 0.05
+    if head_top > 0:
+        safe_max_zoom = 1.0 / (1.0 - head_top + head_margin)
+        safe_max_zoom = max(1.0, min(safe_max_zoom, 2.0))
+    else:
+        safe_max_zoom = max_zoom
+
+    # 实际最大zoom = min(用户选择程度, 安全上限)
+    actual_max_zoom = min(max_zoom, safe_max_zoom)
+
+    # 根据人物大小决定zoom力度
+    if person_size > 0.5:
+        # 人物已经很大，几乎不zoom
+        zoom = 1.0 + random.uniform(0.0, min(0.03, actual_max_zoom - 1.0))
+    elif person_size > 0.3:
+        # 中等距离
+        zoom = 1.0 + random.uniform(0.01, min(0.06, actual_max_zoom - 1.0))
+    else:
+        # 人物较远，正常zoom
+        upper = actual_max_zoom - 1.0
+        if upper > 0.02:
+            zoom = 1.0 + random.uniform(0.02, upper)
+        else:
+            zoom = 1.0 + random.uniform(0.0, max(0.01, upper))
+
+    zoom = max(1.0, min(zoom, actual_max_zoom))
+
     crop_w = 1.0 / zoom
     crop_h = 1.0 / zoom
 
-    crop_x = cx - crop_w / 2 + random.uniform(-0.03, 0.03)
+    # 水平居中于人物，加微小随机偏移
+    crop_x = cx - crop_w / 2 + random.uniform(-0.02, 0.02)
     crop_x = max(0, min(crop_x, 1.0 - crop_w))
 
+    # 垂直：底部不裁切
     crop_y = 1.0 - crop_h
-    face_in_crop = (cy - crop_y) / crop_h if crop_h > 0 else 0.5
-    if face_in_crop > 0.7:
-        crop_y = cy - crop_h * 0.5
-        crop_y = max(0, min(crop_y, 1.0 - crop_h))
+
+    # 二次安全检查：确保头部在裁切区域内
+    if head_top > 0 and crop_y > head_top - head_margin:
+        crop_y = max(0, head_top - head_margin)
+        crop_h = 1.0 - crop_y
+        zoom = 1.0 / min(crop_w, crop_h)
+
+    crop_y = max(0, min(crop_y, 1.0 - crop_h))
 
     if log_fn:
-        log_fn("SmartCrop: zoom=%.2fx" % zoom)
+        log_fn("SmartCrop: zoom=%.2fx (安全上限=%.2fx, 程度=%s)" % (zoom, safe_max_zoom, crop_level))
 
     return {
         'crop_w': crop_w,
@@ -177,11 +306,16 @@ def compute_smart_crop(person_info, frame_w, frame_h, log_fn=None):
     }
 
 
-def _random_crop():
-    crop_w = random.uniform(0.88, 0.98)
-    crop_h = random.uniform(0.88, 0.98)
+def _random_crop(max_zoom=1.08):
+    """无人检测时的随机裁切（保守，不裁头）"""
+    upper = min(0.04, max_zoom - 1.0)
+    if upper <= 0:
+        upper = 0.01
+    zoom = 1.0 + random.uniform(0.0, upper)
+    crop_w = 1.0 / zoom
+    crop_h = 1.0 / zoom
     crop_x = random.uniform(0, 1.0 - crop_w)
-    crop_y = 1.0 - crop_h
+    crop_y = 1.0 - crop_h  # 底部不裁切
     return {
         'crop_w': crop_w,
         'crop_h': crop_h,
@@ -189,3 +323,43 @@ def _random_crop():
         'crop_y': crop_y,
         'method': 'random',
     }
+
+
+def _even(v):
+    """确保偶数"""
+    v = int(v)
+    return v + (v % 2)
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(int(v), hi))
+
+
+def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
+    """Ken Burns: crop+scale 二次编码, 用 n(帧号) 做动画
+
+    在已切好的片段上做动画, n 从0开始, 不受 seeking 影响。
+    crop 居中 (iw-ow)/2, 不做平移。scale 回原尺寸保证输出稳定。
+
+    返回: FFmpeg 滤镜字符串, 可直接用于二次编码的 -vf
+    """
+    direction = random.choice(['in', 'out'])
+    target_zoom = random.uniform(0.05, 0.12)  # 5-12%
+    total_frames = max(1, int(fps * clip_duration))
+
+    if direction == 'in':
+        # 推进: n=0时满画幅, n=total时缩到1-target_zoom
+        cw_expr = "iw-iw*%.4f*n/%d" % (target_zoom, total_frames)
+        ch_expr = "ih-ih*%.4f*n/%d" % (target_zoom, total_frames)
+    else:
+        # 拉远: n=0时缩到1-target_zoom, n=total时满画幅
+        cw_expr = "iw-iw*%.4f*(%d-n)/%d" % (target_zoom, total_frames, total_frames)
+        ch_expr = "ih-ih*%.4f*(%d-n)/%d" % (target_zoom, total_frames, total_frames)
+
+    result = "crop=%s:%s:(iw-ow)/2:(ih-oh)/2,scale=%d:%d" % (cw_expr, ch_expr, w, h)
+
+    if log_fn:
+        label = '\u63a8\u8fdb' if direction == 'in' else '\u62c9\u8fdc'
+        log_fn("KenBurns: %s %.0f%% (%d frames)" % (label, target_zoom * 100, total_frames))
+
+    return result

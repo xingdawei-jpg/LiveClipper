@@ -67,7 +67,7 @@ _FIELD_DEVICE_INFO = "fldZ09gLPn"  # 设备信息
 
 CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
-TRIAL_USES = 10
+TRIAL_USES = 0
 
 PLAN_NAMES = {"01": "月付", "02": "季付", "03": "年付", "04": "永久"}
 PLAN_DAYS = {"01": 30, "02": 90, "03": 365, "04": 36500}  # 04=永久, 36500天=100年
@@ -502,7 +502,7 @@ def _get_fingerprints():
 # 服务器验证配置
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
-_VERIFY_API_URL = "https://license-server-tsigpdxecv.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
+_VERIFY_API_URL = "https://livecli-unified-xfsribggth.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
 _OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
 _REVOKED_MARKER = ".revoked"  # 熔断标记文件名
 
@@ -849,7 +849,7 @@ def deactivate_device():
     unbind_ok = _unbind_device(code) if not fc_ok else True
 
     # 清空本地
-    _save_cache({})
+    _save_cache({"trial_uses_left": 0, "previously_activated": True})
     lic_path = os.path.join(_get_data_path(), LICENSE_FILE)
     try:
         if os.path.exists(lic_path):
@@ -1021,6 +1021,11 @@ def check_activation():
                 "days_left": days_left_s,
                 "expires_date": expires_date_s,
             }
+
+    # 曾经激活过又解绑的，不再给试用机会
+    cache = _load_cache() or {}
+    if cache.get("previously_activated"):
+        return {"need_activate": True, "reason": "设备曾激活，请重新输入激活码"}
 
     trial = check_trial()
     if trial["in_trial"]:
