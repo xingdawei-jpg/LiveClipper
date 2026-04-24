@@ -233,23 +233,33 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
 
 
 def _extract_frame_ffmpeg(ffmpeg_cmd, video_path, timestamp, log_fn=None):
-    """\u4f7f\u7528FFmpeg\u63d0\u53d6\u6307\u5b9a\u65f6\u95f4\u70b9\u7684\u4e00\u5e27\uff08\u517c\u5bb9\u4e2d\u6587\u8def\u5f84\uff09"""
+    """\u4f7f\u7528FFmpeg\u63d0\u53d6\u6307\u5b9a\u65f6\u95f4\u70b9\u7684\u4e00\u5e27\uff08\u4e34\u65f6\u6587\u4ef6\u65b9\u5f0f\uff0c\u517c\u5bb9\u6240\u6709Windows\u73af\u5883\uff09"""
     import subprocess as _sp
+    import tempfile
     _cflags = 0x08000000 if sys.platform == "win32" else 0
+    tmp_path = None
     try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
         proc = _sp.run(
             [ffmpeg_cmd, "-y", "-ss", "%.2f" % timestamp,
              "-i", video_path,
-             "-vframes", "1", "-f", "image2pipe", "-vcodec", "png",
-             "-nostdin", "pipe:1"],
-            capture_output=True, timeout=5, creationflags=_cflags)
-        if proc.returncode == 0 and proc.stdout:
-            nparr = np.frombuffer(proc.stdout, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+             "-vframes", "1", tmp_path],
+            capture_output=True, timeout=8, creationflags=_cflags)
+        if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 100:
+            frame = cv2.imread(tmp_path)
             return frame
+        else:
+            if log_fn:
+                _err = proc.stderr.decode("utf-8", errors="ignore")[-150:] if proc.stderr else ""
+                log_fn("SmartCrop: FFmpeg\u63d0\u5e27\u5931\u8d25 rc=%d %s" % (proc.returncode, _err.replace("\n", " ")))
     except Exception as _e:
         if log_fn:
-            log_fn("SmartCrop: FFmpeg\u63d0\u53d6\u5e27\u5931\u8d25: " + str(_e))
+            log_fn("SmartCrop: FFmpeg\u63d0\u53d6\u5e27\u5f02\u5e38: " + str(_e))
+    finally:
+        if tmp_path:
+            try: os.remove(tmp_path)
+            except: pass
     return None
 
 
