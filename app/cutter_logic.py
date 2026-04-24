@@ -1308,6 +1308,14 @@ def process_video(video_path, srt_path=None, output_path=None,
         except ImportError:
             def _even(v): return v + (v % 2)
 
+    # Ken Burns import (independent of Smart Crop)
+    if ken_burns_enabled:
+        try:
+            from smart_crop import apply_ken_burns_opencv
+        except ImportError:
+            _log("KenBurns: apply_ken_burns_opencv 不可用")
+            ken_burns_enabled = False
+
     _log(f"开始切割 {total_clips} 个片段 (FFmpeg: {ffmpeg_cmd})...")
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
@@ -1416,7 +1424,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             else:
                 _log(f"FAIL [{c_type}] rc={rc}")
 
-            _log(f"[PROGRESS] {(i + 1) / total_clips * 0.3:.2f}")
+            _log(f"[PROGRESS] {(clip_idx + 1) / total_clips * 0.3:.2f}")
 
     except Exception as e:
         _log(f"[T] FATAL: {type(e).__name__}: {e}")
@@ -1456,17 +1464,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                 break
             try:
                 _kb_dur = _clip_ends[_kbi] - _clip_starts[_kbi] if _kbi < len(_clip_starts) else 10.0
-                _kb_vf = ken_burns_filter(_kb_dur, w=w, h=h, fps=_video_fps, log_fn=_log)
                 _kb_out = _clip_file.replace(".mp4", "_kb.mp4")
-                _kb_cmd = [get_ffmpeg_cmd(), "-y", "-i", _clip_file,
-                           "-vf", _kb_vf,
-                           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                           "-pix_fmt", "yuv420p",
-                           "-c:a", "copy", "-movflags", "+faststart",
-                           _kb_out]
-                _kb_pr = subprocess.run(_kb_cmd, capture_output=True, timeout=120,
-                                        creationflags=_NO_WINDOW)
-                if _kb_pr.returncode == 0 and os.path.exists(_kb_out):
+                _kb_ok_flag = apply_ken_burns_opencv(
+                    _clip_file, _kb_out, _kb_dur, w, h, _video_fps,
+                    ffmpeg_cmd=get_ffmpeg_cmd(), log_fn=_log)
+                if _kb_ok_flag and os.path.exists(_kb_out):
                     os.replace(_kb_out, _clip_file)
                     _kb_ok += 1
                 else:

@@ -158,7 +158,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title(f"直播带货切片工具 v{_get_installed_version()}")
-        self.root.geometry("800x820")
+        self.root.geometry("960x820")
         self.root.configure(bg=C["bg"])
         self.root.minsize(550, 650)
         self.videos = []  # [(path, name), ...]
@@ -379,7 +379,7 @@ class App:
         _sc_combo.pack(side="left", padx=1)
 
         tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
-        tk.Label(opt, text="🎥缩放:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
+        tk.Label(opt, text="🎥动态缩放:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
         self.ken_burns_var = tk.BooleanVar(value=True)
         _kb_cb = tk.Checkbutton(opt, text="开", variable=self.ken_burns_var,
                         font=FNT_S, fg=C["btn_sel"], bg=C["card"], selectcolor=C["inp"],
@@ -1799,10 +1799,10 @@ class App:
         self.btn.configure(text="■  停止", bg=C["btn_no"])
         self._set_bar(0)
 
-        # 【重要】剪辑前检查激活/试用状态，防止超限使用
+        # 【重要】剪辑前检查激活/试用状态（用缓存，不阻塞）
         try:
-            from license_client import check_activation
-            _lic = check_activation()
+            from license_client import check_activation_cached
+            _lic = check_activation_cached()
             if _lic.get("need_activate"):
                 self._log("⚠ 请先激活或试用次数已用完，无法开始剪辑", "err")
                 from tkinter import messagebox
@@ -1884,8 +1884,8 @@ class App:
                 # 试用模式下，切割成功后扣减一次
                 if ok:
                     try:
-                        from license_client import check_activation, consume_trial_use
-                        status = check_activation()
+                        from license_client import check_activation_cached, consume_trial_use
+                        status = check_activation_cached()
                         if status.get("trial"):
                             left = consume_trial_use()
                             if left >= 0:
@@ -1935,22 +1935,50 @@ class App:
 
 
 
-def _show_activation_check(root):
-    """检查激活状态/试用状态，需要激活则弹出对话框"""
-    try:
-        import license_client as _lc
-        status = check_activation()
-        if status.get("activated"):
-            pass  # 已激活，静默通过
-        elif status.get("trial"):
-            # 试用中：不弹激活码输入框，只在剩余≤3次时提醒
-            uses = status["uses_left"]
-            if uses <= 3:
-                _show_trial_dialog(root, uses, force=(uses <= 0))
-        elif status.get("need_activate"):
-            _show_activate_dialog(root)
-    except Exception:
-        pass
+def _show_activation_check(root, app=None):
+    """检查激活状态/试用状态（后台线程，不阻塞启动）"""
+    # 验证前禁用开始按钮
+    if app and hasattr(app, 'btn'):
+        try:
+            app.btn.configure(state="disabled", text="验证授权中...")
+        except Exception:
+            pass
+
+    def _do_check():
+        try:
+            import license_client as _lc
+            status = _lc.check_activation()
+            _lc._set_activation_cache(status)
+            # 回主线程处理UI
+            root.after(0, lambda: _on_result(status))
+        except Exception:
+            # 验证失败也恢复按钮
+            root.after(0, _restore_btn)
+
+    def _restore_btn():
+        if app and hasattr(app, 'btn'):
+            try:
+                app.btn.configure(state="normal", text="\u25b6  \u5f00\u59cb\u5207\u5272")
+            except Exception:
+                pass
+
+    def _on_result(status):
+        # 恢复按钮
+        _restore_btn()
+        try:
+            if status.get("activated"):
+                pass  # 已激活，静默通过
+            elif status.get("trial"):
+                uses = status["uses_left"]
+                if uses <= 3:
+                    _show_trial_dialog(root, uses, force=(uses <= 0))
+            elif status.get("need_activate"):
+                _show_activate_dialog(root)
+        except Exception:
+            pass
+
+    import threading
+    threading.Thread(target=_do_check, daemon=True).start()
 
 
 
@@ -2058,7 +2086,7 @@ def _show_activate_dialog(root):
     ).pack(side="left", padx=5)
 
     # 解绑设备按钮（已激活时显示）
-    if check_activation().get("activated"):
+    if check_activation_cached().get("activated"):
         def do_deactivate():
             if messagebox.askyesno("解绑确认", "解绑后当前设备将无法使用，确定要解绑吗？"):
                 result = deactivate_device()
@@ -2224,11 +2252,11 @@ def main():
         tkfont.nametofont('TkFixedFont').configure(family='Consolas', size=11)
     except:
         pass
-    # 启动时检查激活状态
-    _show_activation_check(root)
     # 首次启动引导
     _show_welcome_guide(root)
-    App(root)
+    app = App(root)
+    # 启动时异步检查激活状态（验证前禁用按钮，验证后恢复）
+    _show_activation_check(root, app=app)
     # 首次启动初始化版本号
     try:
         from updater import init_installed_version

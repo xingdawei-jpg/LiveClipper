@@ -503,6 +503,33 @@ def _get_fingerprints():
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
 _VERIFY_API_URL = "https://livecli-unified-xfsribggth.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
+
+
+# ========== Activation result cache (avoid blocking main thread) ==========
+_last_activation_result = None
+_last_activation_time = 0.0
+_ACTIVATION_CACHE_TTL = 30.0  # seconds
+
+
+def check_activation_cached():
+    """Return cached check_activation() result if fresh (<30s), else call synchronously.
+    Used by GUI to avoid blocking on repeated checks."""
+    global _last_activation_result, _last_activation_time
+    import time as _t
+    if _last_activation_result is not None and (_t.time() - _last_activation_time) < _ACTIVATION_CACHE_TTL:
+        return _last_activation_result
+    result = check_activation()
+    _last_activation_result = result
+    _last_activation_time = _t.time()
+    return result
+
+
+def _set_activation_cache(result):
+    """Update cache from async check (called from background thread)."""
+    global _last_activation_result, _last_activation_time
+    import time as _t
+    _last_activation_result = result
+    _last_activation_time = _t.time()
 _OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
 _REVOKED_MARKER = ".revoked"  # 熔断标记文件名
 
