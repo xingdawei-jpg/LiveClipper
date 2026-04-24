@@ -216,6 +216,8 @@ def check_update():
         return None
 
     # 构建镜像URL列表（国内用户直连GitHub不通）
+    # jsDelivr has CDN nodes in China, most reliable
+    jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/version.json" if GITHUB_REPO else ""
     mirror_prefixes = [
         "https://ghfast.top/https://",
         "https://gh-proxy.com/https://",
@@ -223,6 +225,8 @@ def check_update():
         "https://mirror.ghproxy.com/https://",
     ]
     urls_to_try = []
+    if jsdelivr_url:
+        urls_to_try.append(jsdelivr_url)  # jsDelivr first (most stable in China)
     for prefix in mirror_prefixes:
         urls_to_try.append(prefix + url.replace("https://", ""))
     urls_to_try.append(url)  # direct as fallback
@@ -464,14 +468,27 @@ class DownloadDialog(tk.Toplevel):
 
                 # Build download URL
                 base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/app/{fname}" if GITHUB_REPO else ""
+                jsdelivr_base = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/{fname}" if GITHUB_REPO else ""
                 if not base:
                     fail_count += 1
                     continue
 
-                # Try downloading with mirrors
+                # Try downloading: jsDelivr first, then mirrors
                 content = None
-                for prefix in ["https://gh-proxy.com/https://", "https://ghfast.top/https/"]:
-                    mirror_url = prefix + base.replace("https://", "")
+                if jsdelivr_base:
+                    try:
+                        result = subprocess.run(
+                            ["curl.exe", "-s", "-k", "--max-time", "30", jsdelivr_base],
+                            capture_output=True, timeout=20, creationflags=_NO_WINDOW)
+                        if result.stdout and len(result.stdout) > 10:
+                            preview = result.stdout[:50]
+                            if not preview.startswith(b"<!") and not preview.startswith(b"<html"):
+                                content = result.stdout
+                    except Exception:
+                        pass
+                if content is None:
+                    for prefix in ["https://gh-proxy.com/https://", "https://ghfast.top/https/"]:
+                        mirror_url = prefix + base.replace("https://", "")
                     try:
                         result = subprocess.run(
                             ["curl.exe", "-s", "-k", "--max-time", "30", mirror_url],
