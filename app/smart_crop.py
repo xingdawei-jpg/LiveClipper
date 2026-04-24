@@ -162,6 +162,33 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
             if _is_diag and _log_fn:
                 _log_fn("SmartCrop: [DIAG] Haar face exception: %s" % str(_e))
 
+    # Level 4: 皮肤色检测（无需外部文件，所有OpenCV版本通用）
+    if not all_detections:
+        try:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # 肤色HSV范围（覆盖多种肤色）
+            mask1 = cv2.inRange(hsv, np.array([0, 30, 60], dtype=np.uint8), np.array([25, 150, 255], dtype=np.uint8))
+            mask2 = cv2.inRange(hsv, np.array([170, 30, 60], dtype=np.uint8), np.array([180, 150, 255], dtype=np.uint8))
+            mask = cv2.bitwise_or(mask1, mask2)
+            # 形态学去噪
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                # 取最大的皮肤色区域
+                largest = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(largest)
+                min_area = h * w * 0.03  # 至少占3%
+                if _is_diag and _log_fn:
+                    _log_fn("SmartCrop: [DIAG] Skin contours=%d largest_area=%.0f min=%.0f" % (len(contours), area, min_area))
+                if area >= min_area:
+                    x, y, bw, bh = cv2.boundingRect(largest)
+                    all_detections.append((x, y, bw, bh, 0.5, 'skin'))
+        except Exception as _e:
+            if _is_diag and _log_fn:
+                _log_fn("SmartCrop: [DIAG] Skin exception: %s" % str(_e))
+
     if _is_diag:
         _DIAG_LOGGED = True
     return all_detections
