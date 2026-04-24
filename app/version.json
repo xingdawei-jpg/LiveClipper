@@ -23,9 +23,12 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "b4490fd69967ded177183d8f68e9e17d8585bd1d3ca92c723ee7f768b7602266",
     "verify.py": "cd03547b15ff92ddaa26290950d0f9b68a7a12ece22f94a393e7c5cd7333a50f",
-    "version.json": "40e92eb19ecfb6a41cab960b1f0a53424e2b5a0bf847c569fbe3947abe54086c",
+    "version.json": "82b02e2ad4bb775a609cc717385b2ba5435acbac97df9a252ed16389c6c4da09",
     "volcengine_asr.py": "dba312976b741568ccfeea18242bb8c5618c861a7485b28ad2cab056fbc523b3",
-    "smart_crop.py": "3f485ad2df4558d5130d79eed3506a42a3f654bcbabacf3e7e39337fb31c38b6"
+    "smart_crop.py": "f65d568951a7458f35d5865b7a988a63817a4b013b3761f2775c63109f83a4c3",
+    "haarcascade_upperbody.xml": "7328ab4fdb1592f53d98d7ea5b1b9d90e01af5d95f212af378c7eb579048bb5f",
+    "haarcascade_frontalface_default.xml": "0f7d4527844eb514d4a4948e822da90fbb16a34a0bbbbc6adc6498747a5aafb0",
+    "haarcascade_fullbody.xml": "041745c71eef1b5c86aef224f17ce75b042d33314cc8f6757424f8bd8cd30aa1"
   },
   "release_notes": "v2026.4.21",
   "latest_version": "2026.4.24",

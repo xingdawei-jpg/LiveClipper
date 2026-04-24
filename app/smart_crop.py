@@ -50,11 +50,21 @@ def _get_cascade(name):
         return _CASCADES[name]
     if not _CV2_AVAILABLE:
         return None
-    path = os.path.join(cv2.data.haarcascades, name)
-    if os.path.exists(path):
-        cascade = cv2.CascadeClassifier(path)
-        _CASCADES[name] = cascade
-        return cascade
+    # Priority 1: app/ directory (bundled with the tool, works in PyInstaller)
+    _app_dir = os.path.dirname(os.path.abspath(__file__))
+    _app_path = os.path.join(_app_dir, name)
+    if os.path.exists(_app_path):
+        cascade = cv2.CascadeClassifier(_app_path)
+        if not cascade.empty():
+            _CASCADES[name] = cascade
+            return cascade
+    # Priority 2: cv2.data.haarcascades (system OpenCV installation)
+    _cv2_path = os.path.join(cv2.data.haarcascades, name)
+    if os.path.exists(_cv2_path):
+        cascade = cv2.CascadeClassifier(_cv2_path)
+        if not cascade.empty():
+            _CASCADES[name] = cascade
+            return cascade
     return None
 
 
