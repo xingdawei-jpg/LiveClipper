@@ -1,3 +1,4 @@
+import sys
 # -*- coding: utf-8 -*-
 """
 Smart Crop 智能裁切模块 v7
@@ -363,3 +364,120 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
         log_fn("KenBurns: %s %.0f%% (%d frames)" % (label, target_zoom * 100, total_frames))
 
     return result
+
+
+def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None):
+    """Ken Burns effect using OpenCV frame-by-frame processing.
+    
+    Reads each frame via cv2, applies animated zoom (crop+resize),
+    writes via FFmpeg pipe with audio from original clip.
+    
+    Returns True if successful, False otherwise.
+    """
+    if not _CV2_AVAILABLE:
+        if log_fn:
+            log_fn("KenBurns: OpenCV not available, skip")
+        return False
+
+    import subprocess as _sp
+
+    direction = random.choice(['in', 'out'])
+    target_zoom = random.uniform(0.05, 0.12)  # 5-12%
+    total_frames = max(1, int(fps * clip_duration))
+
+    cap = cv2.VideoCapture(clip_path)
+    if not cap.isOpened():
+        if log_fn:
+            log_fn("KenBurns: cannot open video")
+        return False
+
+    actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+
+    # FFmpeg pipe: raw video from stdin + audio from original clip
+    _cflags = 0x08000000 if sys.platform == "win32" else 0
+    pipe_cmd = [
+        ffmpeg_cmd, "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", "%dx%d" % (w, h), "-pix_fmt", "bgr24",
+        "-r", str(actual_fps),
+        "-i", "-",
+        "-i", clip_path,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-map", "0:v:0",
+        "-map", "1:a:0?",
+        "-movflags", "+faststart",
+        output_path
+    ]
+
+    try:
+        proc = _sp.Popen(pipe_cmd, stdin=_sp.PIPE,
+                         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                         creationflags=_cflags)
+    except Exception as e:
+        cap.release()
+        if log_fn:
+            log_fn("KenBurns: FFmpeg pipe failed: %s" % e)
+        return False
+
+    frame_idx = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Calculate zoom for this frame
+            if direction == 'in':
+                zoom = 1.0 + target_zoom * min(frame_idx, total_frames) / total_frames
+            else:
+                zoom = 1.0 + target_zoom * (1.0 - min(frame_idx, total_frames) / total_frames)
+
+            fh, fw = frame.shape[:2]
+            crop_w = int(fw / zoom)
+            crop_h = int(fh / zoom)
+            # Ensure even
+            crop_w -= crop_w % 2
+            crop_h -= crop_h % 2
+
+            # Center crop
+            cx = (fw - crop_w) // 2
+            cy = (fh - crop_h) // 2
+            cropped = frame[cy:cy+crop_h, cx:cx+crop_w]
+
+            # Resize to target
+            if cropped.shape[1] != w or cropped.shape[0] != h:
+                resized = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized = cropped
+
+            try:
+                proc.stdin.write(resized.tobytes())
+            except BrokenPipeError:
+                break
+
+            frame_idx += 1
+    except Exception as e:
+        if log_fn:
+            log_fn("KenBurns: frame processing error: %s" % e)
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.wait()
+
+    if proc.returncode != 0:
+        if log_fn:
+            log_fn("KenBurns: FFmpeg encode failed rc=%d" % proc.returncode)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
+
+    label = '\u63a8\u8fdb' if direction == 'in' else '\u62c9\u8fdc'
+    if log_fn:
+        log_fn("KenBurns: %s %.0f%% (%d frames, OpenCV)" % (label, target_zoom * 100, total_frames))
+
+    return True
