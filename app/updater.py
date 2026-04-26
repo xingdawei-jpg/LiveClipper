@@ -31,7 +31,8 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.4.26""First launch: create .installed_version from version.json in package"""
+CURRENT_VERSION = "2026.4.26"
+# First launch: create .installed_version from version.json in package"""
     try:
         vf = _get_installed_version_file()
         if not os.path.exists(vf):
