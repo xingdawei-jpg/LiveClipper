@@ -32,7 +32,10 @@ VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
 CURRENT_VERSION = "2026.4.26"
-# First launch: create .installed_version from version.json in package"""
+
+def init_installed_version():
+    """First-launch: create .installed_version from version.json if not exists.
+    Call this once at app startup before any update check."""
     try:
         vf = _get_installed_version_file()
         if not os.path.exists(vf):
