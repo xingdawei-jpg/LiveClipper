@@ -1,5 +1,5 @@
 {
-  "version": "v2026.4.25",
+  "version": "2026.4.26",
   "files": {
     ".installed_version": "4438667684990be59733948d176a749d12ba91d7396ea6442e2a1a199d2b25f1",
     "ai_clipper.py": "132c34b04a4b89cae7ba148f6f869b5bce0b2bd0b5dab461a41406ef3c5a8a83",
@@ -31,6 +31,8 @@
     "haarcascade_fullbody.xml": "041745c71eef1b5c86aef224f17ce75b042d33314cc8f6757424f8bd8cd30aa1"
   },
   "release_notes": "v2026.4.21",
-  "latest_version": "v2026.4.25",
-  "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip"
+  "latest_version": "2026.4.26",
+  "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
+  "ai_clipper.py": "962ab960cc69f9e47e96b6a1247bea78ec547eedabc9152c3a2480ef19c8e726",
+  "config.py": "3a3631b068362ebc335e45247c23b82fee8e9496a6ee54045888be084be7658d"
 }
