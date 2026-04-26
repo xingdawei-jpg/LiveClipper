@@ -121,14 +121,19 @@ def get_version_url():
 # ============ 版本比较 ============
 
 def parse_version(version_str):
-    """解析语义化版本号，返回可比较的元组"""
+    """解析语义化版本号或日期版本号，返回可比较的元组"""
     import re
     # Strip optional "v" prefix
     vs = str(version_str).lstrip("vV")
+    # Try date format first: 2026.4.26 or 2026.04.26
+    match = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", vs)
+    if match:
+        return tuple(int(x) for x in match.groups())
+    # Fall back to semantic version: 8.5.1
     match = re.match(r"(\d+)\.(\d+)\.(\d+)", vs)
-    if not match:
-        return (0, 0, 0)
-    return tuple(int(x) for x in match.groups())
+    if match:
+        return tuple(int(x) for x in match.groups())
+    return (0, 0, 0)
 
 
 def is_newer(remote_version, local_version):
