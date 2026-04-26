@@ -248,9 +248,9 @@ def check_update():
                     break  # HTML error, no point retrying same URL
                 data = json.loads(result.stdout)
 
-                remote_ver = data.get("version", "")
+                remote_ver = data.get("version", data.get("latest_version", ""))
                 if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
-                    return None
+                    continue  # version not newer, try next mirror instead of giving up
 
                 return data
 
