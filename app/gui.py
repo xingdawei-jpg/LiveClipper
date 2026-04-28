@@ -154,6 +154,14 @@ def _friendly_error(err_msg):
     return f"处理出错: {err_msg}（如需帮助请联系微信 LeyiDeco）"
 
 
+
+def _preload_whisper():
+    """后台预加载 faster-whisper，避免首次点击开始时的 torch 加载卡顿"""
+    try:
+        from faster_whisper import WhisperModel
+    except Exception:
+        pass  # 加载失败不影响，点击时会正常重试
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -170,6 +178,8 @@ class App:
         # 启动时恢复AI和ASR启用状态
         self.root.after(100, self._restore_toggle_states)
         self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
+        # 后台预加载 faster-whisper（避免首次点击卡顿数秒）
+        threading.Thread(target=_preload_whisper, daemon=True).start()
 
     def _restore_toggle_states(self):
         """启动时恢复所有设置到UI（不触发自动保存）"""
@@ -1593,14 +1603,14 @@ class App:
         t4.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         # 填充当前偏好关键词（内嵌默认值，避免导入ai_clipper失败）
         _default_pref_kw = {
-            "版型显瘦": "显瘦,遮肉,藏肉,收腰,包容,不挑人,微胖,遮胯,遮肚,收腹,提臀,显高,小个子,梨形,苹果型,腿粗,拜拜肉,瘦十斤,小一号,秒变,立瘦,显腿长,显腰细,比例好,拉长比例,遮得住,收腰显瘦,遮副乳,托胸,胯宽,大骨架,纸片人,小肚腩,背厚,肩宽",
-            "颜色氛围": "显白,提亮,抬气色,显肤色,黄皮,黑皮,衬肤色,不挑肤色,冷白皮,暖白皮,气色好,衬人白,高级灰,显嫩,温柔色,显贵色,不挑皮,上镜色,拍照好看,老钱风,奶油色,燕麦色,雾霾蓝,牛油果,奶茶色,焦糖色,香芋紫,橡皮粉,百搭色,抬肤色",
-            "穿着场景": "通勤,约会,度假,日常,出门,上班,逛街,实穿,职场,聚会,拍照,旅游,出差,叠穿,内搭,外穿,单穿,一年四季,懒人,一套搞定,见家长,见前男友,同学聚会,相亲,年会,踏青,遛娃,送孩子,百搭,穿得出去",
-            "性价比": "划算,超值,性价比,品质,质感,做工,同款,外面买不到,大牌平替,代工厂,专柜,商场,物超所值,比外面,比商场,同品质,这个价,这个品质,商场同款,自己家工厂,源头,出厂价,直播间专属,老粉,闭眼冲,不踩坑,买过都说好,回购率,对得起这个价,回头客",
-            "紧迫稀缺": "限量,库存,最后,抢,不多,少数,断货,售罄,抢完,没了,没码,补货,少量,限时,赶紧,手慢无,错过,独家,不撞款,定制,稀缺,马上,不等人,只剩,不多了,剩最后,这一批,下次不知道,不会再上,手速",
-            "情绪感染": "绝了,太漂亮,美爆,太好看了,太爱,神仙,封神,超级超级,特别特别,真的真的,非常非常,天呐,妈呀,我的天,受不了,爱了爱了,绝绝子,yyds,信我,相信我,不骗你,真心,自留,我自己也,美哭,好看死,太绝了,我天,天哪,疯了吧,哇塞,我自己都",
-            "流行趋势": "流行,当季,新款,设计,原创,不撞款,爆款,热门,趋势,法式,韩系,日系,欧美,ins风,极简,复古,国风,新中式,设计师,小心机,细节,小众,轻奢,时髦,小香风,千金风,老钱,清冷感,氛围感,松弛感,财阀千金,甜酷,美拉德,多巴胺,静奢",
-            "面料质感": "面料,手感,亲肤,质感,桑蚕丝,冰感,软糯,透气,真丝,羊毛,羊绒,纯棉,雪纺,缎面,蕾丝,牛仔,针织,垂感,弹力,厚实,做工,走线,不起球,不褪色,抗皱,免熨,垂坠,丝滑,软乎乎,厚薄适中,垂坠感,糯糯的,像云朵,婴儿肌,裸感",
+            "版型显瘦": "显瘦,遮肉,收腰,不挑人,小个子,微胖,遮肚,提臀,遮胯,藏肉,腿粗,拜拜肉,大骨架,肩宽,苹果型,梨形",
+            "颜色氛围": "显白,提亮,黄皮,冷白皮,暖白皮,气色好,高级灰,老钱风,奶茶色,燕麦色,雾霾蓝,牛油果,焦糖色,香芋紫,橡皮粉",
+            "穿着场景": "通勤,约会,度假,上班,聚会,拍照,旅游,出差,叠穿,懒人,一套搞定,见家长,年会,踏青,遛娃",
+            "性价比": "划算,超值,大牌平替,代工厂,出厂价,源头,直供,同品质,商场同款,闭眼冲,老粉,回购率,回头客",
+            "紧迫稀缺": "限量,库存,最后,断货,售罄,没码,补货,手慢无,错过,独家,只剩,不多了,这一批,不会再上",
+            "情绪感染": "绝了,太漂亮,太好看,封神,美爆,爱了爱了,信我,不骗你,美哭,疯了吧,哇塞,好看死,绝美,无敌",
+            "流行趋势": "法式,韩系,日系,ins风,极简,复古,国风,新中式,小众,轻奢,小香风,千金风,美拉德,多巴胺,静奢",
+            "面料质感": "桑蚕丝,冰感,软糯,真丝,羊毛,羊绒,纯棉,雪纺,缎面,蕾丝,牛仔,针织,丝滑,像云朵,婴儿肌,裸感",
         }
         saved_pref = kw_data.get("preference_keywords", {})
         lines4 = []
@@ -1924,15 +1934,25 @@ class App:
         pass  # 不再使用 Worker 直接调用
 
     def _reset_btn(self, cancelled=False):
-        """批处理完成后恢复按钮状态"""
+        """批处理完成后恢复按钮状态（3秒后自动恢复）"""
         self._cancel_event = None
         self._set_bar(0)
         self._set_step("就绪")
         if cancelled:
-            self.btn.configure(text="❌ 已停止", bg=C["btn_go"], activebackground=C["btn_go2"])
+            self.btn.configure(text="\u274c \u5df2\u505c\u6b62", bg=C["btn_go"], activebackground=C["btn_go2"])
         else:
-            self.btn.configure(text="✅ 剪辑已完成", bg=C["btn_go"], activebackground=C["btn_go2"])
+            self.btn.configure(text="\u2705 \u526a\u8f91\u5df2\u5b8c\u6210", bg=C["btn_go"], activebackground=C["btn_go2"])
+        # 3秒后自动恢复为就绪状态，让用户能直接点击开始
+        try:
+            self.root.after(3000, lambda: self._restore_ready_btn())
+        except Exception:
+            pass
 
+    def _restore_ready_btn(self):
+        """恢复按钮为就绪状态"""
+        if self.worker and self.worker.is_alive():
+            return
+        self.btn.configure(text="\u25b6 \u5f00\u59cb\u5207\u5272", bg=C["btn_go"], activebackground=C["btn_go2"])
 
 
 def _show_activation_check(root, app=None):
