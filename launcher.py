@@ -6,6 +6,10 @@ LiveClipper 启动器
 """
 import os
 import sys
+try:
+    import gui  # PyInstaller: 自动收集 gui 及其依赖
+except ImportError:
+    pass  # 开发模式下 app/ 还未加入 sys.path
 
 
 def find_app_dir():

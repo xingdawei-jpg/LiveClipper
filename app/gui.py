@@ -479,7 +479,12 @@ class App:
         # 关键词管理按钮（始终可见，不依赖AI面板展开）
         tk.Button(ai_hdr, text="📝 关键词管理", font=FNT_S, fg="white", bg="#5b21b6",
               relief="flat", cursor="hand2", padx=10,
-              command=self._open_keyword_manager).pack(side="right")
+              command=self._open_keyword_manager).pack(side="right", padx=(0, 4))
+
+        # 单品扫描按钮
+        tk.Button(ai_hdr, text="🔍 单品扫描", font=FNT_S, fg="white", bg="#b91c1c",
+              relief="flat", cursor="hand2", padx=10,
+              command=self._open_product_scan).pack(side="right", padx=(0, 4))
 
         # AI 设置内容（默认隐藏）
         self.ai_detail = tk.Frame(self.ai_frame, bg=C["card"])
@@ -1698,6 +1703,11 @@ class App:
                   relief="flat", cursor="hand2", padx=12, command=_reset_keywords).pack(side="right")
         tk.Button(btn_row, text="保存", font=FNT_B, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=20, command=_save_keywords).pack(side="right", padx=(0, 8))
+
+    def _open_product_scan(self):
+        """打开单品扫描窗口"""
+        from product_scan_window import open_scan_window
+        open_scan_window(self.root)
 
     def _toggle_asr_toggle(self):
         """切换ASR启用状态（按钮触发）"""
