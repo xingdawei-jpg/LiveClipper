@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.4.26"
+CURRENT_VERSION = "2026.4.30"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -222,19 +222,21 @@ def check_update():
         return None
 
     # 构建镜像URL列表（国内用户直连GitHub不通）
-    # jsDelivr has CDN nodes in China, most reliable
+    # GitHub 镜像优先（实时性高），jsDelivr 放最后（有CDN缓存延迟）
     jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/version.json" if GITHUB_REPO else ""
+    # jsDelivr 用 ?v= 版本戳避免CDN缓存
+    jsdelivr_url += "?v=" + str(int(time.time())) if jsdelivr_url else ""
     mirror_prefixes = [
         "https://ghfast.top/https://",
         "https://gh-proxy.com/https://",
-                "https://ghps.cc/https://",
         "https://mirror.ghproxy.com/https://",
+        "https://ghps.cc/https://",
     ]
     urls_to_try = []
-    if jsdelivr_url:
-        urls_to_try.append(jsdelivr_url)  # jsDelivr first (most stable in China)
     for prefix in mirror_prefixes:
         urls_to_try.append(prefix + url.replace("https://", ""))
+    if jsdelivr_url:
+        urls_to_try.append(jsdelivr_url)  # jsDelivr 放最后，有CDN缓存
     urls_to_try.append(url)  # direct as fallback
 
     for try_url in urls_to_try:
@@ -251,7 +253,7 @@ def check_update():
                     break  # HTML error, no point retrying same URL
                 data = json.loads(result.stdout)
 
-                remote_ver = data.get("version", data.get("latest_version", ""))
+                remote_ver = data.get("latest_version", data.get("version", ""))
                 if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
                     continue  # version not newer, try next mirror instead of giving up
 
@@ -545,10 +547,20 @@ class DownloadDialog(tk.Toplevel):
             if self.cancelled:
                 return
 
-            # Update installed version
-            new_ver = self.version_info.get("version", self.version_info.get("latest_version", ""))
-            if new_ver:
-                _set_installed_version(new_ver)
+            # Update installed version from local version.json
+            try:
+                _vj_path = _os.path.join(app_dir, "version.json")
+                if _os.path.exists(_vj_path):
+                    _vj_data = json.load(open(_vj_path, "r", encoding="utf-8-sig"))
+                    _new_ver = _vj_data.get("latest_version", _vj_data.get("version", ""))
+                else:
+                    _new_ver = ""
+                if not _new_ver:
+                    _new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
+                if _new_ver:
+                    _set_installed_version(_new_ver)
+            except Exception:
+                pass
 
             # Clear __pycache__ so new .py files take effect immediately
             try:
@@ -840,7 +852,7 @@ def _apply_update(zip_path):
                     import json as _json
                     with open(vj, "r", encoding="utf-8") as f:
                         vdata = _json.load(f)
-                    new_ver = vdata.get("version", vdata.get("latest_version", ""))
+                    new_ver = vdata.get("latest_version", vdata.get("version", ""))
                     if new_ver:
                         _set_installed_version(new_ver)
                     break

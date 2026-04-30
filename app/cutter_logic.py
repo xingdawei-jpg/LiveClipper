@@ -2447,7 +2447,17 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             if sys.platform == "win32":
                 fc_conf = os.path.join(temp_dir, "fonts.conf")
                 with open(fc_conf, "w", encoding="utf-8") as f:
-                    f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig></fontconfig>\n')
+                    f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig><include ignore_missing="yes"/></fontconfig>\n')
+                # FFmpeg 8.1+ 会尝试加载 DTD，写入最小有效内容避免解析失败
+                fc_dtd = os.path.join(temp_dir, "fonts.dtd")
+                if not os.path.exists(fc_dtd):
+                    with open(fc_dtd, "w", encoding="utf-8") as f:
+                        f.write('<!ELEMENT fontconfig (dir|cache|match)*>\n')
+                        f.write('<!ELEMENT dir (#PCDATA)>\n')
+                        f.write('<!ELEMENT cache (#PCDATA)>\n')
+                        f.write('<!ELEMENT match (test|edit)*>\n')
+                        f.write('<!ELEMENT test (#PCDATA)>\n')
+                        f.write('<!ELEMENT edit (#PCDATA)>\n')
                 popen_kw["env"] = dict(os.environ)
                 popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
             proc = subprocess.Popen(sub_cmd, **popen_kw, creationflags=_NO_WINDOW)
