@@ -1,5 +1,5 @@
 """
-直播带货切片工具 v3.0 - GUI
+LiveClipper v2026.5.2 - 主界面
 - 只需选择视频，自动语音识别
 - 批量处理
 - 字幕叠加开关
@@ -173,8 +173,11 @@ class App:
         self.worker = None
         self._cancel_event = None
         self._log_queue = queue.Queue()
+        self._scan_page = None
+        self._rec_page = None
         self._build()
-        self._poll_queue()  # 启动队列轮询
+        self._poll_queue()
+  # 启动队列轮询
         # 启动时恢复AI和ASR启用状态
         self.root.after(100, self._restore_toggle_states)
         self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
@@ -288,11 +291,40 @@ class App:
         tk.Label(hdr, text=f"选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v{_get_installed_version()}",
                  font=FNT_S, fg=C["dim"], bg=C["bg"]).pack(side="left", padx=(12,0))
 
+        # 模式切换：智能成片 / 单品扫描
+        tab_frame = tk.Frame(m, bg=C["bg"])
+        tab_frame.pack(fill="x", padx=16, pady=(0,4))
+        self._mode_btn_ai = tk.Button(tab_frame, text="智能成片", font=FNT_B,
+                                       fg="white", bg=C["btn_sel"], relief="flat",
+                                       cursor="hand2", padx=16, pady=4,
+                                       command=lambda: self._switch_mode("ai"))
+        self._mode_btn_ai.pack(side="left")
+        self._mode_btn_scan = tk.Button(tab_frame, text="单品扫描", font=FNT_B,
+                                        fg=C["dim"], bg=C["inp"], relief="flat",
+                                        cursor="hand2", padx=16, pady=4,
+                                        command=lambda: self._switch_mode("scan"))
+        self._mode_btn_scan.pack(side="left", padx=(4,0))
+        self._mode_btn_rec = tk.Button(tab_frame, text="直播录制", font=FNT_B,
+                                        fg=C["dim"], bg=C["inp"], relief="flat",
+                                        cursor="hand2", padx=16, pady=4,
+                                        command=lambda: self._switch_mode("rec"))
+        self._mode_btn_rec.pack(side="left", padx=(4,0))
+        self._current_mode = "ai"
+
+        # 页面容器（切换智能成片/单品扫描）
+        self._page_container = tk.Frame(m, bg=C["bg"])
+        self._page_container.pack(fill="both", expand=True)
+
+        # ---- 智能成片页面 ----
+        self._ai_page = tk.Frame(self._page_container, bg=C["bg"])
+        self._ai_page.pack(fill="both", expand=True)
+        m2 = self._ai_page  # alias for code below
+
         # 视频选择
-        vf = tk.Frame(m, bg=C["card"], padx=12, pady=10, highlightbackground=C["card_border"], highlightthickness=1)
+        vf = tk.Frame(m2, bg=C["card"], padx=12, pady=10, highlightbackground=C["card_border"], highlightthickness=1)
         vf.pack(fill="x", padx=16, pady=(2,6))
         top = tk.Frame(vf, bg=C["card"]); top.pack(fill="x")
-        tk.Label(top, text="直播视频", font=FNT_B, fg=C["text"],
+        tk.Label(top, text="单品素材", font=FNT_B, fg=C["text"],
                  bg=C["card"]).pack(side="left")
         tk.Button(top, text="+ 添加视频", font=FNT_S, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=10,
@@ -333,23 +365,19 @@ class App:
         ttk.Combobox(vf, textvariable=self.num_versions_var,
                      values=["1", "2", "3"], width=3,
                      font=FNT_S, state="readonly").pack(side="left", pady=(4,0))
-
         # AI偏好
         tk.Label(vf, text="  AI偏好:", font=FNT_S, fg=C["dim"],
                  bg=C["card"]).pack(side="left", padx=(4,2), pady=(4,0))
         self.ai_focus_var = tk.StringVar(value="自动")
         self.ai_focus_combo = ttk.Combobox(vf, textvariable=self.ai_focus_var,
-                     values=["自动","面料质感","颜色氛围","版型显瘦","穿着场景","性价比","紧迫稀缺","情绪感染","流行趋势"],
+                     values=["自动","面料质感","颜色氛围","版型显瘦","穿着场景","性价比","情绪感染","流行趋势"],
                      width=8, font=FNT_S, state="readonly")
         self.ai_focus_combo.pack(side="left", pady=(4,0))
 
-        # 画中画已移到去重行
-        # SRT 字幕（藏到去重面板里，不单独显示）
-
         # 去重 + 字幕（可折叠）
-        dedup_card = tk.Frame(m, bg=C["card"], padx=12, pady=6)
-        dedup_card.pack(fill="x", padx=16, pady=2)
-        opt = tk.Frame(dedup_card, bg=C["card"])
+        self._dedup_card = tk.Frame(m2, bg=C["card"], padx=12, pady=6)
+        self._dedup_card.pack(fill="x", padx=16, pady=2)
+        opt = tk.Frame(self._dedup_card, bg=C["card"])
         opt.pack(fill="x")
 
         self._dedup_collapsed = True
@@ -432,12 +460,12 @@ class App:
         # 字幕叠加开关（移到输出行）
 
         # 自定义去重面板
-        self._dedup_frame = tk.Frame(dedup_card, bg=C["card"], padx=12, pady=4)
+        self._dedup_frame = tk.Frame(self._dedup_card, bg=C["card"], padx=12, pady=4)
         self._build_custom_dedup_panel()
         self._dedup_frame.pack_forget()
 
         # 品类选择（已移到视频列表左下角，此处隐藏）
-        # cat_f = tk.Frame(m, bg=C["card"], padx=12, pady=8)
+        # cat_f = tk.Frame(m2, bg=C["card"], padx=12, pady=8)
         # tk.Label(cat_f, text="主推品类", font=FNT_B, fg=C["text"],
         #          bg=C["card"]).pack(side="left")
         # 已移到视频列表左下角
@@ -455,7 +483,7 @@ class App:
         self.output_var = tk.StringVar(value="默认: output/")
         self.ai_enabled_var = tk.BooleanVar(value=False)
         # AI 设置（可折叠）
-        self.ai_frame = tk.Frame(m, bg=C["card"], padx=12, pady=6)
+        self.ai_frame = tk.Frame(m2, bg=C["card"], padx=12, pady=6)
         self.ai_frame.pack(fill="x", padx=16, pady=2)
         ai_hdr = tk.Frame(self.ai_frame, bg=C["card"])
         ai_hdr.pack(fill="x")
@@ -480,11 +508,6 @@ class App:
         tk.Button(ai_hdr, text="📝 关键词管理", font=FNT_S, fg="white", bg="#5b21b6",
               relief="flat", cursor="hand2", padx=10,
               command=self._open_keyword_manager).pack(side="right", padx=(0, 4))
-
-        # 单品扫描按钮
-        tk.Button(ai_hdr, text="🔍 单品扫描", font=FNT_S, fg="white", bg="#b91c1c",
-              relief="flat", cursor="hand2", padx=10,
-              command=self._open_product_scan).pack(side="right", padx=(0, 4))
 
         # AI 设置内容（默认隐藏）
         self.ai_detail = tk.Frame(self.ai_frame, bg=C["card"])
@@ -559,7 +582,7 @@ class App:
         self.ai_detail.pack_forget()
 
         # ========== 云端ASR（独立配置区） ==========
-        asr_card = tk.Frame(m, bg=C["card"], padx=12, pady=10)
+        asr_card = tk.Frame(m2, bg=C["card"], padx=12, pady=10)
         asr_card.pack(fill="x", padx=16, pady=2)
         asr_hdr = tk.Frame(asr_card, bg=C["card"])
         asr_hdr.pack(fill="x")
@@ -780,7 +803,7 @@ class App:
         # ASR行已移至独立卡片
 
         # 开始按钮 + 输出目录（同一行）
-        act_row = tk.Frame(m, bg=C["bg"])
+        act_row = tk.Frame(m2, bg=C["bg"])
         act_row.pack(fill="x", padx=16, pady=(8,4))
         tk.Button(act_row, text="浏览", font=FNT_S, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=8,
@@ -794,7 +817,7 @@ class App:
                  bg=C["bg"]).pack(side="right", fill="x", padx=(8,8))
         tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
         self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
-        tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
+        self.subtitle_checkbtn = tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
                        font=FNT_S, fg=C["text"], bg=C["bg"],
                        selectcolor=C["inp"], activebackground=C["bg"],
                        cursor="hand2").pack(side="right", padx=4)
@@ -805,7 +828,7 @@ class App:
         self.btn.pack(side="left")
 
         # 进度条 + 步骤说明
-        prog_frame = tk.Frame(m, bg=C["bg"])
+        prog_frame = tk.Frame(m2, bg=C["bg"])
         prog_frame.pack(fill="x", padx=16, pady=(0,2))
         self.step_label = tk.Label(prog_frame, text="就绪", font=FNT_S, fg=C["dim"],
                                     bg=C["bg"], anchor="w")
@@ -816,7 +839,7 @@ class App:
 
         # 日志区（可折叠 + 清空）
         self._log_collapsed = False
-        log_frame = tk.Frame(m, bg=C["card"])
+        log_frame = tk.Frame(m2, bg=C["card"])
         log_frame.pack(fill="both", expand=True, padx=16, pady=(0,12))
         log_hdr = tk.Frame(log_frame, bg=C["card"])
         log_hdr.pack(fill="x")
@@ -1210,7 +1233,7 @@ class App:
 
     def _add_videos(self):
         paths = filedialog.askopenfilenames(title="选择直播视频（可多选）",
-                                            filetypes=[("视频","*.mp4 *.mov *.avi *.mkv")])
+                                            filetypes=[("视频","*.mp4 *.mov *.avi *.mkv *.ts *.flv")])
         for p in paths:
             if p not in [v[0] for v in self.videos]:
                 self.videos.append((p, os.path.basename(p)))
@@ -1241,7 +1264,7 @@ class App:
             self._log(f"SRT: {os.path.basename(p)}", "ok")
 
     def _browse_pip(self):
-        p = filedialog.askopenfilename(filetypes=[("视频","*.mp4 *.mov *.avi *.mkv"), ("图片","*.png *.jpg *.jpeg")])
+        p = filedialog.askopenfilename(filetypes=[("视频","*.mp4 *.mov *.avi *.mkv *.ts *.flv"), ("图片","*.png *.jpg *.jpeg")])
         if p:
             self.pip_path = p
             name = os.path.basename(p)
@@ -1387,6 +1410,119 @@ class App:
         os.startfile(path)
 
     # ---- 日志操作 ----
+
+    def _switch_mode(self, mode):
+        """在 智能成片 / 单品扫描 / 直播录制 间切换整页"""
+        if mode == self._current_mode:
+            return
+        self._current_mode = mode
+
+        # 先重置所有按钮样式
+        self._mode_btn_ai.configure(fg=C["dim"], bg=C["inp"])
+        self._mode_btn_scan.configure(fg=C["dim"], bg=C["inp"])
+        self._mode_btn_rec.configure(fg=C["dim"], bg=C["inp"])
+        self._ai_page.pack_forget()
+        if self._scan_page:
+            self._scan_page.pack_forget()
+        if self._rec_page:
+            self._rec_page.pack_forget()
+
+        if mode == "ai":
+            self._mode_btn_ai.configure(fg="white", bg=C["btn_sel"])
+            self._ai_page.pack(fill="both", expand=True)
+        elif mode == "scan":
+            self._mode_btn_scan.configure(fg="white", bg=C["btn_sel"])
+            if self._scan_page is None:
+                from product_scan_page import ProductScanPage
+                self._scan_page = ProductScanPage(self._page_container, app=self)
+            self._scan_page.pack(fill="both", expand=True)
+        else:
+            self._mode_btn_rec.configure(fg="white", bg=C["btn_sel"])
+            if self._rec_page is None:
+                from live_recorder_page import LiveRecorderPage
+                self._rec_page = LiveRecorderPage(self._page_container, app=self)
+            self._rec_page.pack(fill="both", expand=True)
+
+    def _scan_start(self):
+        """单品扫描 - 开始处理（由 ProductScanPage 回调）"""
+        """单品扫描 - 开始处理（由 ProductScanPage 回调）"""
+        self._log("单品扫描启动", "info")
+
+
+        """单品扫描 - 逐个处理视频"""
+        videos = getattr(self, '_scan_video_list', [])
+        if not videos:
+            self._log("请先添加视频", "warn")
+            return
+
+        self._scan_start_btn.configure(state="disabled", text="扫描中...")
+        self._scan_results_tree.delete(*self._scan_results_tree.get_children())
+
+        def _process_video(video_path, vidx):
+            """处理单个视频：ASR → AI扫描单品"""
+            try:
+                from ai_clipper import load_settings
+                settings = load_settings()
+
+                # 1. 生成 SRT（Whisper 本地）
+                srt_path = video_path.rsplit(".", 1)[0] + ".srt"
+                if not os.path.exists(srt_path):
+                    self._log(f"生成字幕: {os.path.basename(video_path)}", "info")
+                    from stt import generate_srt
+                    srt_path = generate_srt(video_path, log_fn=lambda m: self._log(f"  {m}", "info"))
+                    if not srt_path or not os.path.exists(srt_path):
+                        self._log(f"  字幕生成失败: {os.path.basename(video_path)}，跳过", "err")
+                        return []
+                else:
+                    self._log(f"  SRT已存在: {os.path.basename(srt_path)}", "info")
+
+                # 2. AI扫描单品
+                from product_scanner import ProductScanner
+                scanner = ProductScanner(
+                    api_key=settings.get("api_key", ""),
+                    base_url=settings.get("base_url", "https://api.deepseek.com"),
+                    model=settings.get("model", "deepseek-chat"),
+                )
+                products = scanner.scan(srt_path)
+                if not products:
+                    self._log(f"  未发现单品: {os.path.basename(video_path)}", "warn")
+                    return []
+
+                # 3. 记录扫描结果
+                for p in products:
+                    p["_video"] = video_path
+                return products
+
+            except Exception as e:
+                self._log(f"  处理失败: {os.path.basename(video_path)}: {e}", "err")
+                return []
+
+        def _run_all():
+            all_products = []
+            for idx, vpath in enumerate(videos):
+                vname = os.path.basename(vpath)
+                self._log(f"[{idx+1}/{len(videos)}] {vname}", "info")
+                prods = _process_video(vpath, idx)
+                all_products.extend(prods)
+
+            self.root.after(0, lambda: _show_results(all_products))
+
+        def _show_results(products):
+            self._scan_products = products
+            if not products:
+                self._log("扫描完成，未发现单品", "warn")
+            else:
+                for i, p in enumerate(products):
+                    time_str = f"{p['start']:.1f}-{p['end']:.1f}s"
+                    vname = os.path.basename(p.get("_video", ""))
+                    self._scan_results_tree.insert("", "end", iid=str(i),
+                                                    values=(p["name"], time_str, vname))
+                self._log(f"扫描完成，共发现 {len(products)} 个单品", "ok")
+            self._scan_start_btn.configure(state="normal", text="开始扫描")
+
+        import threading
+        t = threading.Thread(target=_run_all, daemon=True)
+        t.start()
 
     def _toggle_log(self, event=None):
         self._log_collapsed = not self._log_collapsed
