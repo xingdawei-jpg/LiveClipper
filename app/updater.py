@@ -639,7 +639,7 @@ class DownloadDialog(tk.Toplevel):
                 if self.cancelled:
                     return
 
-                if expected_sha:
+                if expected_sha and isinstance(expected_sha, str):
                     self.after(0, lambda: self.status_label.config(text="正在校验文件完整性..."))
                     actual_sha = compute_sha256(temp_path)
                     if actual_sha.lower() != expected_sha.lower():
