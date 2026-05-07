@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.5.2"
+CURRENT_VERSION = "2026.5.7"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -639,7 +639,7 @@ class DownloadDialog(tk.Toplevel):
                 if self.cancelled:
                     return
 
-                if expected_sha:
+                if expected_sha and isinstance(expected_sha, str):
                     self.after(0, lambda: self.status_label.config(text="正在校验文件完整性..."))
                     actual_sha = compute_sha256(temp_path)
                     if actual_sha.lower() != expected_sha.lower():

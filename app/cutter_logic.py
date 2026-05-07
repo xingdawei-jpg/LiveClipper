@@ -23,6 +23,32 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
+
+# 编码器辅助：优先硬件加速，回退软件编码
+_hw_encoder_checked = False
+_hw_encoder = None
+def _get_video_encoder():
+    global _hw_encoder_checked, _hw_encoder
+    if not _hw_encoder_checked:
+        _hw_encoder_checked = True
+        try:
+            from platform_config import HARDWARE_ENCODER as _he
+            _hw_encoder = _he  # "h264_qsv" or None
+        except Exception:
+            _hw_encoder = None
+    return _hw_encoder
+
+def _vcodec_args():
+    """返回视频编码参数，优先硬件编码"""
+    enc = _get_video_encoder()
+    if enc == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "22"]
+    elif enc == "h264_amf":
+        return ["-c:v", "h264_amf", "-quality", "speed", "-qp", "22"]
+    elif enc == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p1", "-qp", "22"]
+    else:
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
 from config import (
     CLIP_KEYWORDS, CLIP_ORDER, VIDEO_CONFIG, FFMPEG_PATH,
     DEDUP_CONFIG, DEDUP_PRESET, SUBTITLE_OVERLAY,
@@ -767,16 +793,19 @@ def _build_cut_report(ordered_clips, success_count, total_clips, output_path, si
     score = 0
 
     # 时长分 (0-30)
-    if 50 <= total_dur <= 65:
+    _dur_tgt = TARGET_DURATION
+    _dur_low = _dur_tgt - _dur_tgt // 4
+    _dur_high = _dur_tgt + _dur_tgt // 4
+    if _dur_low <= total_dur <= _dur_high:
         score += 30
-    elif 40 <= total_dur <= 75:
+    elif _dur_low - 10 <= total_dur <= _dur_high + 10:
         score += 22
-    elif 30 <= total_dur <= 90:
+    elif _dur_low - 20 <= total_dur <= _dur_high + 20:
         score += 15
-        if total_dur < 50:
-            report["warnings"].append(f"时长偏短({total_dur:.0f}s，建议50s+)")
+        if total_dur < _dur_low:
+            report["warnings"].append(f"时长偏短({total_dur:.0f}s，建议{_dur_low}s+)")
         else:
-            report["warnings"].append(f"时长偏长({total_dur:.0f}s，建议60s以内)")
+            report["warnings"].append(f"时长偏长({total_dur:.0f}s，建议{_dur_high}s以内)")
     else:
         score += 5
         report["warnings"].append(f"时长异常({total_dur:.0f}s)")
@@ -861,7 +890,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                    dedup_preset="medium", subtitle_overlay=True,
                    log_fn=None, force_category=None, cancel_event=None,
                    pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                   _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
+                   _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
+                   target_duration=60):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -877,6 +907,10 @@ def process_video(video_path, srt_path=None, output_path=None,
         return cancel_event and cancel_event.is_set()
 
     # ---- 运行日志 ----
+    global TARGET_DURATION, TARGET_DURATION_TOLERANCE
+    old_dur, old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
+    TARGET_DURATION = target_duration
+    TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
     import time as _time, json as _json
     _run_log = {
         "时间": _time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1157,6 +1191,14 @@ def process_video(video_path, srt_path=None, output_path=None,
                 srt_text = f.read()
             # 单版本：focus_hint传给AI（"自动"=随机偏好，指定=用指定偏好）
             _fh = focus_hint if focus_hint and focus_hint != "自动" else None
+            import ai_clipper as _ai_mod; _ai_mod._AI_TARGET_DURATION = TARGET_DURATION
+            # 动态控制AI输出的片段数量
+            if TARGET_DURATION <= 40:
+                _ai_mod._AI_CLIP_COUNT = "5-8"
+            elif TARGET_DURATION >= 80:
+                _ai_mod._AI_CLIP_COUNT = "15-20"
+            else:
+                _ai_mod._AI_CLIP_COUNT = "10-15"
             ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only, focus_hint=_fh)
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
@@ -1175,7 +1217,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             from stt import cleanup_srt; cleanup_srt(temp_srt)
         return False
 
-    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
+    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
     try:
         if isinstance(_multi_result_cache, dict):
             _multi_result_cache['clips'] = list(ordered_clips)
@@ -1394,7 +1436,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-vsync", "cfr"]
-            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+            cmd += _vcodec_args()
             cmd += ["-vf", combined_vf]
             cmd += ["-pix_fmt", "yuv420p"]
             cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
@@ -1406,7 +1448,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
-                rc = proc.wait(timeout=120)
+                rc = proc.wait(timeout=300)
                 _log(f"[T] [{time.strftime('%H:%M:%S')}] rc={rc}")
             except subprocess.TimeoutExpired:
                 proc.kill()
@@ -1586,7 +1628,16 @@ def process_video(video_path, srt_path=None, output_path=None,
             dedup_cmd += ["-vf", vf]
             dedup_cmd += ["-af", af]
         dedup_cmd += ["-r", str(cfg["fps"]), "-vsync", "cfr", "-b:v", cfg["bitrate_v"]]
-        dedup_cmd += ["-c:v", cfg["codec_v"], "-preset", "ultrafast"]
+        _ve = _get_video_encoder()
+        if _ve:
+            dedup_cmd += ["-c:v", _ve, "-preset", "fast"]
+            # QSV 用 global_quality, NVENC 和 AMF 用 qp
+            if _ve == "h264_qsv":
+                dedup_cmd += ["-global_quality", "22"]
+            elif _ve in ("h264_nvenc", "h264_amf"):
+                dedup_cmd += ["-qp", "22"]
+        else:
+            dedup_cmd += ["-c:v", cfg["codec_v"], "-preset", "ultrafast"]
         dedup_cmd += ["-c:a", cfg["codec_a"], "-b:a", cfg["bitrate_a"]]
         dedup_cmd += ["-movflags", "+faststart"]
         dedup_cmd += [nosub_file]
@@ -1672,9 +1723,23 @@ def process_video(video_path, srt_path=None, output_path=None,
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     _log(f"[PROGRESS] 1.0")
 
+    # 用 ffprobe 测成品真实时长
+    _actual_dur = 0.0
+    try:
+        _ff = get_ffmpeg_cmd()
+        _ffprobe = os.path.join(os.path.dirname(_ff), "ffprobe" + (".exe" if os.name == "nt" else ""))
+        _r = subprocess.run([_ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", output_path],
+                            capture_output=True, text=True, timeout=10, creationflags=_NO_WINDOW)
+        if _r.returncode == 0 and _r.stdout.strip():
+            _actual_dur = float(_r.stdout.strip())
+    except Exception:
+        pass
+
     # ---- 切割评分 ----
     report = _build_cut_report(ordered_clips, success_count, total_clips, output_path, size_mb)
     _print_cut_report(report, _log)
+    if _actual_dur > 0:
+        _log(f"  成品时长: {_actual_dur:.0f}s")
 
     _log(f"生成成功！")
     _log(f"  路径: {output_path}")
@@ -2487,7 +2552,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         dedup_preset="medium", subtitle_overlay=True,
                         log_fn=None, force_category=None, cancel_event=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                        num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
+                        num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
+                        target_duration=60):
     """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
     策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
@@ -2501,7 +2567,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     
     _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
@@ -2513,7 +2579,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -2525,7 +2591,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                  force_category, cancel_event,
                  pip_path, pip_size, pip_opacity, pip_pos,
                  _asr_only=True,
-                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     
     _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
@@ -2537,7 +2603,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -2564,7 +2630,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     
     if len(versions_data) < 1:
         _log("无有效版本，输出单版本")
@@ -2572,7 +2638,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     

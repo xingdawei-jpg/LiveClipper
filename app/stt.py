@@ -57,10 +57,16 @@ def extract_audio(video_path, output_wav, log_fn=None):
 def _ensure_whisper_model(model_size="small", log_fn=None):
     """确保 Whisper 模型已下载，支持多镜像源自动切换和重试"""
     import os as _os
-    from huggingface_hub import scan_cache_dir
 
-    # 检查本地是否已有缓存
+    # 1. 检查是否已捆绑（全量包内置模型）
+    _bundled = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "whisper_models", model_size)
+    if _os.path.exists(_bundled) and _os.path.isdir(_bundled):
+        if log_fn: log_fn(f"Whisper {model_size} 模型已捆绑，跳过下载")
+        return _bundled
+
+    # 2. 检查 HuggingFace 本地缓存
     try:
+        from huggingface_hub import scan_cache_dir
         cache = scan_cache_dir()
         for repo in cache.repos:
             if f"faster-whisper-{model_size}" in repo.repo_id:
@@ -112,15 +118,26 @@ def transcribe_to_srt(audio_path, srt_output, log_fn=None, whisper_model="small"
         ("HuggingFace 官方", "https://huggingface.co"),
     ]
     model = None
-    for mirror_name, mirror_url in mirrors:
-        _os.environ['HF_ENDPOINT'] = mirror_url
+    # 先检查是否有捆绑模型
+    _bundled_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "whisper_models", whisper_model)
+    if _os.path.exists(_bundled_path) and _os.path.isdir(_bundled_path):
         try:
-            _log(f"正在加载语音识别模型 ({whisper_model})...")
-            model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
-            break  # 成功加载，跳出循环
+            _log(f"检测到捆绑模型，直接加载...")
+            model = WhisperModel(_bundled_path, device="cpu", compute_type="int8")
         except Exception as _e:
-            _log(f"⚠️ {mirror_name} 加载失败，尝试下一个源...")
-            continue
+            _log(f"捆绑模型加载失败: {_e}，尝试在线下载...")
+            model = None
+    
+    if model is None:
+        for mirror_name, mirror_url in mirrors:
+            _os.environ['HF_ENDPOINT'] = mirror_url
+            try:
+                _log(f"正在加载语音识别模型 ({whisper_model})...")
+                model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
+                break  # 成功加载，跳出循环
+            except Exception as _e:
+                _log(f"⚠️ {mirror_name} 加载失败，尝试下一个源...")
+                continue
 
     if model is None:
         _log("❌ Whisper 模型下载失败，所有镜像源均不可用")

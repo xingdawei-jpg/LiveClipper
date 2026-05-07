@@ -214,6 +214,12 @@ class App:
             _focus = s.get("ai_focus", "自动")
             if hasattr(self, "ai_focus_var"):
                 self.ai_focus_var.set(_focus)
+            # 恢复成片时长
+            _dur = s.get("target_duration", "60s")
+            if hasattr(self, "duration_var"):
+                val = f"{_dur}s" if str(_dur).isdigit() else str(_dur)
+                if val in ["30s", "60s", "90s"]:
+                    self.duration_var.set(val)
 
             # AI 启用状态（保持收缩，只更新按钮外观）
             if s.get("enabled"):
@@ -373,6 +379,17 @@ class App:
                      values=["自动","面料质感","颜色氛围","版型显瘦","穿着场景","性价比","情绪感染","流行趋势"],
                      width=8, font=FNT_S, state="readonly")
         self.ai_focus_combo.pack(side="left", pady=(4,0))
+        # 成片时长
+        tk.Label(vf, text="  成片时长:", font=FNT_S, fg=C["dim"],
+                 bg=C["card"]).pack(side="left", padx=(4,2), pady=(4,0))
+        self.duration_var = tk.StringVar(value="60s")
+        ttk.Combobox(vf, textvariable=self.duration_var,
+                     values=["30s", "60s", "90s"], width=4,
+                     font=FNT_S, state="readonly").pack(side="left", pady=(4,0))
+        # 清理缓存
+        tk.Button(vf, text="🧹 清理缓存", font=FNT_S, fg="white", bg=C["btn_del"],
+                  relief="flat", cursor="hand2", padx=6,
+                  command=self._clean_cache).pack(side="right", padx=(0,0))
 
         # 去重 + 字幕（可折叠）
         self._dedup_card = tk.Frame(m2, bg=C["card"], padx=12, pady=6)
@@ -1256,6 +1273,34 @@ class App:
             self.video_listbox.insert(tk.END, f"  {name}")
         self.count_label.configure(text=f"已选 {len(self.videos)} 个视频")
 
+    def _clean_cache(self):
+        """清理临时缓存文件"""
+        import shutil, os as _os
+        dirs = [_os.path.join("C:\\", "lc_temp"), _os.path.join(_os.environ.get("TEMP", "C:\\Temp"), "live_cutter_stt")]
+        total_size = 0
+        for d in dirs:
+            if _os.path.exists(d):
+                for f in _os.listdir(d):
+                    fp = _os.path.join(d, f)
+                    if _os.path.isfile(fp):
+                        total_size += _os.path.getsize(fp)
+
+        size_mb = total_size / 1024 / 1024
+        if size_mb < 0.1:
+            tk.messagebox.showinfo("清理缓存", "缓存目录已空，无需清理")
+            return
+
+        ok = tk.messagebox.askyesno("清理缓存", f"临时缓存目录共 {size_mb:.1f} MB\n\n确定清理吗？")
+        if not ok:
+            return
+
+        cleaned = 0
+        for d in dirs:
+            if _os.path.exists(d):
+                shutil.rmtree(d, ignore_errors=True)
+                cleaned += 1
+        self._log(f"已清理 {cleaned} 个缓存目录 (释放 {size_mb:.1f} MB)", "ok")
+
     def _browse_srt(self):
         p = filedialog.askopenfilename(filetypes=[("SRT","*.srt")])
         if p:
@@ -1640,6 +1685,7 @@ class App:
             "aliyun_bucket": self.aliyun_bucket_var.get().strip() if hasattr(self, "aliyun_bucket_var") else "",
             "aliyun_endpoint": self.aliyun_endpoint_var.get().strip() if hasattr(self, "aliyun_endpoint_var") else "",
             "ai_focus": self.ai_focus_var.get() if hasattr(self, "ai_focus_var") else "自动",
+            "target_duration": self.duration_var.get().replace("s","") if hasattr(self, "duration_var") else "60",
         }
         if save_settings(settings):
             self._log("AI 设置已保存", "ok")
@@ -2017,6 +2063,7 @@ class App:
                         smart_crop_enabled=self.smart_crop_var.get() if hasattr(self, "smart_crop_var") else True,
                         crop_level={"轻":"light","中":"medium","重":"heavy"}.get(self.crop_level_var.get() if hasattr(self, "crop_level_var") else "中", "medium"),
                         ken_burns_enabled=self.ken_burns_var.get() if hasattr(self, "ken_burns_var") else True,
+                        target_duration=int(self.duration_var.get().replace("s","")) if hasattr(self, "duration_var") else 60,
                         log_fn=lambda msg, _idx=idx, _total=total: self._batch_log(msg, _idx, _total)
                     )
                     if _nver > 1:
