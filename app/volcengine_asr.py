@@ -128,6 +128,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             _log("⚠️ 火山引擎请求频率超限(429)，请稍后再试或联系火山引擎提升配额")
         elif "401" in str(e):
             _log("⚠️ 401认证失败！请检查语音识别控制台的 App ID 和 Access Token 是否正确，教程：https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
+        elif "403" in str(e) or "Forbidden" in str(e):
+            _log("⚠️ 403鉴权失败/欠费！火山引擎账号可能已欠费，自动切换到本地识别")
         _cleanup_tos(client, bucket, obj_key, _log)
         return None
 
@@ -209,6 +211,10 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             if "429" in str(e):
                 poll_interval = min(poll_interval * 2, 30)
                 _log(f"volcengine_asr: 轮询被限流(429)，退避到{poll_interval}s...")
+            elif "403" in str(e) or "Forbidden" in str(e):
+                _log("volcengine_asr: 轮询被拒(403)，账号欠费或Token过期，终止重试")
+                _cleanup_tos(client, bucket, obj_key, _log)
+                return None
             else:
                 _log(f"volcengine_asr: 轮询异常: {e}")
             continue
