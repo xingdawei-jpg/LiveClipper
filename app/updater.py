@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.5.2"
+CURRENT_VERSION = "2026.5.7"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.

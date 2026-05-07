@@ -1,5 +1,5 @@
 {
-  "version": "2026.4.30",
+  "version": "2026.5.7",
   "files": {
     "ai_clipper.py": "8cf9bf35ec54de7a3e3191ff81e91d32da5e3f131b9f24c5eea37a8c0a014b84",
     "asr_api.py": "90d0161254577664e6cc7a91e44e12debccb73420c825930843c7ec8580e6d3f",
@@ -29,7 +29,7 @@
     "ai_settings.json": "343659da994b9adea58c3fdb62d60a2106a0749fa94d83d6054ba179fb3cb525"
   },
   "release_notes": "2026.4.30: 单品扫描正式版+SRT边界对齐+打包修复",
-  "latest_version": "2026.5.2",
+  "latest_version": "2026.5.7",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
   "update_message": "新版本2026.4.30：单品扫描正式版，修复内容截断问题",
   "update_from": null,
