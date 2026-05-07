@@ -37,21 +37,63 @@ else:
     DRAWTEXT_FONT_PATH = FONT_BOLD_PATH.replace("\\", "/").replace(":", "\\:")
 
 # ============================================================
-# FFmpeg 配置
+# FFmpeg 配置（自动检测）
 # ============================================================
-if getattr(sys, "frozen", False):
-    if IS_MAC:
-        FFMPEG_DIR = os.path.join(os.path.dirname(sys.executable), "_internal", "ffmpeg")
-    else:
-        FFMPEG_DIR = os.path.join(os.path.dirname(sys.executable), "_internal", "ffmpeg")
-else:
-    if IS_MAC:
-        FFMPEG_DIR = "/usr/local/bin"
-    else:
-        FFMPEG_DIR = r"C:\ffmpeg\bin"
+def _find_ffmpeg():
+    """从多个位置自动定位 FFmpeg"""
+    # 1. PyInstaller 打包模式
+    if getattr(sys, "frozen", False):
+        d = os.path.join(os.path.dirname(sys.executable), "_internal", "ffmpeg")
+        cmd = os.path.join(d, "ffmpeg" + (".exe" if IS_WIN else ""))
+        if os.path.exists(cmd):
+            return d, cmd
 
-FFMPEG_CMD = os.path.join(FFMPEG_DIR, "ffmpeg" + (".exe" if IS_WIN else ""))
-FFPROBE_CMD = os.path.join(FFMPEG_DIR, "ffprobe" + (".exe" if IS_WIN else ""))
+    candidates = []
+    
+    # Windows
+    if IS_WIN:
+        # 2. 工作目录下 _internal/ffmpeg
+        candidates.append(os.path.join(os.getcwd(), "_internal", "ffmpeg"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "_internal", "ffmpeg"))
+        # 3. 常见的 FFmpeg 安装路径
+        candidates.append(r"C:\ffmpeg\bin")
+        candidates.append(r"C:\ProgramData\chocolatey\bin")
+        # 4. PATH 中找
+        for p in os.environ.get("PATH", "").split(";"):
+            if "ffmpeg" in p.lower():
+                candidates.append(p)
+    else:
+        candidates.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"])
+    
+    for d in candidates:
+        d = os.path.normpath(d)
+        cmd = os.path.join(d, "ffmpeg" + (".exe" if IS_WIN else ""))
+        if os.path.exists(cmd):
+            return d, cmd
+    
+    return None, None
+
+FFMPEG_DIR, FFMPEG_CMD = _find_ffmpeg()
+FFPROBE_CMD = os.path.join(FFMPEG_DIR, "ffprobe" + (".exe" if IS_WIN else "")) if FFMPEG_DIR else "ffprobe"
+
+# ============================================================
+# 硬件编码检测
+# ============================================================
+HARDWARE_ENCODER = None
+if FFMPEG_CMD:
+    import subprocess
+    try:
+        ret = subprocess.run([FFMPEG_CMD, "-encoders"], capture_output=True, text=True, timeout=5,
+                             creationflags=subprocess.CREATE_NO_WINDOW if IS_WIN else 0)
+        encoders = ret.stdout + ret.stderr
+        if "h264_qsv" in encoders:
+            HARDWARE_ENCODER = "h264_qsv"  # Intel Quick Sync
+        elif "h264_amf" in encoders:
+            HARDWARE_ENCODER = "h264_amf"  # AMD
+        elif "h264_nvenc" in encoders:
+            HARDWARE_ENCODER = "h264_nvenc"  # NVIDIA
+    except Exception:
+        pass
 
 # ============================================================
 # 应用数据目录（缓存、许可证等）
