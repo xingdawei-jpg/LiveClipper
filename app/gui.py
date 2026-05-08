@@ -50,12 +50,6 @@ DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BF
 AI_PRESETS = {
     "自定义":  {"base_url": "", "model": ""},
     "DeepSeek V4": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
-    "豆包 Pro":  {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-1-5-pro-32k"},
-    "通义千问":  {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
-    "GPT-4o":    {"base_url": "https://api.openai.com/v1", "model": "gpt-4o"},
-    "GLM-4":     {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4"},
-    "DeepSeek R1": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-reasoner"},
-    "豆包Seed": {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-seed-2.0-pro-260215"},
 }
 
 # 去重等级说明
@@ -221,11 +215,9 @@ class App:
                 if val in ["30s", "60s", "90s"]:
                     self.duration_var.set(val)
 
-            # AI 启用状态（保持收缩，只更新按钮外观）
+            # AI 启用状态（保持收缩，只更新变量，不展开面板）
             if s.get("enabled"):
                 self.ai_enabled_var.set(True)
-                # 只更新按钮文字，不展开面板
-                self.ai_toggle.configure(text="✅ 启用", fg="#4caf50")
 
             # --- 恢复 ASR 设置 ---
             if s.get("asr_api_key"):
@@ -255,6 +247,8 @@ class App:
                 self.volc_tos_sk_var.set(s["volc_tos_sk"])
             if s.get("volc_bucket"):
                 self.volc_bucket_var.set(s["volc_bucket"])
+            if s.get("volc_api_key"):
+                self.volc_apikey_var.set(s["volc_api_key"])
             if "whisper_model" in s:
                 self._whisper_model_var.set(s["whisper_model"])
 
@@ -263,12 +257,10 @@ class App:
             if asr_matched:
                 self.asr_preset_var.set(asr_matched)
 
-            # ASR 启用状态（保持收缩，只更新按钮外观）
+            # ASR 启用状态（保持收缩，只更新变量，不展开面板）
             asr_on = bool(s.get("asr_enabled", False))
             if asr_on:
                 self.asr_enabled_var.set(True)
-                # 只更新按钮文字，不展开面板
-                self.asr_toggle.configure(text="✓ 启用", fg="#4caf50")
 
             # --- 恢复完成，启用保存 ---
             self._init_done = True
@@ -511,12 +503,13 @@ class App:
                                      padx=6, pady=2)
         self._ai_toggle_lbl.pack(side="left")
         self._ai_toggle_lbl.bind("<Button-1>", self._toggle_ai_collapse)
-        tk.Label(ai_hdr, text="🤖 AI 智能选片（可选）", font=FNT_B, fg=C["text"],
-             bg=C["card"]).pack(side="left")
-        self.ai_toggle = tk.Button(ai_hdr, text="启用", font=FNT_S,
-              fg="#4fc3f7", bg=C["card"], relief="flat", cursor="hand2", padx=6,
-              command=self._toggle_ai_toggle)
-        self.ai_toggle.pack(side="left", padx=(8,0))
+        self.ai_enabled_var = tk.BooleanVar(value=False)
+        ai_cb = tk.Checkbutton(ai_hdr, text="🤖 AI 智能选片（可选）", font=FNT_B,
+                     variable=self.ai_enabled_var, fg=C["text"], bg=C["card"],
+                     selectcolor=C["inp"], activebackground=C["card"],
+                     activeforeground=C["text"], cursor="hand2",
+                     command=self._toggle_ai_toggle)
+        ai_cb.pack(side="left", padx=(4,0))
         tk.Button(ai_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
               relief="flat", cursor="hand2", padx=8,
               command=self._save_ai).pack(side="left", padx=(8,0))
@@ -610,12 +603,12 @@ class App:
         self._asr_toggle_lbl.pack(side="left")
         self._asr_toggle_lbl.bind("<Button-1>", self._toggle_asr_collapse)
         self.asr_enabled_var = tk.BooleanVar(value=False)
-        tk.Label(asr_hdr, text="☁️ 云端ASR（替代 Whisper）", font=FNT_S, fg="#81c784", bg=C["card"],
-                 anchor="w").pack(side="left")
-        self.asr_toggle = tk.Button(asr_hdr, text="启用", font=FNT_S,
-              fg="#4fc3f7", bg=C["card"], relief="flat", cursor="hand2", padx=6,
-              command=self._toggle_asr_toggle)
-        self.asr_toggle.pack(side="left", padx=(8,0))
+        asr_cb = tk.Checkbutton(asr_hdr, text="☁️ 云端ASR（替代 Whisper）", font=FNT_S,
+                     variable=self.asr_enabled_var, fg="#81c784", bg=C["card"],
+                     selectcolor=C["inp"], activebackground=C["card"],
+                     activeforeground="#81c784", cursor="hand2",
+                     command=self._toggle_asr_toggle)
+        asr_cb.pack(side="left", padx=(4,0))
         tk.Button(asr_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
               relief="flat", cursor="hand2", padx=8,
               command=self._save_ai).pack(side="left", padx=(8,0))
@@ -670,18 +663,22 @@ class App:
         tk.Label(_ar1, text="ASR Key", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.asr_key_var = tk.StringVar()
-        tk.Entry(_ar1, textvariable=self.asr_key_var,
+        _e = tk.Entry(_ar1, textvariable=self.asr_key_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              show="*", relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              show="*", relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar2 = tk.Frame(self.asr_fields, bg=C["card"])
         _ar2.pack(fill="x", pady=(2,0))
         tk.Label(_ar2, text="ASR URL", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.asr_url_var = tk.StringVar(value="https://dashscope.aliyuncs.com")
-        tk.Entry(_ar2, textvariable=self.asr_url_var,
+        _e = tk.Entry(_ar2, textvariable=self.asr_url_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar3 = tk.Frame(self.asr_fields, bg=C["card"])
         _ar3.pack(fill="x", pady=(2,0))
@@ -703,41 +700,39 @@ class App:
         # --- 火山引擎 字段 ---
         self.volc_fields = tk.Frame(asr_card, bg=C["card"])
 
-        _vr1 = tk.Frame(self.volc_fields, bg=C["card"])
-        _vr1.pack(fill="x", pady=(2,0))
-        tk.Label(_vr1, text="APP ID", font=FNT_S, fg=C["text"],
+        # 新版API Key（豆包2.0，0.8元/小时）
+        _vr_apikey = tk.Frame(self.volc_fields, bg=C["card"])
+        _vr_apikey.pack(fill="x", pady=(2,0))
+        tk.Label(_vr_apikey, text="API Key", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
-        self.volc_app_id_var = tk.StringVar()
-        tk.Entry(_vr1, textvariable=self.volc_app_id_var,
+        self.volc_apikey_var = tk.StringVar()
+        _e = tk.Entry(_vr_apikey, textvariable=self.volc_apikey_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
-
-        _vr2 = tk.Frame(self.volc_fields, bg=C["card"])
-        _vr2.pack(fill="x", pady=(2,0))
-        tk.Label(_vr2, text="Access Token", font=FNT_S, fg=C["text"],
-             bg=C["card"], width=10).pack(side="left")
-        self.volc_token_var = tk.StringVar()
-        tk.Entry(_vr2, textvariable=self.volc_token_var,
-              font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              show="*", relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              show="*", relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _vr3 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr3.pack(fill="x", pady=(2,0))
         tk.Label(_vr3, text="TOS AK", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.volc_tos_ak_var = tk.StringVar()
-        tk.Entry(_vr3, textvariable=self.volc_tos_ak_var,
+        _e = tk.Entry(_vr3, textvariable=self.volc_tos_ak_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _vr4 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr4.pack(fill="x", pady=(2,0))
         tk.Label(_vr4, text="TOS SK", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.volc_tos_sk_var = tk.StringVar()
-        tk.Entry(_vr4, textvariable=self.volc_tos_sk_var,
+        _e = tk.Entry(_vr4, textvariable=self.volc_tos_sk_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              show="*", relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              show="*", relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         # 火山引擎测试连接按钮
         _vr_test = tk.Frame(self.volc_fields, bg=C["card"])
@@ -751,9 +746,11 @@ class App:
         tk.Label(_vr5, text="TOS 桶名", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.volc_bucket_var = tk.StringVar(value="livec")
-        tk.Entry(_vr5, textvariable=self.volc_bucket_var,
+        _e = tk.Entry(_vr5, textvariable=self.volc_bucket_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
 
         self.aliyun_fields = tk.Frame(asr_card, bg=C["card"])
@@ -763,45 +760,55 @@ class App:
         tk.Label(_ar1, text="API Key", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.aliyun_api_key_var = tk.StringVar()
-        tk.Entry(_ar1, textvariable=self.aliyun_api_key_var,
+        _e = tk.Entry(_ar1, textvariable=self.aliyun_api_key_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar2 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar2.pack(fill="x", pady=(2,0))
         tk.Label(_ar2, text="OSS AK", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.aliyun_oss_ak_var = tk.StringVar()
-        tk.Entry(_ar2, textvariable=self.aliyun_oss_ak_var,
+        _e = tk.Entry(_ar2, textvariable=self.aliyun_oss_ak_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar3 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar3.pack(fill="x", pady=(2,0))
         tk.Label(_ar3, text="OSS SK", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.aliyun_oss_sk_var = tk.StringVar()
-        tk.Entry(_ar3, textvariable=self.aliyun_oss_sk_var,
+        _e = tk.Entry(_ar3, textvariable=self.aliyun_oss_sk_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              show="*", relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              show="*", relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar4 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar4.pack(fill="x", pady=(2,0))
         tk.Label(_ar4, text="OSS桶名", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.aliyun_bucket_var = tk.StringVar()
-        tk.Entry(_ar4, textvariable=self.aliyun_bucket_var,
+        _e = tk.Entry(_ar4, textvariable=self.aliyun_bucket_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         _ar5 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar5.pack(fill="x", pady=(2,0))
         tk.Label(_ar5, text="Endpoint", font=FNT_S, fg=C["text"],
              bg=C["card"], width=10).pack(side="left")
         self.aliyun_endpoint_var = tk.StringVar(value="oss-cn-beijing.aliyuncs.com")
-        tk.Entry(_ar5, textvariable=self.aliyun_endpoint_var,
+        _e = tk.Entry(_ar5, textvariable=self.aliyun_endpoint_var,
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
-              relief="flat").pack(side="left", fill="x", expand=True, padx=(4,0))
+              relief="flat")
+        _e.pack(side="left", fill="x", expand=True, padx=(4,0))
+        _e.bind("<FocusOut>", lambda e: self._save_ai())
 
         # 阿里云测试连接按钮
         _ar_test = tk.Frame(self.aliyun_fields, bg=C["card"])
@@ -1613,17 +1620,12 @@ class App:
             self._asr_toggle_lbl.configure(text="▼")
 
     def _toggle_ai_toggle(self):
-        """切换AI启用状态（按钮触发）"""
-        self.ai_enabled_var.set(not self.ai_enabled_var.get())
-        self._save_ai()  # save FIRST, so _toggle_ai reads correct state
+        """切换AI启用状态（Checkbutton触发）"""
+        self._save_ai()
         self._toggle_ai()
 
     def _toggle_ai(self):
-        """只管 UI 展开/折叠 + 按钮外观，不再加载设置"""
-        if self.ai_enabled_var.get():
-            self.ai_toggle.configure(text="✅ 启用", fg="#4caf50")
-        else:
-            self.ai_toggle.configure(text="启用", fg="#4fc3f7")
+        """只管 UI 展开/折叠（Checkbutton 自带勾选状态显示，不再额外设文字）"""
         if self.ai_enabled_var.get():
             self._ai_collapsed = False
             self._ai_toggle_lbl.configure(text="▾ ")
@@ -1670,11 +1672,10 @@ class App:
             "asr_api_key": self.asr_key_var.get().strip(),
             "asr_base_url": self.asr_url_var.get().strip(),
             "asr_model": self.asr_model_var.get().strip(),
-            "volc_app_id": self.volc_app_id_var.get().strip(),
-            "volc_access_token": self.volc_token_var.get().strip(),
-            "volc_tos_ak": self.volc_tos_ak_var.get().strip(),
-            "volc_tos_sk": self.volc_tos_sk_var.get().strip(),
-            "volc_bucket": self.volc_bucket_var.get().strip(),
+            "volc_api_key": self.volc_apikey_var.get().strip() if hasattr(self, "volc_apikey_var") else "",
+            "volc_tos_ak": self.volc_tos_ak_var.get().strip() if hasattr(self, "volc_tos_ak_var") else "",
+            "volc_tos_sk": self.volc_tos_sk_var.get().strip() if hasattr(self, "volc_tos_sk_var") else "",
+            "volc_bucket": self.volc_bucket_var.get().strip() if hasattr(self, "volc_bucket_var") else "",
             "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
             "ai_preset": self.ai_preset_var.get() if hasattr(self, "ai_preset_var") else "",
             "asr_preset": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
@@ -1688,9 +1689,9 @@ class App:
             "target_duration": self.duration_var.get().replace("s","") if hasattr(self, "duration_var") else "60",
         }
         if save_settings(settings):
-            self._log("AI 设置已保存", "ok")
+            self._log("AI 设置已保存 ✅", "ok")
         else:
-            self._log("AI 设置保存失败", "err")
+            self._log("AI 设置保存失败 ❌", "err")
 
     # ---- 关键词管理 ----
 
@@ -1892,17 +1893,12 @@ class App:
         open_scan_window(self.root)
 
     def _toggle_asr_toggle(self):
-        """切换ASR启用状态（按钮触发）"""
-        self.asr_enabled_var.set(not self.asr_enabled_var.get())
-        self._save_ai()  # save FIRST
+        """切换ASR启用状态（Checkbutton触发）"""
+        self._save_ai()
         self._toggle_asr()
 
     def _toggle_asr(self):
-        """切换云端ASR字段显示"""
-        if self.asr_enabled_var.get():
-            self.asr_toggle.configure(text="✓ 启用", fg="#4caf50")
-        else:
-            self.asr_toggle.configure(text="启用", fg="#4fc3f7")
+        """切换云端ASR字段显示（Checkbutton 自带勾选状态，不再额外设文字）"""
         if self.asr_enabled_var.get():
             self._asr_collapsed = False
             self._asr_toggle_lbl.configure(text="▼")
@@ -1921,13 +1917,14 @@ class App:
             self.aliyun_fields.pack_forget()
 
     def _on_asr_model_change(self, event=None):
-        """ASR模型变更时自动填充 base_url"""
+        """ASR模型变更时自动填充 base_url + 自动保存"""
         model = self.asr_model_var.get()
         url_map = {
             "groq-whisper-large-v3": "https://api.groq.com/openai/v1",
         }
         if model in url_map:
             self.asr_url_var.set(url_map[model])
+        self._save_ai()
 
     def _on_asr_preset_change(self, value):
         """ASR预设切换，自动填充字段 + 切换显示"""
