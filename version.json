@@ -1,5 +1,5 @@
 {
-  "version": "8.4.1",
+  "version": "2026.5.9",
   "files": {
     "ai_clipper.py": "733cbb80e745c81cdb44ad5cc1d0e4c0ae6166366810430ac8e62c2665bfe471",
     "asr_api.py": "d03fc441abd1d3ff8c016e079375e0abb5875fcab2f2985194a5b2f936bc7a80",
@@ -14,7 +14,7 @@
     "srt_parser.py": "229bb03b151bc9f49db1038a451d270307155be324c5f721fe0d1a7131a82c3c",
     "stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "updater.py": "02fa7351334f33bcf5764642858da8c885ac245f93b1ac803d1af84eccf27215",
-    "version.json": "9b00f6c199f8f4748f6cd4f363fa5a9a1e5aa469167a46e49a4a5242fb330c3c",
+    "version.json": "f0633e03e99edbe2f48d98618fa71e42cb389cb1fd8edaf956f3718ff8edc859",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
     "product_scanner.py": "36bf879740ccf2f83959ceb756400a6ea3f6445f0bc12c89b6f9f5e57660b177",
