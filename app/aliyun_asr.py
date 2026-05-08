@@ -197,7 +197,7 @@ def aliyun_asr(audio_path, app_key=None, model=None, timeout=300, log_fn=None,
         _log(f"aliyun_asr: 音频文件不存在 {audio_path}")
         return None
     if not model:
-        model = "paraformer-v2"
+        model = "qwen3-asr-flash"
 
     _log(f"aliyun_asr: 开始处理 ({model})...")
 
