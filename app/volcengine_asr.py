@@ -10,19 +10,20 @@ import uuid
 
 
 def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
-                   bucket="livec", timeout=300, log_fn=None):
+                   bucket="livec", timeout=300, log_fn=None, api_key=None):
     """
     调用火山引擎大模型 ASR 识别音频文件，返回 segments 列表。
     
     Args:
         audio_path: 音频文件路径
-        app_id: 火山引擎 APP ID
-        access_token: 火山引擎 Access Token
+        app_id: 火山引擎 APP ID（旧版控制台）
+        access_token: 火山引擎 Access Token（旧版控制台）
         tos_ak: TOS Access Key ID
         tos_sk: TOS Secret Access Key
         bucket: TOS bucket 名 (默认 livec)
         timeout: 最大等待秒数 (默认 300)
         log_fn: 日志回调函数
+        api_key: 新版控制台 API Key（优先级高于 app_id+token，用于豆包2.0）
     
     Returns:
         list[dict] 格式 [{"start": float, "end": float, "text": str}, ...]
@@ -38,7 +39,10 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         _log("volcengine_asr: tos SDK 未安装，跳过")
         return None
 
-    if not all([app_id, access_token, tos_ak, tos_sk]):
+    if not api_key and not all([app_id, access_token, tos_ak, tos_sk]):
+        _log("volcengine_asr: 配置不完整，跳过")
+        return None
+    if not api_key and not all([tos_ak, tos_sk]):
         _log("volcengine_asr: 配置不完整，跳过")
         return None
 
@@ -79,14 +83,25 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
     import uuid as _uuid
     task_id = str(_uuid.uuid4())
     submit_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-App-Key": str(app_id),
-        "X-Api-Access-Key": access_token,
-        "X-Api-Resource-Id": "volc.bigasr.auc",
-        "X-Api-Request-Id": task_id,
-        "X-Api-Sequence": "-1",
-    }
+    if api_key:
+        # 新版控制台鉴权（豆包2.0）
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+            "X-Api-Resource-Id": "volc.seedasr.auc",
+            "X-Api-Request-Id": task_id,
+            "X-Api-Sequence": "-1",
+        }
+    else:
+        # 旧版控制台鉴权（豆包1.0）
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-App-Key": str(app_id),
+            "X-Api-Access-Key": access_token,
+            "X-Api-Resource-Id": "volc.seedasr.auc",
+            "X-Api-Request-Id": task_id,
+            "X-Api-Sequence": "-1",
+        }
     submit_body = {
         "user": {"uid": "live_cutter"},
         "audio": {

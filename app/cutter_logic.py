@@ -1064,7 +1064,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _v2_tos_ak = _cfg2.get("volc_tos_ak", "")
                     _v2_tos_sk = _cfg2.get("volc_tos_sk", "")
                     _v2_bucket = _cfg2.get("volc_bucket", "livec")
-                    if not _volc_used and all([_v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk]):
+                    _v2_apikey = _cfg2.get("volc_api_key", "")
+                    if not _volc_used and all([_v2_tos_ak, _v2_tos_sk]) and (all([_v2_app_id, _v2_token]) or _v2_apikey):
                         _log("启动火山引擎语音识别...")
                         from volcengine_asr import volcengine_asr
                         import tempfile as _tf2
@@ -1081,7 +1082,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                         _p2 = subprocess.Popen(_ext_cmd, **_pk2, creationflags=_NO_WINDOW)
                         _p2.wait(timeout=120)
                         if _p2.returncode == 0 and _os2.path.exists(_wav2):
-                            _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, log_fn=_log)
+                            _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
                             if _segs2:
                                 # 生成 SRT 文件
                                 _srt_lines = []
@@ -1377,17 +1378,19 @@ def process_video(video_path, srt_path=None, output_path=None,
             # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
             end_buf = 0
-            # [v9.6] Hook尾部ASR补偿：SRT时间戳常比实际语音早0.2-0.4s
-            # 用下一条SRT的start卡上限，不跨入下一句
-            if 'hook' in c_type.lower() and _srt_boundaries:
-                _next_srt = None
+            # [v9.6] 所有片段SRT边界对齐：防止说半句话
+            # 找到end所在的SRT条目→对齐到该条目末尾（上限+1.5s，避免拖入下一段内容）
+            if _srt_boundaries:
+                start_srt, end_srt = None, None
                 for _ts, _te in _srt_boundaries:
-                    if _ts > end + 0.01:
-                        _next_srt = _ts
-                        break
-                _max_ext = min(0.5, _next_srt - end) if _next_srt else 0.5
-                if _max_ext > 0:
-                    end = min(video_duration, end + _max_ext)
+                    if _ts <= end <= _te:
+                        end_srt = _te
+                    if _ts <= start <= _te:
+                        start_srt = _ts
+                if end_srt and end_srt - end < 1.5:
+                    end = end_srt
+                if start_srt and start - start_srt < 0.5:
+                    start = start_srt
             start = max(0, start - start_buf)
             end = min(video_duration, end + end_buf)
 
@@ -1969,13 +1972,14 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             v_token = cfg.get("volc_access_token", "")
             v_tos_ak = cfg.get("volc_tos_ak", "")
             v_tos_sk = cfg.get("volc_tos_sk", "")
-            if not all([v_app_id, v_token, v_tos_ak, v_tos_sk]):
+            v_apikey = cfg.get("volc_api_key", "")
+            if not all([v_tos_ak, v_tos_sk]) or not (all([v_app_id, v_token]) or v_apikey):
                 _log("volcengine_asr: 未配置火山引擎参数，跳过")
                 return
             from volcengine_asr import volcengine_asr
             v_bucket = cfg.get("volc_bucket", "livec")
             segs = volcengine_asr(wav_path, v_app_id, v_token, v_tos_ak, v_tos_sk,
-                                 bucket=v_bucket, log_fn=_log)
+                                 bucket=v_bucket, log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
             if segs:
                 raw_segments = segs
                 volcengine_success = True

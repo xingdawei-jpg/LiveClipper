@@ -18,8 +18,6 @@ from tkinter import ttk
 from tkinter import messagebox
 from pathlib import Path
 
-_NO_WINDOW = 0x08000000
-
 
 # ============ 配置（发布时修改） ============
 
@@ -31,11 +29,12 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.5.7"
+CURRENT_VERSION = "8.4.1"
+
+
 
 def init_installed_version():
-    """First-launch: create .installed_version from version.json if not exists.
-    Call this once at app startup before any update check."""
+    """First launch: create .installed_version from version.json in package"""
     try:
         vf = _get_installed_version_file()
         if not os.path.exists(vf):
@@ -125,19 +124,12 @@ def get_version_url():
 # ============ 版本比较 ============
 
 def parse_version(version_str):
-    """解析语义化版本号或日期版本号，返回可比较的元组"""
+    """解析语义化版本号，返回可比较的元组"""
     import re
-    # Strip optional "v" prefix
-    vs = str(version_str).lstrip("vV")
-    # Try date format first: 2026.4.26 or 2026.04.26
-    match = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", vs)
-    if match:
-        return tuple(int(x) for x in match.groups())
-    # Fall back to semantic version: 8.5.1
-    match = re.match(r"(\d+)\.(\d+)\.(\d+)", vs)
-    if match:
-        return tuple(int(x) for x in match.groups())
-    return (0, 0, 0)
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", str(version_str))
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(x) for x in match.groups())
 
 
 def is_newer(remote_version, local_version):
@@ -169,7 +161,7 @@ def download_file(url, dest_path, progress_callback=None):
         result = subprocess.run(
             ["curl.exe", "-s", "-k", "-L", "-I", url],
             capture_output=True, encoding="utf-8", timeout=15
-, creationflags=_NO_WINDOW)
+        )
         # 取最后一次重定向后的 Content-Length
         for line in reversed(result.stdout.splitlines()):
             if line.lower().startswith("content-length:"):
@@ -182,9 +174,9 @@ def download_file(url, dest_path, progress_callback=None):
 
     # 用 curl 下载
     process = subprocess.Popen(
-        ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "300", "-o", dest_path, url],
+        ["curl.exe", "-s", "-k", "-L", "--connect-timeout", "15", "--max-time", "120", "-o", dest_path, url],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
-, creationflags=_NO_WINDOW)
+    )
 
     # 轮询文件大小上报进度
     while process.poll() is None:
@@ -222,47 +214,36 @@ def check_update():
         return None
 
     # 构建镜像URL列表（国内用户直连GitHub不通）
-    # GitHub 镜像优先（实时性高），jsDelivr 放最后（有CDN缓存延迟）
-    jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/version.json" if GITHUB_REPO else ""
-    # jsDelivr 用 ?v= 版本戳避免CDN缓存
-    jsdelivr_url += "?v=" + str(int(time.time())) if jsdelivr_url else ""
     mirror_prefixes = [
-        "https://ghfast.top/https://",
         "https://gh-proxy.com/https://",
-        "https://mirror.ghproxy.com/https://",
-        "https://ghps.cc/https://",
+        "https://ghfast.top/https://",
     ]
     urls_to_try = []
     for prefix in mirror_prefixes:
         urls_to_try.append(prefix + url.replace("https://", ""))
-    if jsdelivr_url:
-        urls_to_try.append(jsdelivr_url)  # jsDelivr 放最后，有CDN缓存
     urls_to_try.append(url)  # direct as fallback
 
     for try_url in urls_to_try:
-        for attempt in range(2):  # retry once on failure
-            try:
-                # 加时间戳防CDN缓存
-                sep = "&" if "?" in try_url else "?"
-                full_url = try_url + sep + "_t=" + str(int(time.time()))
-                result = subprocess.run(
-                    ["curl.exe", "-s", "-k", "--max-time", "15", full_url],
-                    capture_output=True, encoding="utf-8", timeout=20
-, creationflags=_NO_WINDOW)
-                if not result.stdout or result.stdout.strip().startswith("<!"):
-                    break  # HTML error, no point retrying same URL
-                data = json.loads(result.stdout)
-
-                remote_ver = data.get("latest_version", data.get("version", ""))
-                if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
-                    continue  # version not newer, try next mirror instead of giving up
-
-                return data
-
-            except Exception:
-                if attempt == 0:
-                    time.sleep(1)  # wait before retry
+        try:
+            # 加时间戳防CDN缓存
+            sep = "&" if "?" in try_url else "?"
+            full_url = try_url + sep + "_t=" + str(int(time.time()))
+            result = subprocess.run(
+                ["curl.exe", "-s", "-k", "--max-time", "10", full_url],
+                capture_output=True, encoding="utf-8", timeout=15
+            )
+            if not result.stdout or result.stdout.strip().startswith("<!"):
                 continue
+            data = json.loads(result.stdout)
+
+            remote_ver = data.get("version", "")
+            if not remote_ver or not is_newer(remote_ver, _get_installed_version()):
+                return None
+
+            return data
+
+        except Exception:
+            continue
 
     return None
 
@@ -304,7 +285,7 @@ class UpdateDialog(tk.Toplevel):
         
         # 标题
         tk.Label(
-            self, text=f"🎉 新版本 v{version.lstrip("vV")} 可用",
+            self, text=f"🎉 新版本 v{version} 可用",
             font=("Microsoft YaHei UI", 13, "bold")
         ).pack(pady=(15, 5))
         
@@ -476,32 +457,19 @@ class DownloadDialog(tk.Toplevel):
 
                 # Build download URL
                 base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/app/{fname}" if GITHUB_REPO else ""
-                jsdelivr_base = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/{fname}" if GITHUB_REPO else ""
                 if not base:
                     fail_count += 1
                     continue
 
-                # Try downloading: jsDelivr first, then mirrors
+                # Try downloading with mirrors
                 content = None
-                if jsdelivr_base:
+                for prefix in ["https://gh-proxy.com/https://", "https://ghfast.top/https/"]:
+                    mirror_url = prefix + base.replace("https://", "")
                     try:
                         result = subprocess.run(
-                            ["curl.exe", "-s", "-k", "--max-time", "30", jsdelivr_base],
-                            capture_output=True, timeout=20, creationflags=_NO_WINDOW)
-                        if result.stdout and len(result.stdout) > 10:
-                            preview = result.stdout[:50]
-                            if not preview.startswith(b"<!") and not preview.startswith(b"<html"):
-                                content = result.stdout
-                    except Exception:
-                        pass
-                if content is None:
-                    for prefix in ["https://gh-proxy.com/https://", "https://ghfast.top/https/"]:
-                        mirror_url = prefix + base.replace("https://", "")
-                    try:
-                        result = subprocess.run(
-                            ["curl.exe", "-s", "-k", "--max-time", "30", mirror_url],
+                            ["curl.exe", "-s", "-k", "--max-time", "15", mirror_url],
                             capture_output=True, timeout=20
-, creationflags=_NO_WINDOW)
+                        )
                         if result.stdout and len(result.stdout) > 10:
                             # Check it's not HTML error page
                             preview = result.stdout[:50]
@@ -515,9 +483,9 @@ class DownloadDialog(tk.Toplevel):
                 if content is None:
                     try:
                         result = subprocess.run(
-                            ["curl.exe", "-s", "-k", "--max-time", "30", base + "?_t=" + str(int(time.time()))],
+                            ["curl.exe", "-s", "-k", "--max-time", "15", base + "?_t=" + str(int(time.time()))],
                             capture_output=True, timeout=20
-, creationflags=_NO_WINDOW)
+                        )
                         if result.stdout and len(result.stdout) > 10:
                             preview = result.stdout[:50]
                             if not preview.startswith(b"<!"):
@@ -547,29 +515,10 @@ class DownloadDialog(tk.Toplevel):
             if self.cancelled:
                 return
 
-            # Update installed version from local version.json
-            try:
-                _vj_path = _os.path.join(app_dir, "version.json")
-                if _os.path.exists(_vj_path):
-                    _vj_data = json.load(open(_vj_path, "r", encoding="utf-8-sig"))
-                    _new_ver = _vj_data.get("latest_version", _vj_data.get("version", ""))
-                else:
-                    _new_ver = ""
-                if not _new_ver:
-                    _new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
-                if _new_ver:
-                    _set_installed_version(_new_ver)
-            except Exception:
-                pass
-
-            # Clear __pycache__ so new .py files take effect immediately
-            try:
-                import shutil
-                _cache_dir = _os.path.join(app_dir, "__pycache__")
-                if _os.path.isdir(_cache_dir):
-                    shutil.rmtree(_cache_dir)
-            except Exception:
-                pass
+            # Update installed version
+            new_ver = self.version_info.get("version", self.version_info.get("latest_version", ""))
+            if new_ver:
+                _set_installed_version(new_ver)
 
             self.after(0, lambda: self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * 100 / 100), 20))
             self.after(0, lambda: self.status_label.config(text="更新完成"))
@@ -603,7 +552,7 @@ class DownloadDialog(tk.Toplevel):
                     result = subprocess.run(
                         ["curl.exe", "-s", "-k", "-L", "-I", "--max-time", "5", test_url],
                         capture_output=True, timeout=8
-, creationflags=_NO_WINDOW)
+                    )
                     if result.returncode == 0:
                         mirror_url = test_url
                         break
@@ -639,7 +588,7 @@ class DownloadDialog(tk.Toplevel):
                 if self.cancelled:
                     return
 
-                if expected_sha and isinstance(expected_sha, str):
+                if expected_sha:
                     self.after(0, lambda: self.status_label.config(text="正在校验文件完整性..."))
                     actual_sha = compute_sha256(temp_path)
                     if actual_sha.lower() != expected_sha.lower():
@@ -739,7 +688,7 @@ def _on_download_complete(filepath, filename, is_incremental=False):
                 )
                 if result:
                     exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-                    subprocess.Popen([exe], creationflags=_NO_WINDOW)
+                    subprocess.Popen([exe])
                     try:
                         root = tk._default_root
                         if root:
@@ -852,7 +801,7 @@ def _apply_update(zip_path):
                     import json as _json
                     with open(vj, "r", encoding="utf-8") as f:
                         vdata = _json.load(f)
-                    new_ver = vdata.get("latest_version", vdata.get("version", ""))
+                    new_ver = vdata.get("version", vdata.get("latest_version", ""))
                     if new_ver:
                         _set_installed_version(new_ver)
                     break
@@ -876,7 +825,7 @@ def _restart_app():
             exe = sys.executable
         else:
             exe = sys.argv[0]
-        subprocess.Popen([exe], shell=True, creationflags=_NO_WINDOW)
+        subprocess.Popen([exe], shell=True)
     except Exception:
         pass
     try:
