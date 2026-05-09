@@ -5,7 +5,7 @@
     "asr_api.py": "d03fc441abd1d3ff8c016e079375e0abb5875fcab2f2985194a5b2f936bc7a80",
     "config.py": "467ed19b8a86ca38dc9a54e5e5d4961289fbc2faf9f507ef0aadf26f86b84af4",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
-    "cutter_logic.py": "08fe179cdd89e08afdcf8f2281b58266a5617829b61701af180ef22280519e60",
+    "cutter_logic.py": "a1bb9769961d7f11112f21e26f826b343c40f6f0115a3e7cf63b706fdba38d28",
     "gui.py": "3219c2fb1a41e6f1a950c4a2b2dcb4666c8fd53fbc6cf7685496e82d7259b426",
     "keywords.json": "5e123286635c2211c940b12785d20d41e1680346a68437745ef9a98107a458cf",
     "license_client.py": "5eb092a45f5b4feb66f365340609bc5ecb64e8b306e1ac7a46cb63bed4a3fc3a",
@@ -23,7 +23,7 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "d43ae33522297e2ff44190c788f2984b41d9b2f728e92b942318eb0ee752e4fd",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "3025f7b8b0e60e958b915292c4a783875ec4bde7f8ba8987ca4b2d1dbbab6623",
+    "version.json": "82ef779afa3e455b80d29a2fe94eff6435a38bec9d209ddc95d02fb5064a6e73",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.9: ASR设置自动保存+导出硬件加速+选片通顺度优化+边界对齐修复",
