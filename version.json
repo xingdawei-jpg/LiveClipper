@@ -21,9 +21,9 @@
     "stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "updater.py": "7e9479b1455d0309789ea178e8aaa27513b141b6f2af71c74dcdc29727868b73",
+    "updater.py": "7fa41b94c3c4ef0bdec8af42d39e5569338b7092fedf7b9de0994cb7970e21fa",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "860da4b6ab4f26b81cc3f56a39bb5548fae84a731652a9b7cec355fcd7944a5a",
+    "version.json": "f363f5e3651ec3984891abb2108be5444a5a60c4cb4af76f52080ad7afd23984",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.9: ASR设置自动保存+导出硬件加速+选片通顺度优化+边界对齐修复",

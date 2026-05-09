@@ -276,29 +276,34 @@ def _fetch_file_bytes(url, timeout=30):
 
 
 def _download_file_bytes(fname, expected_sha):
-    """下载单个文件的 bytes，尝试多个源，验证 SHA256"""
+    """下载单个文件的 bytes，尝试多个源+重试，验证 SHA256"""
     repo = GITHUB_REPO
     sources = [
-        f"https://api.github.com/repos/{repo}/contents/app/{fname}?ref=main",  # GitHub API (need ?ref=main)
-        f"https://raw.githubusercontent.com/{repo}/main/app/{fname}",           # Raw
-        f"https://cdn.jsdelivr.net/gh/{repo}@main/app/{fname}",                 # jsDelivr
+        ("GitHub API", f"https://api.github.com/repos/{repo}/contents/app/{fname}?ref=main"),
+        ("Raw", f"https://raw.githubusercontent.com/{repo}/main/app/{fname}"),
+        ("jsDelivr", f"https://cdn.jsdelivr.net/gh/{repo}@main/app/{fname}"),
     ]
     for prefix in ["https://ghfast.top/https://", "https://gh-proxy.com/https://"]:
-        sources.append(prefix + f"raw.githubusercontent.com/{repo}/main/app/{fname}")
-    for url in sources:
-        try:
-            if "api.github.com" in url:
-                data = _fetch_json(url, timeout=30)
-                import base64
-                content = base64.b64decode(data["content"])
-            else:
-                content = _fetch_file_bytes(url, timeout=30)
-            if len(content) < 50 or content[:5] in (b"<htm", b"<!doc"):
+        sources.append((f"Mirror", prefix + f"raw.githubusercontent.com/{repo}/main/app/{fname}"))
+
+    # 每个源尝试2次，超时递减
+    for name, url in sources:
+        for attempt in range(2):
+            timeout = 15 if attempt == 0 else 30
+            try:
+                if "api.github.com" in url:
+                    data = _fetch_json(url, timeout=timeout)
+                    import base64
+                    content = base64.b64decode(data["content"])
+                else:
+                    content = _fetch_file_bytes(url, timeout=timeout)
+                if len(content) < 50 or content[:5] in (b"<htm", b"<!doc"):
+                    continue
+                actual = hashlib.sha256(content).hexdigest().lower()
+                if actual == expected_sha.lower():
+                    return content
+            except Exception:
                 continue
-            if hashlib.sha256(content).hexdigest().lower() == expected_sha.lower():
-                return content
-        except Exception:
-            continue
     return None
 
 
