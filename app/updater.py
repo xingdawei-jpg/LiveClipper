@@ -532,6 +532,15 @@ class DownloadDialog(tk.Toplevel):
                     with open(dest, 'wb') as f:
                         f.write(content)
                     success_count += 1
+                    # 同时写到 sys._MEIPASS/app/（兼容不同版本 EXE 的路径差异）
+                    try:
+                        _meipass_app = os.path.join(sys._MEIPASS, 'app')
+                        if _meipass_app != app_dir:
+                            _alt_dest = os.path.join(_meipass_app, fname)
+                            with open(_alt_dest, 'wb') as f:
+                                f.write(content)
+                    except Exception:
+                        pass
                 except Exception:
                     fail_count += 1
 
