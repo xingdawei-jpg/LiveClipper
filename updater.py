@@ -480,7 +480,7 @@ class DownloadDialog(tk.Toplevel):
 
         # Determine app directory
         if getattr(sys, 'frozen', False):
-            app_dir = os.path.join(os.path.dirname(sys.executable), "_internal", "app")
+            app_dir = os.path.join(os.path.dirname(sys.executable), "app")
         else:
             app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
             if not os.path.isdir(app_dir):
