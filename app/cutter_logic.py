@@ -1453,6 +1453,16 @@ def process_video(video_path, srt_path=None, output_path=None,
                 proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
                 rc = proc.wait(timeout=300)
                 _log(f"[T] [{time.strftime('%H:%M:%S')}] rc={rc}")
+                # 失败时重新运行一次捕获 stderr 看错误
+                if rc != 0:
+                    try:
+                        _proc2 = subprocess.run(cmd, capture_output=True, text=True,
+                            timeout=60, creationflags=_NO_WINDOW)
+                        err_tail = _proc2.stderr.strip().split("\n")[-5:]
+                        for _line in err_tail:
+                            _log(f"  ffmpeg: {_line}")
+                    except Exception:
+                        pass
             except subprocess.TimeoutExpired:
                 proc.kill()
                 _log(f"TIMEOUT [{c_type}] {start:.2f}s-{end:.2f}s")
