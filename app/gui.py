@@ -1118,16 +1118,60 @@ class App:
             messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
 
     def _test_volc_connection(self):
-        app_id = self.volc_app_id_var.get().strip()
-        access_token = self.volc_token_var.get().strip()
+        """测试火山引擎连接（新版API Key / 旧版App ID+Access Token 均可）"""
+        api_key = self.volc_apikey_var.get().strip() if hasattr(self, "volc_apikey_var") else ""
         tos_ak = self.volc_tos_ak_var.get().strip()
         tos_sk = self.volc_tos_sk_var.get().strip()
-        if not app_id or not access_token:
-            messagebox.showwarning("测试连接", "App ID 或 Access Token 为空")
+
+        # 新版API Key方式
+        if api_key:
+            try:
+                submit_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
+                req_id = hashlib.md5(str(time.time()).encode()).hexdigest()
+                payload = json.dumps({
+                    "user": {"uid": "test"},
+                    "audio": {"format": "wav", "url": "https://example.com/test.wav"},
+                    "request": {"model_name": "bigmodel", "show_utterances": True}
+                })
+                result = subprocess.run(
+                    ["curl", "-s", "-w", "\n%{http_code}", submit_url,
+                     "-X", "POST",
+                     "-H", "Content-Type: application/json",
+                     "-H", f"X-Api-Key: {api_key}",
+                     "-H", "X-Api-Resource-Id: volc.bigasr.auc",
+                     "-H", f"X-Api-Request-Id: {req_id}",
+                     "-H", "X-Api-Sequence: -1",
+                     "-d", payload],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=0x08000000 if sys.platform == "win32" else 0
+                )
+                lines = result.stdout.strip().split("\n")
+                http_code = lines[-1] if lines else "0"
+                if http_code == "200":
+                    messagebox.showinfo("测试连接", "✅ API Key 有效！\nTOS 上传需要实际音频文件才能验证，请直接运行一次完整流程测试")
+                elif http_code == "401":
+                    messagebox.showerror("测试连接", "❌ 401 认证失败！API Key 错误\n请检查：\n1. 火山引擎控制台 → 语音识别 → 确认 API Key 正确\n2. 是否开通了「录音文件识别大模型」服务")
+                else:
+                    body = "\n".join(lines[:-1]) if len(lines) > 1 else ""
+                    messagebox.showwarning("测试连接", f"⚠️ HTTP {http_code}\n{body[:200]}")
+                return
+            except Exception as e:
+                messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
+                return
+
+        # 旧版 App ID + Access Token 方式（兜底）
+        app_id = getattr(self, "volc_app_id_var", None)
+        app_id_val = app_id.get().strip() if app_id else ""
+        access_token = getattr(self, "volc_token_var", None)
+        token_val = access_token.get().strip() if access_token else ""
+
+        if not app_id_val or not token_val:
+            messagebox.showwarning("测试连接", "请填写 API Key，或旧版 App ID + Access Token")
             return
         if not tos_ak or not tos_sk:
             messagebox.showwarning("测试连接", "TOS AK/SK 为空")
             return
+
         try:
             submit_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
             req_id = hashlib.md5(str(time.time()).encode()).hexdigest()
@@ -1140,8 +1184,8 @@ class App:
                 ["curl", "-s", "-w", "\n%{http_code}", submit_url,
                  "-X", "POST",
                  "-H", "Content-Type: application/json",
-                 "-H", f"X-Api-App-Key: {app_id}",
-                 "-H", f"X-Api-Access-Key: {access_token}",
+                 "-H", f"X-Api-App-Key: {app_id_val}",
+                 "-H", f"X-Api-Access-Key: {token_val}",
                  "-H", "X-Api-Resource-Id: volc.bigasr.auc",
                  "-H", f"X-Api-Request-Id: {req_id}",
                  "-H", "X-Api-Sequence: -1",
@@ -1153,14 +1197,14 @@ class App:
             http_code = lines[-1] if lines else "0"
             body = "\n".join(lines[:-1]) if len(lines) > 1 else ""
             if http_code == "200":
-                messagebox.showinfo("测试连接", "✅ App ID 和 Access Token 有效！\nTOS 上传需要实际音频文件才能验证，请直接运行一次完整流程测试")
+                messagebox.showinfo("测试连接", "✅ App ID 和 Access Token 有效！")
             elif http_code == "401":
-                messagebox.showerror("测试连接", "❌ 401 认证失败！App ID 或 Access Token 错误\n请检查：\n1. 是否开通了「录音文件识别大模型」\n2. App ID和Token是否同一个应用\n3. 教程: https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
+                messagebox.showerror("测试连接", "❌ 401 认证失败！App ID 或 Access Token 错误")
             else:
                 if "SignatureDoesNotMatch" in body:
-                    messagebox.showerror("测试连接", "❌ TOS AK/SK 错误（签名不匹配）\n请检查 TOS AK 和 TOS SK 是否正确")
+                    messagebox.showerror("测试连接", "❌ TOS AK/SK 错误（签名不匹配）")
                 elif "AccessDenied" in body:
-                    messagebox.showerror("测试连接", "❌ TOS 权限不足\n请确认 TOS 桶已创建且 AK/SK 有访问权限")
+                    messagebox.showerror("测试连接", "❌ TOS 权限不足")
                 else:
                     messagebox.showwarning("测试连接", f"⚠️ HTTP {http_code}\n{body[:200]}")
         except Exception as e:
