@@ -279,9 +279,9 @@ def _download_file_bytes(fname, expected_sha):
     """下载单个文件的 bytes，尝试多个源，验证 SHA256"""
     repo = GITHUB_REPO
     sources = [
-        f"https://api.github.com/repos/{repo}/main/app/{fname}",       # GitHub API
-        f"https://raw.githubusercontent.com/{repo}/main/app/{fname}",   # Raw
-        f"https://cdn.jsdelivr.net/gh/{repo}@main/app/{fname}",         # jsDelivr
+        f"https://api.github.com/repos/{repo}/contents/app/{fname}?ref=main",  # GitHub API (need ?ref=main)
+        f"https://raw.githubusercontent.com/{repo}/main/app/{fname}",           # Raw
+        f"https://cdn.jsdelivr.net/gh/{repo}@main/app/{fname}",                 # jsDelivr
     ]
     for prefix in ["https://ghfast.top/https://", "https://gh-proxy.com/https://"]:
         sources.append(prefix + f"raw.githubusercontent.com/{repo}/main/app/{fname}")
