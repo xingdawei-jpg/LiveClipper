@@ -2451,6 +2451,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 line_offset = li * (font_size + 6)
                 dt = (
                     f"drawtext={font}:textfile='{tf}'"
+                    f":fontconfig=0"
                     f":fontsize={font_size}:fontcolor=white"
                     f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
                     f":x=(w-text_w)/2:y=h-{margin_v}-{line_offset}"
