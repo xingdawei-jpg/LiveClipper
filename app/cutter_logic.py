@@ -27,6 +27,7 @@ from srt_parser import open_srt, _time_to_seconds
 # 编码器辅助：优先硬件加速，回退软件编码
 _hw_encoder_checked = False
 _hw_encoder = None
+_hw_fallback = False  # 硬件编码回退标志
 def _get_video_encoder():
     global _hw_encoder_checked, _hw_encoder
     if not _hw_encoder_checked:
@@ -40,7 +41,10 @@ def _get_video_encoder():
 
 def _vcodec_args():
     """返回视频编码参数，优先硬件编码（如果硬件编码不行自动回退 libx264）"""
+    global _hw_fallback
     enc = _get_video_encoder()
+    if _hw_fallback or enc is None:
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
     if enc == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "22"]
     elif enc == "h264_amf":
@@ -1363,6 +1367,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
     # 硬件编码回退：第一次失败后自动切到 libx264
+    global _hw_fallback
     _hw_fallback = False
 
     try:
@@ -2482,7 +2487,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 line_offset = li * (font_size + 6)
                 dt = (
                     f"drawtext={font}:textfile='{tf}'"
-                    f":fontconfig=0"
                     f":fontsize={font_size}:fontcolor=white"
                     f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
                     f":x=(w-text_w)/2:y=h-{margin_v}-{line_offset}"
