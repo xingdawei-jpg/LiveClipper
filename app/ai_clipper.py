@@ -1073,7 +1073,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     seg_counts = {cat: 0 for cat in all_cats}  # 提到该品类的段落数
     for info in seg_info:
         for cat in info["cats_found"]:
-            if cat in excluded_cats:
+            if cat in excluded_cats and proof_scores[cat] == 0 and base_scores[cat] == 0:
                 continue
             if info["has_match"] and len(info["cats_found"]) > 1:
                 continue
@@ -1084,7 +1084,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     final_scores = {}
     for cat in all_cats:
         s = base_scores[cat] + proof_scores[cat] + deep_bonus[cat]
-        if cat in excluded_cats:
+        if cat in excluded_cats and proof_scores[cat] == 0 and base_scores[cat] == 0:
             s = 0
         final_scores[cat] = s
 
@@ -1107,7 +1107,10 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         _log(f"  {cat}: 总分={final_scores[cat]}分 | {detail}")
 
     # 判定主品类
-    valid_cats = {cat: s for cat, s in final_scores.items() if s > 0 and cat not in excluded_cats}
+    valid_cats = {}
+    for _cat, _s in final_scores.items():
+        if _s > 0 and (_cat not in excluded_cats or proof_scores[_cat] > 0 or base_scores[_cat] > 0):
+            valid_cats[_cat] = _s
     if not valid_cats:
         _log("  无法识别主品类，保留全部")
         return cleaned_srt
@@ -1122,7 +1125,10 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         if suit_bonus > 0:
             final_scores["套装"] = final_scores.get("套装", 0) + suit_bonus
             _log(f"  套装加权: +{suit_bonus}分 (套装+单品共现段落)")
-            valid_cats = {cat: s for cat, s in final_scores.items() if s > 0 and cat not in excluded_cats}
+            valid_cats = {}
+            for _cat, _s in final_scores.items():
+                if _s > 0 and (_cat not in excluded_cats or proof_scores[_cat] > 0 or base_scores[_cat] > 0):
+                    valid_cats[_cat] = _s
 
 
     # 用户手动指定主品类(最高优先级)
@@ -1364,7 +1370,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             for ct, text, s, e, sc, d, *_ in clips:
                 _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text}")
             # 跨品类扫描(第二道防线)
-            clips = _post_filter_cross_category(clips, cleaned_srt, log_fn)
+            clips = _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=force_category)
             # 叙事连贯性检查
             clips = _check_narrative_coherence(clips, log_fn)
             # 按黄金链路排序后，同类型片段再按时间先后排（保证同一类的内容按原始时间顺序衔接）
@@ -4309,7 +4315,7 @@ def _check_narrative_coherence(clips, log_fn):
 # ============================================================
 # 选片后跨品类扫描(第二道防线)
 # ============================================================
-def _post_filter_cross_category(clips, cleaned_srt, log_fn):
+def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
     """扫描每个片段文本，踢出包含非主品类关键词的片段"""
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -4338,7 +4344,11 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn):
             cat_counts[cat] = count
     if not cat_counts:
         return clips
-    main_cat = max(cat_counts, key=cat_counts.get)
+    # 使用用户指定的主品类（如果有）
+    if preferred_cat and preferred_cat in ALL_CATEGORIES:
+        main_cat = preferred_cat
+    else:
+        main_cat = max(cat_counts, key=cat_counts.get)
     main_kws = set(ALL_CATEGORIES.get(main_cat, []))
 
     # 套装保护：如果 SRT 中出现套装相关词，跳过跨品类踢出（套装天然多品类）
