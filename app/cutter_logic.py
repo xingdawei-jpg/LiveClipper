@@ -39,7 +39,7 @@ def _get_video_encoder():
     return _hw_encoder
 
 def _vcodec_args():
-    """返回视频编码参数，优先硬件编码"""
+    """返回视频编码参数，优先硬件编码（如果硬件编码不行自动回退 libx264）"""
     enc = _get_video_encoder()
     if enc == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "22"]
@@ -1362,6 +1362,9 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"开始切割 {total_clips} 个片段 (FFmpeg: {ffmpeg_cmd})...")
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
+    # 硬件编码回退：第一次失败后自动切到 libx264
+    _hw_fallback = False
+
     try:
         _clip_starts = []
         _clip_ends = []
@@ -1478,6 +1481,34 @@ def process_video(video_path, srt_path=None, output_path=None,
                 success_count += 1
             else:
                 _log(f"FAIL [{c_type}] rc={rc}")
+                # 硬件编码失败：回退到 libx264 并重试当前片段
+                if not _hw_fallback and _get_video_encoder():
+                    _log("硬件编码失败，回退到 libx264 软件编码...")
+                    _hw_fallback = True
+                    # 重新构建命令，用 libx264 替换硬件编码
+                    cmd = [ffmpeg, "-y"]
+                    cmd += ["-ss", f"{start:.3f}", "-i", video_path]
+                    cmd += ["-t", f"{clip_duration:.3f}"]
+                    cmd += ["-fflags", "+genpts"]
+                    cmd += ["-vsync", "cfr"]
+                    cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+                    cmd += ["-vf", combined_vf]
+                    cmd += ["-pix_fmt", "yuv420p"]
+                    cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                            "-ac", "2", "-async", "1", "-af", "afade=t=in:st=0:d=0.15"]
+                    cmd += ["-movflags", "+faststart"]
+                    cmd += [temp_file]
+                    try:
+                        proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
+                        rc2 = proc.wait(timeout=300)
+                        if rc2 == 0 and os.path.exists(temp_file) and os.path.getsize(temp_file) > 1000:
+                            _log(f"OK [{c_type}] libx264 回退成功")
+                            temp_files.append(temp_file)
+                            success_count += 1
+                        else:
+                            _log(f"FAIL [{c_type}] libx264 也失败 rc={rc2}")
+                    except Exception:
+                        _log(f"FAIL [{c_type}] libx264 回退异常")
 
             _log(f"[PROGRESS] {(clip_idx + 1) / total_clips * 0.3:.2f}")
 

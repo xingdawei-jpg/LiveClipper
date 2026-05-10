@@ -237,10 +237,7 @@ class App:
                 self.aliyun_bucket_var.set(s["aliyun_bucket"])
             if s.get("aliyun_endpoint"):
                 self.aliyun_endpoint_var.set(s["aliyun_endpoint"])
-            if s.get("volc_app_id"):
-                self.volc_app_id_var.set(s["volc_app_id"])
-            if s.get("volc_access_token"):
-                self.volc_token_var.set(s["volc_access_token"])
+            # 火山引擎旧版 app_id/token 已移除，改用新版 API Key
             if s.get("volc_tos_ak"):
                 self.volc_tos_ak_var.set(s["volc_tos_ak"])
             if s.get("volc_tos_sk"):
@@ -667,7 +664,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               show="*", relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar2 = tk.Frame(self.asr_fields, bg=C["card"])
         _ar2.pack(fill="x", pady=(2,0))
@@ -678,7 +675,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar3 = tk.Frame(self.asr_fields, bg=C["card"])
         _ar3.pack(fill="x", pady=(2,0))
@@ -710,7 +707,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               show="*", relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _vr3 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr3.pack(fill="x", pady=(2,0))
@@ -721,7 +718,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _vr4 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr4.pack(fill="x", pady=(2,0))
@@ -732,7 +729,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               show="*", relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         # 火山引擎测试连接按钮
         _vr_test = tk.Frame(self.volc_fields, bg=C["card"])
@@ -750,7 +747,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
 
         self.aliyun_fields = tk.Frame(asr_card, bg=C["card"])
@@ -764,7 +761,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar2 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar2.pack(fill="x", pady=(2,0))
@@ -775,7 +772,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar3 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar3.pack(fill="x", pady=(2,0))
@@ -786,7 +783,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               show="*", relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar4 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar4.pack(fill="x", pady=(2,0))
@@ -797,7 +794,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         _ar5 = tk.Frame(self.aliyun_fields, bg=C["card"])
         _ar5.pack(fill="x", pady=(2,0))
@@ -808,7 +805,7 @@ class App:
               font=("Consolas", 9), fg=C["text"], bg=C["inp"],
               relief="flat")
         _e.pack(side="left", fill="x", expand=True, padx=(4,0))
-        _e.bind("<FocusOut>", lambda e: self._save_ai())
+        _e.bind("<FocusOut>", lambda e: self._save_ai_debounced())
 
         # 阿里云测试连接按钮
         _ar_test = tk.Frame(self.aliyun_fields, bg=C["card"])
@@ -1702,6 +1699,15 @@ class App:
             self._log("已加载自定义去重配置")
         except Exception as e:
             self._log(f"加载自定义去重配置失败: {e}", "err")
+
+    def _save_ai_debounced(self):
+        """去抖保存：5秒内不重复保存，避免频繁 FocusOut 触发"""
+        now = time.time()
+        last = getattr(self, "_last_ai_save", 0)
+        if now - last < 5.0:
+            return
+        self._last_ai_save = now
+        self._save_ai()
 
     def _save_ai(self):
         if not getattr(self, "_init_done", True):
