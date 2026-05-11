@@ -8,6 +8,13 @@ import time
 import json
 import uuid
 
+# 预导入 tos SDK（避免首次调用时卡顿）
+try:
+    import tos
+    _TOS_AVAILABLE = True
+except ImportError:
+    _TOS_AVAILABLE = False
+
 
 def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                    bucket="livec", timeout=300, log_fn=None, api_key=None):
@@ -33,9 +40,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         if log_fn:
             log_fn(msg)
 
-    try:
-        import tos
-    except ImportError:
+    if not _TOS_AVAILABLE:
         _log("volcengine_asr: tos SDK 未安装，跳过")
         return None
 
