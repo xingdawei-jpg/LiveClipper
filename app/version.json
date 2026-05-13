@@ -21,9 +21,9 @@
     "stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "updater.py": "60bab26e39eb7f2643f4e50e093914ed490722c31ff264c546af85727625d06f",
+    "updater.py": "6749b3252ae95051f65b9ae8fa76881df12b9d907ecf5349c2ce208155660cb5",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "394e324aa6acd575795e3c112f5666ed0b61c7281921a9cb3b85f12a823d1c81",
+    "version.json": "6175e02fc0dfb6bca95bd67337c82ed2fe481fff49b7e4ef80bd440fac93ab17",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
     "launcher.py": "b3ee71cc29552f5c180471017eb56934eafa0b6d82e1c955542ab261ea776d9b"
   },
