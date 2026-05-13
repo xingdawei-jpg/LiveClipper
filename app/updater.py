@@ -533,15 +533,15 @@ class DownloadDialog(tk.Toplevel):
             target_dirs.append(app_dir)
         
         # Write to app directory
-                for td in target_dirs:
-                    td_path = os.path.join(td, fname)
-                    try:
-                        os.makedirs(os.path.dirname(td_path), exist_ok=True)
-                        with open(td_path, 'wb') as f:
-                            f.write(content)
-                    except Exception:
-                        pass
-                success_count += 1
+        for td in target_dirs:
+            td_path = os.path.join(td, fname)
+            try:
+                os.makedirs(os.path.dirname(td_path), exist_ok=True)
+                with open(td_path, 'wb') as f:
+                    f.write(content)
+            except Exception:
+                pass
+        success_count += 1
                     # 同时写到 sys._MEIPASS/app/（兼容不同版本 EXE 的路径差异）
                     try:
                         _meipass_app = os.path.join(sys._MEIPASS, 'app')
