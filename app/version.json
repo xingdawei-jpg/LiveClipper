@@ -11,7 +11,7 @@
     "license_client.py": "441519c217e421976d74f7c5349caa1090175e393bd810a2323f5800ba51e289",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
     "platform_config.py": "acf55fae8bd100b20d3b2f91564084c6cbd0f37792d9ceca12404d6d93975696",
-    "product_scanner.py": "bde680fbcd2c3b95f9ca01c530cb3a603e65841047643f7a776d4b35f0637d97",
+    "product_scanner.py": "2587359d99bf96ffb86468b6c5cef96a62a6e867de5b5fcee20b17f7081b619a",
     "product_scan_page.py": "32e37f4b4e019327cbe22af68a701b5c8dd35206881a635658e0f393278ad53e",
     "product_scan_window.py": "f8fcc16b457b18eadb1db4a997c9f08ef69b5503f1fec1515d927f86e1afe7ae",
     "run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
@@ -23,7 +23,7 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "6749b3252ae95051f65b9ae8fa76881df12b9d907ecf5349c2ce208155660cb5",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "53e5adc3b1ce9b500981fc0223345bda69882ab650d482a871b08774ae420f4e",
+    "version.json": "9488d3b6782b876a18488af6e65b80f82863298c655d7aa3bebbb3d7aab1a308",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
     "launcher.py": "b3ee71cc29552f5c180471017eb56934eafa0b6d82e1c955542ab261ea776d9b"
   },
