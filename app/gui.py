@@ -34,6 +34,7 @@ import queue
 
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
 from cutter_logic import process_video, process_video_multi
+from config import USER_DATA_DIR, SETTINGS_PATH
 from license_client import check_activation, activate_with_code, check_trial, consume_trial_use, deactivate_device
 # 样式
 C = {
@@ -1016,7 +1017,7 @@ class App:
     def _save_dedup_custom(self):
         """保存自定义去重参数到 ai_settings.json"""
         try:
-            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+            settings_path = SETTINGS_PATH
             data = {}
             if os.path.exists(settings_path):
                 with open(settings_path, "r", encoding="utf-8") as f:
@@ -1043,7 +1044,7 @@ class App:
     def _load_dedup_custom(self):
         """从 ai_settings.json 加载自定义去重参数"""
         try:
-            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+            settings_path = SETTINGS_PATH
             if not os.path.exists(settings_path):
                 return
             with open(settings_path, "r", encoding="utf-8") as f:
@@ -1697,7 +1698,7 @@ class App:
         """将自定义去重参数应用到 DEDUP_CONFIG（运行时生效）"""
         import config as _cfg
         try:
-            settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+            settings_path = SETTINGS_PATH
             d = {}
             if os.path.exists(settings_path):
                 with open(settings_path, "r", encoding="utf-8") as f:
@@ -2389,7 +2390,7 @@ def _show_activate_dialog(root):
 def _show_welcome_guide(root):
     """首次启动引导（可跳过）"""
     # 检测是否首次启动
-    settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+    settings_path = SETTINGS_PATH
     guide_done_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".guide_done")
     if os.path.exists(guide_done_path) or os.path.exists(settings_path):
         return  # 已配置过或已完成引导

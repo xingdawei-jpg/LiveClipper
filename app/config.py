@@ -2,6 +2,11 @@
 # 配置文件 2026.4.26：关键词瘦身 + 按类型差异化时长 + 短且多
 # ============================================================
 
+# 用户数据目录（更新不丢失配置）
+import os
+USER_DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper')
+SETTINGS_PATH = os.path.join(USER_DATA_DIR, 'ai_settings.json')
+
 # 一、片段类型 → 关键词分级（精简版：每词只归属一个类型，职责清晰）
 CLIP_KEYWORDS = {
     "hook": {

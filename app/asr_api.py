@@ -31,15 +31,33 @@ SPLIT_THRESHOLD = 90
 
 
 def _get_base_path():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _ensure_settings_dir():
+    """确保用户数据目录存在，并迁移旧版配置文件"""
+    from config import USER_DATA_DIR
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    
+    # 一次性迁移：旧路径 → 新路径
+    old_path = os.path.join(_get_base_path(), "ai_settings.json")
+    from config import SETTINGS_PATH
+    if os.path.exists(old_path) and not os.path.exists(SETTINGS_PATH):
+        try:
+            import shutil
+            shutil.copy2(old_path, SETTINGS_PATH)
+            print(f"已迁移 ai_settings.json 到 {SETTINGS_PATH}")
+        except Exception:
+            pass
+    
+    return USER_DATA_DIR
+
+
 def load_asr_settings():
-    path = os.path.join(_get_base_path(), "ai_settings.json")
+    from config import SETTINGS_PATH
+    _ensure_settings_dir()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             s = json.load(f)
         return {
             "api_key": s.get("asr_api_key", ""),
@@ -55,14 +73,15 @@ def load_asr_settings():
 
 
 def save_asr_settings(settings):
-    path = os.path.join(_get_base_path(), "ai_settings.json")
+    from config import SETTINGS_PATH
+    _ensure_settings_dir()
     try:
         existing = {}
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                 existing = json.load(f)
         existing.update(settings)
-        with open(path, "w", encoding="utf-8") as f:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)
         return True
     except Exception:
