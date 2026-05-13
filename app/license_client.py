@@ -851,23 +851,28 @@ def activate_with_code(code):
     return {"ok": True, "msg": "激活成功", "info": result}
 
 
-def deactivate_device():
+def deactivate_device(force=False):
     """
     解绑当前设备
     
     流程：服务端清绑定 → 本地清缓存
     返回: {ok, msg}
+    
+    force=True: 强制解绑，跳过本地机器校验（用户换硬件后用）
     """
     code = _load_license_code()
     if not code:
         return {"ok": False, "msg": "未找到激活码"}
 
     current_mid = _get_machine_id()
-    cache = _load_cache()
-    if cache:
-        cached_mid = cache.get("machine_id", "")
-        if cached_mid and cached_mid != current_mid:
-            return {"ok": False, "msg": "当前设备与绑定设备不匹配"}
+
+    # 普通解绑：校验本地机器是否匹配（防滥用）
+    if not force:
+        cache = _load_cache()
+        if cache:
+            cached_mid = cache.get("machine_id", "")
+            if cached_mid and cached_mid != current_mid:
+                return {"ok": False, "msg": "当前设备与绑定设备不匹配，如需强制解绑请联系管理员"}
 
     # 防盗2.0 FC解绑（优先）
     fc_ok = _fc_unbind(code, current_mid)
