@@ -6,7 +6,7 @@
     "config.py": "85f5c942c03ea48e93872f4f9e688b89bdaf3b2a4015f1994cb369a5d59f4920",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
     "cutter_logic.py": "e444fc9bb8b26158d834e9e14ba04415fdf7ee5b025e50a82064fe30c8e1fd5e",
-    "gui.py": "dcef90c94bce01e9984eeeb8e5034ae82745868c12f040ca4b34297a5666920a",
+    "gui.py": "45ea3b707f5cf1fbd35d42e14d9c29ab7fe8f36c7834a0a815b009adf727a66b",
     "keywords.json": "5e123286635c2211c940b12785d20d41e1680346a68437745ef9a98107a458cf",
     "license_client.py": "ad0a7a3a6a66debf3512d1c43111e6160368cad56f05fa00f008f396dd61a60f",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
@@ -23,7 +23,7 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "d43ae33522297e2ff44190c788f2984b41d9b2f728e92b942318eb0ee752e4fd",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "52f007671e8e58681170bc818a946bd7bc05956e2c62cedb061e0139f4fe3aaf",
+    "version.json": "e9ea37fceddcde76e7f426be7042f5ab432d17f1d38c4f3057c39566278cb1e2",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.11: 配置迁移到用户数据目录，更新不再丢失AI/ASR设置；修复解绑设备不匹配问题",

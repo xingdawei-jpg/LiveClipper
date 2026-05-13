@@ -2517,6 +2517,24 @@ def _show_welcome_guide(root):
     dlg.protocol("WM_DELETE_WINDOW", _close_guide)
 
 
+
+import atexit
+def _cleanup_tempdir():
+    """退出时清理 PyInstaller 临时目录，避免弹窗"""
+    try:
+        import sys
+        if getattr(sys, '_MEIPASS', '') and '_MEI' in sys._MEIPASS:
+            import shutil
+            parent = os.path.dirname(sys._MEIPASS)
+            temp_root = os.environ.get('TEMP', '') or '/tmp'
+            if parent.startswith(temp_root):
+                for d in os.listdir(parent):
+                    if d.startswith('_MEI'):
+                        shutil.rmtree(os.path.join(parent, d), ignore_errors=True)
+    except:
+        pass
+atexit.register(_cleanup_tempdir)
+
 def main():
     try:
         import tkinterdnd2; root = tkinterdnd2.Tk()
