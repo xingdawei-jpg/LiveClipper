@@ -1399,7 +1399,26 @@ class App:
                 self.root.quit()
             else:
                 self._log("解绑失败: " + result["msg"], "err")
-                messagebox.showerror("解绑失败", result["msg"])
+                # 设备不匹配时提供强制解绑选项
+                if "设备" in result.get("msg", "") and "不匹配" in result.get("msg", ""):
+                    force = messagebox.askyesno("设备不匹配", "当前设备与激活时的设备不匹配。\n\n"
+                                                "可能是重装系统或更换了硬件导致。\n"
+                                                "是否尝试强制解绑？\n\n"
+                                                "⚠️ 强制解绑后可在新设备上重新激活")
+                    if force:
+                        self._log("正在强制解绑设备...")
+                        result = _deact(force=True)
+                        if result["ok"]:
+                            self._log("✅ " + result["msg"], "ok")
+                            messagebox.showinfo("解绑成功", result["msg"] + "\n\n程序将退出，请重新启动。")
+                            self.root.quit()
+                        else:
+                            self._log("强制解绑失败: " + result["msg"], "err")
+                            messagebox.showerror("强制解绑失败", result["msg"] + "\n\n请联系管理员处理。")
+                    else:
+                        messagebox.showerror("解绑失败", result["msg"] + "\n\n请联系管理员获取帮助。")
+                else:
+                    messagebox.showerror("解绑失败", result["msg"])
 
     def _show_feedback(self):
         """提交反馈弹窗"""
