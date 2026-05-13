@@ -305,6 +305,11 @@ class App:
                                         cursor="hand2", padx=16, pady=4,
                                         command=lambda: self._switch_mode("rec"))
         self._mode_btn_rec.pack(side="left", padx=(4,0))
+        self._mode_btn_schedule = tk.Button(tab_frame, text="时间分割", font=FNT_B,
+                                        fg=C["dim"], bg=C["inp"], relief="flat",
+                                        cursor="hand2", padx=16, pady=4,
+                                        command=lambda: self._switch_mode("schedule"))
+        self._mode_btn_schedule.pack(side="left", padx=(4,0))
         self._current_mode = "ai"
 
         # 页面容器（切换智能成片/单品扫描）
@@ -1525,7 +1530,7 @@ class App:
     # ---- 日志操作 ----
 
     def _switch_mode(self, mode):
-        """在 智能成片 / 单品扫描 / 直播录制 间切换整页"""
+        """在 智能成片 / 单品扫描 / 直播录制 / 时间分割 间切换"""
         if mode == self._current_mode:
             return
         self._current_mode = mode
@@ -1534,11 +1539,14 @@ class App:
         self._mode_btn_ai.configure(fg=C["dim"], bg=C["inp"])
         self._mode_btn_scan.configure(fg=C["dim"], bg=C["inp"])
         self._mode_btn_rec.configure(fg=C["dim"], bg=C["inp"])
+        self._mode_btn_schedule.configure(fg=C["dim"], bg=C["inp"])
         self._ai_page.pack_forget()
         if self._scan_page:
             self._scan_page.pack_forget()
         if self._rec_page:
             self._rec_page.pack_forget()
+        if hasattr(self, '_schedule_page') and self._schedule_page:
+            self._schedule_page.pack_forget()
 
         if mode == "ai":
             self._mode_btn_ai.configure(fg="white", bg=C["btn_sel"])
@@ -1549,6 +1557,12 @@ class App:
                 from product_scan_page import ProductScanPage
                 self._scan_page = ProductScanPage(self._page_container, app=self)
             self._scan_page.pack(fill="both", expand=True)
+        elif mode == "schedule":
+            self._mode_btn_schedule.configure(fg="white", bg=C["btn_sel"])
+            if not hasattr(self, '_schedule_page') or self._schedule_page is None:
+                from schedule_page import SchedulePage
+                self._schedule_page = SchedulePage(self._page_container, app=self)
+            self._schedule_page.pack(fill="both", expand=True)
         else:
             self._mode_btn_rec.configure(fg="white", bg=C["btn_sel"])
             if self._rec_page is None:
