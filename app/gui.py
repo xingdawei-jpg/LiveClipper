@@ -1603,7 +1603,13 @@ class App:
                             self._log(f"火山引擎ASR: {os.path.basename(video_path)}", "info")
                             try:
                                 from volcengine_asr import volcengine_asr as _volc_asr
-                                segs = _volc_asr(
+                                _has_volc = True
+                            except ImportError:
+                                _has_volc = False
+                                self._log(f"  volcengine_asr 模块不存在，跳过", "warn")
+                            if _has_volc:
+                                try:
+                                    segs = _volc_asr(
                                     audio_path=audio_path,
                                     app_id="", access_token="",
                                     tos_ak=settings.get("volc_tos_ak", ""),
