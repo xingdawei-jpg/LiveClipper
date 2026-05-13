@@ -1637,8 +1637,8 @@ class App:
                                             f.write("\n".join(srt_lines))
                                         srt_generated = True
                                         self._log(f"  火山引擎ASR完成: {os.path.basename(srt_path)}", "info")
-                            except Exception as e:
-                                self._log(f"  火山引擎ASR失败: {e}", "warn")
+                                except Exception as e:
+                                    self._log(f"  火山引擎ASR失败: {e}", "warn")
 
                         # 通用云端 ASR（硅基流动等）
                         if not srt_generated and asr_enabled:
