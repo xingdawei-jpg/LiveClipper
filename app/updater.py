@@ -526,12 +526,22 @@ class DownloadDialog(tk.Toplevel):
                     fail_count += 1
                     continue
 
-                # Write to app directory
-                dest = os.path.join(app_dir, fname)
-                try:
-                    with open(dest, 'wb') as f:
-                        f.write(content)
-                    success_count += 1
+                # Determine target dirs
+        update_dir = _get_update_dir()
+        target_dirs = [update_dir]
+        if app_dir not in target_dirs:
+            target_dirs.append(app_dir)
+        
+        # Write to app directory
+                for td in target_dirs:
+                    td_path = os.path.join(td, fname)
+                    try:
+                        os.makedirs(os.path.dirname(td_path), exist_ok=True)
+                        with open(td_path, 'wb') as f:
+                            f.write(content)
+                    except Exception:
+                        pass
+                success_count += 1
                     # 同时写到 sys._MEIPASS/app/（兼容不同版本 EXE 的路径差异）
                     try:
                         _meipass_app = os.path.join(sys._MEIPASS, 'app')
@@ -773,6 +783,10 @@ def _get_install_base():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _get_update_dir():
+    """获取持久更新目录"""
+    return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper', 'app')
+
 def _apply_update(zip_path):
     """Extract update zip and replace app files, handle GitHub zip structure"""
     import zipfile, tempfile, shutil as _shutil
@@ -804,39 +818,34 @@ def _apply_update(zip_path):
             return False
 
         # Determine target app directory
+        update_dir = _get_update_dir()
+        targets = [update_dir]  # ① 持久更新目录（首选）
+        
         if getattr(sys, 'frozen', False):
-            # 写入 exe_dir/app/（持久目录，重启不被覆盖）
-            target_app = os.path.join(base, "app")
-            # 同时也写入 _internal/app/（兼容旧版 EXE）
-            target_app_fallback = os.path.join(base, "_internal", "app")
+            targets.append(os.path.join(base, "app"))           # ② exe同级
+            targets.append(os.path.join(base, "_internal", "app"))  # ③ 内嵌
         else:
             # Dev mode: same directory
-            target_app = os.path.dirname(os.path.abspath(__file__))
-            if os.path.basename(target_app) != "app":
-                target_app = os.path.join(target_app, "app")
+            dev_target = os.path.dirname(os.path.abspath(__file__))
+            if os.path.basename(dev_target) != "app":
+                dev_target = os.path.join(dev_target, "app")
+            targets.append(dev_target)
 
-        if not os.path.isdir(target_app):
-            os.makedirs(target_app, exist_ok=True)
+        for target_app in targets:
+            if not os.path.isdir(target_app):
+                os.makedirs(target_app, exist_ok=True)
 
-        # Copy all .py and .json files from app_src to target
         copied = 0
         for fname in os.listdir(app_src):
             if fname.endswith(('.py', '.json')):
                 src_f = os.path.join(app_src, fname)
-                dst_f = os.path.join(target_app, fname)
-                try:
-                    _shutil.copy2(src_f, dst_f)
-                    copied += 1
-                except Exception:
-                    pass
-        
-        # 同时写入 _internal/app/（兼容旧版 EXE，launcher 回退路径）
-        if getattr(sys, 'frozen', False):
-            try:
-                _shutil.copytree(app_src, target_app_fallback, dirs_exist_ok=True,
-                                 ignore=lambda d,f: [x for x in f if not x.endswith(('.py','.json'))])
-            except Exception:
-                pass
+                for target_app in targets:
+                    dst_f = os.path.join(target_app, fname)
+                    try:
+                        _shutil.copy2(src_f, dst_f)
+                    except Exception:
+                        pass
+                copied += 1
 
         # Also copy from LiveClipper-main/app/ if different from app_src
         gh_app = os.path.join(staging, "LiveClipper-main", "app")

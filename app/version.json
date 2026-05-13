@@ -1,5 +1,5 @@
 {
-  "version": "2026.5.14",
+  "version": "2026.5.15",
   "files": {
     "ai_clipper.py": "7a45cc5d7c3066a517d3d06de4b2fd6eedab7de108f2186be02215c705fac140",
     "asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
@@ -21,13 +21,14 @@
     "stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "updater.py": "99a0f8a751e9a41d821f8ff0419c08f230b6c3c30677b13261d465c3eb6bcbe9",
+    "updater.py": "3eb72d618332367b10a43b70d53052b93199b8beca695ff593620d56aa268464",
     "volcengine_asr.py": "b81f2c5332863d22e796564da6b2b80f2134d85ef48fd44beea4e53b8324e0b5",
-    "version.json": "9ea7c8deeb60f51de47bc56e0e4f5ebcbb9e18ee5384a3c549717990176d3b96",
-    "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
+    "version.json": "bd851a81c089e5ff7335d2ce34630dc7687daa1a1de8d1e51290b7daa4eb09ed",
+    "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
+    "launcher.py": "b3ee71cc29552f5c180471017eb56934eafa0b6d82e1c955542ab261ea776d9b"
   },
-  "release_notes": "v2026.5.14: 修复更新后文件未生效问题（更新写入exe_dir/app/持久目录）",
-  "latest_version": "2026.5.14",
+  "release_notes": "v2026.5.15: permanent update fix - writes to APPDATA/LiveClipper/app/, works with all EXE modes",
+  "latest_version": "2026.5.15",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
   "update_message": "修复云端ASR设置不保存问题；单品导出使用硬件加速编码（QSV/AMF/NVENC）；AI选片新增通顺度质检和时间顺序重排；所有片段SRT边界对齐防止说半句话"
 }
