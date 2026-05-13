@@ -193,7 +193,7 @@ def _query_device_binding(code):
     """查询激活码的设备绑定，返回 {record_id, machine_id, activate_date, status, distributor_id} 或 None"""
     try:
         raw_code = code.replace("-", "").strip().lower()
-        # 飞书 filter 必须用字段名（中文），不能用 field_id
+        # 先用精确匹配查找
         import urllib.parse as _urlp
         filt = _urlp.quote(f'CurrentValue.[激活码]="{raw_code}"', safe="")
         resp = _feishu_request("GET",
@@ -203,26 +203,50 @@ def _query_device_binding(code):
             items = resp.get("data", {}).get("items", [])
             if items:
                 rec = items[0]
-                fields = rec.get("fields", {})
-                mid = fields.get("设备ID", "")
-                if isinstance(mid, list):
-                    mid = mid[0].get("text", "") if mid else ""
-                activate_date = fields.get("激活日期", 0)
-                if isinstance(activate_date, list):
-                    activate_date = activate_date[0] if activate_date else 0
-                status = fields.get("状态", "")
-                if isinstance(status, list):
-                    status = status[0].get("text", "") if status else ""
-                distributor = fields.get("分销商ID", "")
-                if isinstance(distributor, list):
-                    distributor = distributor[0].get("text", "") if distributor else ""
-                return {
-                    "record_id": rec["record_id"],
-                    "machine_id": str(mid).strip(),
-                    "activate_date": int(activate_date) if activate_date else 0,
-                    "status": str(status).strip(),
-                    "distributor_id": str(distributor).strip(),
-                }
+            else:
+                rec = None
+        else:
+            rec = None
+        
+        # 精确匹配没找到，尝试模糊匹配（兼容不同录入格式）
+        if not rec:
+            import urllib.parse as _urlp2
+            # 搜索激活码中包含 code 的后8位（唯一性足够）
+            short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
+            filt2 = _urlp2.quote(f'find("{short_code}", {{激活码}})', safe="")
+            resp2 = _feishu_request("GET",
+                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
+                f"?filter={filt2}&page_size=10")
+            if resp2 and resp2.get("code") == 0:
+                items2 = resp2.get("data", {}).get("items", [])
+                for item in items2:
+                    code_field = item.get("fields", {}).get("激活码", "")
+                    code_val = code_field[0].get("text", "") if isinstance(code_field, list) else str(code_field)
+                    if raw_code in code_val.replace("-", "").lower():
+                        rec = item
+                        break
+
+        if rec:
+            fields = rec.get("fields", {})
+            mid = fields.get("设备ID", "")
+            if isinstance(mid, list):
+                mid = mid[0].get("text", "") if mid else ""
+            activate_date = fields.get("激活日期", 0)
+            if isinstance(activate_date, list):
+                activate_date = activate_date[0] if activate_date else 0
+            status = fields.get("状态", "")
+            if isinstance(status, list):
+                status = status[0].get("text", "") if status else ""
+            distributor = fields.get("分销商ID", "")
+            if isinstance(distributor, list):
+                distributor = distributor[0].get("text", "") if distributor else ""
+            return {
+                "record_id": rec["record_id"],
+                "machine_id": str(mid).strip(),
+                "activate_date": int(activate_date) if activate_date else 0,
+                "status": str(status).strip(),
+                "distributor_id": str(distributor).strip(),
+            }
         return None
     except Exception:
         return None
@@ -273,7 +297,7 @@ def _bind_device(code, machine_id, device_info="", status="已激活"):
             date_fields["到期日期"] = expire_ts
 
         if existing:
-            # 更新
+            # 更新第一条匹配的记录
             fields = {"设备ID": machine_id, "设备信息": device_info, "状态": status}
             if dist_id:
                 fields["分销商ID"] = dist_id
@@ -281,7 +305,35 @@ def _bind_device(code, machine_id, device_info="", status="已激活"):
             resp = _feishu_request("PUT",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
                 {"fields": fields})
-            return resp and resp.get("code") == 0
+            if not (resp and resp.get("code") == 0):
+                return False
+            
+            # 清理同激活码的重复记录（保留一条）
+            try:
+                raw_code = code.replace("-", "").strip().lower()
+                short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
+                import urllib.parse as _urlp
+                filt = _urlp.quote(f'find("{short_code}", {{激活码}})', safe="")
+                dup_resp = _feishu_request("GET",
+                    f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
+                    f"?filter={filt}&page_size=20")
+                if dup_resp and dup_resp.get("code") == 0:
+                    dup_items = dup_resp.get("data", {}).get("items", [])
+                    dup_ids = []
+                    for item in dup_items:
+                        if item["record_id"] != existing["record_id"]:
+                            code_field = item.get("fields", {}).get("激活码", "")
+                            code_val = code_field[0].get("text", "") if isinstance(code_field, list) else str(code_field)
+                            if raw_code in code_val.replace("-", "").lower():
+                                dup_ids.append(item["record_id"])
+                    if dup_ids:
+                        _feishu_request("DELETE",
+                            f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
+                            {"record_ids": dup_ids})
+            except Exception:
+                pass
+            
+            return True
         else:
             # 新增
             fields = {
