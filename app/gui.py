@@ -1577,15 +1577,45 @@ class App:
                 from ai_clipper import load_settings
                 settings = load_settings()
 
-                # 1. 生成 SRT（Whisper 本地）
+                # 1. 生成 SRT（Whisper 本地 或 云端 ASR）
                 srt_path = video_path.rsplit(".", 1)[0] + ".srt"
                 if not os.path.exists(srt_path):
-                    self._log(f"生成字幕: {os.path.basename(video_path)}", "info")
-                    from stt import generate_srt
-                    srt_path = generate_srt(video_path, log_fn=lambda m: self._log(f"  {m}", "info"))
-                    if not srt_path or not os.path.exists(srt_path):
-                        self._log(f"  字幕生成失败: {os.path.basename(video_path)}，跳过", "err")
-                        return []
+                    # 尝试云端 ASR
+                    asr_provider = settings.get("asr_provider", "")
+                    asr_enabled = settings.get("asr_enabled", False)
+                    if asr_provider == "火山引擎" or asr_enabled:
+                        self._log(f"云端ASR: {os.path.basename(video_path)}", "info")
+                        from asr_api import cloud_asr
+                        # 先提取音频
+                        audio_path = video_path + ".wav"
+                        try:
+                            import subprocess
+                            subprocess.run(["ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+                                          "-ar", "16000", "-ac", "1", audio_path],
+                                         capture_output=True, timeout=120,
+                                         creationflags=subprocess.CREATE_NO_WINDOW)
+                            if os.path.exists(audio_path):
+                                srt_content = cloud_asr(audio_path, log_fn=lambda m: self._log(f"  {m}", "info"))
+                                if srt_content:
+                                    with open(srt_path, "w", encoding="utf-8") as f:
+                                        f.write(srt_content)
+                                    self._log(f"  云端ASR完成: {os.path.basename(srt_path)}", "info")
+                                else:
+                                    self._log(f"  云端ASR失败，回退本地Whisper", "warn")
+                                os.remove(audio_path)
+                        except Exception as e:
+                            self._log(f"  云端ASR异常: {e}，回退本地Whisper", "warn")
+                            if os.path.exists(audio_path):
+                                os.remove(audio_path)
+
+                    # 兜底：本地 Whisper
+                    if not os.path.exists(srt_path):
+                        self._log(f"本地Whisper: {os.path.basename(video_path)}", "info")
+                        from stt import generate_srt
+                        srt_path = generate_srt(video_path, log_fn=lambda m: self._log(f"  {m}", "info"))
+                        if not srt_path or not os.path.exists(srt_path):
+                            self._log(f"  字幕生成失败: {os.path.basename(video_path)}，跳过", "err")
+                            return []
                 else:
                     self._log(f"  SRT已存在: {os.path.basename(srt_path)}", "info")
 
