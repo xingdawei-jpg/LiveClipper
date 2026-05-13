@@ -805,8 +805,10 @@ def _apply_update(zip_path):
 
         # Determine target app directory
         if getattr(sys, 'frozen', False):
-            # PyInstaller build: _internal/app/
-            target_app = os.path.join(base, "_internal", "app")
+            # 写入 exe_dir/app/（持久目录，重启不被覆盖）
+            target_app = os.path.join(base, "app")
+            # 同时也写入 _internal/app/（兼容旧版 EXE）
+            target_app_fallback = os.path.join(base, "_internal", "app")
         else:
             # Dev mode: same directory
             target_app = os.path.dirname(os.path.abspath(__file__))
@@ -827,6 +829,14 @@ def _apply_update(zip_path):
                     copied += 1
                 except Exception:
                     pass
+        
+        # 同时写入 _internal/app/（兼容旧版 EXE，launcher 回退路径）
+        if getattr(sys, 'frozen', False):
+            try:
+                _shutil.copytree(app_src, target_app_fallback, dirs_exist_ok=True,
+                                 ignore=lambda d,f: [x for x in f if not x.endswith(('.py','.json'))])
+            except Exception:
+                pass
 
         # Also copy from LiveClipper-main/app/ if different from app_src
         gh_app = os.path.join(staging, "LiveClipper-main", "app")
