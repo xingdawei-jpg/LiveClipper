@@ -27,10 +27,7 @@ if IS_MAC:
 else:
     FONT_NAME = "Microsoft YaHei"
     FONT_BOLD_NAME = "Microsoft YaHei Bold"
-    if getattr(sys, "frozen", False):
-        FONT_DIR = os.path.join(os.path.dirname(sys.executable), "_internal", "fonts")
-    else:
-        FONT_DIR = r"C:\Windows\Fonts"
+    FONT_DIR = r"C:\Windows\Fonts"
     FONT_PATH = os.path.join(FONT_DIR, "msyh.ttc")
     FONT_BOLD_PATH = os.path.join(FONT_DIR, "msyhbd.ttc")
     # Windows 下 drawtext 需要转义冒号
@@ -52,10 +49,12 @@ def _find_ffmpeg():
     
     # Windows
     if IS_WIN:
-        # 2. 工作目录下 _internal/ffmpeg
+        # 2. 源码目录下 app/ffmpeg（便携版）
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"))
+        # 3. 工作目录下 _internal/ffmpeg
         candidates.append(os.path.join(os.getcwd(), "_internal", "ffmpeg"))
         candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "_internal", "ffmpeg"))
-        # 3. 常见的 FFmpeg 安装路径
+        # 4. 常见的 FFmpeg 安装路径
         candidates.append(r"C:\ffmpeg\bin")
         candidates.append(r"C:\ProgramData\chocolatey\bin")
         # 4. PATH 中找
