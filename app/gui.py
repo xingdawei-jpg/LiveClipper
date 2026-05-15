@@ -287,7 +287,7 @@ class App:
         tk.Label(hdr, text=f"选择视频 → AI智能选片 → 自动剪辑+字幕  ·  v{_get_installed_version()}",
                  font=FNT_S, fg=C["dim"], bg=C["bg"]).pack(side="left", padx=(12,0))
 
-        # 模式切换：智能成片 / 单品扫描
+        # 模式切换：智能成片 / AI 扫描
         tab_frame = tk.Frame(m, bg=C["bg"])
         tab_frame.pack(fill="x", padx=16, pady=(0,4))
         self._mode_btn_ai = tk.Button(tab_frame, text="智能成片", font=FNT_B,
@@ -295,7 +295,7 @@ class App:
                                        cursor="hand2", padx=16, pady=4,
                                        command=lambda: self._switch_mode("ai"))
         self._mode_btn_ai.pack(side="left")
-        self._mode_btn_scan = tk.Button(tab_frame, text="单品扫描", font=FNT_B,
+        self._mode_btn_scan = tk.Button(tab_frame, text="AI 扫描", font=FNT_B,
                                         fg=C["dim"], bg=C["inp"], relief="flat",
                                         cursor="hand2", padx=16, pady=4,
                                         command=lambda: self._switch_mode("scan"))
@@ -305,14 +305,14 @@ class App:
                                         cursor="hand2", padx=16, pady=4,
                                         command=lambda: self._switch_mode("rec"))
         self._mode_btn_rec.pack(side="left", padx=(4,0))
-        self._mode_btn_schedule = tk.Button(tab_frame, text="时间分割", font=FNT_B,
+        self._mode_btn_schedule = tk.Button(tab_frame, text="单品扫描", font=FNT_B,
                                         fg=C["dim"], bg=C["inp"], relief="flat",
                                         cursor="hand2", padx=16, pady=4,
                                         command=lambda: self._switch_mode("schedule"))
         self._mode_btn_schedule.pack(side="left", padx=(4,0))
         self._current_mode = "ai"
 
-        # 页面容器（切换智能成片/单品扫描）
+        # 页面容器（切换智能成片/AI 扫描）
         self._page_container = tk.Frame(m, bg=C["bg"])
         self._page_container.pack(fill="both", expand=True)
 
@@ -1530,7 +1530,7 @@ class App:
     # ---- 日志操作 ----
 
     def _switch_mode(self, mode):
-        """在 智能成片 / 单品扫描 / 直播录制 / 时间分割 间切换"""
+        """在 智能成片 / AI 扫描 / 直播录制 / 单品扫描 间切换"""
         if mode == self._current_mode:
             return
         self._current_mode = mode
@@ -1571,12 +1571,12 @@ class App:
             self._rec_page.pack(fill="both", expand=True)
 
     def _scan_start(self):
-        """单品扫描 - 开始处理（由 ProductScanPage 回调）"""
-        """单品扫描 - 开始处理（由 ProductScanPage 回调）"""
-        self._log("单品扫描启动", "info")
+        """AI 扫描 - 开始处理（由 ProductScanPage 回调）"""
+        """AI 扫描 - 开始处理（由 ProductScanPage 回调）"""
+        self._log("AI 扫描启动", "info")
 
 
-        """单品扫描 - 逐个处理视频"""
+        """AI 扫描 - 逐个处理视频"""
         videos = getattr(self, '_scan_video_list', [])
         if not videos:
             self._log("请先添加视频", "warn")
@@ -2030,7 +2030,7 @@ class App:
                   relief="flat", cursor="hand2", padx=20, command=_save_keywords).pack(side="right", padx=(0, 8))
 
     def _open_product_scan(self):
-        """打开单品扫描窗口"""
+        """打开AI 扫描窗口"""
         from product_scan_window import open_scan_window
         open_scan_window(self.root)
 
