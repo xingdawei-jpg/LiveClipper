@@ -23,7 +23,7 @@
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "updater.py": "2877281141a288c827acf5e3a731b91ca5171f440ffa63bee58c8a42adf699c0",
     "volcengine_asr.py": "d69c4bfea428d7bf76adf8f0671b3fef1faae30189a911dd631ecd74aec539a2",
-    "version.json": "50a4c18d47169611f6cefbce2516e8c04f5d28a4c8a6d6e31f805fb07fd68c70",
+    "version.json": "79eb7633cc45b371edcc291a52d59b005fffb6a2fd9673b806d39b8638b37ffd",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.9: ASR设置自动保存+导出硬件加速+选片通顺度优化+边界对齐修复",
