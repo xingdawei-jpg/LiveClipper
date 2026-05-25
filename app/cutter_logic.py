@@ -915,6 +915,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     old_dur, old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
     TARGET_DURATION = target_duration
     TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
+    _log(f"目标时长: {target_duration}秒 (容差{max(5, target_duration // 6)}秒)")
     import time as _time, json as _json
     _run_log = {
         "时间": _time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -950,6 +951,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             pass
 
     auto_srt = False
+    auto_srt = True
     temp_srt = None
 
     # 1. 自动语音识别（如果没给 SRT）
@@ -957,47 +959,47 @@ def process_video(video_path, srt_path=None, output_path=None,
         _log("已取消。"); return {"ok": False, "error": "cancelled"}
 
     if not srt_path:
-        # 检查云端ASR是否启用
-        _volc_asr_on = False
+        # 先检查视频旁边是否有 SRT 缓存
+        _srt_cache = os.path.splitext(video_path)[0] + ".srt"
+        if os.path.exists(_srt_cache):
+            _log(f"使用本地SRT: {os.path.basename(_srt_cache)}")
+            srt_path = _srt_cache
+            temp_srt = _srt_cache
+            auto_srt = False
+        
+        if not srt_path:
+            # 使用缓存标志，让后面的代码知道用了缓存
+            auto_srt = True
+            # 检查云端ASR是否启用
+            _volc_asr_on = False
+        
+        if not srt_path:
+            # 没有缓存，走 ASR 流程
+            # 检查云端ASR是否启用
+            _volc_asr_on = False
         _volc_used = False
         try:
-            import json as _j3, os as _o3, sys as _s3
-            if getattr(_s3, "frozen", False):
-                _sd3 = _o3.path.dirname(_s3.executable)
-            else:
-                _sd3 = _o3.path.dirname(_o3.path.abspath(__file__))
-            _sp3 = _o3.path.join(_sd3, "ai_settings.json")
-            if _o3.path.exists(_sp3):
-                with open(_sp3, "r", encoding="utf-8-sig") as _f3:
-                    _volc_asr_on = _j3.load(_f3).get("asr_enabled", False)
+            from ai_clipper import load_settings as _ld_asr
+            _volc_asr_on = _ld_asr().get("asr_enabled", False)
         except Exception:
             pass
         # 记录AI模型到运行日志
         try:
-            import json as _jl, os as _ol, sys as _sl
-            _sdl = _ol.path.dirname(_sl.executable) if getattr(_sl, "frozen", False) else _ol.path.dirname(_ol.path.abspath(__file__))
-            _spl = _ol.path.join(_sdl, "ai_settings.json")
-            if _ol.path.exists(_spl):
-                with open(_spl, "r", encoding="utf-8-sig") as _fl:
-                    _s = _jl.load(_fl)
-                    _run_log["参数"]["AI模型"] = _s.get("model", "deepseek-chat")
-                    _run_log["参数"]["云端ASR"] = _s.get("asr_enabled", False)
-                    _run_log["参数"]["ASR预设"] = _s.get("asr_preset", "自定义")
+            from ai_clipper import load_settings as _ld_log
+            _s = _ld_log()
+            _run_log["参数"]["AI模型"] = _s.get("model", "deepseek-chat")
+            _run_log["参数"]["云端ASR"] = _s.get("asr_enabled", False)
+            _run_log["参数"]["ASR预设"] = _s.get("asr_preset", "自定义")
         except Exception:
             pass
-        if _volc_asr_on:
+        if _volc_asr_on and not srt_path:
             # 使用火山引擎 ASR（断句精准），失败则降级到本地 Whisper
             _volc_used = False
             try:
-                import json as _json2, os as _os2, sys as _sys2
-                if getattr(_sys2, "frozen", False):
-                    _sd2 = _os2.path.dirname(_sys2.executable)
-                else:
-                    _sd2 = _os2.path.dirname(_os2.path.abspath(__file__))
-                _sp2 = _os2.path.join(_sd2, "ai_settings.json")
-                if _os2.path.exists(_sp2):
-                    with open(_sp2, "r", encoding="utf-8-sig") as f2:
-                        _cfg2 = _json2.load(f2)
+                import os as _os2
+                from ai_clipper import load_settings as _ld3
+                _cfg2 = _ld3()
+                if _cfg2:
                     # --- 阿里云 ASR ---
                     _asr_preset = _cfg2.get("asr_preset", "") or _cfg2.get("asr_provider", "")
                     if _asr_preset == "阿里云" and not _volc_used:
@@ -1126,7 +1128,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             except Exception as _e2:
                 _log(f"⚠️ 云端语音识别异常，已自动切换到本地识别")
         
-        if not _volc_used:
+        if not _volc_used and not srt_path:
             _log("[STEP] 🎬 语音识别中...")
             _log("启动本地语音识别 (Whisper)...")
             try:
@@ -1161,7 +1163,18 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log("语音识别失败！")
             _run_log["结果"] = "失败"; _run_log["错误"] = "ASR识别失败"; _save_run_log(); return {"ok": False, "error": "asr_failed"}
         srt_path = temp_srt
-        auto_srt = True
+        # 缓存SRT到视频旁边，下次直接复用
+        if srt_path and os.path.exists(srt_path):
+            try:
+                _cache_path = os.path.splitext(video_path)[0] + ".srt"
+                if _cache_path != srt_path:  # 避免自拷贝
+                    import shutil as _shutil
+                    _shutil.copy2(srt_path, _cache_path)
+                    _log(f"SRT已缓存: {os.path.basename(_cache_path)}")
+            except Exception:
+                pass
+        if auto_srt is not False:
+            auto_srt = True
     # 2. 自动生成输出路径
     if not output_path:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -1204,7 +1217,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _ai_mod._AI_CLIP_COUNT = "15-20"
             else:
                 _ai_mod._AI_CLIP_COUNT = "10-15"
-            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only, focus_hint=_fh)
+            ordered_clips = ai_analyze_clips(srt_text, log_fn=_log, force_category=force_category, multi_version=_clips_only, focus_hint=_fh, target_duration=TARGET_DURATION)
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
                 ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
@@ -1414,7 +1427,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             mirror_vf = ""
             if random.random() < 0.5:
                 mirror_vf = "hflip"
-            clip_duration = end - start
+            clip_duration = end - start + 0.1  # 0.1s缓冲避免语音尾部被切 + 0.1  # 0.1s缓冲避免语音尾部被切
 
             # Smart Crop VF
             if smart_crop_enabled and _sc_results is not None:
@@ -1698,9 +1711,30 @@ def process_video(video_path, srt_path=None, output_path=None,
             if proc.returncode != 0:
                 _log(f"去重FFmpeg返回 {proc.returncode}")
                 _log(f"去重stderr: {stderr_data[-300:]}")
-                # 去重失败时直接输出原始拼接
-                import shutil as _shutil
-                _shutil.copy2(raw_file, nosub_file)
+                if _ve:
+                    _log("硬件编码失败，回退libx264...")
+                    cmd2 = []
+                    for a in dedup_cmd:
+                        if a in ("-qp", "-global_quality", "-quality", "-preset", "fast", "p1"): continue
+                        if a.startswith("h264_") or (a.startswith("-c:v") and a != "-c:v"): continue
+                        cmd2.append(a)
+                    cmd2 += ["-c:v", "libx264", "-preset", "fast"]
+                    try:
+                        p2 = subprocess.Popen(cmd2, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                            creationflags=_NO_WINDOW)
+                        _, _ = p2.communicate(timeout=600)
+                        if p2.returncode == 0 and os.path.exists(nosub_file):
+                            _log("  libx264回退成功")
+                        else:
+                            _log("  libx264回退失败，用原片")
+                            import shutil as _shutil
+                            _shutil.copy2(raw_file, nosub_file)
+                    except:
+                        import shutil as _shutil
+                        _shutil.copy2(raw_file, nosub_file)
+                else:
+                    import shutil as _shutil
+                    _shutil.copy2(raw_file, nosub_file)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
@@ -1958,16 +1992,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         nonlocal raw_segments, volcengine_success
         try:
             _log("正在尝试阿里云 ASR...")
-            if getattr(sys, "frozen", False):
-                sd = os.path.dirname(sys.executable)
-            else:
-                sd = os.path.dirname(os.path.abspath(__file__))
-            sp2 = os.path.join(sd, "ai_settings.json")
-            if not os.path.exists(sp2):
-                _log("aliyun_asr: ai_settings.json 不存在，跳过")
-                return
-            with open(sp2, "r", encoding="utf-8-sig") as f:
-                cfg = _json.load(f)
+            from ai_clipper import load_settings as _ld_sub_ali
+            cfg = _ld_sub_ali()
             _ali_api_key = cfg.get("aliyun_api_key", "")
             _ali_oss_ak = cfg.get("aliyun_oss_ak", "")
             _ali_oss_sk = cfg.get("aliyun_oss_sk", "")
@@ -2004,16 +2030,11 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         nonlocal raw_segments, volcengine_success
         try:
             _log("正在尝试火山引擎 ASR...")
-            if getattr(sys, "frozen", False):
-                sd = os.path.dirname(sys.executable)
-            else:
-                sd = os.path.dirname(os.path.abspath(__file__))
-            sp = os.path.join(sd, "ai_settings.json")
-            if not os.path.exists(sp):
-                _log("volcengine_asr: ai_settings.json 不存在，跳过")
+            from ai_clipper import load_settings as _ld_sub_volc
+            cfg = _ld_sub_volc()
+            if not cfg.get("volc_tos_ak") or not cfg.get("volc_tos_sk"):
+                _log("volcengine_asr: 未配置火山引擎，跳过")
                 return
-            with open(sp, "r", encoding="utf-8-sig") as f:
-                cfg = _json.load(f)
             v_app_id = cfg.get("volc_app_id", "")
             v_token = cfg.get("volc_access_token", "")
             v_tos_ak = cfg.get("volc_tos_ak", "")
@@ -2097,7 +2118,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 ffmpeg = get_ffmpeg_cmd()
                 kw = dict(stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
                 p = _sp.Popen([ffmpeg, "-y", "-i", video_path, "-vn", "-acodec",
-                              "libmp3lame", "-ar", "16000", "-ac", "1", "-q:a", "4", mp3_p], **kw)
+                              "libmp3lame", "-ar", "16000", "-ac", "1", "-q:a", "4", mp3_p], creationflags=_NO_WINDOW, **kw)
                 p.wait(timeout=60)
                 if p.returncode == 0:
                     srt_text = _ca(mp3_p)
@@ -2125,15 +2146,10 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     _asr_preset_sub = ""
     _use_cloud_sub = False
     try:
-        if getattr(sys, "frozen", False):
-            _sub_sd = os.path.dirname(sys.executable)
-        else:
-            _sub_sd = os.path.dirname(os.path.abspath(__file__))
-        _sub_sp = os.path.join(_sub_sd, "ai_settings.json")
-        with open(_sub_sp, "r", encoding="utf-8-sig") as _cf:
-            _sub_cfg = _json.load(_cf)
-            _use_cloud_sub = _sub_cfg.get("asr_enabled", False)
-            _asr_preset_sub = _sub_cfg.get("asr_preset", "") or _sub_cfg.get("asr_provider", "")
+        from ai_clipper import load_settings as _ld_sub
+        _sub_cfg = _ld_sub()
+        _use_cloud_sub = _sub_cfg.get("asr_enabled", False)
+        _asr_preset_sub = _sub_cfg.get("asr_preset", "") or _sub_cfg.get("asr_provider", "")
     except:
         pass
     if _use_cloud_sub:
@@ -2778,3 +2794,566 @@ def _process_version_with_clips(video_path, srt_path, output_path,
     finally:
         _ai.ai_analyze_clips = _original_fn
 
+def process_video_mix(video_path, output_path=None, dedup_preset="medium",
+                       subtitle_overlay=True, log_fn=None, cancel_event=None,
+                       pip_path="auto", pip_size=0.15, pip_opacity=0.03, pip_pos="\u53f3\u4e0a",
+                       smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
+                       target_duration=60, focus_hint="\u81ea\u52a8", num_versions=1,
+                       srt_path=None, force_category=None, **extra_kwargs):
+
+    def _log(msg):
+        if log_fn: log_fn(msg)
+
+    def _cancelled():
+        return cancel_event and cancel_event.is_set()
+
+    _log("=== \u6df7\u526a\u6a21\u5f0f ===")
+    if not isinstance(video_path, (list, tuple)) or not video_path:
+        _log("\u8bf7\u6dfb\u52a0\u89c6\u9891\u6587\u4ef6"); return False
+
+    video_list = video_path
+    _log(f"\u5171 {len(video_list)} \u4e2a\u89c6\u9891")
+
+    # Get ffmpeg
+    try:
+        from platform_config import FFMPEG_CMD as ffmpeg
+    except:
+        ffmpeg = "ffmpeg"
+
+    # Temp dir
+    tmp = os.path.join("C:\\", "lc_temp_mix_" + os.urandom(4).hex())
+    os.makedirs(tmp, exist_ok=True)
+
+    out_dir = os.path.dirname(output_path) if output_path else os.path.join(os.path.dirname(video_list[0]), "mix_output")
+    os.makedirs(out_dir, exist_ok=True)
+    final = output_path or os.path.join(out_dir, "mix_output.mp4")
+
+    # ============================================================
+    # Phase 1: 合并SRT + AI 一步选片
+    # ============================================================
+    from ai_clipper import ai_analyze_clips, is_enabled as ai_is_enabled
+
+    if not ai_is_enabled():
+        _log("AI 未启用"); shutil.rmtree(tmp, ignore_errors=True); return False
+
+    # 合并 SRT
+    _log("合并语音文本...")
+    merged_srt = ""
+    for _vi, vp in enumerate(video_list):
+        if _cancelled(): return False
+        _sc = os.path.splitext(vp)[0] + ".srt"
+        if not os.path.exists(_sc):
+            # Fallback scan
+            _srt_dir = os.path.dirname(vp)
+            _base = os.path.splitext(os.path.basename(vp))[0]
+            if os.path.isdir(_srt_dir):
+                for _f in os.listdir(_srt_dir):
+                    if _f.endswith(".srt") and _base in _f:
+                        _sc = os.path.join(_srt_dir, _f)
+                        _log(f"  找到匹配 SRT: {_f}")
+                        break
+        if not os.path.exists(_sc):
+            # Cloud ASR + Whisper fallback
+            try:
+                from ai_clipper import load_settings as _ld_mix
+                _cfg4 = _ld_mix()
+                _asr_enabled = _cfg4.get("asr_enabled", False)
+            except:
+                _asr_enabled = False
+            _asr_ok = False
+            if _asr_enabled:
+                try:
+                    from volcengine_asr import volcengine_asr
+                    import hashlib, tempfile, json
+                    _td = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
+                    os.makedirs(_td, exist_ok=True)
+                    _vh = hashlib.md5(vp.encode("utf-8")).hexdigest()[:8]
+                    _wav = os.path.join(_td, f"audio_{_vh}.wav")
+                    if not os.path.exists(_wav):
+                        subprocess.run([ffmpeg, "-y", "-i", vp, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, creationflags=_NO_WINDOW)
+                    srts = volcengine_asr(_wav,
+                                         _cfg4.get("volc_app_id", ""),
+                                         _cfg4.get("volc_access_token", ""),
+                                         _cfg4.get("volc_tos_ak", ""),
+                                         _cfg4.get("volc_tos_sk", ""),
+                                         bucket=_cfg4.get("volc_bucket", "livec"),
+                                         log_fn=_log,
+                                         api_key=_cfg4.get("volc_api_key", "") or None)
+                    if srts:
+                        with open(_sc, "w", encoding="utf-8") as _fw:
+                            for _i_seg, _seg in enumerate(srts):
+                                _st_seg = _seg["start"] if isinstance(_seg, dict) else _seg[1]
+                                _et_seg = _seg["end"] if isinstance(_seg, dict) else _seg[2]
+                                _tx_seg = _seg["text"] if isinstance(_seg, dict) else _seg[0]
+                                _fw.write(f"{_i_seg+1}\n{int(_st_seg//3600):02d}:{int((_st_seg%3600)//60):02d}:{int(_st_seg%60):02d},{int((_st_seg%1)*1000):03d} --> {int(_et_seg//3600):02d}:{int((_et_seg%3600)//60):02d}:{int(_et_seg%60):02d},{int((_et_seg%1)*1000):03d}\n{_tx_seg}\n\n")
+                        _log(f"  火山引擎 ASR 成功: {len(srts)} 条")
+                        _asr_ok = True
+                except Exception as _ve:
+                    _log(f"  火山引擎 ASR 失败: {_ve}")
+                if not _asr_ok:
+                    try:
+                        from aliyun_asr import aliyun_asr
+                        import json, hashlib, tempfile
+                        _ali_api_key = _cfg4.get("aliyun_api_key", "")
+                        _ali_oss_ak = _cfg4.get("aliyun_oss_ak", "")
+                        _ali_oss_sk = _cfg4.get("aliyun_oss_sk", "")
+                        _ali_bucket = _cfg4.get("aliyun_bucket", "")
+                        if _ali_api_key and _ali_oss_ak and _ali_oss_sk and _ali_bucket:
+                            _td2 = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
+                            os.makedirs(_td2, exist_ok=True)
+                            _vh2 = hashlib.md5(vp.encode("utf-8")).hexdigest()[:8]
+                            _wav2 = os.path.join(_td2, f"audio_{_vh2}.wav")
+                            if not os.path.exists(_wav2):
+                                subprocess.run([ffmpeg, "-y", "-i", vp, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav2],
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, creationflags=_NO_WINDOW)
+                            srts = aliyun_asr(_wav2, _cfg4, log_fn=_log)
+                            if srts:
+                                with open(_sc, "w", encoding="utf-8") as _fw:
+                                    for _i_seg, _seg in enumerate(srts):
+                                        _st_seg = _seg["start"] if isinstance(_seg, dict) else _seg[1]
+                                        _et_seg = _seg["end"] if isinstance(_seg, dict) else _seg[2]
+                                        _tx_seg = _seg["text"] if isinstance(_seg, dict) else _seg[0]
+                                        _fw.write(f"{_i_seg+1}\n{int(_st_seg//3600):02d}:{int((_st_seg%3600)//60):02d}:{int(_st_seg%60):02d},{int((_st_seg%1)*1000):03d} --> {int(_et_seg//3600):02d}:{int((_et_seg%3600)//60):02d}:{int(_et_seg%60):02d},{int((_et_seg%1)*1000):03d}\n{_tx_seg}\n\n")
+                                _log(f"  阿里云 ASR 成功: {len(srts)} 条")
+                                _asr_ok = True
+                    except Exception as _ae:
+                        _log(f"  阿里云 ASR 失败: {_ae}")
+            if not _asr_ok:
+                try:
+                    from stt import generate_srt
+                    _temp = generate_srt(vp, log_fn=_log)
+                    if _temp and os.path.exists(_temp):
+                        shutil.copy2(_temp, _sc)
+                        _log(f"  Whisper ASR 成功")
+                except Exception as e:
+                    _log(f"  Whisper ASR 失败: {e}")
+        if os.path.exists(_sc):
+            with open(_sc, "r", encoding="utf-8", errors="replace") as f:
+                _srt_text = f.read()
+            # Add [Vn] marker to text lines
+            _marker = f"V{_vi+1}"
+            _out_lines = []
+            for _line in _srt_text.split("\n"):
+                import re as _re_line
+                if _re_line.match(r'^\d+$', _line.strip()):  # index
+                    _out_lines.append(_line)
+                elif _re_line.match(r'\d+:\d+:\d+', _line):  # timecode
+                    _out_lines.append(_line)
+                elif _line.strip() == "":
+                    _out_lines.append(_line)
+                else:
+                    _out_lines.append(f"[{_marker}] {_line}")
+            merged_srt += "\n".join(_out_lines) + "\n\n"
+
+    if not merged_srt.strip():
+        _log("所有视频均无语音文本"); shutil.rmtree(tmp, ignore_errors=True); return False
+
+    _log(f"合并 SRT 完成，调用 AI 选片...")
+
+    # 传递时长设置到 AI 模块
+    import ai_clipper as _ai_mod
+    _ai_mod._AI_TARGET_DURATION = target_duration
+    if target_duration <= 40:
+        _ai_mod._AI_CLIP_COUNT = "8-12"
+    elif target_duration >= 80:
+        _ai_mod._AI_CLIP_COUNT = "18-25"
+    else:
+        _ai_mod._AI_CLIP_COUNT = "12-18"
+
+    try:
+        ordered_clips = ai_analyze_clips(merged_srt, log_fn=_log,
+                                          force_category=force_category,
+                                          focus_hint=focus_hint,
+                                          merge_mode=True,
+                                          target_duration=TARGET_DURATION)
+    except Exception as e:
+        _log(f"AI 选片失败: {e}"); import traceback; _log(traceback.format_exc())
+        shutil.rmtree(tmp, ignore_errors=True); return False
+
+    if not ordered_clips:
+        _log("AI 未选到任何片段"); shutil.rmtree(tmp, ignore_errors=True); return False
+
+    _log(f"AI 选到 {len(ordered_clips)} 个片段")
+
+    # Map clips back to source videos
+    all_clips_meta = []
+    tc = 0
+    for clip in ordered_clips:
+        c_type, text, start, end, score, dur = clip[:6]
+        _src_idx = -1
+        for _vi2 in range(len(video_list)):
+            if f"[V{_vi2+1}]" in text:
+                _src_idx = _vi2
+                break
+        if _src_idx < 0:
+            _src_idx = 0
+        vp = video_list[_src_idx]
+        all_clips_meta.append({
+            "idx": tc, "type": c_type, "text": text,
+            "start": start, "end": end, "score": score,
+            "duration": dur, "source": vp,
+        })
+        tc += 1
+
+    _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
+
+    # Bridge: ai_analyze_clips with merge_mode already sorts, so sorted_clips = all_clips_meta
+    sorted_clips = all_clips_meta
+
+    # ============================================================
+    # Step 3: Cut each clip in order
+    # ============================================================
+    # Probe first video for dimensions
+    probe_cmd = [ffmpeg, "-i", video_list[0]]
+    try:
+        probe_out = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   creationflags=_NO_WINDOW, timeout=30)
+        probe_stderr = probe_out.stderr
+    except:
+        probe_stderr = ""
+    w, h = 720, 1280
+    try:
+        _ff = get_ffmpeg_cmd()
+        _p = subprocess.run([_ff, "-i", video_list[0]], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=30, creationflags=_NO_WINDOW)
+        _stderr = _p.stderr.decode("utf-8", errors="replace") if isinstance(_p.stderr, bytes) else (_p.stderr or "")
+        _best_w, _best_h, _best_area = 0, 0, 0
+        for _m in re.finditer(r'(\d+)x(\d+)', _stderr):
+            _tw, _th = int(_m.group(1)), int(_m.group(2))
+            _ta = _tw * _th
+            if _ta > _best_area:
+                _best_w, _best_h, _best_area = _tw, _th, _ta
+        if _best_w > 100 and _best_h > 100:
+            w, h = _best_w, _best_h
+    except:
+        pass
+
+    _log(f"Source: {w}x{h}")
+
+    # ===== Smart Crop batch detection =====
+    _sc_results_all = {}
+    _src_dims = {}
+    if smart_crop_enabled:
+        try:
+            from smart_crop import batch_detect_clips, compute_smart_crop, _even
+            _src_groups = {}
+            for ci, clip in enumerate(sorted_clips):
+                vp = clip["source"]
+                _src_groups.setdefault(vp, []).append((ci, clip))
+            for _vp, _group in _src_groups.items():
+                if cancel_event and cancel_event.is_set():
+                    break
+                _ordered = [("", "", c["start"], c["end"], 0, c["duration"]) for ci, c in _group]
+                # Probe per-source dimensions for accurate smart crop
+                try:
+                    _ps = subprocess.run([ffmpeg, "-i", _vp], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, creationflags=_NO_WINDOW)
+                    _ps_stderr = _ps.stderr.decode("utf-8", errors="replace") if isinstance(_ps.stderr, bytes) else ""
+                    _pw = _ph = 0
+                    for _pm in re.finditer(r"(\d+)x(\d+)", _ps_stderr):
+                        _tw2, _th2 = int(_pm.group(1)), int(_pm.group(2))
+                        if _tw2 * _th2 > _pw * _ph:
+                            _pw, _ph = _tw2, _th2
+                    if _pw > 100 and _ph > 100:
+                        _fw, _fh = _pw, _ph
+                    else:
+                        _fw, _fh = w, h
+                except:
+                    _fw, _fh = w, h
+                _src_dims[_vp] = (_fw, _fh)
+                _results = batch_detect_clips(_vp, _ordered, log_fn=_log, ffmpeg_cmd=ffmpeg, frame_w=_fw, frame_h=_fh)
+                if _results:
+                    for _ri, (_ci, _) in enumerate(_group):
+                        if _ri in _results:
+                            _sc_results_all[(_vp, _ci)] = _results[_ri]
+        except Exception as e:
+            _log(f"Smart crop: {e}")
+
+    temp_dir = os.path.join(tmp, "clips")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_files = []
+    _clip_starts = []
+    _clip_ends = []
+
+    for ci, clip in enumerate(sorted_clips):
+        if _cancelled():
+            break
+
+        vp = clip["source"]
+        c_type = clip["type"]
+        start = clip["start"]
+        end = clip["end"] + 0.1  # 缓冲避免尾部被切 + 0.1  # +0.1s缓冲避免语音尾部被切
+        duration = end - start
+
+        if start < 0: start = 0
+        if duration <= 0:
+            continue
+
+        _log(f"Cut [{ci+1}/{len(sorted_clips)}] {c_type} ({start:.1f}s-{end:.1f}s) @ {os.path.basename(vp)[:20]}")
+
+        out_clip = os.path.join(temp_dir, f"clip_{ci:03d}.mp4")
+        _clip_starts.append(start)
+        _clip_ends.append(end)
+
+        mirror_vf = ""
+        if random.random() < 0.5:
+            mirror_vf = "hflip"
+
+        # Smart crop or default 9:16
+        _sc_info = _sc_results_all.get((vp, ci), None) if smart_crop_enabled and _sc_results_all else None
+        if _sc_info:
+            _sw, _sh = _src_dims.get(vp, (w, h))
+            try:
+                from smart_crop import compute_smart_crop, _even
+                _sc_crop = compute_smart_crop(_sc_info, _sw, _sh, crop_level=crop_level, log_fn=_log)
+                if _sc_crop and _sc_crop.get("method") == "smart":
+                    _cw = _even(int(_sw * _sc_crop["crop_w"]))
+                    _ch = _even(int(_sh * _sc_crop["crop_h"]))
+                    _cx = _even(int(_sw * _sc_crop["crop_x"]))
+                    _cy = _even(int(_sh * _sc_crop["crop_y"]))
+                    combined_vf = "crop=%d:%d:%d:%d,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (_cw, _ch, _cx, _cy, w, h, w, h)
+                else:
+                    _rc = _sc_crop or {}
+                    _zoom = _rc.get("zoom", 1.08)
+                    _rcw = _even(int(_sw / _zoom))
+                    _rch = _even(int(_sh / _zoom))
+                    _rcx = _even(int((_sw - _rcw) / 2))
+                    _rcy = _even(int(_sh - _rch))
+                    combined_vf = "crop=%d:%d:%d:%d,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" % (_rcw, _rch, _rcx, _rcy, w, h, w, h)
+            except Exception as sce:
+                _log(f"Smart crop err: {sce}")
+                combined_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
+        else:
+            combined_vf = r"crop=min(iw\,trunc(ih*9/16/2)*2):min(ih\,trunc(iw*16/9/2)*2)"
+        if mirror_vf:
+            combined_vf += "," + mirror_vf
+
+        cmd = [ffmpeg, "-y"]
+        cmd += ["-ss", f"{start:.3f}", "-i", vp]
+        cmd += ["-t", f"{duration:.3f}"]
+        # 去掉最后的淡入淡出避免音频被切（原afade去掉）
+        # 改用精准截断：提前0.15s开始保证帧对齐
+        cmd += ["-fflags", "+genpts"]
+        cmd += ["-vsync", "cfr"]
+        cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+        cmd += ["-vf", combined_vf]
+        cmd += ["-pix_fmt", "yuv420p"]
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+               "-af", "afade=t=in:st=0:d=0.15"]
+        cmd += ["-movflags", "+faststart"]
+        cmd += [out_clip]
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=_NO_WINDOW)
+            rc = proc.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _log(f"  Cut timeout")
+            continue
+        except Exception as e:
+            _log(f"  Cut failed: {e}")
+            continue
+
+        if rc == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
+            temp_files.append(out_clip)
+        else:
+            _log(f"  Cut failed (rc={rc})")
+
+    if not temp_files:
+        _log("No clips cut successfully!")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    _log(f"Cut {len(temp_files)}/{len(sorted_clips)} clips")
+
+    # ===== Ken Burns per clip =====
+    kb_intensity = extra_kwargs.get('kb_intensity', '中')
+    if ken_burns_enabled and _clip_starts:
+        _log("Ken Burns...")
+        try:
+            from smart_crop import apply_ken_burns_opencv
+            _kb_ok = 0
+            for _kbi, _clip_file in enumerate(temp_files):
+                if _cancelled():
+                    break
+                try:
+                    _kb_dur = _clip_ends[_kbi] - _clip_starts[_kbi]
+                    _kb_out = _clip_file.replace('.mp4', '_kb.mp4')
+                    if apply_ken_burns_opencv(_clip_file, _kb_out, _kb_dur, w, h, 30, ffmpeg_cmd=ffmpeg, log_fn=_log, intensity=kb_intensity) and os.path.exists(_kb_out):
+                        os.replace(_kb_out, _clip_file)
+                        _kb_ok += 1
+                except:
+                    pass
+            _log(f"Ken Burns: {_kb_ok}/{len(temp_files)}")
+        except Exception as kbe:
+            _log(f"Ken Burns: {kbe}")
+
+    # ============================================================
+    # Step 4: Concat with filter_complex (handles format differences)
+    # ============================================================
+    if _cancelled():
+        _log("Cancelled.")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    _log(f"Concatenating {len(temp_files)} clips...")
+
+    # Probe clip stream info
+    clip_has_video = []
+    clip_has_audio = []
+    for tf in temp_files:
+        p = subprocess.run([ffmpeg, "-i", tf], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace",
+                          creationflags=_NO_WINDOW, timeout=15)
+        stderr = p.stderr or ""
+        clip_has_video.append("Video:" in stderr)
+        clip_has_audio.append("Audio:" in stderr)
+        if not clip_has_video[-1]:
+            _log(f"  Warning: {os.path.basename(tf)} no video stream")
+        if not clip_has_audio[-1]:
+            _log(f"  Warning: {os.path.basename(tf)} no audio stream, adding silent track")
+
+    n = len(temp_files)
+    inputs = []
+    filter_parts = []
+    in_idx = 0
+
+    for i in range(n):
+        inputs.extend(["-i", temp_files[i]])
+        streams = []
+        if clip_has_video[i]:
+            streams.append(f"[{in_idx}:v]")
+        if clip_has_audio[i]:
+            streams.append(f"[{in_idx}:a]")
+        else:
+            inputs.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
+            in_idx += 1
+            streams.append(f"[{in_idx}:a]")
+        filter_parts.append(streams)
+        in_idx += 1
+
+    concat_input_str = ""
+    for streams in filter_parts:
+        for s in streams:
+            concat_input_str += s
+
+    has_v_out = any(clip_has_video)
+    has_a_out = any(clip_has_audio) or not all(clip_has_audio)
+    v_count = 1 if has_v_out else 0
+    a_count = 1 if has_a_out else 0
+    concat_filter = f"{concat_input_str}concat=n={n}:v={v_count}:a={a_count}[outv]"
+    if has_a_out:
+        concat_filter += "[outa]"
+    else:
+        concat_filter = concat_filter.replace("[outv]", "[outv][outa]")
+
+    raw_concat = os.path.join(tmp, "raw_concat.mp4")
+    cmd = [ffmpeg, "-y"] + inputs + ["-filter_complex", concat_filter]
+    if has_v_out:
+        cmd += ["-map", "[outv]"]
+    if has_a_out or not any(clip_has_audio):
+        cmd += ["-map", "[outa]"]
+    cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+    cmd += ["-c:a", "aac"]
+    cmd += [raw_concat]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=_NO_WINDOW)
+        _, stderr_data = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _log("Concat timeout!")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    except Exception as e:
+        _log(f"Concat error: {e}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    if proc.returncode != 0 or not os.path.exists(raw_concat) or os.path.getsize(raw_concat) < 1000:
+        _log(f"Concat failed (rc={proc.returncode})")
+        if stderr_data:
+            for line in stderr_data.strip().split(chr(10))[-10:]:
+                if line.strip(): _log(f"  ffmpeg: {line.strip()[:120]}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    raw_mb = os.path.getsize(raw_concat) / (1024 * 1024)
+    _log(f"Concat done: {raw_mb:.1f}MB")
+
+    # ============================================================
+    # Step 5: Dedup
+    # ============================================================
+    if _cancelled():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+
+    nosub_file = os.path.join(tmp, "nosub.mp4")
+    cfg = VIDEO_CONFIG
+
+    if dedup_preset == "none":
+        shutil.copy2(raw_concat, nosub_file)
+    else:
+        _log(f"Dedup ({dedup_preset})...")
+        dedup = build_dedup_filters(w, h, 0)
+        applied = ",".join(dedup["applied"]) if dedup.get("applied") else "none"
+        _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
+
+        vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease,crop={w}:{h}"
+        af = "afade=t=in:st=0:d=0.3"
+        if dedup.get("video_filters"):
+            vf = dedup["video_filters"] + "," + vf
+        if dedup.get("audio_filters"):
+            af = dedup["audio_filters"] + "," + af
+
+        dedup_cmd = [ffmpeg, "-y", "-i", raw_concat]
+        dedup_cmd += ["-vf", vf, "-af", af]
+        dedup_cmd += ["-r", str(cfg["fps"]), "-vsync", "cfr", "-b:v", cfg["bitrate_v"]]
+        dedup_cmd += ["-c:v", cfg["codec_v"], "-preset", "ultrafast"]
+        dedup_cmd += ["-c:a", cfg["codec_a"], "-b:a", cfg["bitrate_a"]]
+        dedup_cmd += ["-movflags", "+faststart"]
+        dedup_cmd += [nosub_file]
+
+        try:
+            proc = subprocess.Popen(dedup_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=_NO_WINDOW)
+            _, _ = proc.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _log("Dedup timeout, using raw")
+            shutil.copy2(raw_concat, nosub_file)
+        except:
+            shutil.copy2(raw_concat, nosub_file)
+
+        if not os.path.exists(nosub_file):
+            shutil.copy2(raw_concat, nosub_file)
+
+    # ============================================================
+    # Step 6: Subtitle overlay (if enabled)
+    # ============================================================
+    if subtitle_overlay and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 10000:
+        try:
+            _add_subtitles_final(nosub_file, final, w, h, tmp, _log, pip_path, pip_size, pip_opacity, pip_pos)
+        except Exception as e:
+            _log(f"Subtitle overlay failed: {e}")
+            shutil.copy2(nosub_file, final)
+    else:
+        shutil.copy2(nosub_file, final)
+
+    # ============================================================
+    # Cleanup + return
+    # ============================================================
+    final_mb = os.path.getsize(final) / (1024 * 1024) if os.path.exists(final) else 0
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    _log(f"\nMix done!")
+    _log(f"  Sources: {len(video_list)} videos")
+    _log(f"  Clips: {len(sorted_clips)}")
+    _log(f"  Output: {final}")
+    _log(f"  Size: {final_mb:.1f}MB")
+
+    return {"ok": True, "output_path": final, "clips": len(sorted_clips), "sources": len(video_list), "size_mb": final_mb}

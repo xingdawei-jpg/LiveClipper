@@ -412,7 +412,12 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
     返回: FFmpeg 滤镜字符串, 可直接用于二次编码的 -vf
     """
     direction = random.choice(['in', 'out'])
-    target_zoom = random.uniform(0.08, 0.25)  # 8-25%
+    if intensity == 'light':
+        target_zoom = random.uniform(0.03, 0.10)
+    elif intensity == 'heavy':
+        target_zoom = random.uniform(0.15, 0.40)
+    else:
+        target_zoom = random.uniform(0.08, 0.25)
     total_frames = max(1, int(fps * clip_duration))
 
     if direction == 'in':
@@ -433,7 +438,7 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
     return result
 
 
-def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None):
+def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None):
     """Ken Burns effect using OpenCV frame-by-frame processing.
     
     Reads each frame via cv2, applies animated zoom (crop+resize),
@@ -449,7 +454,12 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
     import subprocess as _sp
 
     direction = random.choice(['in', 'out'])
-    target_zoom = random.uniform(0.08, 0.25)  # 8-25%
+    if intensity == 'light':
+        target_zoom = random.uniform(0.03, 0.10)
+    elif intensity == 'heavy':
+        target_zoom = random.uniform(0.15, 0.40)
+    else:
+        target_zoom = random.uniform(0.08, 0.25)
     total_frames = max(1, int(fps * clip_duration))
 
     cap = cv2.VideoCapture(clip_path)

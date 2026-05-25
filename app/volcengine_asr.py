@@ -12,7 +12,9 @@ import uuid
 try:
     import tos
     _TOS_AVAILABLE = True
-except ImportError:
+except ImportError as _e:
+    import sys as _sys
+    print(f"[VOLC_DEBUG] tos import failed: {_e}", file=_sys.stderr, flush=True)
     _TOS_AVAILABLE = False
 
 

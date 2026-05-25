@@ -60,6 +60,14 @@ def _get_base_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 def load_settings():
+    # 优先读用户数据目录（用户保存的设置），其次读打包目录
+    try:
+        from config import SETTINGS_PATH as _user_path
+        if os.path.exists(_user_path):
+            with open(_user_path, "r", encoding="utf-8-sig") as f:
+                return json.load(f)
+    except Exception:
+        pass
     path = os.path.join(_get_base_path(), "ai_settings.json")
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
@@ -96,7 +104,7 @@ def load_keywords():
 
     # 废话词：用户自定义覆盖默认
     default_filler = list(FILLER_WORDS) if hasattr(FILLER_WORDS, '__iter__') else []
-    merged_filler = custom.get("filler_words", default_filler)
+    merged_filler = list(dict.fromkeys(default_filler + custom.get("filler_words", [])))
 
     # Hook爆点词：从hook关键词 + 额外爆点词库
     hook_words = merged_clip_kw.get("hook", [])
@@ -147,7 +155,7 @@ def _get_keywords():
     """获取关键词（带文件修改时间缓存，keywords.json更新后自动刷新）"""
     import os
     from config import CLIP_KEYWORDS  # just for fallback
-    kw_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.json")
+    kw_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
     try:
         mtime = os.path.getmtime(kw_path)
     except Exception:
@@ -173,14 +181,18 @@ _DEFAULT_PREFERENCE_KEYWORDS = {
 
 
 def save_settings(settings):
-    path = os.path.join(_get_base_path(), "ai_settings.json")
+    # 写入用户数据目录（可写），非打包目录（可能只读）
+    try:
+        from config import SETTINGS_PATH as _save_path
+    except ImportError:
+        _save_path = os.path.join(_get_base_path(), "ai_settings.json")
     try:
         existing = {}
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8-sig") as f:
+        if os.path.exists(_save_path):
+            with open(_save_path, "r", encoding="utf-8-sig") as f:
                 existing = json.load(f)
         existing.update(settings)
-        with open(path, "w", encoding="utf-8") as f:
+        with open(_save_path, "w", encoding="utf-8") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
@@ -353,17 +365,17 @@ def _pre_clean_srt(srt_text, log_fn=None):
     all_lines = srt_text.strip().split("\n")
 
     # 标准模式
-    entries = _parse_and_filter(all_lines, 1.5, 12, 5, 2)
+    entries = _parse_and_filter(all_lines, 0.5, 25, 1, 0)
     _log(f"前置清洗(标准): {len(entries)} 条通过")
 
-    # 一级降级:取消字数限制，放宽时长
-    if len(entries) < 20:
-        entries = _parse_and_filter(all_lines, 1.0, 15, 3, 1)
-        _log(f"一级降级(放宽字数+时长): {len(entries)} 条通过")
+    # 一级降级:跳过负面信号
+    if len(entries) < 30:
+        entries = _parse_and_filter(all_lines, 0.3, 30, 1, 0)
+        _log(f"一级降级(仅黑名单): {len(entries)} 条通过")
 
-    # 二级降级:仅过滤黑名单
-    if len(entries) < 10:
-        entries = _parse_and_filter(all_lines, 0.5, 20, 3, 0)
+    # 二级降级:仅过滤黑名单中的过渡废话
+    if len(entries) < 15:
+        entries = _parse_and_filter(all_lines, 0.3, 30, 1, 0)
         _log(f"二级降级(仅黑名单): {len(entries)} 条通过")
 
     # 相邻片段重叠检测：Whisper medium 会在片段边界重复识别
@@ -429,8 +441,8 @@ def _pre_clean_srt(srt_text, log_fn=None):
         i = 0
         while i < len(entries):
             text, start_s, end_s, dur = entries[i]
-            # 如果当前条目>=3秒，直接保留（阿里云ASR按标点切分后3-5秒已够精确）
-            if dur >= 3.0:
+            # 如果当前条目>=2.0秒，直接保留（缩短合并门槛）
+            if dur >= 2.0:
                 merged_short.append(entries[i])
                 i += 1
                 continue
@@ -438,7 +450,7 @@ def _pre_clean_srt(srt_text, log_fn=None):
             combined_text = text
             combined_end = end_s
             j = i + 1
-            while j < len(entries) and (combined_end - start_s) < 5.0:
+            while j < len(entries) and (combined_end - start_s) < 4.0:
                 next_text, next_start, next_end, next_dur = entries[j]
                 # 间隔>2秒视为话题断裂，不再合并
                 if next_start - combined_end > 2.0:
@@ -447,13 +459,13 @@ def _pre_clean_srt(srt_text, log_fn=None):
                 combined_text += next_text
                 combined_end = next_end
                 j += 1
-                # 达到5秒目标就停
-                if combined_end - start_s >= 3.0:
+                # 达到4秒目标就停
+                if combined_end - start_s >= 2.0:
                     break
             merged_short.append((combined_text, start_s, combined_end, combined_end - start_s))
             i = j
         if len(merged_short) != len(entries):
-            _log(f"SRT短条目合并: {len(entries)} → {len(merged_short)} 条 (目标3-5秒/条)")
+            _log(f"SRT短条目合并: {len(entries)} → {len(merged_short)} 条 (目标2-4秒/条)")
         entries = merged_short
 
     # 重建 SRT
@@ -478,11 +490,15 @@ SYSTEM_PROMPT = """你是抖音女装带货短视频专业编导，严格执行�
 1. 品类统计→确定主打单品 2. Hook扫描→选冲击力最强的 3. 链路规划→hook/product/close分配 4. 叙事编排→按话题分组+时间相邻优先，确保上下句能接上 5. 重复排查→去重叠 6. 直接输出JSON
 
 ★叙事编排核心原则★:
-- Product片段按主题分组排列：先排A主题(如面料/版型)，再排B主题(如搭配效果)，不混排
-  - Step1: 阅读所选Product片段的文本，识别它们属于哪些主题（面料、版型、颜色、搭配效果、尺码推荐、品质背书等）
-  - Step2: 将同一主题的Product放在一起，讲完一个主题再换下一个
-  - 例：面料（薄+透气+舒适）→ 版型（大开口领+余量+显瘦）→ 尺码推荐（S-M-L推荐）
-- 同话题片段必须选时间相邻的SRT条目，不要选隔了几十条的（说话语气和场景对不上）
+- 视频结构: 开场圈人(1-2段) → 提高预期(2-3段) → 产品介绍(6-10段) → 促单收尾(1-2段)
+  - 开场圈人: 自由选最抓人的Hook，不受时间约束
+  - 提高预期: 选"为什么好"的铺垫内容，形成递进
+  - 产品介绍: ★按话题分组排列★先排A主题(如面料/版型)，再排B主题(如搭配效果)，不混排
+    * Step1: 阅读所选Product片段的文本，识别属于哪些主题（面料、版型、颜色、搭配效果等）
+    * Step2: 将同一主题的Product放在一起，讲完一个主题再换下一个
+    * 例：面料→触感→版型→尺码推荐
+  - 促单收尾: 自由选最好的促单，不受时间约束
+- 同话题片段优先选时间相邻的SRT条目（说话语气和场景对得上）
 - 片段A的最后一句和片段B的第一句应该能自然衔接，不可跳跃话题
 - 宁可牺牲一点"最精彩"，也要保证整条视频连贯流畅
 
@@ -492,12 +508,25 @@ SYSTEM_PROMPT = """你是抖音女装带货短视频专业编导，严格执行�
 3. 所有片段必须围绕同一个主打单品，禁止混入其他品类的内容
 4. 即使其他品类的文案再好，也不能选
 
+[二,多视频源选片规则]
+1. 字幕条目中有 [V1] [V2] [V3] 等标记，代表来自不同视频素材
+2. ★必须从每个有标记的视频源中各选至少3-4个片段★，确保混剪均衡使用每个素材
+3. 如果某个视频源的精华内容确实很少，可以少选但至少选1-2个
+4. 检查每个片段的文本是否含 [Vn] 标记来判断来源，不要只看时间顺序
+
 [二,数量与时长]
-1. 输出10-15段片段，每段必须是完整语义单元
-2. 整条视频总时长45-65秒（唯一硬性时长约束）
+1. 输出10-15段片段，每段必须是完整语义单元（10-15会被按目标时长自动替换，见下方规则）
+2. 整条视频总时长45-65秒（唯一硬性时长约束，会被按目标时长自动替换）
 3. 如果主打单品的同类型好片段不够，宁可重复不同角度的卖点，也不要混入其他品类
-4. ★宁可片段少但每段完整，也不要片段多但句句断★
+4. ★宁可片段多但每段完整，也不要片段少但句句断★
 5. ★Product必须选6-10段★（短而精，每段只说1-2个要点，多角度覆盖卖点）
+
+【动态数量规则（AI自动遵守上方替换后的数值）】
+- 目标30-45秒: 选8-12段，每段3-5秒 = 总时长达标
+- 目标60秒: 选14-18段，每段3-5秒 = 总时长达标  
+- 目标90秒: 选18-24段，每段3-5秒 = 总时长达标
+- 目标120秒: 选24-30段，每段3-5秒 = 总时长达标
+★片段数不够=时长不够=不合格，宁可多选到上限也不要少选★
 
 [三,黄金链路结构]
 采用"必选+可选"灵活组合模式：
@@ -551,6 +580,7 @@ SYSTEM_PROMPT = """你是抖音女装带货短视频专业编导，严格执行�
    ⑥ 版型/面料/细节: 讲解设计、材质、做工 → 建立产品认知
    ⑦ 场景想象(画面感): "法国女生的浪漫感"、"办公室喝茶的雅" → 感觉比参数更打动人
    ⑧ 穿搭展示: 多种风格搭配、跨季节可穿 → 证明百搭实穿性
+   ★★★绝对禁止★★★: 所有尺码推荐、码数建议(卡码拍小、正码正拍、买大买小、S/M/L尺码等)禁止放在Product片段里，只允许出现在Close
 
 3. Close(促单收尾): ★必须选择1-2个片段★核心是消除顾虑+推动决策，绝不能空缺
    - ★尺码引导只能放在Close区域(最后1-2段)★
@@ -656,6 +686,8 @@ SYSTEM_PROMPT = """你是抖音女装带货短视频专业编导，严格执行�
 [九,输出格式]
 
 ★★★重要：直接输出JSON数组！不要输出任何推理过程、分析步骤、解释说明！第一行就是[★★★
+
+★严格数量要求：你必须输出（10-15段）总时长（45-65秒），这是硬性约束！如果输出数量不足，视频时长不够，整个视频就废了！输出10-15段→实际输出10-15段，输出18-24段→实际输出18-24段，输出22-30段→实际输出22-30段。输出数量由上方[二,数量与时长]决定，此处替换生效。★
 
 ★单版本模式★:只输出JSON数组，每个片段必须包含 focus 和 reason 字段:
 [
@@ -958,7 +990,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
             i += 1
 
     if not segments:
-        return cleaned_srt
+        return cleaned_srt, None
 
     # ============================================================
     # 3. 逐段分析
@@ -1113,7 +1145,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
             valid_cats[_cat] = _s
     if not valid_cats:
         _log("  无法识别主品类，保留全部")
-        return cleaned_srt
+        return cleaned_srt, None
 
     # [v8.3] 套装加权: 套装+单品共现段落 +30分
     if "套装" in valid_cats and valid_cats["套装"] > 0:
@@ -1263,13 +1295,15 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     else:
         _log(f"品类合法性校验: 无突兀跨品类内容")
 
-    return "\n".join(legal_lines)
+    return "\n".join(legal_lines), main_cat
 
 
 # ============================================================
 # 核心:调用 AI + 前置清洗 + 重试
 # ============================================================
-def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False, focus_hint=None, hook_candidates_hint=None):
+def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False, focus_hint=None, hook_candidates_hint=None, merge_mode=False, target_duration=60):
+    global _AI_TARGET_DURATION
+    _AI_TARGET_DURATION = target_duration
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -1295,10 +1329,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             return []
 
     # SRT预去重: 去除主播重复讲述的段落
-    cleaned_srt = _dedup_srt_repeated_sections(cleaned_srt, log_fn)
+    if not merge_mode:
+            cleaned_srt = _dedup_srt_repeated_sections(cleaned_srt, log_fn)
 
     # 品类过滤:识别主品类，从源SRT中移除其他品类(支持用户手动指定)
-    cleaned_srt = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
+    cleaned_srt, detected_main_cat = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
+    # 用检测到的品类（或用户指定）作为跨品类过滤的偏好品类
+    _cross_cat_preferred = force_category if force_category and force_category != "自动检测" else detected_main_cat
 
     # [PATCH] Compute SRT max time for safety clamping
     _srt_entries_times = []
@@ -1309,9 +1346,16 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _srt_entries_times.append(_es)
     srt_max_end = max(_srt_entries_times) + 0.5 if _srt_entries_times else None
 
-    # AI 分析(最多重试 3 次)
+    # AI 分析(最多重试 5 次，对抗 R1 空 content)
+    # 计算目标片段数（用于检查AI是否选够）
+    _target_min_clips = 8
+    if _AI_TARGET_DURATION >= 100: _target_min_clips = 22
+    elif _AI_TARGET_DURATION >= 80: _target_min_clips = 18
+    elif _AI_TARGET_DURATION >= 50: _target_min_clips = 14
+    elif _AI_TARGET_DURATION >= 30: _target_min_clips = 8
+
     best_clips = []
-    for attempt in range(3):
+    for attempt in range(5):
         _log(f"AI: 调用 {model}(第 {attempt + 1} 次)...")
         # ★构建SRT条目列表（供AI按索引选片）★
         _indexed_srt_entries = []
@@ -1333,6 +1377,17 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _call_ai(api_key, base_url, model, cleaned_srt, log_fn, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint)
         if not clips:
             continue
+        # 检查AI选的片段数是否达标，不够则让AI自己补选
+        if clips and len(clips) < _target_min_clips and attempt < 2:
+            log_fn(f"AI: 当前{len(clips)}段 < 目标{_target_min_clips}段，让AI补选...")
+            _extra_hint = f"【注意：刚才你只选了{len(clips)}段，目标需要至少{_target_min_clips}段。请再额外选{_target_min_clips - len(clips)}个片段，不要重复你刚选的。仅输出新增片段的JSON数组，不要包含任何推理过程。】"
+            _supplement = _call_ai(api_key, base_url, model, _extra_hint + "\n" + cleaned_srt, _log, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint)
+            if _supplement:
+                _existing_times = {(c[2], c[3]) for c in clips if len(c) >= 4}
+                for sc in _supplement:
+                    if len(sc) >= 4 and (sc[2], sc[3]) not in _existing_times:
+                        clips.append(sc)
+                _log(f"AI: 补选后共{len(clips)}段")
         original_clips = list(clips)
         removed_from_dedup = []
         clips = _dedup_clips(clips, log_fn, multi_version=multi_version, focus_hint=focus_hint, srt_text=srt_text)
@@ -1370,7 +1425,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             for ct, text, s, e, sc, d, *_ in clips:
                 _log(f"  {ct:<16s} | {s:.1f}-{e:.1f}s ({d:.1f}s) | {text}")
             # 跨品类扫描(第二道防线)
-            clips = _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=force_category)
+            clips = _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=_cross_cat_preferred)
             # 叙事连贯性检查
             clips = _check_narrative_coherence(clips, log_fn)
             # 按黄金链路排序后，同类型片段再按时间先后排（保证同一类的内容按原始时间顺序衔接）
@@ -1389,7 +1444,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # CTA误判校验
             clips = _validate_cta(clips, log_fn)
             # 先去重(在边界修复前，避免边界扩展导致误判重叠)
-            clips = _dedup_clip_text_overlap(clips, log_fn)
+            clips = _dedup_clip_text_overlap(clips, log_fn, merge_mode=merge_mode)
             if not clips:
                 _log("AI: 去重后无剩余")
                 continue
@@ -1403,13 +1458,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # [v9.3 - DISABLED] tighten_clip_boundaries + 延伸 - 引起片段间跳跃废话
             # 改用AI Prompt控制片段长度和边界，代码层只做 trim_filler
             _total_dur = sum(c[5] for c in clips)
-            _min_dur = 40 if multi_version else 50  # 多版本需要3倍素材
+            _min_dur = max(25, _AI_TARGET_DURATION * 2 // 3)  # 兜底目标 ≈ 目标时长的2/3
             if _total_dur < _min_dur and removed_from_dedup:
                 _log(f"兜底回收: 当前 {_total_dur:.1f}s < {_min_dur}s, 尝试回收被去重片段...")
                 for rc in removed_from_dedup:
                     if sum(c[5] for c in clips) >= _min_dur:
                         break
-                    if rc[5] >= 8:
+                    if rc[5] <= 0 or rc[5] >= 8:
                         continue
                     # 检查重叠
                     _overlap = False
@@ -1428,18 +1483,36 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         else:
                             clips.append(rc)
                         _log(f"  回收: {rc[2]:.1f}-{rc[3]:.1f}s ({rc[5]:.1f}s)")
+            if len(clips) < 8 and attempt < 2:
+                _log(f"AI: 仅{len(clips)}个片段偏少，拉高temperature重试...")
+                import random as _r2
+                temperature = round(_r2.uniform(0.5, 0.75), 2)  # 更高temperature刺激多样化
+                _log(f"AI: 重试temperature={temperature}")
+                original_clips = list(clips)
+                continue
             return clips
         _log(f"AI: 第 {attempt + 1} 次校验未通过，重试...")
 
     # 用最好的结果(不硬拒绝)
     if best_clips:
         _log(f"AI: 使用最佳结果({len(best_clips)} 片段)")
-        clips = _dedup_clip_text_overlap(best_clips, log_fn)
-        clips = _post_filter_cross_category(clips, cleaned_srt, log_fn)
+        clips = _dedup_clip_text_overlap(best_clips, log_fn, merge_mode=merge_mode)
+        clips = _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=_cross_cat_preferred)
     # ★AI选片后跨品类二次过滤★：AI可能选了含纯次品类的片段
     if clips:
         # 从SRT统计品类频率，确定主品类
         _cross_cat_counts = {}
+        ALL_CATEGORIES = {
+            "上衣": ["上衣","T恤","衬衫","针织衫","卫衣","打底衫","小衫","衬衣","网纱罩衫","罩衫",
+                     "毛衣","短袖","长袖","吊带衫","背心","抹胸","针织"],
+            "裤子": ["裤子","牛仔裤","阔腿裤","打底裤","工装裤","休闲裤","长裤","短裤","九分裤",
+                     "小脚裤","直筒裤","牛奶裤","烟管裤","哈伦裤","裤"],
+            "裙子": ["裙子","连衣裙","半身裙","A字裙","包臀裙","长裙","短裙","百褶裙","裙",
+                     "吊带裙","碎花裙","鱼尾裙","蛋糕裙","一步裙","旗袍裙","吊带","背心裙"],
+            "外套": ["外套","风衣","西装","羽绒服","大衣","夹克","棉服","皮衣","开衫","马甲"],
+            "套装": ["套装","四件套","三件套","两件套","三件","四件","成套","整套","全套"],
+            "鞋子": ["鞋","鞋子","凉鞋","运动鞋","高跟鞋","平底鞋","单鞋","靴子","老爹鞋"],
+        }
         for _cc, _ckws in ALL_CATEGORIES.items():
             _cc_count = sum(1 for _ckw in _ckws if _ckw in cleaned_srt)
             if _cc_count > 0:
@@ -1490,7 +1563,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # CTA误判校验
         clips = _validate_cta(clips, log_fn)
         # 先去重(在边界修复前)
-        clips = _dedup_clip_text_overlap(clips, log_fn)
+        clips = _dedup_clip_text_overlap(clips, log_fn, merge_mode=merge_mode)
         if not clips:
             _log("AI: 去重后无剩余")
             return []
@@ -1510,13 +1583,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # clips = _extend_clips(clips, log_fn, target_min=55, target_max=75, max_end=srt_max_end)
         # 兜底回收：延伸后如果仍不到50s，从去重被砍的片段中回收
         _total_dur = sum(c[5] for c in clips)
-        _min_dur = 40 if multi_version else 50  # 多版本需要3倍素材
+        _min_dur = max(25, _AI_TARGET_DURATION * 2 // 3)  # 兜底目标 ≈ 目标时长的2/3
         if _total_dur < _min_dur and removed_from_dedup:
             _log(f"兜底回收(best): 当前 {_total_dur:.1f}s < {_min_dur}s, 尝试回收...")
             for rc in removed_from_dedup:
                 if sum(c[5] for c in clips) >= _min_dur:
                     break
-                if rc[5] >= 8:
+                if rc[5] <= 0 or rc[5] >= 8:
                     continue
                 _overlap = False
                 for ec in clips:
@@ -1696,7 +1769,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         if log_fn: log_fn(msg)
 
     # 多版本模式：设置全局标志，让Prompt构建走多版本路径
-    global _skip_focus
+    global _skip_focus, _AI_CLIP_COUNT
     _orig_skip = _skip_focus
     if multi_version:
         _skip_focus = True
@@ -1768,7 +1841,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
     # 随机化:同一视频多次生成不同成品
     import random
-    temperature = round(random.uniform(0.2, 0.5), 2)
+    temperature = round(random.uniform(0.15, 0.75), 2)
     _log(f"AI: temperature={temperature}")
 
     # 随机偏好提示(每次侧重不同角度，增加差异化)
@@ -1790,15 +1863,32 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             _focus_hints_map = _kw_data_focus.get("preference_keywords", _DEFAULT_PREFERENCE_KEYWORDS)
             # 统计SRT中每种偏好的关键词命中数
             _srt_lower = srt_text
+            # Load preference weights (default 1.0)
+            _weights = {}
+            try:
+                import json as _jw
+                with open(_kw_path, "r", encoding="utf-8") as _jwf:
+                    _jwdata = _jw.load(_jwf)
+                _weights = _jwdata.get("preference_weights", {})
+            except:
+                pass
             for _fname, _fkws in _focus_hints_map.items():
                 _score = sum(1 for _kw in _fkws if _kw in _srt_lower)
                 if _score > 0:
-                    _focus_scores[_fname] = _score
+                    _weight = _weights.get(_fname, 1.0)
+                    _focus_scores[_fname] = _score * _weight
             
             if _focus_scores:
-                # 选得分最高的偏好
-                _best_focus = max(_focus_scores, key=_focus_scores.get)
-                _best_score = _focus_scores[_best_focus]
+                # 选得分最高的偏好，但最高分差距<2时随机选（增加差异化）
+                _max_score = max(_focus_scores.values())
+                _candidates = [k for k, v in _focus_scores.items() if v >= _max_score - 1]
+                if len(_candidates) > 1:
+                    import random as _rand_pref
+                    _best_focus = _rand_pref.choice(_candidates)
+                    _best_score = _focus_scores[_best_focus]
+                else:
+                    _best_focus = max(_focus_scores, key=_focus_scores.get)
+                    _best_score = _focus_scores[_best_focus]
                 # 从all_angle_hints找对应的完整提示
                 _focus_hint_map_full = {
                     "版型显瘦": "侧重身材痛点，优先选显瘦,遮肉,修饰身材,收腰的片段",
@@ -1810,7 +1900,15 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     "面料质感": "侧重面料卖点，优先选面料手感,质感,亲肤的片段",
                 }
                 focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
-                _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
+                # 40%概率随机换一个偏好（避免同视频永远同一个）
+                import random as _rand_switch
+                if _rand_switch.random() < 0.4 and len(_focus_hint_map_full) > 1:
+                    _alt_keys = [k for k in _focus_hint_map_full if k != _best_focus]
+                    _alt_focus = _rand_switch.choice(_alt_keys)
+                    focus = _focus_hint_map_full[_alt_focus]
+                    _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次)，随机切换到→ {_alt_focus} → {focus}")
+                else:
+                    _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
             else:
                 focus_hints = [
                     "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
@@ -1841,22 +1939,34 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
     # 多版本模式：选更多片段，允许同卖点不同角度
     if _skip_focus:
+        _min_pieces = 12
         _clip_range = "25-35"
         _dedup_rule = "★同一卖点如果主播用了不同表达方式（如'面料好'和'这个面料摸着特别软'），可以分别选取，因为多版本需要差异化素材★"
-        _total_rule = "总时长80-120秒（宁可多选，后续会按版本分配，且要确保每个版本至少6-8个片段）"
+        _total_rule = f"总素材池25-35个，每个版本必须独立达到{_AI_TARGET_DURATION}秒左右。确保每个版本至少10-15个片段，宁可多选也不要少选★"
         _hook_rule = "★多版本选片：必须找出3-5个不同类型的Hook候选★ 不要只选1个最强Hook，而是找出圈人群型、极端表态型、痛点型、爆料型、夸奖型各1个（有则选）。不同版本需要不同的Hook开场。"
         _product_rule = "★多版本选片：选择12-18个Product片段★ 覆盖不同卖点角度（版型/面料/功能/风格/品质/对比/上身效果/搭配建议/场景种草），每个角度至少2个片段，同一角度有不同表达也要选。素材越丰富，3个版本的内容越充实。"
         _close_rule = "★多版本选片：选择3-5个Close片段★ 不同促单方式（紧迫感/闭眼入/尺码引导/信任强化/场景收尾）各选1-2个。"
     else:
-        if _AI_TARGET_DURATION <= 40:
+        # 使用调用方设置的 _AI_CLIP_COUNT
+        _min_pieces = 8  # 默认兜底值
+        if _AI_CLIP_COUNT and _AI_CLIP_COUNT != "10-15":
+            _clip_range = _AI_CLIP_COUNT
+            _min_pieces = int(_AI_CLIP_COUNT.split("-")[0])
+            _total_rule = f"★必须选{_AI_CLIP_COUNT}个以上片段(不能少于{_min_pieces}个)，总时长控制在{_AI_TARGET_DURATION}秒左右，宁可多选也不要少选★"
+        elif _AI_TARGET_DURATION <= 40:
             _clip_range = "5-8"
-            _total_rule = "总时长25-40秒（短一点没关系，内容丰富更重要）"
+            _total_rule = "总时长25-40秒（宁可选满8段）"
+        elif _AI_TARGET_DURATION >= 100:
+            _clip_range = "22-30"
+            _total_rule = "总时长80-120秒（不够时长就从全片中补选，不要回收废片）"
         elif _AI_TARGET_DURATION >= 80:
-            _clip_range = "15-20"
-            _total_rule = f"总时长{_AI_TARGET_DURATION - _AI_TARGET_DURATION // 4}-{_AI_TARGET_DURATION + _AI_TARGET_DURATION // 4}秒（目标{_AI_TARGET_DURATION}秒，可多选）"
+            _clip_range = "18-24"
+            _total_rule = "总时长60-90秒（宁可多选到24段，确保时长充足）"
         else:
             _clip_range = "10-15"
-            _total_rule = "总时长40-65秒（短一点没关系，内容丰富更重要）"
+            _total_rule = "总时长40-65秒（可根据时长适当增减）"
+        # ★★★ 关键：同步 _AI_CLIP_COUNT，否则 prompt 替换的永远是默认值 ★★★
+        _AI_CLIP_COUNT = _clip_range
         _dedup_rule = '★绝对禁止重复同一卖点★ 字幕中主播会重复讲同一个卖点(如"面料好"说了3遍)，你必须只选每个卖点的最佳版本，严禁选两段内容相似的片段'
         _hook_rule = ""
         _product_rule = ""
@@ -1864,6 +1974,16 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _hook_rule = ""
         _product_rule = ""
         _close_rule = ""
+
+    # 随机差异化指令（每次运行不同侧重点）
+    _diff_vibes = [
+        "★本轮选片重点：优先选主播语气最激动、情绪最饱满的片段，卖点角度越多越好★",
+        "★本轮选片重点：优先选展示上身效果、穿搭场景的片段，少选纯面料描述★",
+        "★本轮选片重点：优先选对比类、痛点解决类的内容，搭配推荐最佳★",
+        "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
+        "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
+    ]
+    _diff_vibe = random.choice(_diff_vibes)
 
     if _skip_focus:
         # 多版本模式：AI只做素材选取，不做编排
@@ -1916,9 +2036,10 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 6. 如果一个片段选的条目之间有间隔（如选了#05和#07但跳过#06），说明中间条目是废话需要跳过——这是正确的，代码会自动拆成两段分别剪辑
 7. [本轮选片偏好]{focus}
    ★Hook必须匹配偏好！选不出匹配偏好的Hook就不选Hook类型，改用其他类型开头★ 前两个Product也必须切中偏好角度。 后续Product必须覆盖其他卖点角度（版型/面料/显瘦/穿搭/品质/场景等），确保单视频介绍完整。同一卖点角度最多2段，禁止全片只讲一个维度
-8. {_hook_rule}
-9. {_product_rule}
-10. {_close_rule}
+8. {_diff_vibe}
+9. {_hook_rule}
+10. {_product_rule}
+11. {_close_rule}
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目（数组），不要填start/end时间戳。★每个片段只选1个条目，确保单片段3-8秒，不要选2个以上★:
 [
@@ -1935,13 +2056,22 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     body = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT.replace("45-65", f"{max(25, _AI_TARGET_DURATION - _AI_TARGET_DURATION // 6)}-{_AI_TARGET_DURATION + _AI_TARGET_DURATION // 6}").replace("10-15", _AI_CLIP_COUNT)},
+            {"role": "system", "content": SYSTEM_PROMPT.replace("45-65", f"{max(25, _AI_TARGET_DURATION - _AI_TARGET_DURATION // 6)}-{_AI_TARGET_DURATION + _AI_TARGET_DURATION // 6}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")},
             {"role": "user", "content": user_msg}
         ],
         "temperature": temperature,
         "top_p": 0.9,
         "max_tokens": 8192,
+        # DeepSeek: 关闭思考模式（R1），防止返回 reasoning_content 无 content
     }, ensure_ascii=False).encode("utf-8")
+    # DeepSeek: 显式关闭思考模式（R1），防止空content
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        try:
+            body_dict = json.loads(body)
+            body_dict["thinking"] = {"type": "disabled"}
+            body = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            pass
     # 豆包Seed模型：添加reasoning_effort，Seed忽略temperature
     if "seed" in model.lower():
         try:
@@ -1965,34 +2095,15 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         msg = result.get("choices", [{}])[0].get("message", {})
         content = msg.get("content", "")
         # DeepSeek-R1: reasoning in reasoning_content, final answer in content
-        # If content is empty but reasoning exists, try to extract JSON from reasoning tail
+        # If content is empty but reasoning exists, don't waste time extracting
+        # Just log and let the retry loop handle it
         if not content.strip():
             reasoning = msg.get("reasoning_content", "")
             if reasoning.strip():
-                # R1 sometimes puts the JSON at the end of reasoning
-                json_match = re.search(r'\[\s*\{[^]]*\}\s*\]', reasoning, re.DOTALL)
-                if json_match:
-                    content = json_match.group()
-                    _log(f"AI: 从推理内容中提取JSON，长度={len(content)}字")
-                else:
-                    _log(f"AI: R1推理完成但content为空，reasoning长度={len(reasoning)}字")
-                    # R1多版本: 从reasoning的尾部提取JSON
-                    _mv_match = re.search(r'\{"versions"\s*:', reasoning)
-                    if _mv_match:
-                        _json_start = _mv_match.start()
-                        # 找到匹配的闭合括号
-                        _depth = 0
-                        for _i in range(_json_start, len(reasoning)):
-                            if reasoning[_i] == '{':
-                                _depth += 1
-                            elif reasoning[_i] == '}':
-                                _depth -= 1
-                                if _depth == 0:
-                                    content = reasoning[_json_start:_i+1]
-                                    _log(f"AI: 从R1推理中提取多版本JSON，长度={len(content)}字")
-                                    break
-                    if not content.strip():
-                        _log(f"AI: 从推理中未找到JSON，将触发兜底")
+                _log(f"AI: R1推理完成但content为空，reasoning长度={len(reasoning)}字，将重试")
+            # No R1 response, just empty content from API error
+            if not reasoning.strip():
+                _log(f"AI: 响应为空")
         _log(f"AI: 响应成功，内容长度={len(content)}字")
         _skip_focus = _orig_skip  # 恢复全局状态
         if return_raw:
@@ -2044,7 +2155,17 @@ def _parse_raw_response(content, log_fn=None):
         m2 = re.search(r'\[\s*\{', cleaned)
         if m2:
             sub = cleaned[m2.start():]
-            last_bracket = sub.rfind(']')
+            depth = 0
+            end_pos = -1
+            for ci, ch in enumerate(sub):
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end_pos = ci + 1
+                        break
+            last_bracket = end_pos - 1 if end_pos > 0 else -1
             if last_bracket >= 0:
                 sub = sub[:last_bracket+1]
                 try:
@@ -2075,7 +2196,17 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
         idx = m.start() if m else -1
         if idx >= 0:
             sub = cleaned[idx:]
-            last_bracket = sub.rfind(']')
+            depth = 0
+            end_pos = -1
+            for ci, ch in enumerate(sub):
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end_pos = ci + 1
+                        break
+            last_bracket = end_pos - 1 if end_pos > 0 else -1
             if last_bracket >= 0:
                 sub = sub[:last_bracket+1]
                 try:
@@ -2343,7 +2474,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
             return {"versions": []}
 
     cleaned_srt = _dedup_srt_repeated_sections(cleaned_srt, log_fn)
-    cleaned_srt = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
+    cleaned_srt, _detected_main_cat = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
 
     # ★构建SRT条目索引★
     _indexed_srt_entries = []
@@ -2380,7 +2511,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     # ★第一步：AI选素材（只挑选不编排），失败自动重试★
     # IncompleteRead(0 bytes read) 是 DeepSeek 服务端 TCP 中断，重试通常成功
     raw_clips = None
-    for _retry in range(3):
+    for _retry in range(5):
         _log(f"AI: 调用 {model} 选素材(25-35个片段)..." + (f" 重试{_retry+1}/3" if _retry > 0 else ""))
         raw_clips = _call_ai(api_key, base_url, model, cleaned_srt, _log,
                             focus_hint=focus_hint,
@@ -2408,7 +2539,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
 
     # ★对素材做初步后处理★
     raw_clips = _dedup_clips(raw_clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt)
-    raw_clips = _post_filter_cross_category(raw_clips, cleaned_srt, _log)
+    raw_clips = _post_filter_cross_category(raw_clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
     raw_clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
                  for ct, text, s, e, sc, d, focus in raw_clips]
     raw_clips = _filter_host_interaction(raw_clips, _log)
@@ -2617,7 +2748,7 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
         clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log)
         clips = _force_short_hook(clips, cleaned_srt, _log)
-        clips = _post_filter_cross_category(clips, cleaned_srt, _log)
+        clips = _post_filter_cross_category(clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
         clips = _check_narrative_coherence(clips, _log)
         clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
                  for ct, text, s, e, sc, d, focus in clips]
@@ -2759,6 +2890,14 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
         "top_p": 0.9,
         "max_tokens": 4096,
     }, ensure_ascii=False).encode("utf-8")
+    # DeepSeek: 显式关闭思考模式（R1），防止空content
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        try:
+            _d = json.loads(body)
+            _d["thinking"] = {"type": "disabled"}
+            body = json.dumps(_d, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            pass
     if "seed" in model.lower():
         try:
             _d = json.loads(body)
@@ -2845,7 +2984,7 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
 # ============================================================
 # 去重
 # ============================================================
-def _dedup_clip_text_overlap(clips, log_fn):
+def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
     """Remove clips with overlapping source time ranges or highly similar text."""
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -2868,6 +3007,21 @@ def _dedup_clip_text_overlap(clips, log_fn):
             cj_type, cj_text, cj_start, cj_end, cj_score, cj_dur = clips[j][:6]
             cj_s = adjusted.get(j, (cj_start, cj_end))[0]
             cj_e = adjusted.get(j, (cj_start, cj_end))[1]
+
+            # [混剪模式] 不同视频的片段不走时间重叠检查
+            if merge_mode:
+                _ci_v = None
+                for _vi in range(10):
+                    if f"[V{_vi+1}]" in ci_text:
+                        _ci_v = _vi
+                        break
+                _cj_v = None
+                for _vi in range(10):
+                    if f"[V{_vi+1}]" in cj_text:
+                        _cj_v = _vi
+                        break
+                if _ci_v is not None and _cj_v is not None and _ci_v != _cj_v:
+                    continue  # 不同视频源，不检查时间重叠
 
             # Calculate overlap
             overlap_start = max(ci_s, cj_s)
@@ -3068,6 +3222,33 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
     original = len(clips)
     _log(f"AI: 解析到 {original} 个片段，开始去重...")
     no_overlap = []
+    # === Forbidden phrase filter (from GUI keyword management) ===
+    try:
+        _kw_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
+        _fb_list = []
+        if os.path.exists(_kw_path):
+            import json as _json
+            _fb_data = _json.load(open(_kw_path, "r", encoding="utf-8"))
+            _fb_list = _fb_data.get("forbidden_phrases", [])
+        if not _fb_list:
+            from config import FORBIDDEN_PHRASES
+            _fb_list = list(FORBIDDEN_PHRASES)
+        if _fb_list:
+            _before = len(clips)
+            _keep = []
+            for _clip in clips:
+                _txt = _clip[1] if len(_clip) > 1 else ""
+                _matched = [w for w in _fb_list if w in _txt]
+                if _matched:
+                    _log(f"  forbid: [{','.join(_matched[:3])}] CT={_clip[0]} [{_clip[2]:.0f}s-{_clip[3]:.0f}s]")
+                else:
+                    _keep.append(_clip)
+            clips = _keep
+            if len(clips) < _before:
+                _log(f"forbidden filter: skipped {_before - len(clips)}/{_before} clips")
+    except Exception as _fe:
+        _log(f"forbidden filter error: {_fe}")
+    
     for clip in clips:
         ct, text, start, end, score, dur = clip[:6]
         overlap = False
@@ -3304,11 +3485,11 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
             return 2
         # 不排序，保持 AI 叙事顺序
 
-    # 删除过短片段（<3s且非Hook的内容不完整，但Hook可以很短）
-    _short = [c for c in clips if len(c) > 3 and (c[3] - c[2]) < 3 and c[0] != "hook"]
+    # 删除过短片段（<2s且非Hook的内容不完整，但Hook可以很短）
+    _short = [c for c in clips if len(c) > 3 and (c[3] - c[2]) < 2 and c[0] != "hook"]
     if _short:
-        clips = [c for c in clips if not (len(c) > 3 and (c[3] - c[2]) < 3 and c[0] != "hook")]
-        _log(f"过短片段过滤: 删除{len(_short)}段<3s的非Hook片段")
+        clips = [c for c in clips if not (len(c) > 3 and (c[3] - c[2]) < 2 and c[0] != "hook")]
+        _log(f"过短片段过滤: 删除{len(_short)}段<2s的非Hook片段")
 
     return clips
 
@@ -4899,6 +5080,158 @@ def fallback_clips(srt_path, log_fn=None, force_category=None):
     return result
 
 
+def ai_reorder_clips(all_clips, log_fn=None):
+    """
+    Mix mode: reorder clips from multiple videos via AI.
+    Input: [{"idx":0, "type":"hook", "text":"...", "source":"videoA", "duration":12.5}, ...]
+    Output: sorted index list [3, 7, 1, ...]
+    """
+    def _log(msg):
+        if log_fn: log_fn(msg)
+
+    settings = load_settings()
+    if not settings.get("api_key"):
+        _log("AI reorder: no API key, using original order")
+        return [c["idx"] for c in all_clips]
+
+    api_key = settings["api_key"]
+    base_url = settings["base_url"].rstrip("/")
+    model = settings.get("model", "deepseek-chat")
+
+    lines = []
+    for c in all_clips:
+        _text = c.get("text", "").strip()[:80]
+        _type = c.get("type", "unknown")
+        _src = c.get("source", "")
+        _dur = c.get("duration", 0)
+        lines.append(f"[{c['idx']}] \u7c7b\u578b: {_type} | \u6587\u6848: \"{_text}\" | \u6765\u6e90: {_src} | \u65f6\u957f: {_dur:.1f}s")
+
+    clips_desc = chr(10).join(lines)
+
+    system_prompt = """\u4f60\u662f\u76f4\u64ad\u5e26\u8d27\u77ed\u89c6\u9891\u526a\u8f91\u5e08\u3002\u5c06\u4ee5\u4e0b\u7247\u6bb5\u6309\u6700\u4f73\u64ad\u653e\u987a\u5e8f\u6392\u5217\u3002
+\u89c4\u5219\uff1ahook\u653e\u6700\u524d \u2192 \u540c\u7c7b\u5356\u70b9\u653e\u4e00\u8d77 \u2192 \u63a8\u8350\u4fc3\u9500\u653e\u6700\u540e\u3002
+\u8f93\u51fa\u4e25\u683c JSON \u683c\u5f0f\uff1a{"order": [\u5e8f\u53f71, \u5e8f\u53f72, ...]}\uff0c\u8df3\u8fc7\u7528 -1\u3002"""
+
+    user_prompt = f"\u6392\u5e8f\u8fd9\u4e9b\u7247\u6bb5\uff1a\n\n{clips_desc}"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.3,
+        "max_tokens": 1024,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        _log(f"AI reorder failed: {e}, using original order")
+        return [c["idx"] for c in all_clips]
+
+    try:
+        content = result["choices"][0]["message"]["content"].strip()
+        ordered = None
+        # Parse as {"order": [...]} (json_object mode)
+        try:
+            data = json.loads(content)
+            ordered = data.get("order") or data
+        except:
+            pass
+        # Fallback: raw array
+        if ordered is None:
+            try:
+                cleaned = re.sub(r'^```(?:json)?\s*', '', content)
+                cleaned = re.sub(r'\s*```\s*$', '', cleaned)
+                ordered = json.loads(cleaned.strip())
+            except:
+                pass
+        # Fallback: regex array
+        if ordered is None:
+            try:
+                m = re.search(r'\[[\d,\s-]+\]', content)
+                if m: ordered = json.loads(m.group())
+            except:
+                pass
+        if ordered is None or not isinstance(ordered, list):
+            return _rule_order(all_clips)
+        ordered = [int(x) for x in ordered]
+        valid_indices = {c["idx"] for c in all_clips}
+        ordered = [x for x in ordered if x in valid_indices]
+        seen = set(ordered)
+        for c in all_clips:
+            if c["idx"] not in seen:
+                ordered.append(c["idx"])
+        _log(f"AI reorder done: {len(ordered)}/{len(all_clips)} clips")
+        return ordered
+    except Exception as e:
+        _log(f"AI reorder parse failed: {e}, using original order")
+        return [c["idx"] for c in all_clips]
+
+
+def detect_main_category(srt_text, force_category=None):
+    """
+    Detect main product category from SRT text.
+    Uses same keywords as _filter_srt_by_main_product.
+    Returns category name string, or None.
+    """
+    CATEGORIES = {
+        "\u4e0a\u8863": ["\u4e0a\u8863", "T\u6064", "\u886c\u886b", "\u9488\u7ec7\u886b", "\u536b\u8863", "\u6253\u5e95\u886b", "\u5c0f\u886b", "\u886b\u8863", "\u7f51\u7eb1\u7f69\u886b", "\u7f69\u886b",
+                       "\u897f\u8863", "\u6bdb\u8863", "\u77ed\u8896", "\u957f\u8896", "\u540a\u5e26", "\u80cc\u5fc3", "\u62b9\u80f8", "\u8fd9\u4ef6", "\u8fd9\u6b3e", "\u8fd9\u6761",
+                       "\u9488\u7ec7", "\u6bdb\u8863", "\u536b\u8863", "\u5c0f\u886b", "\u886c\u8863", "\u7f69\u886b", "\u5e26\u94fe\u8863"],
+        "\u88e4\u5b50": ["\u88e4\u5b50", "\u725b\u4ed4\u88e4", "\u4e5d\u5206\u88e4", "\u77ed\u88e4", "\u897f\u88c5\u88e4", "\u5bbd\u677e\u88e4", "\u76f4\u7b52\u88e4", "\u5c0f\u811a\u88e4", "\u8783\u87f9\u88e4", "\u725b\u4ed4",
+                       "\u88e4", "\u88e4\u88c5", "\u8fd9\u6761"],
+        "\u88d9\u5b50": ["\u88d9\u5b50", "\u8fde\u8863\u88d9", "\u767e\u88d9\u88d9", "A\u5b57\u88d9", "\u5305\u817f\u88d9", "\u5939\u514b\u88d9", "\u7f8a\u7ed2\u88d9", "\u82b1\u5965\u88d9", "\u88d9",
+                       "\u9c7c\u5c3e\u88d9", "\u88d9\u88c5", "\u77ed\u88d9", "\u957f\u88d9"],
+        "\u5916\u5957": ["\u5916\u5957", "\u5927\u8863", "\u7fbd\u7ed2\u670d", "\u76ae\u8863", "\u897f\u88c5", "\u98ce\u8863", "\u6bdb\u5462", "\u590d\u53e4", "\u725b\u4ed4\u5916\u5957", "\u76ae\u8346",
+                       "\u590d\u53e4\u5927\u8863", "\u77ed\u5916\u5957", "\u76ae\u8863"],
+        "\u5957\u88c5": ["\u5957\u88c5", "\u56db\u4ef6\u5957", "\u4e09\u4ef6\u5957", "\u8fd0\u52a8\u5957", "\u8fde\u8863\u8863", "\u8fde\u8863\u88d9", "\u5957\u88c5\u5916\u5957", "\u5957\u88c5", "\u5168\u5957",
+                       "\u5c0f\u9999\u98ce", "\u996d\u5957"],
+        "\u978b\u5b50": ["\u978b", "\u978b\u5b50", "\u957f\u9774", "\u8fd0\u52a8\u978b", "\u9ad8\u8ddf\u978b", "\u5e73\u5e95\u978b", "\u77ed\u9774", "\u9774\u5b50", "\u77ed\u9774"],
+    }
+
+    if force_category and force_category in CATEGORIES:
+        return force_category
+
+    scores = {}
+    for cat, kws in CATEGORIES.items():
+        score = sum(1 for kw in kws if kw in srt_text)
+        if score > 0:
+            scores[cat] = score
+    if scores:
+        return max(scores, key=scores.get)
+    return None
+
+
+
+# Module-level ALL_CATEGORIES for post-filter code (lazy init from same source)
+ALL_CATEGORIES_MODULE = None
+def _get_categories():
+    global ALL_CATEGORIES_MODULE
+    if ALL_CATEGORIES_MODULE is None:
+        # Copy from _post_filter_cross_category
+        ALL_CATEGORIES_MODULE = {
+            'shangyi': [],
+            'kuzi': [],
+            'qunzi': [],
+            'waitao': [],
+            'taozhuang': [],
+            'xiezi': [],
+        }
+    return ALL_CATEGORIES_MODULE
 def is_enabled():
     settings = load_settings()
     # 有 API Key 就启用 AI，不需要额外勾选

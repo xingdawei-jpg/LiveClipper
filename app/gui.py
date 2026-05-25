@@ -33,7 +33,7 @@ import tkinter.ttk as ttk
 import queue
 
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
-from cutter_logic import process_video, process_video_multi
+from cutter_logic import process_video, process_video_multi, process_video_mix
 from config import USER_DATA_DIR, SETTINGS_PATH
 from license_client import check_activation, activate_with_code, check_trial, consume_trial_use, deactivate_device
 # 样式
@@ -170,6 +170,7 @@ class App:
         self._log_queue = queue.Queue()
         self._scan_page = None
         self._rec_page = None
+        self._mix_page = None
         self._build()
         self._poll_queue()
   # 启动队列轮询
@@ -260,9 +261,40 @@ class App:
             if asr_on:
                 self.asr_enabled_var.set(True)
 
+            # --- 恢复字幕 & 画面设置 ---
+            if "subtitle_enabled" in s:
+                self.subtitle_var.set(bool(s["subtitle_enabled"]))
+            if "dedup_preset" in s:
+                _dp = s["dedup_preset"]
+                if _dp in ("off", "light", "medium", "heavy", "custom"):
+                    self.dedup.set(_dp)
+            if "smart_crop_enabled" in s:
+                self.smart_crop_var.set(bool(s["smart_crop_enabled"]))
+            if "crop_level" in s:
+                _cl = {"light":"轻","medium":"中","heavy":"重"}.get(s["crop_level"], "")
+                if _cl:
+                    self.crop_level_var.set(_cl)
+            if "ken_burns_enabled" in s:
+                self.ken_burns_var.set(bool(s["ken_burns_enabled"]))
+            if "pip_size" in s:
+                self.pip_size_var.set(f"{s['pip_size']}%")
+            if "pip_opacity" in s:
+                self.pip_opacity_var.set(f"{s['pip_opacity']}%")
+            if "pip_pos" in s:
+                _pos = s["pip_pos"]
+                if _pos in ("右下", "右上", "左下", "左上"):
+                    self.pip_pos_var.set(_pos)
+
             # --- 恢复完成，启用保存 ---
             self._init_done = True
             self._save_ai()  # 确保文件包含所有恢复的值
+
+            # 启动后在线程中预检查激活状态（不阻塞UI）
+            threading.Thread(target=lambda: (
+                setattr(self, '_cached_lic',
+                    __import__('license_client', fromlist=['check_activation_cached']).check_activation_cached()),
+                None
+            ), daemon=True).start()
 
         except Exception:
             import traceback
@@ -295,6 +327,11 @@ class App:
                                        cursor="hand2", padx=16, pady=4,
                                        command=lambda: self._switch_mode("ai"))
         self._mode_btn_ai.pack(side="left")
+        self._mode_btn_mix = tk.Button(tab_frame, text="混剪成片", font=FNT_B,
+                                        fg=C["dim"], bg=C["inp"], relief="flat",
+                                        cursor="hand2", padx=16, pady=4,
+                                        command=lambda: self._switch_mode("mix"))
+        self._mode_btn_mix.pack(side="left", padx=(4,0))
         self._mode_btn_scan = tk.Button(tab_frame, text="AI 扫描", font=FNT_B,
                                         fg=C["dim"], bg=C["inp"], relief="flat",
                                         cursor="hand2", padx=16, pady=4,
@@ -366,6 +403,7 @@ class App:
         ttk.Combobox(vf, textvariable=self.num_versions_var,
                      values=["1", "2", "3"], width=3,
                      font=FNT_S, state="readonly").pack(side="left", pady=(4,0))
+
         # AI偏好
         tk.Label(vf, text="  AI偏好:", font=FNT_S, fg=C["dim"],
                  bg=C["card"]).pack(side="left", padx=(4,2), pady=(4,0))
@@ -845,9 +883,10 @@ class App:
         tk.Frame(act_row, width=1, bg=C["dim"]).pack(side="right", fill="y", padx=6, pady=2)
         self.subtitle_var = tk.BooleanVar(value=SUBTITLE_OVERLAY.get("enabled"))
         self.subtitle_checkbtn = tk.Checkbutton(act_row, text="字幕叠加", variable=self.subtitle_var,
-                       font=FNT_S, fg=C["text"], bg=C["bg"],
-                       selectcolor=C["inp"], activebackground=C["bg"],
-                       cursor="hand2").pack(side="right", padx=4)
+            command=lambda: self._save_ai_debounced() if getattr(self, "_init_done", False) else None,
+            font=FNT_S, fg=C["text"], bg=C["bg"],
+            selectcolor=C["inp"], activebackground=C["bg"],
+            cursor="hand2").pack(side="right", padx=4)
         self.btn = tk.Button(act_row, text="▶ 开始切割", font=FNT_B,
                          fg="white", bg=C["btn_go"], activebackground=C["btn_go2"],
                          activeforeground="white", relief="flat", cursor="hand2",
@@ -1141,7 +1180,7 @@ class App:
                      "-X", "POST",
                      "-H", "Content-Type: application/json",
                      "-H", f"X-Api-Key: {api_key}",
-                     "-H", "X-Api-Resource-Id: volc.bigasr.auc",
+                     "-H", "X-Api-Resource-Id: volc.seedasr.auc",
                      "-H", f"X-Api-Request-Id: {req_id}",
                      "-H", "X-Api-Sequence: -1",
                      "-d", payload],
@@ -1189,7 +1228,7 @@ class App:
                  "-H", "Content-Type: application/json",
                  "-H", f"X-Api-App-Key: {app_id_val}",
                  "-H", f"X-Api-Access-Key: {token_val}",
-                 "-H", "X-Api-Resource-Id: volc.bigasr.auc",
+                 "-H", "X-Api-Resource-Id: volc.seedasr.auc",
                  "-H", f"X-Api-Request-Id: {req_id}",
                  "-H", "X-Api-Sequence: -1",
                  "-d", payload],
@@ -1540,11 +1579,14 @@ class App:
         self._mode_btn_scan.configure(fg=C["dim"], bg=C["inp"])
         self._mode_btn_rec.configure(fg=C["dim"], bg=C["inp"])
         self._mode_btn_schedule.configure(fg=C["dim"], bg=C["inp"])
+        self._mode_btn_mix.configure(fg=C["dim"], bg=C["inp"])
         self._ai_page.pack_forget()
         if self._scan_page:
             self._scan_page.pack_forget()
         if self._rec_page:
             self._rec_page.pack_forget()
+        if self._mix_page:
+            self._mix_page.pack_forget()
         if hasattr(self, '_schedule_page') and self._schedule_page:
             self._schedule_page.pack_forget()
 
@@ -1563,6 +1605,12 @@ class App:
                 from schedule_page import SchedulePage
                 self._schedule_page = SchedulePage(self._page_container, app=self)
             self._schedule_page.pack(fill="both", expand=True)
+        elif self._current_mode == "mix":
+            self._mode_btn_mix.configure(fg="white", bg=C["btn_sel"])
+            if self._mix_page is None:
+                from mix_page import MixPage
+                self._mix_page = MixPage(self._page_container, app=self)
+            self._mix_page.pack(fill="both", expand=True)
         else:
             self._mode_btn_rec.configure(fg="white", bg=C["btn_sel"])
             if self._rec_page is None:
@@ -1829,6 +1877,15 @@ class App:
             "aliyun_endpoint": self.aliyun_endpoint_var.get().strip() if hasattr(self, "aliyun_endpoint_var") else "",
             "ai_focus": self.ai_focus_var.get() if hasattr(self, "ai_focus_var") else "自动",
             "target_duration": self.duration_var.get().replace("s","") if hasattr(self, "duration_var") else "60",
+            # --- 字幕 & 画面设置 ---
+            "subtitle_enabled": self.subtitle_var.get() if hasattr(self, "subtitle_var") else True,
+            "dedup_preset": self.dedup.get() if hasattr(self, "dedup") else "medium",
+            "smart_crop_enabled": self.smart_crop_var.get() if hasattr(self, "smart_crop_var") else True,
+            "crop_level": {"轻":"light","中":"medium","重":"heavy"}.get(self.crop_level_var.get() if hasattr(self, "crop_level_var") else "中", "medium"),
+            "ken_burns_enabled": self.ken_burns_var.get() if hasattr(self, "ken_burns_var") else True,
+            "pip_size": self.pip_size_var.get().replace("%","") if hasattr(self, "pip_size_var") else "15",
+            "pip_opacity": self.pip_opacity_var.get().replace("%","") if hasattr(self, "pip_opacity_var") else "3",
+            "pip_pos": self.pip_pos_var.get() if hasattr(self, "pip_pos_var") else "右下",
         }
         if save_settings(settings):
             self._log("AI 设置已保存 ✅", "ok")
@@ -1850,7 +1907,7 @@ class App:
         win.grab_set()
 
         # 加载已有配置
-        kw_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.json")
+        kw_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
         kw_data = {}
         try:
             with open(kw_path, "r", encoding="utf-8") as f:
@@ -2140,18 +2197,6 @@ class App:
         self.btn.configure(text="■  停止", bg=C["btn_no"])
         self._set_bar(0)
 
-        # 【重要】剪辑前检查激活/试用状态（用缓存，不阻塞）
-        try:
-            from license_client import check_activation_cached
-            _lic = check_activation_cached()
-            if _lic.get("need_activate"):
-                self._log("⚠ 请先激活或试用次数已用完，无法开始剪辑", "err")
-                from tkinter import messagebox
-                messagebox.showerror("提示", _lic.get("reason", "请激活后使用"))
-                return
-        except Exception:
-            pass
-
         # 先读 tkinter 变量（主线程），避免子线程报 RuntimeError
         _dedup = self.dedup.get()
         _subtitle = self.subtitle_var.get()
@@ -2172,6 +2217,10 @@ class App:
                 self._log(f"\n{'='*45}")
                 self._log(f"[{idx+1}/{total}] {video_name}")
                 self._log(f"{'='*45}")
+                # 立即检查取消（先于任何耗时操作）
+                if self._cancel_event and self._cancel_event.is_set():
+                    self._log("__BATCH_CANCEL__")
+                    break
 
                 # 输出路径（加时间戳，不覆盖）
                 import time as _time
@@ -2463,7 +2512,7 @@ def _show_welcome_guide(root):
     """首次启动引导（可跳过）"""
     # 检测是否首次启动
     settings_path = SETTINGS_PATH
-    guide_done_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".guide_done")
+    guide_done_path = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper', '.guide_done')
     if os.path.exists(guide_done_path) or os.path.exists(settings_path):
         return  # 已配置过或已完成引导
 

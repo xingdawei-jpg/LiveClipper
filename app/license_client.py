@@ -67,7 +67,7 @@ _FIELD_DEVICE_INFO = "fldZ09gLPn"  # 设备信息
 
 CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
-TRIAL_USES = 0
+TRIAL_USES = 10
 
 PLAN_NAMES = {"01": "月付", "02": "季付", "03": "年付", "04": "永久"}
 PLAN_DAYS = {"01": 30, "02": 90, "03": 365, "04": 36500}  # 04=永久, 36500天=100年
@@ -193,63 +193,80 @@ def _query_device_binding(code):
     """查询激活码的设备绑定，返回 {record_id, machine_id, activate_date, status, distributor_id} 或 None"""
     try:
         raw_code = code.replace("-", "").strip().lower()
-        # 先用精确匹配查找
+        # 先精确匹配
         import urllib.parse as _urlp
         filt = _urlp.quote(f'CurrentValue.[激活码]="{raw_code}"', safe="")
         resp = _feishu_request("GET",
             f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
-            f"?filter={filt}&page_size=5")
+            f"?filter={filt}&page_size=50")
         if resp and resp.get("code") == 0:
             items = resp.get("data", {}).get("items", [])
             if items:
                 rec = items[0]
-            else:
-                rec = None
-        else:
-            rec = None
+                _cleanup_duplicates(raw_code, items, rec["record_id"])
+                return _parse_record_to_binding(rec)
         
-        # 精确匹配没找到，尝试模糊匹配（兼容不同录入格式）
-        if not rec:
-            import urllib.parse as _urlp2
-            # 搜索激活码中包含 code 的后8位（唯一性足够）
-            short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
-            filt2 = _urlp2.quote(f'find("{short_code}", {{激活码}})', safe="")
-            resp2 = _feishu_request("GET",
-                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
-                f"?filter={filt2}&page_size=10")
-            if resp2 and resp2.get("code") == 0:
-                items2 = resp2.get("data", {}).get("items", [])
-                for item in items2:
-                    code_field = item.get("fields", {}).get("激活码", "")
-                    code_val = code_field[0].get("text", "") if isinstance(code_field, list) else str(code_field)
-                    if raw_code in code_val.replace("-", "").lower():
-                        rec = item
-                        break
-
-        if rec:
-            fields = rec.get("fields", {})
-            mid = fields.get("设备ID", "")
-            if isinstance(mid, list):
-                mid = mid[0].get("text", "") if mid else ""
-            activate_date = fields.get("激活日期", 0)
-            if isinstance(activate_date, list):
-                activate_date = activate_date[0] if activate_date else 0
-            status = fields.get("状态", "")
-            if isinstance(status, list):
-                status = status[0].get("text", "") if status else ""
-            distributor = fields.get("分销商ID", "")
-            if isinstance(distributor, list):
-                distributor = distributor[0].get("text", "") if distributor else ""
-            return {
-                "record_id": rec["record_id"],
-                "machine_id": str(mid).strip(),
-                "activate_date": int(activate_date) if activate_date else 0,
-                "status": str(status).strip(),
-                "distributor_id": str(distributor).strip(),
-            }
+        # 精确匹配没找到，尝试后8位模糊匹配
+        short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
+        filt2 = _urlp.quote(f'find("{short_code}", {{激活码}})', safe="")
+        resp2 = _feishu_request("GET",
+            f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
+            f"?filter={filt2}&page_size=50")
+        if resp2 and resp2.get("code") == 0:
+            items2 = resp2.get("data", {}).get("items", [])
+            matched_items = []
+            for item in items2:
+                code_field = item.get("fields", {}).get("激活码", "")
+                code_val = code_field[0].get("text", "") if isinstance(code_field, list) else str(code_field)
+                if raw_code in code_val.replace("-", "").lower():
+                    matched_items.append(item)
+            if matched_items:
+                rec = matched_items[0]
+                _cleanup_duplicates(raw_code, matched_items, rec["record_id"])
+                return _parse_record_to_binding(rec)
+        
         return None
     except Exception:
         return None
+
+
+def _cleanup_duplicates(raw_code, matched_items, keep_id):
+    """清理同激活码的重复记录，只保留 keep_id 一条"""
+    dup_ids = [item["record_id"] for item in matched_items if item["record_id"] != keep_id]
+    if dup_ids:
+        # 分批删除（飞书每批最多500条）
+        for i in range(0, len(dup_ids), 100):
+            batch = dup_ids[i:i+100]
+            try:
+                _feishu_request("DELETE",
+                    f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
+                    {"record_ids": batch})
+            except Exception:
+                pass
+
+
+def _parse_record_to_binding(rec):
+    """从多维表格记录提取绑定信息"""
+    fields = rec.get("fields", {})
+    mid = fields.get("设备ID", "")
+    if isinstance(mid, list):
+        mid = mid[0].get("text", "") if mid else ""
+    activate_date = fields.get("激活日期", 0)
+    if isinstance(activate_date, list):
+        activate_date = activate_date[0] if activate_date else 0
+    status = fields.get("状态", "")
+    if isinstance(status, list):
+        status = status[0].get("text", "") if status else ""
+    distributor = fields.get("分销商ID", "")
+    if isinstance(distributor, list):
+        distributor = distributor[0].get("text", "") if distributor else ""
+    return {
+        "record_id": rec["record_id"],
+        "machine_id": str(mid).strip(),
+        "activate_date": int(activate_date) if activate_date else 0,
+        "status": str(status).strip(),
+        "distributor_id": str(distributor).strip(),
+    }
 
 def _parse_code_dates(code):
     """从激活码中解析出激活日期和到期日期（毫秒时间戳，供飞书日期字段使用）"""
@@ -259,8 +276,8 @@ def _parse_code_dates(code):
             # 36位码：plan(2) + dist_id(4base36) + expires(8) + nonce(2) + sig(20)
             expires_hex = raw[6:14]
         elif len(raw) == 34:
-            # 34位码：plan(2) + dist_id(2) + expires(8) + nonce(2) + sig(20)
-            expires_hex = raw[4:12]
+            # 34位码：plan(2) + dist_id(4hex) + expires(8) + nonce(2) + sig(18)
+            expires_hex = raw[6:14]
         elif len(raw) == 32:
             # 32位码：plan(2) + expires(8) + nonce(2) + sig(20)
             expires_hex = raw[2:10]
@@ -275,77 +292,73 @@ def _parse_code_dates(code):
     except Exception:
         return None, None
 
-def _bind_device(code, machine_id, device_info="", status="已激活"):
-    """绑定设备（写入或更新多维表格记录，含激活/到期日期/状态/分销商ID）"""
+def _get_dynamic_status(code):
+    """根据激活码hex里的到期时间或缓存动态计算状态"""
+    try:
+        # 优先用hex编码的到期时间（一次定生死）
+        _, expire_ts = _parse_code_dates(code)
+        if expire_ts and expire_ts < int(time.time()) * 1000:
+            return "已过期"
+        # hex解析不到时降级到缓存
+        cache = _load_cache()
+        if cache and cache.get("expires_at"):
+            if cache["expires_at"] < int(time.time()):
+                return "已过期"
+        return "已激活"
+    except Exception:
+        return "已激活"
+
+
+def _bind_device(code, machine_id, device_info="", status=None):
+    """绑定设备（写入或更新多维表格记录，自动去重+动态状态）"""
     try:
         raw_code = code.replace("-", "").strip().lower()
-        existing = _query_device_binding(code)
-        activate_ts, expire_ts = _parse_code_dates(code)
+        if status is None:
+            status = _get_dynamic_status(code)
         
-        # 解析分销商ID（36位码含4位base36, 34位码含2位hex, 32位码无）
+        # 解析分销商ID
         dist_id = ""
         if len(raw_code) == 36:
             dist_id = raw_code[2:6].upper()
         elif len(raw_code) == 34:
-            dist_id = raw_code[2:4]
+            dist_id = raw_code[2:6].upper()
         
-        # 日期字段（飞书多维表格日期类型需要毫秒时间戳）
+        # 日期字段：优先从hex解析（一次定生死），降级到缓存
+        activate_ts, expire_ts = _parse_code_dates(code)
         date_fields = {}
         if activate_ts:
             date_fields["激活日期"] = activate_ts
         if expire_ts:
             date_fields["到期日期"] = expire_ts
-
+        else:
+            cache_for_dates = _load_cache()
+            if cache_for_dates and cache_for_dates.get("expires_at"):
+                date_fields["到期日期"] = cache_for_dates["expires_at"] * 1000
+                if cache_for_dates.get("activated_at"):
+                    date_fields["激活日期"] = cache_for_dates["activated_at"] * 1000
+        
+        # 先查已有记录（_query_device_binding 已内含清理重复）
+        existing = _query_device_binding(code)
+        
+        fields = {
+            "设备ID": machine_id,
+            "设备信息": device_info,
+            "状态": status,
+        }
+        if dist_id:
+            fields["分销商ID"] = dist_id
+        fields.update(date_fields)
+        
         if existing:
-            # 更新第一条匹配的记录
-            fields = {"设备ID": machine_id, "设备信息": device_info, "状态": status}
-            if dist_id:
-                fields["分销商ID"] = dist_id
-            fields.update(date_fields)
+            # 更新
             resp = _feishu_request("PUT",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
                 {"fields": fields})
-            if not (resp and resp.get("code") == 0):
-                return False
-            
-            # 清理同激活码的重复记录（保留一条）
-            try:
-                raw_code = code.replace("-", "").strip().lower()
-                short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
-                import urllib.parse as _urlp
-                filt = _urlp.quote(f'find("{short_code}", {{激活码}})', safe="")
-                dup_resp = _feishu_request("GET",
-                    f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
-                    f"?filter={filt}&page_size=20")
-                if dup_resp and dup_resp.get("code") == 0:
-                    dup_items = dup_resp.get("data", {}).get("items", [])
-                    dup_ids = []
-                    for item in dup_items:
-                        if item["record_id"] != existing["record_id"]:
-                            code_field = item.get("fields", {}).get("激活码", "")
-                            code_val = code_field[0].get("text", "") if isinstance(code_field, list) else str(code_field)
-                            if raw_code in code_val.replace("-", "").lower():
-                                dup_ids.append(item["record_id"])
-                    if dup_ids:
-                        _feishu_request("DELETE",
-                            f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
-                            {"record_ids": dup_ids})
-            except Exception:
-                pass
-            
-            return True
+            return resp and resp.get("code") == 0
         else:
             # 新增
-            fields = {
-                "多行文本": f"用户_{machine_id[:8]}",
-                "激活码": raw_code,
-                "设备ID": machine_id,
-                "设备信息": device_info,
-                "状态": status,
-            }
-            if dist_id:
-                fields["分销商ID"] = dist_id
-            fields.update(date_fields)
+            fields["多行文本"] = f"用户_{machine_id[:8]}"
+            fields["激活码"] = raw_code
             resp = _feishu_request("POST",
                 f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
                 {"fields": fields})
@@ -601,7 +614,7 @@ def _verify_online(code, machine_id):
             "machine_id": machine_id,
             "fingerprints": json.dumps(fingerprints),
         })
-        url = f"{_VERIFY_API_URL}/verify?{params}"
+        url = f"{_VERIFY_API_URL}/api/verify?{params}"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=8) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -628,7 +641,7 @@ def _fc_activate(code, machine_id, result_info, expires_at):
             "plan_hex": result_info.get("plan_hex", ""),
             "expires_at": expires_at,
         }).encode("utf-8")
-        url = f"{_VERIFY_API_URL}/activate"
+        url = f"{_VERIFY_API_URL}/api/activate"
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -649,7 +662,7 @@ def _fc_unbind(code, machine_id):
             "machine_id": machine_id,
             "fingerprints": fingerprints,
         }).encode("utf-8")
-        url = f"{_VERIFY_API_URL}/unbind"
+        url = f"{_VERIFY_API_URL}/api/unbind"
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -873,10 +886,14 @@ def activate_with_code(code):
             return {"ok": False, "msg": online_result.get("msg", "服务器验证失败")}
         _update_online_verify_time()
 
-    # Step 5: 本地保存
+    # Step 5: 本地保存（到期时间优先从激活码hex解析）
     plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
     activated_at = int(time.time())
-    expires_at = activated_at + plan_days * 86400
+    _, hex_expire_ts = _parse_code_dates(code)
+    if hex_expire_ts:
+        expires_at = hex_expire_ts // 1000  # 毫秒转秒
+    else:
+        expires_at = activated_at + plan_days * 86400  # 降级：now + 套餐天数
     expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     _save_license_code(code)
     _save_cache({
@@ -982,23 +999,27 @@ def check_activation():
         code = cache["code"]
         result = validate_code(code)
         if result["ok"]:
-            # 方案B：到期时间 = activated_at + 套餐天数
-            activated_at = cache.get("activated_at", 0)
-            plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
-            if activated_at > 0:
-                expires_at = activated_at + plan_days * 86400
+            # 到期时间：优先从hex解析，降级到 activated_at + 套餐天数
+            _, hex_expire = _parse_code_dates(code)
+            if hex_expire:
+                expires_at = hex_expire // 1000
             else:
-                try:
-                    binding = _query_device_binding(code)
-                    if binding and binding.get("activate_date", 0) > 0:
-                        activated_at = binding["activate_date"] // 1000
-                        expires_at = activated_at + plan_days * 86400
-                        cache["activated_at"] = activated_at
-                        _save_cache(cache)
-                    else:
+                activated_at = cache.get("activated_at", 0)
+                plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+                if activated_at > 0:
+                    expires_at = activated_at + plan_days * 86400
+                else:
+                    try:
+                        binding = _query_device_binding(code)
+                        if binding and binding.get("activate_date", 0) > 0:
+                            activated_at = binding["activate_date"] // 1000
+                            expires_at = activated_at + plan_days * 86400
+                            cache["activated_at"] = activated_at
+                            _save_cache(cache)
+                        else:
+                            expires_at = cache.get("expires_at", 0)
+                    except Exception:
                         expires_at = cache.get("expires_at", 0)
-                except Exception:
-                    expires_at = cache.get("expires_at", 0)
             
             now = int(time.time())
             days_left = max(0, (expires_at - now) // 86400)
@@ -1047,15 +1068,19 @@ def check_activation():
                 if _is_offline_grace_expired():
                     return {"need_activate": True, "reason": f"已离线超过{_OFFLINE_GRACE_HOURS}小时，请联网验证"}
             
-            # Step: 飞书多维表格校验（防盗2.0暂时关闭，仅保留吊销检测）
+            # Step: 飞书多维表格状态校验（远程吊销/过期检测）
             try:
                 binding = _query_device_binding(code)
                 if binding:
-                    # 仅检查吊销状态，不做设备绑定校验
-                    if binding.get("status") == "已吊销":
+                    bstatus = binding.get("status", "")
+                    # 管理表里的状态优先：已吊销或已过期 → 熔断
+                    if bstatus == "已吊销":
                         _write_revoked_marker()
                         return {"need_activate": True, "reason": "授权已被吊销，请联系管理员"}
-                    # 静默更新设备绑定（不阻塞）
+                    if bstatus == "已过期":
+                        _write_revoked_marker()
+                        return {"need_activate": True, "reason": "激活码已在服务端过期，请续费"}
+                    # 状态正常，静默更新设备绑定
                     _bind_device(code, _get_machine_id(), _get_device_info())
                 else:
                     # 无记录时自动绑定
@@ -1079,10 +1104,14 @@ def check_activation():
         if prev_mid and prev_mid != current_mid:
             return {"need_activate": True, "reason": "设备已更换，请重新激活"}
         if result["ok"]:
-            # 方案B：到期时间 = 激活时间 + 套餐天数
+            # 到期时间优先从激活码hex解析
             plan_days_s = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
             activated_at_s = int(time.time())
-            expires_at_s = activated_at_s + plan_days_s * 86400
+            _, hex_expire_s = _parse_code_dates(code)
+            if hex_expire_s:
+                expires_at_s = hex_expire_s // 1000
+            else:
+                expires_at_s = activated_at_s + plan_days_s * 86400
             expires_date_s = datetime.fromtimestamp(expires_at_s).strftime("%Y-%m-%d")
             _save_cache({
                 "code": code,
