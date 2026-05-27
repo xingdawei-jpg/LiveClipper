@@ -1126,7 +1126,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     else:
                         _log("未配置云端语音识别，使用本地识别")
             except Exception as _e2:
-                _log(f"⚠️ 云端语音识别异常，已自动切换到本地识别")
+                _log(f"⚠️ 云端语音识别异常: {_e2}，已自动切换到本地识别")
         
         if not _volc_used and not srt_path:
             _log("[STEP] 🎬 语音识别中...")
