@@ -15,6 +15,7 @@ if hasattr(sys, '_MEIPASS'):
     _cert_candidates = [
         os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem'),
         os.path.join(os.path.dirname(sys._MEIPASS), 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certifi', 'cacert.pem'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'certifi', 'cacert.pem'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'certifi', 'cacert.pem'),
     ]
