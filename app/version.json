@@ -1,5 +1,5 @@
 {
-  "version": "2026.5.29",
+  "version": "2026.5.25",
   "files": {
     "ai_clipper.py": "d705a5370ec6bfe5312555a44c6d5ec0b6f606481a1346a4b7f808828b30f533",
     "asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
@@ -27,7 +27,7 @@
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.23: 混剪模式合并SRT+品类过滤修正+时长设置应用+SRT缓存+volcengine_asr修复",
-  "latest_version": "2026.5.29",
+  "latest_version": "2026.5.25",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
   "update_message": "混剪模式：支持合并SRT（带[Vn]标记），修正跨品类过滤主品类误检，应用时长设置，SRT缓存到视频旁，修复volcengine_asr参数签名错误；独立模式：SRT缓存，shutil变量作用域修复",
   "updated_at": "2026-05-27 17:28:06"
