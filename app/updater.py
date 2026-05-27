@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.5.25"
+CURRENT_VERSION = "2026.5.29"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -526,57 +526,43 @@ class DownloadDialog(tk.Toplevel):
                     fail_count += 1
                     continue
 
-                # Determine target dirs
-        update_dir = _get_update_dir()
-        target_dirs = [update_dir]
-        if app_dir not in target_dirs:
-            target_dirs.append(app_dir)
-        
-        # Write to app directory
-        for td in target_dirs:
-            td_path = os.path.join(td, fname)
-            try:
-                os.makedirs(os.path.dirname(td_path), exist_ok=True)
-                with open(td_path, 'wb') as f:
-                    f.write(content)
-            except Exception:
-                pass
-        success_count += 1
+                update_dir = _get_update_dir()
+                target_dirs = [update_dir]
+                if app_dir not in target_dirs:
+                    target_dirs.append(app_dir)
 
-        # 同时写到 sys._MEIPASS/app/（兼容不同版本 EXE 的路径差异）
-        try:
-            _meipass_app = os.path.join(sys._MEIPASS, 'app')
-            if _meipass_app != app_dir:
-                _alt_dest = os.path.join(_meipass_app, fname)
-                with open(_alt_dest, 'wb') as f:
-                    f.write(content)
-        except Exception:
-            pass
+                wrote = False
+                for td in target_dirs:
+                    td_path = os.path.join(td, fname)
+                    try:
+                        os.makedirs(os.path.dirname(td_path), exist_ok=True)
+                        with open(td_path, 'wb') as f:
+                            f.write(content)
+                        wrote = True
+                    except Exception:
+                        pass
+
+                if wrote:
+                    success_count += 1
+                else:
+                    fail_count += 1
 
             if self.cancelled:
                 return
 
-            # Update installed version from local version.json
             try:
-                _vj_path = _os.path.join(app_dir, "version.json")
-                if _os.path.exists(_vj_path):
-                    _vj_data = json.load(open(_vj_path, "r", encoding="utf-8-sig"))
-                    _new_ver = _vj_data.get("latest_version", _vj_data.get("version", ""))
-                else:
-                    _new_ver = ""
-                if not _new_ver:
-                    _new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
-                if _new_ver:
-                    _set_installed_version(_new_ver)
+                new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
+                if new_ver:
+                    _set_installed_version(new_ver)
             except Exception:
                 pass
 
-            # Clear __pycache__ so new .py files take effect immediately
             try:
                 import shutil
-                _cache_dir = _os.path.join(app_dir, "__pycache__")
-                if _os.path.isdir(_cache_dir):
-                    shutil.rmtree(_cache_dir)
+                for cache_root in {app_dir, _get_update_dir()}:
+                    cache_dir = os.path.join(cache_root, "__pycache__")
+                    if os.path.isdir(cache_dir):
+                        shutil.rmtree(cache_dir)
             except Exception:
                 pass
 
@@ -584,7 +570,6 @@ class DownloadDialog(tk.Toplevel):
             self.after(0, lambda: self.status_label.config(text="更新完成"))
 
             if fail_count == 0:
-                msg = f"成功更新 {success_count} 个文件"
                 self.after(500, lambda: self.on_complete(None, "", True))
                 self.after(600, self.destroy)
             elif success_count > 0:
@@ -836,7 +821,7 @@ def _apply_update(zip_path):
 
         copied = 0
         for fname in os.listdir(app_src):
-            if fname.endswith(('.py', '.json')):
+            if fname.endswith(('.py', '.json', '.pem')):
                 src_f = os.path.join(app_src, fname)
                 for target_app in targets:
                     dst_f = os.path.join(target_app, fname)
@@ -850,7 +835,7 @@ def _apply_update(zip_path):
         gh_app = os.path.join(staging, "LiveClipper-main", "app")
         if os.path.isdir(gh_app) and gh_app != app_src:
             for fname in os.listdir(gh_app):
-                if fname.endswith(('.py', '.json')):
+                if fname.endswith(('.py', '.json', '.pem')):
                     src_f = os.path.join(gh_app, fname)
                     dst_f = os.path.join(target_app, fname)
                     try:

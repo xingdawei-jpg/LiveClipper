@@ -9,6 +9,29 @@ import time
 import json
 import uuid
 
+# PyInstaller 打包后 certifi 路径可能指向已删除的临时目录，
+# 尝试多个可能的位置找到 cacert.pem
+if hasattr(sys, '_MEIPASS'):
+    _cert_candidates = [
+        os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(sys._MEIPASS), 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'certifi', 'cacert.pem'),
+    ]
+    for _cp in _cert_candidates:
+        if os.path.exists(_cp):
+            os.environ.setdefault('SSL_CERT_FILE', _cp)
+            os.environ.setdefault('REQUESTS_CA_BUNDLE', _cp)
+            break
+    else:
+        # 都找不到，干脆跳过 SSL 验证
+        try:
+            import ssl as _ssl
+            _ssl._create_default_https_context = _ssl._create_unverified_context
+        except Exception:
+            pass
+
 # 预导入 tos SDK（避免首次调用时卡顿）
 try:
     import tos
