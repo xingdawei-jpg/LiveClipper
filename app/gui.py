@@ -811,6 +811,10 @@ class App:
         tk.Button(_vr_test, text="✓ 测试火山引擎连接", font=FNT_S, fg=C["ok"], bg=C["card"],
               relief="flat", cursor="hand2", padx=8, pady=2,
               command=self._test_volc_connection).pack(side="left", padx=(4,0))
+        self._volc_diag_btn = tk.Button(_vr_test, text="火山完整诊断", font=FNT_S, fg=C["warn"], bg=C["card"],
+              relief="flat", cursor="hand2", padx=8, pady=2,
+              command=self._diagnose_volc_connection)
+        self._volc_diag_btn.pack(side="left", padx=(8,0))
         _vr5 = tk.Frame(self.volc_fields, bg=C["card"])
         _vr5.pack(fill="x", pady=(2,0))
         tk.Label(_vr5, text="TOS 桶名", font=FNT_S, fg=C["text"],
@@ -1280,6 +1284,80 @@ class App:
                     messagebox.showwarning("测试连接", f"⚠️ HTTP {http_code}\n{body[:200]}")
         except Exception as e:
             messagebox.showerror("测试连接", f"❌ 连接异常: {e}")
+
+
+    def _diagnose_volc_connection(self):
+        """Run a full Volcengine diagnostic: TOS upload, signed URL, ASR submit/query."""
+        api_key = self.volc_apikey_var.get().strip() if hasattr(self, "volc_apikey_var") else ""
+        tos_ak = self.volc_tos_ak_var.get().strip() if hasattr(self, "volc_tos_ak_var") else ""
+        tos_sk = self.volc_tos_sk_var.get().strip() if hasattr(self, "volc_tos_sk_var") else ""
+        bucket = self.volc_bucket_var.get().strip() if hasattr(self, "volc_bucket_var") else ""
+        app_id_obj = getattr(self, "volc_app_id_var", None)
+        token_obj = getattr(self, "volc_token_var", None)
+        app_id = app_id_obj.get().strip() if app_id_obj else ""
+        access_token = token_obj.get().strip() if token_obj else ""
+
+        if not tos_ak or not tos_sk or not bucket:
+            messagebox.showwarning("火山完整诊断", "请先填写 TOS AK、TOS SK 和 TOS 桶名。")
+            return
+        if not api_key and not (app_id and access_token):
+            messagebox.showwarning("火山完整诊断", "请先填写火山 API Key，或旧版 App ID + Access Token。")
+            return
+
+        btn = getattr(self, "_volc_diag_btn", None)
+        if btn:
+            btn.configure(state="disabled", text="诊断中...")
+        self._log("火山完整诊断开始：将上传 1 秒测试音频并提交 ASR 测试。", "info")
+
+        def _finish(result):
+            if btn:
+                btn.configure(state="normal", text="火山完整诊断")
+            title = "火山完整诊断"
+            msg = result.get("message", "")
+            detail = result.get("detail", "")
+            stage = result.get("stage", "")
+            text = f"阶段: {stage}\n\n{msg}"
+            if detail:
+                text += f"\n\n详情:\n{detail[:1200]}"
+            if result.get("ok"):
+                messagebox.showinfo(title, text)
+            else:
+                messagebox.showwarning(title, text)
+
+        def _worker():
+            try:
+                from volcengine_asr import diagnose_volcengine
+
+                def _diag_log(msg):
+                    self._log("火山诊断: " + str(msg), "info")
+
+                result = diagnose_volcengine(
+                    app_id=app_id,
+                    access_token=access_token,
+                    tos_ak=tos_ak,
+                    tos_sk=tos_sk,
+                    bucket=bucket,
+                    api_key=api_key or None,
+                    log_fn=_diag_log,
+                    timeout=45,
+                )
+            except Exception as e:
+                result = {
+                    "ok": False,
+                    "stage": "diagnostic_exception",
+                    "message": f"{type(e).__name__}: {e}",
+                }
+
+            self._log(
+                "火山完整诊断结果: " + ("通过" if result.get("ok") else "未通过") + f" ({result.get('stage', '')})",
+                "ok" if result.get("ok") else "warn",
+            )
+            try:
+                self.root.after(0, lambda r=result: _finish(r))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 
     def _test_aliyun_connection(self):

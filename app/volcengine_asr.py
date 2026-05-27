@@ -42,6 +42,228 @@ except ImportError as _e:
     _TOS_AVAILABLE = False
 
 
+_TOS_REGIONS = [
+    ("tos-cn-beijing.volces.com", "cn-beijing"),
+    ("tos-cn-shanghai.volces.com", "cn-shanghai"),
+    ("tos-cn-guangzhou.volces.com", "cn-guangzhou"),
+    ("tos-ap-southeast-1.volces.com", "ap-southeast-1"),
+]
+
+
+def _volc_ssl_context():
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _volc_headers(task_id, app_id="", access_token="", api_key=None):
+    if api_key:
+        return {
+            "Content-Type": "application/json",
+            "X-Api-Key": api_key,
+            "X-Api-Resource-Id": "volc.seedasr.auc",
+            "X-Api-Request-Id": task_id,
+            "X-Api-Sequence": "-1",
+        }
+    return {
+        "Content-Type": "application/json",
+        "X-Api-App-Key": str(app_id),
+        "X-Api-Access-Key": access_token,
+        "X-Api-Resource-Id": "volc.seedasr.auc",
+        "X-Api-Request-Id": task_id,
+        "X-Api-Sequence": "-1",
+    }
+
+
+def _make_diagnostic_wav(path):
+    import math
+    import struct
+    import wave
+
+    sample_rate = 16000
+    duration = 1.0
+    frames = int(sample_rate * duration)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        for i in range(frames):
+            sample = int(4000 * math.sin(2 * math.pi * 440 * i / sample_rate))
+            wf.writeframes(struct.pack("<h", sample))
+
+
+def _explain_tos_error(error_text):
+    text = str(error_text)
+    low = text.lower()
+    if "ssl" in low or "eof" in low or "certificate" in low:
+        return "TOS HTTPS/SSL failed. Ask the user to try another network, disable proxy/VPN/HTTPS inspection, or use a China-region bucket."
+    if "timeout" in low or "timed out" in low or "max retries" in low:
+        return "TOS upload timed out. This is usually network/firewall/DNS or a far-away bucket region."
+    if "nosuchbucket" in text or "not found" in low:
+        return "Bucket was not found in the tested region. Check bucket name and region."
+    if "accessdenied" in text or "access denied" in low:
+        return "TOS denied access. Check AK/SK permissions for the bucket."
+    if "signature" in low:
+        return "TOS signature mismatch. Check AK/SK and bucket region."
+    return "TOS upload failed. Check bucket name, region, AK/SK permissions, and user network."
+
+
+def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
+                        bucket="", api_key=None, log_fn=None, timeout=45):
+    """Run an end-to-end Volcengine ASR diagnostic without using user media."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    bucket = (bucket or "livec").strip()
+    api_key = (api_key or "").strip()
+    app_id = (app_id or "").strip()
+    access_token = (access_token or "").strip()
+    tos_ak = (tos_ak or "").strip()
+    tos_sk = (tos_sk or "").strip()
+
+    if not _TOS_AVAILABLE:
+        return {"ok": False, "stage": "sdk", "message": "tos SDK is not available in this build."}
+    if not tos_ak or not tos_sk:
+        return {"ok": False, "stage": "config", "message": "TOS AK/SK is required for the full diagnostic."}
+    if not bucket:
+        return {"ok": False, "stage": "config", "message": "TOS bucket name is required."}
+    if not api_key and not (app_id and access_token):
+        return {"ok": False, "stage": "config", "message": "Volcengine API Key, or App ID + Access Token, is required."}
+
+    import tempfile
+    import shutil
+    import urllib.request
+
+    temp_dir = tempfile.mkdtemp(prefix="liveclipper_volc_diag_")
+    wav_path = os.path.join(temp_dir, "diagnostic.wav")
+    obj_key = f"asr_diag/{uuid.uuid4().hex}.wav"
+    client = None
+    uploaded = False
+    selected_region = ""
+    last_error = ""
+
+    try:
+        _make_diagnostic_wav(wav_path)
+        _log("1/4 Created 1-second diagnostic WAV.")
+
+        for endpoint, region in _TOS_REGIONS:
+            _log(f"2/4 Testing TOS upload: bucket={bucket}, region={region}, endpoint={endpoint}")
+            try:
+                client = tos.TosClientV2(
+                    ak=tos_ak,
+                    sk=tos_sk,
+                    endpoint=endpoint,
+                    region=region,
+                )
+                client.put_object_from_file(bucket, obj_key, wav_path)
+                uploaded = True
+                selected_region = region
+                _log(f"2/4 TOS upload OK: region={region}")
+                break
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                _log(f"2/4 TOS upload failed on {region}: {last_error[:600]}")
+                if "AccessDenied" in last_error or "access denied" in last_error.lower():
+                    break
+                if "Signature" in last_error or "signature" in last_error.lower():
+                    break
+
+        if not uploaded:
+            return {
+                "ok": False,
+                "stage": "tos_upload",
+                "message": _explain_tos_error(last_error),
+                "detail": last_error,
+            }
+
+        try:
+            url_resp = client.pre_signed_url(
+                tos.HttpMethodType.Http_Method_Get, bucket, obj_key, 3600
+            )
+            audio_url = url_resp.signed_url
+            _log("3/4 TOS pre-signed URL OK.")
+        except Exception as e:
+            detail = f"{type(e).__name__}: {e}"
+            return {"ok": False, "stage": "tos_signed_url", "message": "Failed to generate TOS pre-signed URL.", "detail": detail}
+
+        task_id = str(uuid.uuid4())
+        headers = _volc_headers(task_id, app_id=app_id, access_token=access_token, api_key=api_key)
+        submit_body = {
+            "user": {"uid": "live_cutter_diagnostic"},
+            "audio": {"format": "wav", "url": audio_url},
+            "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True, "show_utterances": True},
+        }
+
+        try:
+            req = urllib.request.Request(
+                "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit",
+                data=json.dumps(submit_body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout, context=_volc_ssl_context()) as resp:
+                submit_body_text = resp.read().decode("utf-8", errors="ignore")
+                status_code = resp.headers.get("X-Api-Status-Code", "")
+                message = resp.headers.get("X-Api-Message", "")
+            if status_code != "20000000":
+                return {
+                    "ok": False,
+                    "stage": "asr_submit",
+                    "message": f"ASR submit failed: status={status_code} message={message}",
+                    "detail": submit_body_text[:800],
+                }
+            _log(f"4/4 ASR submit OK: task_id={task_id}")
+        except Exception as e:
+            detail = f"{type(e).__name__}: {e}"
+            return {"ok": False, "stage": "asr_submit", "message": "ASR submit request failed.", "detail": detail}
+
+        try:
+            time.sleep(3)
+            query_headers = dict(headers)
+            query_headers["X-Api-Sequence"] = "-1"
+            req = urllib.request.Request(
+                "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query",
+                data=json.dumps({}).encode("utf-8"),
+                headers=query_headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout, context=_volc_ssl_context()) as resp:
+                query_text = resp.read().decode("utf-8", errors="ignore")
+                query_status = resp.headers.get("X-Api-Status-Code", "")
+                query_message = resp.headers.get("X-Api-Message", "")
+            if query_status in ("20000000", "20000001", "20000002"):
+                return {
+                    "ok": True,
+                    "stage": "ok",
+                    "message": f"Full diagnostic passed. TOS region={selected_region}; ASR status={query_status or 'empty'} {query_message}".strip(),
+                    "detail": query_text[:800],
+                }
+            return {
+                "ok": False,
+                "stage": "asr_query",
+                "message": f"ASR query failed: status={query_status} message={query_message}",
+                "detail": query_text[:800],
+            }
+        except Exception as e:
+            detail = f"{type(e).__name__}: {e}"
+            return {
+                "ok": True,
+                "stage": "submit_ok_query_warn",
+                "message": f"TOS upload and ASR submit passed, but query check failed: {detail}",
+                "detail": detail,
+            }
+    finally:
+        if uploaded and client:
+            _cleanup_tos(client, bucket, obj_key, _log)
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                    bucket="", timeout=300, log_fn=None, api_key=None):
     """
@@ -85,12 +307,6 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
 
     # --- 1. 上传音频到 TOS（自动检测区域） ---
     _log(f"volcengine_asr: 上传音频到 TOS ({bucket}/{obj_key})...")
-    _TOS_REGIONS = [
-        ("tos-cn-beijing.volces.com", "cn-beijing"),
-        ("tos-cn-shanghai.volces.com", "cn-shanghai"),
-        ("tos-cn-guangzhou.volces.com", "cn-guangzhou"),
-        ("tos-ap-southeast-1.volces.com", "ap-southeast-1"),
-    ]
     _upload_ok = False
     _last_error = ""
     _tos_client = None
