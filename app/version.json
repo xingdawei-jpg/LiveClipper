@@ -1,12 +1,12 @@
 {
-  "version": "2026.5.28",
+  "version": "2026.5.29",
   "files": {
     "ai_clipper.py": "d705a5370ec6bfe5312555a44c6d5ec0b6f606481a1346a4b7f808828b30f533",
     "asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
     "config.py": "f3f79a7784f67994b89888f183d2b28b5af39b2f59a2c739e7cede611c40e664",
     "cutter.py": "f31d36b059c2bd9d36b380e0b55ca575becae01b38f6b53eb7f63285e8faad33",
-    "cutter_logic.py": "1639b0b2338df9304348be9bce29b6da261a9585543895c13d97ff51b56ede18",
-    "gui.py": "7d3e3fe504e3f56c41ce3f884109099b6d2ae0b1cfbb004ac9df00c9f5573a5d",
+    "cutter_logic.py": "d625381424c2da8ed50398bfaac152c27bedc03e5bff5a71562c7a1824162cd7",
+    "gui.py": "a486f16c984dfe22e1dd485a6d005fcc44c6483bf673afcca7519475a67ee94a",
     "keywords.json": "56cdf30d4771f7825dcf11ea2f0328d6cd6b448ea2a6b7720563ef3ba673ff22",
     "license_client.py": "868b59c9b1580977f2e4e7fe2bae121e0f946c35558c09dcbd250bd645716476",
     "multi_version.py": "bd0cd015a06bce6277e99e1f934c50a7ed90e88d7d2f61b81f02da26530b39a0",
@@ -21,14 +21,14 @@
     "stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "updater.py": "e337dc05a6008b2a535a0a6607ffcf897eab526477fce8f5e85e9668f4fbc779",
-    "volcengine_asr.py": "3beafc541d4b90c00bdf64f89b806d98415f079868b1093425dd0d2bc816046f",
+    "updater.py": "3b17e101563f190a5f60dfc0a8f1ac6070ffa57468f01a2690542a6dd170e5be",
+    "volcengine_asr.py": "a83ed6bb65e677d1a8ab0a64462fef17f03270d820deb596daff012209e9d16d",
     "version.json": "ff0ac587e17432013e62411bb86aa7e414dc1034c0ce958371fc973dba3b0ef0",
     "aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb"
   },
   "release_notes": "v2026.5.23: 混剪模式合并SRT+品类过滤修正+时长设置应用+SRT缓存+volcengine_asr修复",
-  "latest_version": "2026.5.28",
+  "latest_version": "2026.5.29",
   "update_url": "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
   "update_message": "混剪模式：支持合并SRT（带[Vn]标记），修正跨品类过滤主品类误检，应用时长设置，SRT缓存到视频旁，修复volcengine_asr参数签名错误；独立模式：SRT缓存，shutil变量作用域修复",
-  "updated_at": "2026-05-27 17:08:49"
+  "updated_at": "2026-05-27 17:28:06"
 }

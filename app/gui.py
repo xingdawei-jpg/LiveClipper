@@ -39,34 +39,6 @@ from license_client import check_activation, activate_with_code, check_trial, co
 # 样式
 from config import C, FNT_S, FNT_B
 
-# ==== 启动时清理 PyInstaller 残留临时目录（_MEI*） ====
-import atexit as _atexit, shutil as _shutil, glob as _glob, time as _time
-_temp_dir = os.environ.get('TEMP', os.environ.get('TMP', ''))
-if _temp_dir:
-    for _old_mei in _glob.glob(os.path.join(_temp_dir, '_MEI*')):
-        if os.path.isdir(_old_mei) and _old_mei != getattr(sys, '_MEIPASS', ''):
-            for _attempt in range(3):
-                try:
-                    _shutil.rmtree(_old_mei, ignore_errors=True)
-                    break
-                except Exception:
-                    _time.sleep(0.5)
-
-@_atexit.register
-def _cleanup_temp_dir():
-    try:
-        _mp = getattr(sys, '_MEIPASS', '')
-        if _mp and _mp.startswith(_temp_dir or ''):
-            for _attempt in range(3):
-                try:
-                    _shutil.rmtree(_mp, ignore_errors=True)
-                    break
-                except Exception:
-                    _time.sleep(0.5)
-    except Exception:
-        pass
-
-FNT=("Segoe UI",10); FNT_B=("Segoe UI",10,"bold"); FNT_T=("Segoe UI",20,"bold")
 FNT_S=("Segoe UI",9); FNT_L=("Consolas",9)
 DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BFA","custom":"#FF6B6B"}
 
