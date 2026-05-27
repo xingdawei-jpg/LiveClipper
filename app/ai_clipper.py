@@ -8,6 +8,7 @@ import json
 # 模块级时长配置：由 cutter_logic 在调用 ai_analyze_clips 前设置
 _AI_TARGET_DURATION = 60
 _AI_CLIP_COUNT = "10-15"
+_detail_kw_prompt = ""
 import os
 import sys
 import ssl
@@ -143,6 +144,7 @@ def load_keywords():
         "hook_keywords": all_hook_kw,
         "negative_signals": merged_negative,
         "preference_keywords": merged_pref,
+        "detail_keywords": custom.get("detail_keywords", []),
     }
 
 
@@ -177,6 +179,10 @@ _DEFAULT_PREFERENCE_KEYWORDS = {
     "情绪感染": ['绝了', '太漂亮', '美爆', '太好看了', '太爱', '神仙', '封神', '超级超级', '特别特别', '真的真的', '非常非常', '天呐', '妈呀', '我的天', '受不了', '爱了爱了', '绝绝子', 'yyds', '信我', '相信我', '不骗你', '真心', '自留', '我自己也', '美哭', '好看死', '太绝了', '我天', '天哪', '疯了吧', '哇塞', '我自己都'],
     "流行趋势": ['流行', '当季', '新款', '设计', '原创', '不撞款', '爆款', '热门', '趋势', '法式', '韩系', '日系', '欧美', 'ins风', '极简', '复古', '国风', '新中式', '设计师', '小心机', '细节', '小众', '轻奢', '时髦', '小香风', '千金风', '老钱', '清冷感', '氛围感', '松弛感', '财阀千金', '甜酷', '美拉德', '多巴胺', '静奢'],
     "面料质感": ['面料', '手感', '亲肤', '质感', '桑蚕丝', '冰感', '软糯', '透气', '真丝', '羊毛', '羊绒', '纯棉', '雪纺', '缎面', '蕾丝', '牛仔', '针织', '垂感', '弹力', '厚实', '做工', '走线', '不起球', '不褪色', '抗皱', '免熨', '垂坠', '丝滑', '软乎乎', '厚薄适中', '垂坠感', '糯糯的', '像云朵', '婴儿肌', '裸感'],
+    "尺寸长度": ['裙长', '到脚踝', '露脚踝', '遮小腿', '小腿肚', '膝盖', '大腿', '长度', '衣长', '袖长', '胯宽', '遮胯', '盖住', '刚好', '不过膝', '过膝', '九分', '七分', '短款', '中长款', '拖地', '盖脚面', '比例', '显腿长', '拉长比例', '视觉比例'],
+    "工艺细节": ['工艺', '成本', '做工', '走线', '细节', '设计', '拼接', '剪裁', '立体', '版型', '定型', '压褶', '褶皱', '花边', '蕾丝边', '包边', '锁边', '双线', '加固', '五金', '拉链', '扣子', '纽扣', '口袋', '里衬', '加绒', '加厚', '薄款', '定染', '染色', '固色', '色牢度'],
+    "穿着体验": ['舒适', '不勒', '自在', '轻盈', '无感', '不紧绷', '活动方便', '不束缚', '不扎人', '亲肤', '不闷', '不热', '轻薄', '凉爽', '温暖', '贴身', '宽松', '有余量', '不卡', '不掉', '不滑', '不卷边'],
+    "对比优势": ['买不到', '外面没有', '不一样', '区别', '独特', '独家', '外面买', '比外面', '比市面', '比商场', '同价位', '同品质', '这个价', '值这个价', '性价比高', '划算', '超值', '几十块', '商场同款', '代工厂', '源头', '一手', '直接', '没有第二家'],
 }
 
 
@@ -580,6 +586,11 @@ SYSTEM_PROMPT = """你是抖音女装带货短视频专业编导，严格执行�
    ⑥ 版型/面料/细节: 讲解设计、材质、做工 → 建立产品认知
    ⑦ 场景想象(画面感): "法国女生的浪漫感"、"办公室喝茶的雅" → 感觉比参数更打动人
    ⑧ 穿搭展示: 多种风格搭配、跨季节可穿 → 证明百搭实穿性
+   ⑨ 尺寸长度(细节加分): "裙长到脚踝"、"刚好露脚踝的恰到好处"、"遮住小腿肚"、"衣长刚好盖住胯" → 精准描述长度的片段，体现对身材的理解，细节卖点高于通用卖点★
+   ⑩ 工艺细节(品质差异): "这个工艺成本高"、"双线压褶定型"、"定染颜色市面上没有"、"五金拉链质感" → 体现做工精致和成本投入的细节
+   ⑪ 穿着体验(信任基石): "穿上不想脱"、"活动自如"、"不勒不绷"、"穿了跟没穿一样" → 穿戴感受用词更打动人
+   ⑫ 对比优势(购买理由): "同价位买不到"、"外面没有这个品质"、"跟专柜一比省一半" → 强调不可替代性的内容
+   ★细节卖点优先级高于通用卖点★ 通用卖点(面料好、显瘦等)每个最多1段，细节卖点(尺寸、工艺、穿着体验、对比优势)优先选择，同一细节可多角度覆盖
    ★★★绝对禁止★★★: 所有尺码推荐、码数建议(卡码拍小、正码正拍、买大买小、S/M/L尺码等)禁止放在Product片段里，只允许出现在Close
 
 3. Close(促单收尾): ★必须选择1-2个片段★核心是消除顾虑+推动决策，绝不能空缺
@@ -1769,7 +1780,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         if log_fn: log_fn(msg)
 
     # 多版本模式：设置全局标志，让Prompt构建走多版本路径
-    global _skip_focus, _AI_CLIP_COUNT
+    global _skip_focus, _AI_CLIP_COUNT, _detail_kw_prompt
     _orig_skip = _skip_focus
     if multi_version:
         _skip_focus = True
@@ -1812,6 +1823,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 _forbidden_count += 1
             _indexed_lines.append(f"[#{i:02d}] {et}")
         indexed_transcript = chr(10).join(_indexed_lines)
+        # 追加用户自定义细节关键词（注入到AI prompt末尾，高优先级关注）
+        if _detail_kw_prompt:
+            indexed_transcript += "\n" + _detail_kw_prompt
         _log(f"AI: 编号SRT条目 {len(_srt_entry_map)} 条")
         if _forbidden_count:
             _log(f"AI: 预扫描: {len(_srt_entry_map) - _forbidden_count} 条可选, {_forbidden_count} 条含违禁词/价格已标记")
@@ -1898,6 +1912,10 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     "情绪感染": "侧重情绪感染力，优先选主播语气最激动,最真诚,最惊艳的片段",
                     "流行趋势": "侧重流行趋势，优先选当季流行,设计感,风格标签的片段",
                     "面料质感": "侧重面料卖点，优先选面料手感,质感,亲肤的片段",
+                    "尺寸长度": "侧重尺寸比例，优先选裙长,长度,遮小腿,露脚踝等精准描述长度的片段",
+                    "工艺细节": "侧重工艺品质，优先选工艺,成本,做工,定染等体现品质细节的片段",
+                    "穿着体验": "侧重穿着感受，优先选舒适,不勒,自在,活动方便等体验类片段",
+                    "对比优势": "侧重对比独特，优先选同价位买不到,独家,差异化的片段",
                 }
                 focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
                 # 40%概率随机换一个偏好（避免同视频永远同一个）
@@ -1984,6 +2002,20 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
     ]
     _diff_vibe = random.choice(_diff_vibes)
+
+    # 注入用户自定义细节关键词（来自keywords.json的detail_keywords字段）
+    _detail_kw_prompt = ""
+    try:
+        import json as _dkw_json
+        _kw_path_detail = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
+        if os.path.exists(_kw_path_detail):
+            with open(_kw_path_detail, "r", encoding="utf-8") as _dkwf:
+                _dkw_data = _dkw_json.load(_dkwf)
+            _detail_kws = _dkw_data.get("detail_keywords", [])
+            if _detail_kws:
+                _detail_kw_prompt = f"\n★用户特别关注的卖点关键词（优先选含这些词的片段）: {', '.join(_detail_kws[:30])}★\n"
+    except Exception:
+        pass
 
     if _skip_focus:
         # 多版本模式：AI只做素材选取，不做编排

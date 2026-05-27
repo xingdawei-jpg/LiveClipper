@@ -4,9 +4,32 @@
 """
 
 import os
+import sys
 import time
 import json
 import uuid
+
+# PyInstaller 打包后 certifi 路径可能指向已删除的临时目录，
+# 尝试多个可能的位置找到 cacert.pem
+if hasattr(sys, '_MEIPASS'):
+    _cert_candidates = [
+        os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(sys._MEIPASS), 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'certifi', 'cacert.pem'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'certifi', 'cacert.pem'),
+    ]
+    for _cp in _cert_candidates:
+        if os.path.exists(_cp):
+            os.environ.setdefault('SSL_CERT_FILE', _cp)
+            os.environ.setdefault('REQUESTS_CA_BUNDLE', _cp)
+            break
+    else:
+        # 都找不到，干脆跳过 SSL 验证
+        try:
+            import ssl as _ssl
+            _ssl._create_default_https_context = _ssl._create_unverified_context
+        except Exception:
+            pass
 
 # 预导入 tos SDK（避免首次调用时卡顿）
 try:
@@ -19,7 +42,7 @@ except ImportError as _e:
 
 
 def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
-                   bucket="livec", timeout=300, log_fn=None, api_key=None):
+                   bucket="", timeout=300, log_fn=None, api_key=None):
     """
     调用火山引擎大模型 ASR 识别音频文件，返回 segments 列表。
     
@@ -59,31 +82,53 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         ext = ".wav"
     obj_key = f"asr_temp/{uuid.uuid4().hex}{ext}"
 
-    # --- 1. 上传音频到 TOS ---
+    # --- 1. 上传音频到 TOS（自动检测区域） ---
     _log(f"volcengine_asr: 上传音频到 TOS ({bucket}/{obj_key})...")
-    try:
-        client = tos.TosClientV2(
-            ak=tos_ak,
-            sk=tos_sk,
-            endpoint="tos-cn-beijing.volces.com",
-            region="cn-beijing",
-        )
-        client.put_object_from_file(bucket, obj_key, audio_path)
-        _log("volcengine_asr: TOS 上传完成")
-    except Exception as e:
-        _log(f"volcengine_asr: TOS 上传失败: {e}")
+    _TOS_REGIONS = [
+        ("tos-cn-beijing.volces.com", "cn-beijing"),
+        ("tos-cn-shanghai.volces.com", "cn-shanghai"),
+        ("tos-cn-guangzhou.volces.com", "cn-guangzhou"),
+        ("tos-ap-southeast-1.volces.com", "ap-southeast-1"),
+    ]
+    _upload_ok = False
+    _last_error = ""
+    _tos_client = None
+    for _ep, _region in _TOS_REGIONS:
+        try:
+            _tos_client = tos.TosClientV2(
+                ak=tos_ak,
+                sk=tos_sk,
+                endpoint=_ep,
+                region=_region,
+            )
+            _tos_client.put_object_from_file(bucket, obj_key, audio_path)
+            _log(f"volcengine_asr: TOS 上传完成 (region={_region})")
+            _upload_ok = True
+            break
+        except Exception as e:
+            _last_error = str(e)
+            # "not found" 可能是区域不对，继续试下一个
+            if "not found" in _last_error.lower() or "NoSuchBucket" in _last_error:
+                continue
+            # "ACCESS DENIED" 是认证问题，再试也没用
+            if "access denied" in _last_error.lower() or "AccessDenied" in _last_error:
+                break
+            continue
+    if not _upload_ok:
+        _log(f"volcengine_asr: TOS 上传失败: {_last_error}")
+        _log("volcengine_asr: 提示：请检查桶名和区域是否正确，AK/SK是否有TOS权限")
         return None
 
     # 获取 pre_signed_url
     try:
-        url_resp = client.pre_signed_url(
+        url_resp = _tos_client.pre_signed_url(
             tos.HttpMethodType.Http_Method_Get, bucket, obj_key, 3600
         )
         audio_url = url_resp.signed_url
         _log(f"volcengine_asr: 获取 pre_signed_url 成功")
     except Exception as e:
         _log(f"volcengine_asr: 获取 pre_signed_url 失败: {e}")
-        _cleanup_tos(client, bucket, obj_key, _log)
+        _cleanup_tos(_tos_client, bucket, obj_key, _log)
         return None
 
     # --- 2. 提交 ASR 任务 ---
@@ -140,7 +185,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         status_code = resp.headers.get("X-Api-Status-Code", "")
         if status_code != "20000000":
             _log(f"volcengine_asr: 提交失败: status={status_code} body={resp_body[:200]}")
-            _cleanup_tos(client, bucket, obj_key, _log)
+            _cleanup_tos(_tos_client, bucket, obj_key, _log)
             return None
         
         _log(f"volcengine_asr: 任务已提交, id={task_id}")
@@ -152,7 +197,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             _log("⚠️ 401认证失败！请检查语音识别控制台的 App ID 和 Access Token 是否正确，教程：https://www.feishu.cn/docx/QdJDdGpzGofSSuxmPDjc4lrxnVb")
         elif "403" in str(e) or "Forbidden" in str(e):
             _log("⚠️ 403鉴权失败/欠费！火山引擎账号可能已欠费，自动切换到本地识别")
-        _cleanup_tos(client, bucket, obj_key, _log)
+        _cleanup_tos(_tos_client, bucket, obj_key, _log)
         return None
 
     # --- 3. 轮询结果 ---
@@ -186,16 +231,16 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 continue
             elif status_code and status_code != "20000000":
                 _log(f"volcengine_asr: 查询失败: status={status_code} msg={message}")
-                _cleanup_tos(client, bucket, obj_key, _log)
+                _cleanup_tos(_tos_client, bucket, obj_key, _log)
                 return None
             elif "silence" in message.lower() or "no valid speech" in message.lower():
                 _log(f"volcengine_asr: 音频无有效语音: {message}")
-                _cleanup_tos(client, bucket, obj_key, _log)
+                _cleanup_tos(_tos_client, bucket, obj_key, _log)
                 return None
             elif "error" in message.lower() or "fail" in message.lower():
                 # 防止"Error processing"等含Processing的错误消息被误判为继续轮询
                 _log(f"volcengine_asr: 查询返回错误: status={status_code} msg={message}")
-                _cleanup_tos(client, bucket, obj_key, _log)
+                _cleanup_tos(_tos_client, bucket, obj_key, _log)
                 return None
             elif message and ("Processing" in message or "PENDING" in str(message).upper()):
                 continue
@@ -204,7 +249,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 _empty_count += 1
                 if _empty_count >= 3:
                     _log("volcengine_asr: 连续3次空响应，终止轮询")
-                    _cleanup_tos(client, bucket, obj_key, _log)
+                    _cleanup_tos(_tos_client, bucket, obj_key, _log)
                     return None
                 continue
             
@@ -226,7 +271,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 segments.append({"start": utt_start, "end": utt_end, "text": text})
 
             _log(f"volcengine_asr: 解析得到 {len(segments)} 条语音段")
-            _cleanup_tos(client, bucket, obj_key, _log)
+            _cleanup_tos(_tos_client, bucket, obj_key, _log)
             return segments if segments else None
 
         except Exception as e:
@@ -235,14 +280,14 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 _log(f"volcengine_asr: 轮询被限流(429)，退避到{poll_interval}s...")
             elif "403" in str(e) or "Forbidden" in str(e):
                 _log("volcengine_asr: 轮询被拒(403)，账号欠费或Token过期，终止重试")
-                _cleanup_tos(client, bucket, obj_key, _log)
+                _cleanup_tos(_tos_client, bucket, obj_key, _log)
                 return None
             else:
                 _log(f"volcengine_asr: 轮询异常: {e}")
             continue
 
     _log(f"volcengine_asr: 超时 ({timeout}s)")
-    _cleanup_tos(client, bucket, obj_key, _log)
+    _cleanup_tos(_tos_client, bucket, obj_key, _log)
     return None
 
 

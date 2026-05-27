@@ -382,3 +382,40 @@ CLIP_COUNT_BY_TYPE = {
     "trend": (0, 1),      # 可选
 }
 TIME_WINDOW_MINUTES = 8
+
+# ============================================================
+# 主题系统 — 跟随 Windows 深色/浅色模式
+# ============================================================
+import winreg as _wr
+
+def _is_dark_mode():
+    """检测 Windows 系统是否为深色模式"""
+    try:
+        key = _wr.OpenKey(_wr.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        val, _ = _wr.QueryValueEx(key, "AppsUseLightTheme")
+        _wr.CloseKey(key)
+        return val == 0  # 0=深色, 1=浅色
+    except:
+        return True  # 默认深色
+
+# 深色主题（简洁现代）
+_DARK = {
+    "bg": "#1C1C1E", "card": "#2C2C3A", "text": "#F5F5F5", "dim": "#8E8E93",
+    "ok": "#30D158", "warn": "#FF9F0A", "err": "#FF453A", "inp": "#3A3A4D",
+    "bar": "#0A84FF", "btn_go": "#0A84FF", "btn_no": "#FF453A", "btn_sel": "#0A84FF", "btn_go2": "#0A84FF", "btn_del": "#63687A", "card_border": "#3A3A52", "bar_bg": "#3A3A4D",
+}
+
+# 浅色主题（简洁现代）  
+_LIGHT = {
+    "bg": "#F2F2F7", "card": "#FFFFFF", "text": "#1C1C1E", "dim": "#8E8E93",
+    "ok": "#34C759", "warn": "#FF9500", "err": "#FF3B30", "inp": "#E5E5EA",
+    "bar": "#007AFF", "btn_go": "#007AFF", "btn_no": "#FF3B30", "btn_sel": "#007AFF", "btn_go2": "#007AFF", "btn_del": "#C7C7CC", "card_border": "#D1D1D6", "bar_bg": "#D1D1D6",
+}
+
+# 根据系统主题选择配色
+C = _DARK if _is_dark_mode() else _LIGHT
+
+# 字体
+FNT_S = ("Microsoft YaHei", 10)
+FNT_B = ("Microsoft YaHei", 12, "bold")

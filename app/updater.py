@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.5.25"
+CURRENT_VERSION = "2026.5.27"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -836,7 +836,7 @@ def _apply_update(zip_path):
 
         copied = 0
         for fname in os.listdir(app_src):
-            if fname.endswith(('.py', '.json')):
+            if fname.endswith(('.py', '.json', '.pem')):
                 src_f = os.path.join(app_src, fname)
                 for target_app in targets:
                     dst_f = os.path.join(target_app, fname)
@@ -850,7 +850,7 @@ def _apply_update(zip_path):
         gh_app = os.path.join(staging, "LiveClipper-main", "app")
         if os.path.isdir(gh_app) and gh_app != app_src:
             for fname in os.listdir(gh_app):
-                if fname.endswith(('.py', '.json')):
+                if fname.endswith(('.py', '.json', '.pem')):
                     src_f = os.path.join(gh_app, fname)
                     dst_f = os.path.join(target_app, fname)
                     try:

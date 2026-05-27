@@ -37,12 +37,7 @@ from cutter_logic import process_video, process_video_multi, process_video_mix
 from config import USER_DATA_DIR, SETTINGS_PATH
 from license_client import check_activation, activate_with_code, check_trial, consume_trial_use, deactivate_device
 # 样式
-C = {
-    "bg":"#1C1C1E","card":"#2C2C3A","text":"#E5E5EA","dim":"#9898A8",
-    "ok":"#30D158","warn":"#FF9F0A","err":"#FF453A","inp":"#232338",
-    "bar_bg":"#3A3A4D","bar":"#0A84FF","btn_go":"#30D158","btn_go2":"#28A745",
-    "btn_no":"#FF453A","btn_sel":"#0A84FF","btn_del":"#63687A","card_border":"#3A3A52",
-}
+from config import C, FNT_S, FNT_B
 FNT=("Segoe UI",10); FNT_B=("Segoe UI",10,"bold"); FNT_T=("Segoe UI",20,"bold")
 FNT_S=("Segoe UI",9); FNT_L=("Consolas",9)
 DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BFA","custom":"#FF6B6B"}
@@ -347,6 +342,12 @@ class App:
                                         cursor="hand2", padx=16, pady=4,
                                         command=lambda: self._switch_mode("schedule"))
         self._mode_btn_schedule.pack(side="left", padx=(4,0))
+        # 去重工具按钮（独立功能，不做模式切换，直接弹窗）
+        self._mode_btn_dedup = tk.Button(tab_frame, text="🔄 去重工具", font=FNT_B,
+                                        fg="white", bg="#1e40af", relief="flat",
+                                        cursor="hand2", padx=16, pady=4,
+                                        command=self._open_dedup)
+        self._mode_btn_dedup.pack(side="left", padx=(4,0))
         self._current_mode = "ai"
 
         # 页面容器（切换智能成片/AI 扫描）
@@ -1894,6 +1895,14 @@ class App:
 
     # ---- 关键词管理 ----
 
+    def _open_dedup(self):
+        """打开去重工具窗口"""
+        try:
+            from dedup_page import DedupApp
+            DedupApp(self.root)
+        except Exception as e:
+            self._log(f"去重工具打开失败: {e}", "err")
+
     def _open_keyword_manager(self):
         """打开关键词管理窗口"""
         import tkinter.ttk as ttk
@@ -1998,6 +2007,10 @@ class App:
             "情绪感染": "绝了,太漂亮,太好看,封神,美爆,爱了爱了,信我,不骗你,美哭,疯了吧,哇塞,好看死,绝美,无敌",
             "流行趋势": "法式,韩系,日系,ins风,极简,复古,国风,新中式,小众,轻奢,小香风,千金风,美拉德,多巴胺,静奢",
             "面料质感": "桑蚕丝,冰感,软糯,真丝,羊毛,羊绒,纯棉,雪纺,缎面,蕾丝,牛仔,针织,丝滑,像云朵,婴儿肌,裸感",
+            "尺寸长度": "裙长,到脚踝,露脚踝,遮小腿,小腿肚,膝盖,衣长,袖长,盖住,刚好,九分,七分,短款,中长款,拖地,比例,显腿长",
+            "工艺细节": "工艺,成本,做工,走线,细节,设计,拼接,剪裁,定型,压褶,花边,包边,锁边,双线,加固,五金,拉链,里衬",
+            "穿着体验": "舒适,不勒,自在,轻盈,无感,不紧绷,活动方便,不束缚,不扎人,不闷,不热,轻薄,凉爽,贴身,宽松,有余量",
+            "对比优势": "买不到,外面没有,不一样,区别,独特,独家,比外面,比市面,同价位,同品质,值这个价,划算,超值,源头",
         }
         saved_pref = kw_data.get("preference_keywords", {})
         lines4 = []
@@ -2015,6 +2028,19 @@ class App:
             lines4.append("")
         t4.insert("1.0", "\n".join(lines4))
         text_widgets["preference_keywords"] = t4
+
+
+        # === Tab 5: 自定义细节关键词 ===
+        tab5 = tk.Frame(nb, bg=C["card"])
+        nb.add(tab5, text=" 细节关键词 ")
+        tk.Label(tab5, text="你关心的卖点细节词，AI会优先选含这些词的片段。每行一个词。\n例如：裙长  到脚踝  遮小腿  工艺  成本  同价位  舒适",
+                 font=FNT_S, fg=C["dim"], bg=C["card"], justify="left").pack(anchor="w", padx=8, pady=(6, 2))
+        t5 = tk.Text(tab5, font=("Consolas", 10), fg=C["text"], bg=C["inp"],
+                     relief="flat", padx=6, pady=4, wrap="word", height=18)
+        t5.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        saved_detail = kw_data.get("detail_keywords", [])
+        t5.insert("1.0", "\n".join(saved_detail))
+        text_widgets["detail_keywords"] = t5
 
 
         # 底部按钮
@@ -2061,6 +2087,11 @@ class App:
                         if pname and kw:
                             pref_kw.setdefault(pname, []).append(kw)
             result["preference_keywords"] = pref_kw
+
+            # 解析细节关键词
+            if "detail_keywords" in text_widgets:
+                raw5 = text_widgets["detail_keywords"].get("1.0", "end").strip()
+                result["detail_keywords"] = [l.strip() for l in raw5.split("\n") if l.strip()]
 
             try:
                 with open(kw_path, "w", encoding="utf-8") as f:
