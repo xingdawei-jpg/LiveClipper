@@ -1,6 +1,6 @@
 {
-    "version":  "2026.5.29",
-    "latest_version":  "2026.5.29",
+    "version":  "2026.5.30",
+    "latest_version":  "2026.5.30",
     "files":  {
                   "ai_clipper.py":  "d705a5370ec6bfe5312555a44c6d5ec0b6f606481a1346a4b7f808828b30f533",
                   "asr_api.py":  "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
@@ -28,14 +28,14 @@
                   "stt.py":  "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
                   "tighten.py":  "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
                   "trim_long.py":  "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-                  "updater.py":  "9b8048e86656b1d6ef3de241eda2df8996de824ec1237ba1f37df0f35c35e6ac",
+                  "updater.py":  "07ae70b8ee94c9492947e32fd066bede7361ba701aefc7462e71104bff5a7e97",
                   "volcengine_asr.py":  "3beafc541d4b90c00bdf64f89b806d98415f079868b1093425dd0d2bc816046f",
                   "aliyun_asr.py":  "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
                   "aliyun_asr_v2.py":  "52ddb7b86af3c6984671cbb10889b624646a46bc86f949a85cbfbc630e1d694a"
               },
-    "release_notes":  "v2026.5.29: 紧急修复发布版增量更新失败、去重工具打包缺失、ffmpeg路径查找；火山引擎ASR异常日志输出具体原因，便于定位网络/SSL/DNS/权限问题。",
+    "release_notes":  "v2026.5.30: 以 OpenClaw 正确源码目录重新发布；修复增量更新写入位置、去重工具 ffmpeg/ffprobe 查找、打包遗漏 dedup_page/mix_page/aliyun_asr_v2，并让火山引擎 ASR 异常日志输出具体错误。",
     "update_url":  "https://github.com/xingdawei-jpg/LiveClipper/archive/refs/heads/main.zip",
-    "update_message":  "紧急热修：修复部分用户更新失败、去重工具打不开/找不到ffmpeg、打包遗漏dedup_page/mix_page等问题；火山引擎ASR异常会在日志里显示具体错误。",
+    "update_message":  "紧急热修：使用正确源码重新发布，修复部分用户更新失败、去重工具打不开/找不到 ffmpeg、打包遗漏模块；火山 ASR 异常会显示具体错误。",
     "force_update":  false,
-    "updated_at":  "2026-05-27 20:57:15"
+    "updated_at":  "2026-05-27 22:02:45"
 }
