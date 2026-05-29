@@ -6,6 +6,7 @@ LiveClipper 启动器
 """
 import os
 import sys
+import json
 
 try:
     import gui  # PyInstaller: 自动收集 gui 及其依赖
@@ -28,35 +29,63 @@ def _get_update_dir():
     return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper', 'app')
 
 
+def _version_key(version):
+    parts = []
+    for chunk in str(version or "").replace("-", ".").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts[:4] + [0] * (4 - len(parts)))
+
+
+def _read_app_version(app_dir):
+    try:
+        with open(os.path.join(app_dir, "version.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("version") or data.get("latest_version") or "0"
+    except Exception:
+        return "0"
+
+
+def _is_valid_app_dir(app_dir):
+    required = ("gui.py", "config.py", "schedule_page.py", "product_scan_page.py")
+    return (
+        os.path.isdir(app_dir)
+        and all(os.path.isfile(os.path.join(app_dir, name)) for name in required)
+    )
+
+
 def find_app_dir():
     """
-    定位 app/ 目录（优先级：持久更新 > exe同级 > 内嵌 > 临时）
+    定位 app/ 目录。
 
-    持久更新目录 %APPDATA%/LiveClipper/app/ 保证：
-    - onefile 和 onedir 模式都可用
-    - 重启不被 PyInstaller 覆盖
-    - 重装 EXE 也不丢失
+    老版本会把更新文件放在 %APPDATA%/LiveClipper/app/。如果那里残留了
+    不完整或更旧的文件，不能让它盖掉新安装包内置的完整 app。
     """
     base = _get_base_path()
     update_dir = _get_update_dir()
 
-    candidates = [
-        update_dir,                               # ① 持久更新目录（推荐，所有版本通用）
-        os.path.join(base, 'app'),                # ② exe 同级的持久目录
-        os.path.join(base, '_internal', 'app'),   # ③ PyInstaller 内嵌（onedir）
-    ]
+    candidates = []
+    if not getattr(sys, 'frozen', False):
+        candidates.append((base, 100))
+    candidates.extend([
+        (os.path.join(base, '_internal', 'app'), 90),  # PyInstaller onedir bundled app
+        (os.path.join(base, 'app'), 80),               # exe sibling app
+        (update_dir, 60),                              # legacy incremental update app
+    ])
 
-    for d in candidates:
-        d = os.path.normpath(d)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, 'gui.py')):
-            return d
+    # 最终尝试：从 _MEIPASS 查找（兼容旧 onefile 包）
+    if getattr(sys, 'frozen', False) and hasattr(sys, "_MEIPASS"):
+        candidates.append((os.path.join(sys._MEIPASS, 'app'), 70))
 
-    # ④ 最终尝试：从 _MEIPASS 查找（onefile 临时目录）
-    if getattr(sys, 'frozen', False):
-        d = os.path.join(sys._MEIPASS, 'app')
+    valid = []
+    for d, priority in candidates:
         d = os.path.normpath(d)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, 'gui.py')):
-            return d
+        if _is_valid_app_dir(d):
+            valid.append((_version_key(_read_app_version(d)), priority, d))
+
+    if valid:
+        valid.sort(reverse=True)
+        return valid[0][2]
 
     return None
 

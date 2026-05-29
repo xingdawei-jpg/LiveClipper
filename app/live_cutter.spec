@@ -120,7 +120,8 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
-    pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
+    pyz, a.scripts, [],
+    exclude_binaries=True,
     name='直播切片工具',
     debug=False, bootloader_ignore_signals=False,
     strip=False, upx=False, upx_exclude=[],

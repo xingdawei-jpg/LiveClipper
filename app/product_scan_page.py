@@ -42,6 +42,9 @@ class ProductScanPage(tk.Frame):
         bar.pack(fill="x", padx=16, pady=(2,6))
 
         tk.Label(bar, text="AI 扫描", font=FNT_B, fg=C["text"], bg=C["card"]).pack(side="left")
+        self._count_label = tk.Label(bar, text="已选 0 个视频", font=FNT_S,
+                                     fg=C["dim"], bg=C["card"])
+        self._count_label.pack(side="left", padx=(10, 0))
         tk.Button(bar, text="+ 添加视频", font=FNT_S, fg="white", bg=C["btn_sel"],
                   relief="flat", cursor="hand2", padx=10,
                   command=self._add_videos).pack(side="right")
@@ -329,6 +332,7 @@ class ProductScanPage(tk.Frame):
             if p not in self._video_list:
                 self._video_list.append(p)
                 self._video_listbox.insert("end", os.path.basename(p))
+        self._count_label.configure(text=f"已选 {len(self._video_list)} 个视频")
 
     def _del_selected(self):
         sel = self._video_listbox.curselection()
@@ -337,6 +341,7 @@ class ProductScanPage(tk.Frame):
         idx = sel[0]
         del self._video_list[idx]
         self._video_listbox.delete(idx)
+        self._count_label.configure(text=f"已选 {len(self._video_list)} 个视频")
 
     def _clear_all(self):
         self._video_list.clear()

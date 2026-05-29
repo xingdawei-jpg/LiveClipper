@@ -9,6 +9,8 @@ import threading
 # 颜色常量（与主界面保持一致）
 from config import C, FNT_S, FNT_B
 
+CARD_BORDER = C.get("card_border", C.get("inp", "#3A3A52"))
+
 
 class SchedulePage(tk.Frame):
     """单品扫描页面"""
@@ -27,7 +29,7 @@ class SchedulePage(tk.Frame):
 
     def _build_ui(self):
         bar = tk.Frame(self, bg=C["card"], padx=12, pady=10,
-                       highlightbackground=C["card_border"], highlightthickness=1)
+                       highlightbackground=CARD_BORDER, highlightthickness=1)
         bar.pack(fill="x", padx=16, pady=(2, 6))
         tk.Label(bar, text="单品扫描", font=FNT_B, fg=C["text"], bg=C["card"]).pack(side="left")
 
@@ -66,7 +68,7 @@ class SchedulePage(tk.Frame):
 
         # 商品预览列表
         list_frame = tk.Frame(self, bg=C["card"], padx=8, pady=6,
-                              highlightbackground=C["card_border"], highlightthickness=1)
+                              highlightbackground=CARD_BORDER, highlightthickness=1)
         list_frame.pack(fill="both", expand=True, padx=16, pady=(6, 4))
         tk.Label(list_frame, text="预览（读取 Excel 后显示）", font=FNT_S,
                  fg=C["dim"], bg=C["card"]).pack(anchor="w")
