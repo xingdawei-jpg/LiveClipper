@@ -35,7 +35,7 @@ import queue
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
 from cutter_logic import process_video, process_video_multi, process_video_mix
 from config import USER_DATA_DIR, SETTINGS_PATH
-from license_client import check_activation, activate_with_code, check_trial, consume_trial_use, deactivate_device
+from license_client import check_activation, check_activation_cached, activate_with_code, check_trial, deactivate_device
 # 样式
 from config import C, FNT_S, FNT_B
 
@@ -200,8 +200,21 @@ class App:
         # 启动时恢复AI和ASR启用状态
         self.root.after(100, self._restore_toggle_states)
         self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
+        self.root.after(10 * 60 * 1000, self._periodic_license_refresh)
         # 后台预加载 faster-whisper（避免首次点击卡顿数秒）
         threading.Thread(target=_preload_whisper, daemon=True).start()
+
+    def _periodic_license_refresh(self):
+        try:
+            import license_client as _lc
+            _lc.refresh_activation_cache_async()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(10 * 60 * 1000, self._periodic_license_refresh)
+            except Exception:
+                pass
 
     def _restore_toggle_states(self):
         """启动时恢复所有设置到UI（不触发自动保存）"""
@@ -289,8 +302,10 @@ class App:
                 self.subtitle_var.set(bool(s["subtitle_enabled"]))
             if "dedup_preset" in s:
                 _dp = s["dedup_preset"]
-                if _dp in ("off", "light", "medium", "heavy", "custom"):
+                if _dp in ("none", "off", "light", "medium", "heavy", "custom"):
                     self.dedup.set(_dp)
+            if "mirror_enabled" in s and hasattr(self, "mirror_var"):
+                self.mirror_var.set(bool(s["mirror_enabled"]))
             if "smart_crop_enabled" in s:
                 self.smart_crop_var.set(bool(s["smart_crop_enabled"]))
             if "crop_level" in s:
@@ -299,6 +314,8 @@ class App:
                     self.crop_level_var.set(_cl)
             if "ken_burns_enabled" in s:
                 self.ken_burns_var.set(bool(s["ken_burns_enabled"]))
+            if "hardware_encoder_enabled" in s and hasattr(self, "hardware_encoder_var"):
+                self.hardware_encoder_var.set(bool(s["hardware_encoder_enabled"]))
             if "pip_size" in s:
                 self.pip_size_var.set(f"{s['pip_size']}%")
             if "pip_opacity" in s:
@@ -316,6 +333,7 @@ class App:
             threading.Thread(target=lambda: (
                 setattr(self, '_cached_lic',
                     __import__('license_client', fromlist=['check_activation_cached']).check_activation_cached()),
+                __import__('license_client', fromlist=['refresh_activation_cache_async']).refresh_activation_cache_async(),
                 None
             ), daemon=True).start()
 
@@ -480,6 +498,14 @@ class App:
             rb.pack(side="left", padx=1)
             ToolTip(rb, DEDUP_TIPS[val])
 
+        self.mirror_var = tk.BooleanVar(value=bool(DEDUP_CONFIG.get("mirror", {}).get("enabled", True)))
+        _mirror_cb = tk.Checkbutton(opt, text="镜像", variable=self.mirror_var,
+                        font=FNT_S, fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                        activebackground=C["card"], cursor="hand2",
+                        command=lambda: self._save_ai_debounced() if getattr(self, "_init_done", False) else None)
+        _mirror_cb.pack(side="left", padx=(6, 1))
+        ToolTip(_mirror_cb, "关闭后，切割阶段和整体去重阶段都不会水平翻转画面。")
+
         # 画中画（与去重同行，| 分隔）
         # Smart Crop 智能裁切（独立于去重）
         tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
@@ -502,6 +528,16 @@ class App:
                         font=FNT_S, fg=C["btn_sel"], bg=C["card"], selectcolor=C["inp"],
                         activebackground=C["card"], cursor="hand2")
         _kb_cb.pack(side="left", padx=1)
+
+        tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
+        tk.Label(opt, text="加速:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
+        self.hardware_encoder_var = tk.BooleanVar(value=False)
+        _hw_cb = tk.Checkbutton(opt, text="硬件(实验)", variable=self.hardware_encoder_var,
+                        font=FNT_S, fg=C["warn"], bg=C["card"], selectcolor=C["inp"],
+                        activebackground=C["card"], cursor="hand2",
+                        command=lambda: self._save_ai_debounced() if getattr(self, "_init_done", False) else None)
+        _hw_cb.pack(side="left", padx=1)
+        ToolTip(_hw_cb, "默认关闭更稳定。仅在本机确认显卡驱动可用时开启；失败会自动改用 libx264。")
 
         tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
         tk.Label(opt, text="画中画:", font=FNT_S, fg=C["text"], bg=C["card"]).pack(side="left")
@@ -1001,7 +1037,9 @@ class App:
         r1.pack(fill="x", pady=2)
 
         # 镜像
-        self._dv_mirror = tk.BooleanVar(value=cfg.get("mirror", {}).get("enabled", True))
+        if not hasattr(self, "mirror_var"):
+            self.mirror_var = tk.BooleanVar(value=bool(cfg.get("mirror", {}).get("enabled", True)))
+        self._dv_mirror = self.mirror_var
         tk.Checkbutton(r1, text="镜像翻转", variable=self._dv_mirror, font=FNT_S,
                        fg=C["text"], bg=C["card"], selectcolor=C["inp"],
                        cursor="hand2").pack(side="left", padx=(0, 16))
@@ -1943,6 +1981,8 @@ class App:
                 _cfg.DEDUP_CONFIG["audio_pitch"]["enabled"] = d.get("audio_pitch", True)
                 _cfg.DEDUP_CONFIG["audio_reverb"]["enabled"] = d.get("audio_reverb", True)
                 _cfg.DEDUP_CONFIG["noise_fusion"]["enabled"] = d.get("noise_fusion", True)
+            if hasattr(self, "mirror_var"):
+                _cfg.DEDUP_CONFIG["mirror"]["enabled"] = self.mirror_var.get()
             self._log("已加载自定义去重配置")
         except Exception as e:
             self._log(f"加载自定义去重配置失败: {e}", "err")
@@ -1987,9 +2027,11 @@ class App:
             # --- 字幕 & 画面设置 ---
             "subtitle_enabled": self.subtitle_var.get() if hasattr(self, "subtitle_var") else True,
             "dedup_preset": self.dedup.get() if hasattr(self, "dedup") else "medium",
+            "mirror_enabled": self.mirror_var.get() if hasattr(self, "mirror_var") else True,
             "smart_crop_enabled": self.smart_crop_var.get() if hasattr(self, "smart_crop_var") else True,
             "crop_level": {"轻":"light","中":"medium","重":"heavy"}.get(self.crop_level_var.get() if hasattr(self, "crop_level_var") else "中", "medium"),
             "ken_burns_enabled": self.ken_burns_var.get() if hasattr(self, "ken_burns_var") else True,
+            "hardware_encoder_enabled": self.hardware_encoder_var.get() if hasattr(self, "hardware_encoder_var") else False,
             "pip_size": self.pip_size_var.get().replace("%","") if hasattr(self, "pip_size_var") else "15",
             "pip_opacity": self.pip_opacity_var.get().replace("%","") if hasattr(self, "pip_opacity_var") else "3",
             "pip_pos": self.pip_pos_var.get() if hasattr(self, "pip_pos_var") else "右下",
@@ -2331,6 +2373,15 @@ class App:
         if not self.videos:
             self._log("请先添加视频文件！", "err"); return
 
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("智能成片", self.root, self._log, refresh=False):
+                _show_activate_dialog(self.root)
+                return
+        except Exception as e:
+            self._log(f"授权检查异常: {e}", "err")
+            return
+
         self.btn.configure(text="■  停止", bg=C["btn_no"])
         self._set_bar(0)
 
@@ -2357,6 +2408,16 @@ class App:
                 # 立即检查取消（先于任何耗时操作）
                 if self._cancel_event and self._cancel_event.is_set():
                     self._log("__BATCH_CANCEL__")
+                    break
+                try:
+                    from license_guard import require_feature_access
+                    if not require_feature_access(
+                        "智能成片", None, self._log, show_dialog=False, refresh=False
+                    ):
+                        self._log("试用次数已用完，已停止本次批处理。", "warn")
+                        break
+                except Exception as e:
+                    self._log(f"授权检查异常: {e}", "err")
                     break
 
                 # 输出路径（加时间戳，不覆盖）
@@ -2388,6 +2449,7 @@ class App:
                         smart_crop_enabled=self.smart_crop_var.get() if hasattr(self, "smart_crop_var") else True,
                         crop_level={"轻":"light","中":"medium","重":"heavy"}.get(self.crop_level_var.get() if hasattr(self, "crop_level_var") else "中", "medium"),
                         ken_burns_enabled=self.ken_burns_var.get() if hasattr(self, "ken_burns_var") else True,
+                        mirror_enabled=self.mirror_var.get() if hasattr(self, "mirror_var") else True,
                         target_duration=int(self.duration_var.get().replace("s","")) if hasattr(self, "duration_var") else 60,
                         log_fn=lambda msg, _idx=idx, _total=total: self._batch_log(msg, _idx, _total)
                     )
@@ -2412,14 +2474,8 @@ class App:
                 # 试用模式下，切割成功后扣减一次
                 if ok:
                     try:
-                        from license_client import check_activation_cached, consume_trial_use
-                        status = check_activation_cached()
-                        if status.get("trial"):
-                            left = consume_trial_use()
-                            if left >= 0:
-                                self._log(f"试用剩余 {left} 次")
-                            else:
-                                self._log("⚠ 试用次数已用完，请激活继续使用")
+                        from license_guard import consume_trial_after_success
+                        consume_trial_after_success("智能成片", root=None, log_fn=self._log)
                     except Exception:
                         pass
 
@@ -2475,13 +2531,6 @@ class App:
 
 def _show_activation_check(root, app=None):
     """检查激活状态/试用状态（后台线程，不阻塞启动）"""
-    # 验证前禁用开始按钮
-    if app and hasattr(app, 'btn'):
-        try:
-            app.btn.configure(state="disabled", text="验证授权中...")
-        except Exception:
-            pass
-
     def _do_check():
         try:
             import license_client as _lc
@@ -2496,7 +2545,7 @@ def _show_activation_check(root, app=None):
     def _restore_btn():
         if app and hasattr(app, 'btn'):
             try:
-                app.btn.configure(state="normal", text="\u25b6  \u5f00\u59cb\u5207\u5272")
+                app.btn.configure(state="normal")
             except Exception:
                 pass
 
@@ -2523,11 +2572,11 @@ def _show_activation_check(root, app=None):
 def _show_trial_dialog(root, uses_left, force=False):
     """试用剩余次数提醒"""
     if force:
-        msg = f"试用次数已用完，请激活以继续使用全部功能。"
-        btn_text = "立即激活"
+        messagebox.showwarning("试用已用完", "试用次数已用完，请激活以继续使用全部功能。")
+        _show_activate_dialog(root)
+        return
     else:
         msg = f"免费试用还剩 {uses_left} 次，激活后可无限制使用。"
-        btn_text = "现在激活"
 
     result = messagebox.askyesno("试用提醒", msg)
     if result:
@@ -2583,6 +2632,12 @@ def _show_activate_dialog(root):
         result = activate_with_code(code)
         if result["ok"]:
             info = result["info"]
+            try:
+                import license_client as _lc
+                _lc._set_activation_cache(_lc._check_activation_local_fast())
+                _lc.refresh_activation_cache_async()
+            except Exception:
+                pass
             dlg.destroy()  # 立即关闭弹窗，无需等待
         else:
             msg_label.config(text=result.get("msg", "激活失败"), fg="#E74C3C")
@@ -2605,17 +2660,14 @@ def _show_activate_dialog(root):
         root.quit()
         root.destroy()
 
-    # 始终显示试用按钮（新用户首次启动也会看到）
     trial = check_trial()
-    # 无论是否在试用期，都显示试用按钮（首次启动时check_trial会自动初始化试用）
-    trial_label = ""
     if trial.get("in_trial") and trial.get("uses_left", 0) > 0:
         trial_label = f"（剩余{trial['uses_left']}次）"
-    tk.Button(
-        btn_frame, text=f"试用{trial_label}", width=12,
-        command=skip_trial,
-        font=("Microsoft YaHei UI", 10)
-    ).pack(side="left", padx=5)
+        tk.Button(
+            btn_frame, text=f"试用{trial_label}", width=12,
+            command=skip_trial,
+            font=("Microsoft YaHei UI", 10)
+        ).pack(side="left", padx=5)
 
     tk.Button(
         btn_frame, text="退出", width=10,

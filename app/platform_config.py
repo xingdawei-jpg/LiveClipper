@@ -79,18 +79,68 @@ FFPROBE_CMD = os.path.join(FFMPEG_DIR, "ffprobe" + (".exe" if IS_WIN else "")) i
 # 硬件编码检测
 # ============================================================
 HARDWARE_ENCODER = None
-if FFMPEG_CMD:
+
+def _hardware_encoder_enabled_from_settings():
+    try:
+        import json
+        settings_path = os.path.join(
+            os.environ.get("APPDATA", os.path.expanduser("~")),
+            "LiveClipper",
+            "ai_settings.json",
+        )
+        if os.path.exists(settings_path):
+            with open(settings_path, "r", encoding="utf-8-sig") as f:
+                return bool(json.load(f).get("hardware_encoder_enabled", False))
+    except Exception:
+        pass
+    return False
+
+
+ENABLE_HARDWARE_ENCODER = (
+    os.environ.get("LIVECLIPPER_ENABLE_HWENC", "").strip().lower() in ("1", "true", "yes", "on")
+    or _hardware_encoder_enabled_from_settings()
+)
+if FFMPEG_CMD and ENABLE_HARDWARE_ENCODER:
     import subprocess
+
+    def _hw_creationflags():
+        return subprocess.CREATE_NO_WINDOW if IS_WIN else 0
+
+    def _hw_encoder_args(encoder):
+        if encoder == "h264_qsv":
+            return ["-vf", "format=nv12", "-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "22"]
+        if encoder == "h264_amf":
+            return ["-c:v", "h264_amf", "-quality", "speed", "-qp", "22"]
+        if encoder == "h264_nvenc":
+            return ["-c:v", "h264_nvenc", "-preset", "p1", "-qp", "22"]
+        return []
+
+    def _can_run_hw_encoder(encoder):
+        """FFmpeg lists many encoders that are compiled in but unusable on this PC."""
+        try:
+            cmd = [
+                FFMPEG_CMD, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=544x960:rate=30",
+                "-frames:v", "1",
+            ]
+            cmd += _hw_encoder_args(encoder)
+            cmd += ["-f", "null", "-"]
+            ret = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=4, creationflags=_hw_creationflags()
+            )
+            return ret.returncode == 0
+        except Exception:
+            return False
+
     try:
         ret = subprocess.run([FFMPEG_CMD, "-encoders"], capture_output=True, text=True, timeout=5,
-                             creationflags=subprocess.CREATE_NO_WINDOW if IS_WIN else 0)
+                             creationflags=_hw_creationflags())
         encoders = ret.stdout + ret.stderr
-        if "h264_qsv" in encoders:
-            HARDWARE_ENCODER = "h264_qsv"  # Intel Quick Sync
-        elif "h264_amf" in encoders:
-            HARDWARE_ENCODER = "h264_amf"  # AMD
-        elif "h264_nvenc" in encoders:
-            HARDWARE_ENCODER = "h264_nvenc"  # NVIDIA
+        for _encoder in ("h264_nvenc", "h264_amf", "h264_qsv"):
+            if _encoder in encoders and _can_run_hw_encoder(_encoder):
+                HARDWARE_ENCODER = _encoder
+                break
     except Exception:
         pass
 

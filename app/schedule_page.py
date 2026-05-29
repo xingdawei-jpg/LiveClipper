@@ -1,4 +1,4 @@
-"""
+﻿"""
 单品扫描页面 — 读取 Excel 时间表，按时间戳切割视频合并同品
 """
 import os
@@ -131,7 +131,17 @@ class SchedulePage(tk.Frame):
             for p in paths:
                 if p not in self._video_list:
                     self._video_list.append(p)
-                    self._video_listbox.insert("end", os.path.basename(p))
+            self._sort_and_refresh_videos()
+
+    def _sort_and_refresh_videos(self):
+        try:
+            from schedule_splitter import sort_videos_by_start
+            self._video_list = sort_videos_by_start(self._video_list)
+        except Exception:
+            pass
+        self._video_listbox.delete(0, "end")
+        for p in self._video_list:
+            self._video_listbox.insert("end", os.path.basename(p))
 
     def _clear_videos(self):
         self._video_list = []
@@ -178,6 +188,14 @@ class SchedulePage(tk.Frame):
         if not self._output_dir:
             self._log("请先选择导出目录")
             return
+        self._sort_and_refresh_videos()
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("单品扫描", self.winfo_toplevel(), self._log, refresh=False):
+                return
+        except Exception as e:
+            self._log("授权检查异常: " + str(e))
+            return
         self._start_btn.configure(state="disabled", text="分割中...")
 
         def worker():
@@ -188,6 +206,14 @@ class SchedulePage(tk.Frame):
                     ffmpeg = fc
             except:
                 pass
+            try:
+                from schedule_splitter import read_excel
+                fresh_schedule, fresh_live_start = read_excel(self._excel_path)
+                if fresh_schedule:
+                    self._schedule = fresh_schedule
+                    self._live_start = fresh_live_start
+            except Exception as e:
+                self._log("重新读取时间表失败: " + str(e))
             from schedule_splitter import align_schedule_to_video
             align_schedule_to_video(self._schedule, self._video_list, self._live_start, log_fn=lambda m: self._log(m), ffmpeg_cmd=ffmpeg)
             from schedule_splitter import group_by_product
@@ -208,8 +234,16 @@ class SchedulePage(tk.Frame):
                 results = extract_by_schedule(
                     self._groups, self._video_list, self._output_dir,
                     ffmpeg=ffmpeg, log_fn=lambda m: self._log(m))
+                if isinstance(results, tuple):
+                    results = results[0]
                 ok = len([r for r in results if r.get("output_path")])
                 self._log(f"完成: {ok}/{len(self._groups)} 个商品导出成功")
+                if ok:
+                    try:
+                        from license_guard import consume_trial_after_success
+                        consume_trial_after_success("单品扫描", units=ok, root=None, log_fn=self._log)
+                    except Exception:
+                        pass
             except Exception as e:
                 self._log(f"分割异常: {e}")
             finally:

@@ -12,6 +12,24 @@ from typing import Optional, List
 
 
 
+def _parse_datetime_from_name(path):
+    m = re.search(r"(\d{14})", os.path.basename(str(path)))
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+    except Exception:
+        return None
+
+
+def sort_videos_by_start(video_list):
+    """Sort videos by timestamp in filename when every selected file has one."""
+    items = [(v, _parse_datetime_from_name(v)) for v in video_list]
+    if items and all(dt is not None for _, dt in items):
+        return [v for v, _ in sorted(items, key=lambda x: x[1])]
+    return list(video_list)
+
+
 
 
 def read_excel(filepath: str, log_fn=None):
@@ -43,11 +61,14 @@ def read_excel(filepath: str, log_fn=None):
     results = []
 
     if is_new_format:
+        live_start = _parse_datetime_from_name(filepath)
+        if live_start and log_fn:
+            log_fn("从文件名识别直播开始时间: %s" % live_start.strftime("%Y-%m-%d %H:%M:%S"))
         # 自动匹配: 商品名称在第0列或第1列, 讲解时段从含"讲解"的列开始
         # 确定商品名称列和讲解时段列
         _name_col = 0
         _time_start = 4
-        if len(header) > 1 and header[1] and "商品标题" in str(header[1]) or "商品名称" in str(header[1]):
+        if len(header) > 1 and header[1] and ("商品标题" in str(header[1]) or "商品名称" in str(header[1])):
             _name_col = 1
             _time_start = 6
         for row in rows[1:]:
@@ -222,7 +243,7 @@ def group_by_product(schedule: List[dict]) -> List[dict]:
 
 
 
-_video_durations_cache = []
+_video_durations_cache = {}
 
 def _parse_video_time(filename):
 
@@ -324,9 +345,17 @@ def _probe_durations(video_list, log_fn=None, ffmpeg_cmd=None):
 
     global _video_durations_cache
 
-    if _video_durations_cache:
+    cache_key = []
+    for v in video_list:
+        try:
+            cache_key.append((os.path.abspath(v), os.path.getmtime(v), os.path.getsize(v)))
+        except Exception:
+            cache_key.append((os.path.abspath(v), 0, 0))
+    cache_key = tuple(cache_key)
 
-        return _video_durations_cache
+    if cache_key in _video_durations_cache:
+
+        return list(_video_durations_cache[cache_key])
 
     durations = []
 
@@ -352,7 +381,7 @@ def _probe_durations(video_list, log_fn=None, ffmpeg_cmd=None):
 
             durations.append(0)
 
-    _video_durations_cache = durations
+    _video_durations_cache[cache_key] = list(durations)
 
     return durations
 
@@ -395,36 +424,27 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
     import os, subprocess, shutil, tempfile
 
     results = []
-    live_start = None
 
-    # 计算视频时长
-    durations = []
-    for v in video_list:
-        try:
-            r = subprocess.run([ffmpeg, "-i", v, "-f", "null", "-"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30,
-                creationflags=0x8000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0)
-            for ln in r.stderr.decode().split("\n"):
-                if "Duration:" in ln:
-                    import re
-                    m = re.search(r"(\d+):(\d+):(\d+)\.(\d+)", ln)
-                    if m:
-                        dur = int(m.group(1))*3600 + int(m.group(2))*60 + int(m.group(3)) + int(m.group(4))/100
-                        durations.append(dur)
-                        break
-        except:
-            pass
-    if not durations:
+    video_list = sort_videos_by_start(video_list)
+
+    # 计算视频时长和时间线；有时间戳文件名时按文件名时间定位，否则按选择顺序连续拼接定位。
+    durations = _probe_durations(video_list, log_fn=log_fn, ffmpeg_cmd=ffmpeg)
+    if not durations or len(durations) != len(video_list):
         durations = [99999] * len(video_list)
+    starts = _get_video_timeline(video_list, durations)
+    timeline = []
+    for i, v in enumerate(video_list):
+        dur = durations[i] if i < len(durations) else 0
+        timeline.append((v, starts[i], starts[i] + dur))
 
-    def _find_video_for_time(vl, offset, durs):
-        cum = 0
-        for i, v in enumerate(vl):
-            d = durs[i] if i < len(durs) else 99999
-            if cum <= offset < cum + d:
-                return v, offset - cum
-            cum += d
-        return (vl[-1], offset - (sum(durs[:-1]) if len(durs) > 1 else 0)) if vl else (None, 0)
+    def _split_across_videos(start, end):
+        parts = []
+        for video, vs, ve in timeline:
+            cut_start = max(start, vs)
+            cut_end = min(end, ve)
+            if cut_end - cut_start >= 0.5:
+                parts.append((video, cut_start - vs, cut_end - cut_start, cut_start, cut_end))
+        return parts
 
     for g in groups:
         name = g.get("name", "")
@@ -439,27 +459,31 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
             dur = et - st
             if dur < 10:
                 continue
-            video, rel_st = _find_video_for_time(video_list, st, durations)
-            if not video:
-                if log_fn: log_fn("  \u672a\u627e\u5230\u89c6\u9891")
+            parts = _split_across_videos(st, et)
+            if not parts:
+                if log_fn:
+                    log_fn("  未找到覆盖时段 %.0fs-%.0fs 的视频" % (st, et))
                 continue
-            out_path = os.path.join(out_dir, "%s_%d.mp4" % (safe_name[:30], si + 1))
-            try:
-                # \u5feb\u5207 -c copy
-                r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
-                    "-t", str(float(dur)), "-c", "copy", out_path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300, creationflags=0x8000000)
-                if r.returncode != 0 or not (os.path.exists(out_path) and os.path.getsize(out_path) > 1000):
-                    # \u5feb\u5207\u5931\u8d25\uff0c\u91cd\u7f16\u7801
+
+            for part_idx, (video, rel_st, part_dur, _, _) in enumerate(parts):
+                suffix = "%d" % (si + 1) if len(parts) == 1 else "%d_%d" % (si + 1, part_idx + 1)
+                out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_name[:30], suffix))
+                try:
+                    # 快切 -c copy
                     r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
-                        "-t", str(float(dur)), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out_path],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600, creationflags=0x8000000)
-                if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
-                    mb = os.path.getsize(out_path) / 1024 / 1024
-                    results.append({"name": name, "output_path": out_path, "size_mb": round(mb, 1)})
-                    exported += 1
-            except Exception as _ee:
-                if log_fn: log_fn("  \u5207\u5272\u5931\u8d25: " + str(_ee)[:60])
+                        "-t", str(float(part_dur)), "-c", "copy", out_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300, creationflags=0x8000000)
+                    if r.returncode != 0 or not (os.path.exists(out_path) and os.path.getsize(out_path) > 1000):
+                        # 快切失败，重编码
+                        r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
+                            "-t", str(float(part_dur)), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out_path],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600, creationflags=0x8000000)
+                    if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                        mb = os.path.getsize(out_path) / 1024 / 1024
+                        results.append({"name": name, "output_path": out_path, "size_mb": round(mb, 1)})
+                        exported += 1
+                except Exception as _ee:
+                    if log_fn: log_fn("  切割失败: " + str(_ee)[:60])
         if exported and log_fn:
             log_fn("  %s: %d\u6bb5" % (name, exported))
 
@@ -474,12 +498,17 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
             except: pass
     except:
         pass
-    return results, live_start
+    return results
 def align_schedule_to_video(schedule, video_list, live_start, log_fn=None, ffmpeg_cmd=None):
     """Align schedule to each video's filename timestamp."""
     import re as _re2
 
     if not schedule or not video_list or live_start is None:
+        return schedule
+
+    align_key = "|".join(os.path.basename(str(v)) for v in video_list) + "|" + live_start.strftime("%Y-%m-%d %H:%M:%S")
+    if schedule and all(item.get("_aligned_key") == align_key for item in schedule):
+        if log_fn: log_fn("[align] schedule already aligned, skip")
         return schedule
 
     excel_sec = live_start.hour * 3600 + live_start.minute * 60 + live_start.second
@@ -495,6 +524,23 @@ def align_schedule_to_video(schedule, video_list, live_start, log_fn=None, ffmpe
     if log_fn:
         for i, d in enumerate(durations):
             log_fn("[align]   video %d: %.0f min" % (i+1, d/60))
+
+    total_duration = sum(d for d in durations if d and d > 0)
+    try:
+        min_start = min(float(item.get("start_offset", 0)) for item in schedule)
+        max_end = max(float(item.get("end_offset", 0)) for item in schedule)
+    except Exception:
+        min_start, max_end = 0, 0
+    if total_duration > 0 and min_start >= -300 and max_end <= total_duration + 300:
+        if log_fn:
+            log_fn("[align] schedule already matches selected video timeline, no adjustment")
+        return schedule
+
+    has_any_video_ts = any(_parse_video_time(v) is not None for v in video_list)
+    if not has_any_video_ts:
+        if log_fn:
+            log_fn("[align] video filenames have no precise start timestamp, keep schedule offsets")
+        return schedule
 
     # Build per-video info: (start_abs, end_abs, delta)
     # start_abs = video filename timestamp (seconds from midnight)
@@ -526,17 +572,18 @@ def align_schedule_to_video(schedule, video_list, live_start, log_fn=None, ffmpe
             base_note = " (base +%ds)" % (d - timeline[0][2]) if abs(d - timeline[0][2]) >= 1 else ""
             log_fn("[align]   video %d: %s~%s  [%s]%s" % (i+1, hms_s, hms_e, vn[:30], base_note))
 
-        # Use first video delta globally (keeps timeline consistent)
-        delta = timeline[0][2] if timeline else 0
-        if abs(delta) < 1:
-            if log_fn: log_fn("[align] videos match excel, no adjustment")
-            return schedule
-        for item in schedule:
-            item["start_offset"] -= delta
-            item["end_offset"] -= delta
-        if log_fn:
-            log_fn("[align] global skew %+ds, adjusted %d items" % (delta, len(schedule)))
+    # Use first video delta globally (keeps timeline consistent)
+    delta = timeline[0][2] if timeline else 0
+    if abs(delta) < 1:
+        if log_fn: log_fn("[align] videos match excel, no adjustment")
         return schedule
+    for item in schedule:
+        item["start_offset"] -= delta
+        item["end_offset"] -= delta
+        item["_aligned_key"] = align_key
+    if log_fn:
+        log_fn("[align] global skew %+ds, adjusted %d items" % (delta, len(schedule)))
+    return schedule
 
 def _parse_datetime(s):
     if s is None:

@@ -280,7 +280,10 @@ def _extract_frame_ffmpeg(ffmpeg_cmd, video_path, timestamp, log_fn=None):
         else:
             if log_fn:
                 _err = proc.stderr.decode("utf-8", errors="ignore")[-150:] if proc.stderr else ""
-                log_fn("SmartCrop: FFmpeg\u63d0\u5e27\u5931\u8d25 rc=%d %s" % (proc.returncode, _err.replace("\n", " ")))
+                if proc.returncode == 0:
+                    log_fn("SmartCrop: 该时间点未提取到画面，可能是片段时间超出源视频或来源映射错误 (%ss)" % ("%.2f" % timestamp))
+                else:
+                    log_fn("SmartCrop: FFmpeg\u63d0\u5e27\u5931\u8d25 rc=%d %s" % (proc.returncode, _err.replace("\n", " ")))
     except Exception as _e:
         if log_fn:
             log_fn("SmartCrop: FFmpeg\u63d0\u53d6\u5e27\u5f02\u5e38: " + str(_e))

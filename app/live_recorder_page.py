@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 
 # -*- coding: utf-8 -*-
 
@@ -1270,6 +1270,20 @@ class LiveRecorderPage(tk.Frame):
 
             return
 
+        try:
+
+            from license_guard import require_feature_access
+
+            if not require_feature_access("直播录制", self.winfo_toplevel(), self._log, refresh=False):
+
+                return
+
+        except Exception as e:
+
+            self._log("授权检查异常: " + str(e), "err")
+
+            return
+
         self._start_monitor_bg()
 
         if hasattr(self, "_monitor_btn"):
@@ -1542,6 +1556,30 @@ class LiveRecorderPage(tk.Frame):
 
         try:
 
+            from license_guard import require_feature_access
+
+            if not require_feature_access("直播录制", self.winfo_toplevel(), self._log, refresh=False):
+
+                task["status"] = "idle"
+
+                self._refresh_task_list()
+
+                return
+
+        except Exception as e:
+
+            task["status"] = "error"
+
+            task["error_msg"] = str(e)
+
+            self._log("授权检查异常: " + str(e), "err")
+
+            self._refresh_task_list()
+
+            return
+
+        try:
+
             from config import FFMPEG_PATH
 
             ffmpeg = FFMPEG_PATH or "ffmpeg"
@@ -1728,6 +1766,16 @@ class LiveRecorderPage(tk.Frame):
             sz = os.path.getsize(fpath)
 
             self._log("录制完成: " + os.path.basename(fpath) + " ({:.1f}MB)".format(sz/1024/1024), "ok")
+
+            try:
+
+                from license_guard import consume_trial_after_success
+
+                consume_trial_after_success("直播录制", root=None, log_fn=self._log)
+
+            except Exception:
+
+                pass
 
         self._refresh_task_list()
 

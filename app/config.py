@@ -414,7 +414,7 @@ _LIGHT = {
 }
 
 # 根据系统主题选择配色
-C = _DARK if _is_dark_mode() else _LIGHT
+C = _DARK
 
 # 字体
 FNT_S = ("Microsoft YaHei", 10)

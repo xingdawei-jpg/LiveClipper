@@ -1,8 +1,59 @@
-﻿__pycache__/
-*.pyc
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# Build and release outputs
+build/
+dist/
+release_build/
+release_dist/
+release_artifacts/
+*.spec.bak
+*.zip
+*.exe
+releases/**/*.zip
+
+# Runtime state, user settings, and secrets
 .installed_version
 ai_settings.json
-*.egg-info/
-dist/
-build/
-/app
+generated_codes.json
+tasks.json
+logs/
+*.log
+
+# App-local generated/runtime files
+app/__pycache__/
+app/build/
+app/dist/
+app/logs/
+app/.installed_version
+app/.guide_done
+app/ai_settings.json
+app/generated_codes.json
+app/tasks.json
+app/ffmpeg/*.exe
+app/haarcascade_*.xml
+
+# Backups and scratch scripts kept out of the clean source tree
+*.bak
+*.bak*
+*_BACKUP.py
+app/gui_clean.py
+app/gui_fresh.py
+app/gui_tmp.py
+app/cutter_logic_corrupted.py.bak
+app/cutter_logic.py.bak*
+app/schedule_splitter.py.bak
+app/live_recorder_page_BACKUP.py
+app/_*.py
+app/clip_tuple_check.py
+
+# Do not publish local licensing/server tooling or third-party webhook secrets
+license_generator.py
+updater.py
+version.json
+app/license_generator.py
+app/license_server.py
+app/feishu_scheduler.py

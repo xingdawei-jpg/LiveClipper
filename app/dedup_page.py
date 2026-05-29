@@ -1,4 +1,4 @@
-"""
+﻿"""
 独立去重工具 - 手剪视频去重页面
 用户自由选择去重参数：镜像/裁切/变速/模糊/锐化/色相/噪点/画中画/音频等
 """
@@ -387,6 +387,14 @@ class DedupApp:
             messagebox.showerror("提示", "请选择源视频", parent=self.win)
             return
 
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("去重工具", self.win, self._log, refresh=False):
+                return
+        except Exception as e:
+            self._log("授权检查异常: " + str(e))
+            return
+
         self._start_btn.config(text="■ 停止", bg=C["btn_no"])
         self._cancel_event = threading.Event()
         self._worker = threading.Thread(target=self._run_dedup, daemon=True)
@@ -604,6 +612,11 @@ class DedupApp:
 
             if proc.returncode == 0:
                 self._log(f"✅ 去重完成: {os.path.getsize(output_path)//1024//1024}MB")
+                try:
+                    from license_guard import consume_trial_after_success
+                    consume_trial_after_success("去重工具", root=None, log_fn=self._log)
+                except Exception:
+                    pass
                 # 自动打开输出目录
                 if out_dir and os.path.exists(out_dir):
                     os.startfile(out_dir)

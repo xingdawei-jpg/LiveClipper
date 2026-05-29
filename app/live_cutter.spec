@@ -23,6 +23,7 @@ def _module_file(module_name, *parts):
 ffmpeg_dir = os.path.join(SPECPATH, 'ffmpeg')
 cv2_data_dir = _module_file('cv2', 'data')
 fw_assets_dir = _module_file('faster_whisper', 'assets')
+certifi_pem = _module_file('certifi', 'cacert.pem')
 
 a = Analysis(
     [os.path.join(SPECPATH, 'launcher.py')],
@@ -39,6 +40,7 @@ a = Analysis(
         ('stt.py', 'app'),
         ('ai_clipper.py', 'app'),
         ('license_client.py', 'app'),
+        ('license_guard.py', 'app'),
         ('updater.py', 'app'),
         ('version.json', 'app'),
         ('keywords.json', 'app'),
@@ -75,9 +77,11 @@ a = Analysis(
         (os.path.join(cv2_data_dir, 'haarcascade_fullbody.xml') if cv2_data_dir else '', '.'),
         # Silero VAD
         (os.path.join(fw_assets_dir, 'silero_vad_v6.onnx') if fw_assets_dir else '', 'faster_whisper/assets'),
+        # HTTPS certificate bundle used by requests/tos in frozen builds
+        (certifi_pem if certifi_pem else '', 'certifi'),
     ]),
     hiddenimports=[
-        'gui', 'dedup_page', 'mix_page', 'product_scanner', 'product_scan_window',
+        'gui', 'license_guard', 'dedup_page', 'mix_page', 'product_scanner', 'product_scan_window',
         'product_scan_page', 'live_recorder_page', 'schedule_page', 'douyin_stream',
         'socketserver', 'mimetypes', 'calendar', 'fnmatch', 'nturl2path',
         'urllib', 'urllib.parse', 'urllib.error', 'urllib.request',
@@ -88,7 +92,7 @@ a = Analysis(
         'email.mime.application', 'cgi', 'html',
         'PIL._tkinter_finder',
         'cv2', 'numpy', 'ctranslate2', 'tokenizers', 'faster_whisper',
-        'av', 'tos', 'fsspec', 'packaging', 'anyio', 'httpx', 'httpcore', 'schedule_splitter', 'openpyxl',
+        'av', 'av.descriptor', 'tos', 'fsspec', 'packaging', 'anyio', 'httpx', 'httpcore', 'schedule_splitter', 'openpyxl',
         'h11', 'sniffio', 'certifi', 'urllib3', 'charset_normalizer',
         'idna', 'cryptography', 'pytz', 'tqdm', 'rich', 'pygments',
         'click', 'requests', 'yaml',

@@ -573,19 +573,107 @@ _VERIFY_API_URL = "https://livecli-unified-xfsribggth.cn-hangzhou.fcapp.run"  #�
 # ========== Activation result cache (avoid blocking main thread) ==========
 _last_activation_result = None
 _last_activation_time = 0.0
-_ACTIVATION_CACHE_TTL = 30.0  # seconds
+_activation_refreshing = False
+_ACTIVATION_CACHE_TTL = 600.0  # seconds
 
 
-def check_activation_cached():
-    """Return cached check_activation() result if fresh (<30s), else call synchronously.
-    Used by GUI to avoid blocking on repeated checks."""
+def _check_activation_local_fast():
+    """Local-only activation/trial check for UI gates; never touches the network."""
+    try:
+        if _check_revoked_marker():
+            return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
+
+        cache = _load_cache() or {}
+        code = cache.get("code") or _load_license_code()
+        if code:
+            result = validate_code(code)
+            if result.get("ok"):
+                cached_mid = cache.get("machine_id", "")
+                current_mid = _get_machine_id()
+                if cached_mid and cached_mid != current_mid:
+                    return {"need_activate": True, "reason": "设备已更换，请重新激活"}
+
+                _, hex_expire = _parse_code_dates(code)
+                if hex_expire:
+                    expires_at = hex_expire // 1000
+                else:
+                    expires_at = cache.get("expires_at", 0)
+                    if not expires_at:
+                        activated_at = cache.get("activated_at", int(time.time()))
+                        plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+                        expires_at = activated_at + plan_days * 86400
+
+                now = int(time.time())
+                if expires_at and now > expires_at and result.get("plan_hex") != "04":
+                    expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
+                    _write_revoked_marker()
+                    return {"need_activate": True, "reason": f"激活码已于 {expires_date} 过期，请续费"}
+
+                days_left = max(0, (expires_at - now) // 86400) if expires_at else 0
+                expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d") if expires_at else ""
+                return {
+                    "activated": True,
+                    "plan_name": result.get("plan_name", cache.get("plan_name", "")),
+                    "days_left": days_left,
+                    "expires_date": expires_date,
+                    "local_only": True,
+                }
+
+        if cache.get("previously_activated"):
+            return {"need_activate": True, "reason": "设备曾激活，请重新输入激活码"}
+
+        trial = check_trial()
+        if trial.get("in_trial"):
+            return {"trial": True, "uses_left": trial.get("uses_left", 0), "local_only": True}
+
+        if not _get_trial_info():
+            _start_trial()
+            return {"trial": True, "uses_left": TRIAL_USES, "local_only": True}
+
+        return {"need_activate": True, "reason": "试用次数已用完，请激活后继续使用。"}
+    except Exception as exc:
+        return {"need_activate": True, "reason": "本地授权检查异常：" + str(exc)}
+
+
+def refresh_activation_cache_async():
+    """Refresh activation against the server in the background."""
+    global _activation_refreshing
+    if _activation_refreshing:
+        return False
+    _activation_refreshing = True
+
+    def _worker():
+        global _activation_refreshing
+        try:
+            _set_activation_cache(check_activation())
+        finally:
+            _activation_refreshing = False
+
+    try:
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+    except Exception:
+        _activation_refreshing = False
+        return False
+
+
+def check_activation_cached(allow_stale=True, refresh_async=True):
+    """Return activation state without blocking the UI; refresh online in background."""
     global _last_activation_result, _last_activation_time
     import time as _t
     if _last_activation_result is not None and (_t.time() - _last_activation_time) < _ACTIVATION_CACHE_TTL:
         return _last_activation_result
-    result = check_activation()
-    _last_activation_result = result
-    _last_activation_time = _t.time()
+
+    if _last_activation_result is not None and allow_stale:
+        if refresh_async:
+            refresh_activation_cache_async()
+        return _last_activation_result
+
+    result = _check_activation_local_fast()
+    _set_activation_cache(result)
+    if refresh_async:
+        refresh_activation_cache_async()
     return result
 
 
@@ -766,10 +854,21 @@ def consume_trial_use():
         return -1
     uses_left = trial.get("trial_uses_left", 0)
     if uses_left <= 0:
+        try:
+            _set_activation_cache({"need_activate": True, "reason": "试用次数已用完，请激活后继续使用。"})
+        except Exception:
+            pass
         return -1
     uses_left -= 1
     trial["trial_uses_left"] = uses_left
     _save_cache(trial)
+    try:
+        if uses_left > 0:
+            _set_activation_cache({"trial": True, "uses_left": uses_left})
+        else:
+            _set_activation_cache({"need_activate": True, "reason": "试用次数已用完，请激活后继续使用。"})
+    except Exception:
+        pass
     return uses_left
 
 

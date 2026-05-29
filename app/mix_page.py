@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """混剪成片 - 独立页面，布局和智能成片一致"""
 
-import os, time, threading, tkinter as tk
+import os, time, threading, json, tkinter as tk
 from tkinter import filedialog, ttk
 from cutter_logic import process_video_mix
+from config import DEDUP_CONFIG, SETTINGS_PATH
 
 C = {
     "bg": "#1A1A2E", "card": "#25253A", "inp": "#2C2C3A", "text": "#E5E5EA",
@@ -31,6 +32,7 @@ class MixPage(tk.Frame):
         self.ai_focus_var = tk.StringVar(value="自动")
         self.duration_var = tk.StringVar(value="60s")
         self.dedup = tk.StringVar(value="medium")
+        self.mirror_var = tk.BooleanVar(value=bool(DEDUP_CONFIG.get("mirror", {}).get("enabled", True)))
         self.smart_crop_var = tk.BooleanVar(value=True)
         self.crop_level_var = tk.StringVar(value="中")
         self.ken_burns_var = tk.BooleanVar(value=True)
@@ -118,14 +120,18 @@ class MixPage(tk.Frame):
         # 去重
         tk.Label(opt, text="去重:", font=FNT_B, fg=C["text"],
                  bg=C["card"]).pack(side="left")
-        for val, txt in [("none","不去重"),("light","轻微"),("medium","中度"),("heavy","重度")]:
+        for val, txt in [("none","不去重"),("light","轻微"),("medium","中度"),("heavy","重度"),("custom","自定义")]:
             fg = DEDUP_CLR[val]
             rb = tk.Radiobutton(opt, text=txt, variable=self.dedup, value=val,
                            font=FNT_S, fg=fg, bg=C["card"], selectcolor=C["inp"],
                            activebackground=C["card"], activeforeground=fg,
                            indicatoron=0, padx=6, pady=2, relief="flat", bd=2,
-                           cursor="hand2")
+                           cursor="hand2", command=self._on_dedup_change)
             rb.pack(side="left", padx=1)
+
+        tk.Checkbutton(opt, text="镜像", variable=self.mirror_var,
+                        font=FNT_S, fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                        activebackground=C["card"], cursor="hand2").pack(side="left", padx=(6, 1))
 
         # 裁切
         tk.Frame(opt, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=6, pady=2)
@@ -172,6 +178,10 @@ class MixPage(tk.Frame):
         ttk.Combobox(opt, textvariable=self.pip_pos_var, width=5, font=FNT_S, state="readonly",
                      values=["\u5de6\u4e0a","\u53f3\u4e0a","\u5de6\u4e0b","\u53f3\u4e0b"]).pack(side="left", padx=1)
 
+        self._dedup_frame = tk.Frame(self._dedup_card, bg=C["card"], padx=12, pady=4)
+        self._build_custom_dedup_panel()
+        self._dedup_frame.pack_forget()
+
         # 字幕(移至按钮行)
         # 已移至按钮行
 
@@ -206,8 +216,200 @@ class MixPage(tk.Frame):
         self._log.pack(fill="both", expand=True, padx=16, pady=(6,8))
 
     def _toggle_dedup(self, e=None):
-        self._dedup_collapsed = not self._dedup_collapsed
-        self._dedup_toggle_lbl.configure(text="\u25bc" if self._dedup_collapsed else "\u25b6")
+        if self._dedup_collapsed:
+            if self.dedup.get() == "custom":
+                self._load_dedup_custom()
+                self._dedup_frame.pack(fill="x")
+            self._dedup_toggle_lbl.configure(text="\u25bc")
+            self._dedup_collapsed = False
+        else:
+            self._dedup_frame.pack_forget()
+            self._dedup_toggle_lbl.configure(text="\u25b6")
+            self._dedup_collapsed = True
+
+    def _on_dedup_change(self):
+        if self.dedup.get() == "custom":
+            self._load_dedup_custom()
+            self._dedup_frame.pack(fill="x")
+            self._dedup_toggle_lbl.configure(text="\u25bc")
+            self._dedup_collapsed = False
+        else:
+            self._dedup_frame.pack_forget()
+            self._dedup_toggle_lbl.configure(text="\u25b6")
+            self._dedup_collapsed = True
+
+    def _build_custom_dedup_panel(self):
+        f = self._dedup_frame
+        cfg = DEDUP_CONFIG
+
+        sec1 = tk.Frame(f, bg=C["card"])
+        sec1.pack(fill="x", pady=(4, 2))
+        tk.Label(sec1, text="画面", font=FNT_B, fg=C["text"], bg=C["card"]).pack(anchor="w")
+        r1 = tk.Frame(sec1, bg=C["card"])
+        r1.pack(fill="x", pady=2)
+
+        self._dv_mirror = self.mirror_var
+        tk.Checkbutton(r1, text="镜像翻转", variable=self._dv_mirror, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 16))
+
+        self._dv_crop = tk.BooleanVar(value=cfg.get("random_crop", {}).get("enabled", True))
+        tk.Checkbutton(r1, text="微裁剪", variable=self._dv_crop, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 16))
+
+        self._dv_gamma = tk.BooleanVar(value=cfg.get("gamma_shift", {}).get("enabled", True))
+        tk.Checkbutton(r1, text="亮度微调", variable=self._dv_gamma, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 16))
+
+        self._dv_corner = tk.BooleanVar(value=cfg.get("corner_mask", {}).get("enabled", True))
+        tk.Checkbutton(r1, text="四角遮罩", variable=self._dv_corner, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left")
+
+        sec2 = tk.Frame(f, bg=C["card"])
+        sec2.pack(fill="x", pady=(6, 2))
+        tk.Label(sec2, text="速度", font=FNT_B, fg=C["text"], bg=C["card"]).pack(anchor="w")
+        r2 = tk.Frame(sec2, bg=C["card"])
+        r2.pack(fill="x", pady=2)
+
+        self._dv_speed = tk.BooleanVar(value=cfg.get("variable_speed", {}).get("enabled", True))
+        tk.Checkbutton(r2, text="变速", variable=self._dv_speed, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 12))
+        tk.Label(r2, text="范围:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
+        self._dv_speed_min = tk.StringVar(value=str(cfg.get("variable_speed", {}).get("min_rate", 1.10)))
+        self._dv_speed_max = tk.StringVar(value=str(cfg.get("variable_speed", {}).get("max_rate", 1.30)))
+        tk.Entry(r2, textvariable=self._dv_speed_min, font=FNT_S, fg=C["text"], bg=C["inp"],
+                 width=5, relief="flat").pack(side="left", padx=2)
+        tk.Label(r2, text="~", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
+        tk.Entry(r2, textvariable=self._dv_speed_max, font=FNT_S, fg=C["text"], bg=C["inp"],
+                 width=5, relief="flat").pack(side="left", padx=2)
+        tk.Label(r2, text="倍", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left", padx=(4, 16))
+
+        tk.Label(r2, text="低速占比:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
+        self._dv_speed_weight = tk.IntVar(value=int(cfg.get("variable_speed", {}).get("weight_low", 0.7) * 100))
+        tk.Scale(r2, from_=0, to=100, orient="horizontal", variable=self._dv_speed_weight,
+                 font=FNT_S, fg=C["dim"], bg=C["card"], highlightthickness=0,
+                 troughcolor=C["inp"], length=80, showvalue=True, sliderlength=12).pack(side="left")
+
+        sec3 = tk.Frame(f, bg=C["card"])
+        sec3.pack(fill="x", pady=(6, 2))
+        tk.Label(sec3, text="音频", font=FNT_B, fg=C["text"], bg=C["card"]).pack(anchor="w")
+        r3 = tk.Frame(sec3, bg=C["card"])
+        r3.pack(fill="x", pady=2)
+
+        self._dv_pitch = tk.BooleanVar(value=cfg.get("audio_pitch", {}).get("enabled", True))
+        tk.Checkbutton(r3, text="音高微调", variable=self._dv_pitch, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 16))
+
+        self._dv_reverb = tk.BooleanVar(value=cfg.get("audio_reverb", {}).get("enabled", True))
+        tk.Checkbutton(r3, text="轻微混响", variable=self._dv_reverb, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left", padx=(0, 16))
+
+        self._dv_noise = tk.BooleanVar(value=cfg.get("noise_fusion", {}).get("enabled", True))
+        tk.Checkbutton(r3, text="白噪音融合", variable=self._dv_noise, font=FNT_S,
+                       fg=C["text"], bg=C["card"], selectcolor=C["inp"],
+                       cursor="hand2").pack(side="left")
+
+        btn_f = tk.Frame(f, bg=C["card"])
+        btn_f.pack(fill="x", pady=(6, 2))
+        tk.Button(btn_f, text="恢复默认", font=FNT_S, fg=C["dim"], bg=C["inp"],
+                  relief="flat", cursor="hand2", padx=10,
+                  command=self._reset_dedup_defaults).pack(side="right", padx=2)
+        tk.Button(btn_f, text="保存设置", font=FNT_S, fg="white", bg=C["btn_sel"],
+                  relief="flat", cursor="hand2", padx=10,
+                  command=self._save_dedup_custom).pack(side="right", padx=2)
+
+    def _save_dedup_custom(self):
+        try:
+            data = {}
+            if os.path.exists(SETTINGS_PATH):
+                with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["dedup_custom"] = {
+                "mirror": self._dv_mirror.get(),
+                "random_crop": self._dv_crop.get(),
+                "gamma_shift": self._dv_gamma.get(),
+                "corner_mask": self._dv_corner.get(),
+                "variable_speed": self._dv_speed.get(),
+                "speed_min": float(self._dv_speed_min.get()),
+                "speed_max": float(self._dv_speed_max.get()),
+                "speed_weight_low": self._dv_speed_weight.get() / 100.0,
+                "audio_pitch": self._dv_pitch.get(),
+                "audio_reverb": self._dv_reverb.get(),
+                "noise_fusion": self._dv_noise.get(),
+            }
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log_msg("自定义去重设置已保存")
+        except Exception as e:
+            self._log_msg(f"保存自定义去重失败: {e}")
+
+    def _load_dedup_custom(self):
+        try:
+            if not os.path.exists(SETTINGS_PATH):
+                return
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            d = data.get("dedup_custom", {})
+            if not d:
+                return
+            self._dv_mirror.set(d.get("mirror", True))
+            self._dv_crop.set(d.get("random_crop", True))
+            self._dv_gamma.set(d.get("gamma_shift", True))
+            self._dv_corner.set(d.get("corner_mask", True))
+            self._dv_speed.set(d.get("variable_speed", True))
+            self._dv_speed_min.set(str(d.get("speed_min", 1.10)))
+            self._dv_speed_max.set(str(d.get("speed_max", 1.30)))
+            self._dv_speed_weight.set(int(d.get("speed_weight_low", 0.7) * 100))
+            self._dv_pitch.set(d.get("audio_pitch", True))
+            self._dv_reverb.set(d.get("audio_reverb", True))
+            self._dv_noise.set(d.get("noise_fusion", True))
+        except Exception:
+            pass
+
+    def _reset_dedup_defaults(self):
+        cfg = DEDUP_CONFIG
+        self._dv_mirror.set(cfg.get("mirror", {}).get("enabled", True))
+        self._dv_crop.set(cfg.get("random_crop", {}).get("enabled", True))
+        self._dv_gamma.set(cfg.get("gamma_shift", {}).get("enabled", True))
+        self._dv_corner.set(cfg.get("corner_mask", {}).get("enabled", True))
+        self._dv_speed.set(cfg.get("variable_speed", {}).get("enabled", True))
+        self._dv_speed_min.set(str(cfg.get("variable_speed", {}).get("min_rate", 1.10)))
+        self._dv_speed_max.set(str(cfg.get("variable_speed", {}).get("max_rate", 1.30)))
+        self._dv_speed_weight.set(int(cfg.get("variable_speed", {}).get("weight_low", 0.7) * 100))
+        self._dv_pitch.set(cfg.get("audio_pitch", {}).get("enabled", True))
+        self._dv_reverb.set(cfg.get("audio_reverb", {}).get("enabled", True))
+        self._dv_noise.set(cfg.get("noise_fusion", {}).get("enabled", True))
+        self._log_msg("去重参数已恢复默认")
+
+    def _apply_dedup_custom(self):
+        import config as _cfg
+        try:
+            d = {}
+            if os.path.exists(SETTINGS_PATH):
+                with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                    d = json.load(f).get("dedup_custom", {})
+            if d:
+                _cfg.DEDUP_CONFIG["mirror"]["enabled"] = d.get("mirror", True)
+                _cfg.DEDUP_CONFIG["random_crop"]["enabled"] = d.get("random_crop", True)
+                _cfg.DEDUP_CONFIG["gamma_shift"]["enabled"] = d.get("gamma_shift", True)
+                _cfg.DEDUP_CONFIG["corner_mask"]["enabled"] = d.get("corner_mask", True)
+                _cfg.DEDUP_CONFIG["variable_speed"]["enabled"] = d.get("variable_speed", True)
+                _cfg.DEDUP_CONFIG["variable_speed"]["min_rate"] = d.get("speed_min", 1.10)
+                _cfg.DEDUP_CONFIG["variable_speed"]["max_rate"] = d.get("speed_max", 1.30)
+                _cfg.DEDUP_CONFIG["variable_speed"]["weight_low"] = d.get("speed_weight_low", 0.7)
+                _cfg.DEDUP_CONFIG["audio_pitch"]["enabled"] = d.get("audio_pitch", True)
+                _cfg.DEDUP_CONFIG["audio_reverb"]["enabled"] = d.get("audio_reverb", True)
+                _cfg.DEDUP_CONFIG["noise_fusion"]["enabled"] = d.get("noise_fusion", True)
+            _cfg.DEDUP_CONFIG["mirror"]["enabled"] = self.mirror_var.get()
+            self._log_msg("已加载自定义去重配置")
+        except Exception as e:
+            self._log_msg(f"加载自定义去重配置失败: {e}")
 
     def _log_msg(self, m):
         self._log.configure(state="normal")
@@ -256,6 +458,18 @@ class MixPage(tk.Frame):
         if len(self._mix_videos) < 2:
             self._log_msg("请至少添加2个视频"); return
 
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("混剪成片", self.winfo_toplevel(), self._log_msg, refresh=False):
+                return
+        except Exception as e:
+            self._log_msg("授权检查异常: " + str(e))
+            return
+
+        if self.dedup.get() == "custom":
+            self._save_dedup_custom()
+            self._apply_dedup_custom()
+
         self._btn.configure(text="\u25a0  停止", bg=C["btn_no"])
         self._mix_cancel = threading.Event()
         nver = int(self.num_versions_var.get())
@@ -268,6 +482,15 @@ class MixPage(tk.Frame):
                 cat = self.main_category_var.get()
                 for vi in range(nver):
                     if self._mix_cancel and self._mix_cancel.is_set(): break
+                    try:
+                        from license_guard import require_feature_access
+                        if not require_feature_access(
+                            "混剪成片", None, self._log_msg, show_dialog=False, refresh=False
+                        ):
+                            break
+                    except Exception as e:
+                        self._log_msg("授权检查异常: " + str(e))
+                        break
                     suf = "" if nver == 1 else f"_v{vi+1}"
                     out = os.path.join(out_dir, "mix_output", f"mix_{time.strftime('%H%M%S')}{suf}.mp4")
                     self._log_msg(f"\n=== 版本 {vi+1}/{nver} ===")
@@ -286,10 +509,17 @@ class MixPage(tk.Frame):
                         smart_crop_enabled=self.smart_crop_var.get(),
                         crop_level={"\u8f7b":"light","\u4e2d":"medium","\u91cd":"heavy"}.get(self.crop_level_var.get(),"medium"),
                         ken_burns_enabled=self.ken_burns_var.get(),
-                    kb_intensity=self.kb_intensity_var.get())
+                        mirror_enabled=self.mirror_var.get(),
+                        kb_intensity=self.kb_intensity_var.get()
+                    )
                     if result:
                         sz = os.path.getsize(out)/1024/1024
                         self._log_msg(f"\u2713 版本{vi+1}: {sz:.1f}MB\n{out}")
+                        try:
+                            from license_guard import consume_trial_after_success
+                            consume_trial_after_success("混剪成片", root=None, log_fn=self._log_msg)
+                        except Exception:
+                            pass
                     else:
                         self._log_msg(f"\u2717 版本{vi+1} 失败")
             except Exception as e:

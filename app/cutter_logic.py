@@ -28,23 +28,93 @@ from srt_parser import open_srt, _time_to_seconds
 _hw_encoder_checked = False
 _hw_encoder = None
 _hw_fallback = False  # 硬件编码回退标志
+_sw_encoder_checked = False
+_sw_encoder_args = None
+
+
 def _get_video_encoder():
     global _hw_encoder_checked, _hw_encoder
     if not _hw_encoder_checked:
         _hw_encoder_checked = True
         try:
-            from platform_config import HARDWARE_ENCODER as _he
-            _hw_encoder = _he  # "h264_qsv" or None
+            import importlib
+            import platform_config as _pc
+            _pc = importlib.reload(_pc)
+            _hw_encoder = _pc.HARDWARE_ENCODER  # "h264_qsv" or None
         except Exception:
             _hw_encoder = None
     return _hw_encoder
 
+
+def _software_vcodec_args():
+    """Return a software encoder supported by the current FFmpeg."""
+    global _sw_encoder_checked, _sw_encoder_args
+    if _sw_encoder_checked and _sw_encoder_args:
+        return list(_sw_encoder_args)
+    _sw_encoder_checked = True
+    try:
+        ffmpeg = get_ffmpeg_cmd()
+        ret = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=_NO_WINDOW,
+        )
+        encoders = (ret.stdout or "") + (ret.stderr or "")
+        if "libx264" in encoders:
+            _sw_encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+        else:
+            _sw_encoder_args = ["-c:v", "mpeg4", "-q:v", "3"]
+    except Exception:
+        _sw_encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+    return list(_sw_encoder_args)
+
+
+def _software_encoder_name():
+    args = _software_vcodec_args()
+    try:
+        return args[args.index("-c:v") + 1]
+    except Exception:
+        return "libx264"
+
+
+def _hardware_encoder_requested():
+    try:
+        import platform_config as _pc
+        return bool(getattr(_pc, "ENABLE_HARDWARE_ENCODER", False))
+    except Exception:
+        return False
+
+
+def _with_software_encoder(cmd):
+    """Replace hardware video encoder options while keeping output options before the output file."""
+    if not cmd:
+        return cmd
+    output = cmd[-1]
+    body = cmd[:-1]
+    cleaned = []
+    skip_next = False
+    skip_opts = {"-c:v", "-vcodec", "-qp", "-global_quality", "-quality", "-preset"}
+    for arg in body:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in skip_opts:
+            skip_next = True
+            continue
+        if isinstance(arg, str) and arg.startswith("h264_"):
+            continue
+        cleaned.append(arg)
+    return cleaned + _software_vcodec_args() + [output]
+
+
 def _vcodec_args():
     """返回视频编码参数，优先硬件编码（如果硬件编码不行自动回退 libx264）"""
-    global _hw_fallback
+    global _hw_fallback, _hw_encoder_checked, _hw_encoder
     enc = _get_video_encoder()
     if _hw_fallback or enc is None:
-        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+        return _software_vcodec_args()
     if enc == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "22"]
     elif enc == "h264_amf":
@@ -52,7 +122,7 @@ def _vcodec_args():
     elif enc == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p1", "-qp", "22"]
     else:
-        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+        return _software_vcodec_args()
 from config import (
     CLIP_KEYWORDS, CLIP_ORDER, VIDEO_CONFIG, FFMPEG_PATH,
     DEDUP_CONFIG, DEDUP_PRESET, SUBTITLE_OVERLAY,
@@ -67,7 +137,7 @@ from config import (
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 def get_ffmpeg_cmd():
     from platform_config import FFMPEG_CMD
-    if os.path.exists(FFMPEG_CMD):
+    if FFMPEG_CMD and os.path.exists(FFMPEG_CMD):
         return FFMPEG_CMD
     # 回退：打包目录中查找
     import sys
@@ -169,21 +239,28 @@ def _generate_random_dedup_params(clip_index):
     return params
 
 
-def build_dedup_filters(width, height, clip_index=0):
+def _dedup_mirror_enabled(mirror_enabled=None):
+    if mirror_enabled is None:
+        return bool(DEDUP_CONFIG.get("mirror", {}).get("enabled", True))
+    return bool(mirror_enabled)
+
+
+def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None):
     """
     构建去重滤镜链
     - enhanced模式: 镜像 + 随机变速 + 随机微裁剪（pitch已移除）
     - classic模式: 原有随机方法（兼容）
     """
     _, methods, strategy = apply_preset("custom")
+    mirror_enabled = _dedup_mirror_enabled(mirror_enabled)
 
     if strategy == "enhanced":
-        return _build_enhanced_dedup(width, height, clip_index)
+        return _build_enhanced_dedup(width, height, clip_index, mirror_enabled=mirror_enabled)
     else:
-        return _build_classic_dedup(width, height, clip_index, methods)
+        return _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=mirror_enabled)
 
 
-def _build_enhanced_dedup(width, height, clip_index):
+def _build_enhanced_dedup(width, height, clip_index, mirror_enabled=True):
     """增强版去重：镜像 + 随机变速 + 随机微裁剪（pitch已移除，修复音画不同步）"""
     cfg = DEDUP_CONFIG
     params = _generate_random_dedup_params(clip_index)
@@ -193,7 +270,7 @@ def _build_enhanced_dedup(width, height, clip_index):
     applied = []
 
     # 1. 水平镜像（80%概率开启，增加随机性）
-    if cfg.get("mirror", {}).get("enabled") and random.random() < 0.8:
+    if mirror_enabled and random.random() < 0.8:
         vf_list.append("hflip")
         applied.append("mirror")
 
@@ -271,9 +348,11 @@ def _build_enhanced_dedup(width, height, clip_index):
     }
 
 
-def _build_classic_dedup(width, height, clip_index, methods):
+def _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=True):
     """经典去重模式（兼容原有逻辑）"""
     enabled_methods = [name for name, c in methods.items() if c.get("enabled")]
+    if not mirror_enabled:
+        enabled_methods = [name for name in enabled_methods if name != "mirror"]
     if not enabled_methods:
         return {"video_filters": "", "audio_filters": "", "applied": []}
 
@@ -895,7 +974,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                    log_fn=None, force_category=None, cancel_event=None,
                    pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                    _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
-                   target_duration=60):
+                   target_duration=60, mirror_enabled=None):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -910,8 +989,10 @@ def process_video(video_path, srt_path=None, output_path=None,
     def _cancelled():
         return cancel_event and cancel_event.is_set()
 
+    _mirror_enabled = _dedup_mirror_enabled(mirror_enabled) and dedup_preset != "none"
+
     # ---- 运行日志 ----
-    global TARGET_DURATION, TARGET_DURATION_TOLERANCE
+    global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
     old_dur, old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
     TARGET_DURATION = target_duration
     TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
@@ -1301,6 +1382,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     will_subtitle = subtitle_overlay and SUBTITLE_OVERLAY.get("enabled")
     _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置Whisper+DeepSeek修复）' if will_subtitle else '关'}")
+    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}")
     # [v9.6] Parse SRT boundaries for hook tail buffer
     _srt_boundaries = []
     try:
@@ -1328,6 +1410,15 @@ def process_video(video_path, srt_path=None, output_path=None,
         if not os.path.exists(ffmpeg_cmd):
             ffmpeg_cmd = "ffmpeg"
         _log(f"FFmpeg: {ffmpeg_cmd}")
+        _hw_encoder_checked = False
+        _hw_encoder = None
+        _encoder = _get_video_encoder()
+        if _encoder:
+            _log(f"编码器: 实验硬件加速 ({_encoder})")
+        elif _hardware_encoder_requested():
+            _log(f"编码器: 硬件加速自检未通过，使用稳定软件编码 ({_software_encoder_name()})")
+        else:
+            _log(f"编码器: 稳定软件编码 ({_software_encoder_name()})")
         probe_cmd = [ffmpeg_cmd, "-i", video_path]
         proc = subprocess.Popen(probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
@@ -1380,7 +1471,6 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"[T] {time.strftime('%H:%M:%S')} enter cut loop, total={total_clips}")
 
     # 硬件编码回退：第一次失败后自动切到 libx264
-    global _hw_fallback
     _hw_fallback = False
 
     try:
@@ -1425,7 +1515,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             # [v9.2] 切割编码模式 + Smart Crop + mirror
             mirror_vf = ""
-            if random.random() < 0.5:
+            if _mirror_enabled and random.random() < 0.5:
                 mirror_vf = "hflip"
             clip_duration = end - start + 0.1  # 0.1s缓冲避免语音尾部被切 + 0.1  # 0.1s缓冲避免语音尾部被切
 
@@ -1501,15 +1591,19 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _log(f"FAIL [{c_type}] rc={rc}")
                 # 硬件编码失败：回退到 libx264 并重试当前片段
                 if not _hw_fallback and _get_video_encoder():
-                    _log("硬件编码失败，回退到 libx264 软件编码...")
+                    _sw_args = _software_vcodec_args()
+                    _sw_name = _software_encoder_name()
+                    if _sw_name != "libx264":
+                        _log("当前 FFmpeg 不支持 libx264，已使用 mpeg4 作为软件编码兜底。建议发布包内置完整 FFmpeg。")
+                    _log(f"当前设备硬件编码不可用，已自动切换到 {_sw_name} 软件编码，后续片段不再尝试硬件编码。")
                     _hw_fallback = True
-                    # 重新构建命令，用 libx264 替换硬件编码
+                    # 重新构建命令，用软件编码替换硬件编码
                     cmd = [ffmpeg, "-y"]
                     cmd += ["-ss", f"{start:.3f}", "-i", video_path]
                     cmd += ["-t", f"{clip_duration:.3f}"]
                     cmd += ["-fflags", "+genpts"]
                     cmd += ["-vsync", "cfr"]
-                    cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18"]
+                    cmd += _sw_args
                     cmd += ["-vf", combined_vf]
                     cmd += ["-pix_fmt", "yuv420p"]
                     cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100",
@@ -1520,13 +1614,13 @@ def process_video(video_path, srt_path=None, output_path=None,
                         proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
                         rc2 = proc.wait(timeout=300)
                         if rc2 == 0 and os.path.exists(temp_file) and os.path.getsize(temp_file) > 1000:
-                            _log(f"OK [{c_type}] libx264 回退成功")
+                            _log(f"OK [{c_type}] {_sw_name} 软件编码成功")
                             temp_files.append(temp_file)
                             success_count += 1
                         else:
-                            _log(f"FAIL [{c_type}] libx264 也失败 rc={rc2}")
+                            _log(f"FAIL [{c_type}] {_sw_name} 也失败 rc={rc2}")
                     except Exception:
-                        _log(f"FAIL [{c_type}] libx264 回退异常")
+                        _log(f"FAIL [{c_type}] {_sw_name} 回退异常")
 
             _log(f"[PROGRESS] {(clip_idx + 1) / total_clips * 0.3:.2f}")
 
@@ -1641,12 +1735,12 @@ def process_video(video_path, srt_path=None, output_path=None,
         _shutil.copy2(raw_file, nosub_file)
     else:
         _log(f"去重步骤使用分辨率: {w}x{h}，去重预设: {dedup_preset}")
-        dedup = build_dedup_filters(w, h, 0)
+        dedup = build_dedup_filters(w, h, 0, mirror_enabled=_mirror_enabled)
         # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease,crop={w}:{h}"
         # 随机镜像（50%概率）
-        if random.random() < 0.5:
+        if _mirror_enabled and random.random() < 0.5:
             vf = "hflip," + vf
         # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
         af = "afade=t=in:st=0:d=0.3"
@@ -1690,16 +1784,9 @@ def process_video(video_path, srt_path=None, output_path=None,
             dedup_cmd += ["-vf", vf]
             dedup_cmd += ["-af", af]
         dedup_cmd += ["-r", str(cfg["fps"]), "-vsync", "cfr", "-b:v", cfg["bitrate_v"]]
-        _ve = _get_video_encoder()
-        if _ve:
-            dedup_cmd += ["-c:v", _ve, "-preset", "fast"]
-            # QSV 用 global_quality, NVENC 和 AMF 用 qp
-            if _ve == "h264_qsv":
-                dedup_cmd += ["-global_quality", "22"]
-            elif _ve in ("h264_nvenc", "h264_amf"):
-                dedup_cmd += ["-qp", "22"]
-        else:
-            dedup_cmd += ["-c:v", cfg["codec_v"], "-preset", "ultrafast"]
+        _ve = _get_video_encoder() if not _hw_fallback else None
+        _using_hw_encoder = bool(_ve)
+        dedup_cmd += _vcodec_args()
         dedup_cmd += ["-c:a", cfg["codec_a"], "-b:a", cfg["bitrate_a"]]
         dedup_cmd += ["-movflags", "+faststart"]
         dedup_cmd += [nosub_file]
@@ -1711,22 +1798,21 @@ def process_video(video_path, srt_path=None, output_path=None,
             if proc.returncode != 0:
                 _log(f"去重FFmpeg返回 {proc.returncode}")
                 _log(f"去重stderr: {stderr_data[-300:]}")
-                if _ve:
-                    _log("硬件编码失败，回退libx264...")
-                    cmd2 = []
-                    for a in dedup_cmd:
-                        if a in ("-qp", "-global_quality", "-quality", "-preset", "fast", "p1"): continue
-                        if a.startswith("h264_") or (a.startswith("-c:v") and a != "-c:v"): continue
-                        cmd2.append(a)
-                    cmd2 += ["-c:v", "libx264", "-preset", "fast"]
+                if _using_hw_encoder:
+                    _hw_fallback = True
+                    _sw_name = _software_encoder_name()
+                    if _sw_name != "libx264":
+                        _log("当前 FFmpeg 不支持 libx264，去重阶段使用 mpeg4 兜底。")
+                    _log(f"硬件编码不可用，已自动改用 {_sw_name} 重新执行去重...")
+                    cmd2 = _with_software_encoder(dedup_cmd)
                     try:
                         p2 = subprocess.Popen(cmd2, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                             creationflags=_NO_WINDOW)
                         _, _ = p2.communicate(timeout=600)
-                        if p2.returncode == 0 and os.path.exists(nosub_file):
-                            _log("  libx264回退成功")
+                        if p2.returncode == 0 and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 1000:
+                            _log(f"  去重已用 {_sw_name} 完成，去重效果已保留")
                         else:
-                            _log("  libx264回退失败，用原片")
+                            _log(f"  {_sw_name} 去重重试失败，使用未去重拼接片继续输出")
                             import shutil as _shutil
                             _shutil.copy2(raw_file, nosub_file)
                     except:
@@ -2216,26 +2302,23 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     else:
         _log("正在用DeepSeek修复字幕（错别字+繁简转换+断句）...")
         try:
-            if getattr(sys, "frozen", False):
-                settings_dir = os.path.dirname(sys.executable)
-            else:
-                settings_dir = os.path.dirname(os.path.abspath(__file__))
-            settings_path = os.path.join(settings_dir, "ai_settings.json")
-            if os.path.exists(settings_path):
-                with open(settings_path, "r", encoding="utf-8-sig") as f:
-                    settings = _json.load(f)
-                api_key = settings.get("api_key", "")
-                base_url = settings.get("base_url", "").rstrip("/")
-                model = settings.get("model", "")
-            else:
-                api_key = ""; base_url = ""; model = ""
-        except Exception:
+            from ai_clipper import load_settings as _load_ai_settings
+            settings = _load_ai_settings()
+            api_key = settings.get("api_key", "").strip()
+            base_url = (settings.get("base_url", "") or "").rstrip("/")
+            model = (settings.get("model", "") or "").strip()
+        except Exception as e:
+            _log(f"读取 AI 设置失败: {e}")
             api_key = ""; base_url = ""; model = ""
 
         if not api_key:
             _log("未找到 AI API Key，跳过DeepSeek修复，直接用 Whisper 原始文本")
             fixed_segments = raw_segments
+        elif not base_url or not model:
+            _log("AI 设置不完整（缺少 Base URL 或模型名），跳过DeepSeek修复")
+            fixed_segments = raw_segments
         else:
+            _log(f"字幕修复模型: {model}")
             seg_text = "\n".join([f"[{s['start']:.2f}-{s['end']:.2f}] {s['text']}" for s in raw_segments])
             ref_note = ""
             if cloud_reference:
@@ -2619,7 +2702,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         log_fn=None, force_category=None, cancel_event=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                         num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
-                        target_duration=60):
+                        target_duration=60, mirror_enabled=None):
     """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
     策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
@@ -2633,7 +2716,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     
     _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
@@ -2645,7 +2728,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -2657,7 +2740,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                  force_category, cancel_event,
                  pip_path, pip_size, pip_opacity, pip_pos,
                  _asr_only=True,
-                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     
     _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
@@ -2669,7 +2752,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -2696,7 +2779,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     
     if len(versions_data) < 1:
         _log("无有效版本，输出单版本")
@@ -2704,7 +2787,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                            pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled)
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
@@ -2735,7 +2818,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             ver_clips, dedup_preset, subtitle_overlay,
             log_fn, cancel_event,
             pip_path, pip_size, pip_opacity, pip_pos,
-            smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled
+            smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
+            mirror_enabled=mirror_enabled
         )
         results.append(result)
     
@@ -2757,7 +2841,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                  subtitle_overlay=True, log_fn=None,
                                  cancel_event=None, pip_path=None,
                                  pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
-                                 smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True):
+                                 smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
+                                 mirror_enabled=None):
     """Process a single version with pre-determined clips (bypass AI selection)"""
     import time as _time
     from ai_clipper import is_enabled as ai_is_enabled
@@ -2789,7 +2874,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                               dedup_preset, subtitle_overlay, log_fn,
                               None, cancel_event,  # force_category=None (already filtered)
                               pip_path, pip_size, pip_opacity, pip_pos,
-                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled)
+                               smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
+                               mirror_enabled=mirror_enabled)
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn
@@ -2807,12 +2893,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     def _cancelled():
         return cancel_event and cancel_event.is_set()
 
+    _mirror_enabled = _dedup_mirror_enabled(extra_kwargs.get("mirror_enabled")) and dedup_preset != "none"
+
     _log("=== \u6df7\u526a\u6a21\u5f0f ===")
     if not isinstance(video_path, (list, tuple)) or not video_path:
         _log("\u8bf7\u6dfb\u52a0\u89c6\u9891\u6587\u4ef6"); return False
 
     video_list = video_path
     _log(f"\u5171 {len(video_list)} \u4e2a\u89c6\u9891")
+    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}")
 
     # Get ffmpeg
     try:
@@ -2839,6 +2928,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # 合并 SRT
     _log("合并语音文本...")
     merged_srt = ""
+    _mix_srt_entries = []
     for _vi, vp in enumerate(video_list):
         if _cancelled(): return False
         _sc = os.path.splitext(vp)[0] + ".srt"
@@ -2931,6 +3021,18 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if os.path.exists(_sc):
             with open(_sc, "r", encoding="utf-8", errors="replace") as f:
                 _srt_text = f.read()
+            try:
+                _subs, _ = open_srt(_sc)
+                for _sub in _subs:
+                    _mix_srt_entries.append({
+                        "source_idx": _vi,
+                        "source": vp,
+                        "start": float(_time_to_seconds(_sub.start)),
+                        "end": float(_time_to_seconds(_sub.end)),
+                        "text": _sub.text,
+                    })
+            except Exception:
+                pass
             # Add [Vn] marker to text lines
             _marker = f"V{_vi+1}"
             _out_lines = []
@@ -2977,6 +3079,46 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _log(f"AI 选到 {len(ordered_clips)} 个片段")
 
     # Map clips back to source videos
+    def _strip_mix_marker(txt):
+        return re.sub(r"\[V\d+\]\s*", "", str(txt or ""))
+
+    def _norm_mix_text(txt):
+        txt = _strip_mix_marker(txt).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", txt)
+
+    def _infer_source_idx_from_srt(txt, start, end):
+        import difflib
+        norm_clip = _norm_mix_text(txt)
+        if not norm_clip or not _mix_srt_entries:
+            return -1
+        clip_mid = (float(start) + float(end)) / 2.0
+        best_score = 0.0
+        best_idx = -1
+        for entry in _mix_srt_entries:
+            ent_start = float(entry.get("start", 0))
+            ent_end = float(entry.get("end", ent_start))
+            ent_text = entry.get("text", "")
+            norm_entry = _norm_mix_text(ent_text)
+            if not norm_entry:
+                continue
+            overlap = max(0.0, min(float(end), ent_end) - max(float(start), ent_start))
+            ent_mid = (ent_start + ent_end) / 2.0
+            mid_diff = abs(clip_mid - ent_mid)
+            ratio = difflib.SequenceMatcher(None, norm_clip, norm_entry).ratio()
+            if norm_entry in norm_clip or norm_clip in norm_entry:
+                ratio = max(ratio, 0.96)
+            score = ratio
+            if overlap > 0:
+                score += 0.55
+            if mid_diff <= 1.5:
+                score += 0.25
+            elif mid_diff > max(12.0, (float(end) - float(start)) + 6.0):
+                score -= 0.25
+            if score > best_score:
+                best_score = score
+                best_idx = int(entry.get("source_idx", -1))
+        return best_idx if best_score >= 0.55 else -1
+
     all_clips_meta = []
     tc = 0
     for clip in ordered_clips:
@@ -2987,7 +3129,12 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _src_idx = _vi2
                 break
         if _src_idx < 0:
+            _src_idx = _infer_source_idx_from_srt(text, start, end)
+            if _src_idx >= 0:
+                _log(f"Source map: 片段缺少[Vn]标记，已按SRT匹配到 V{_src_idx+1} ({start:.1f}-{end:.1f}s)")
+        if _src_idx < 0:
             _src_idx = 0
+            _log(f"Source map: 片段缺少[Vn]标记且无法匹配，暂按 V1 处理 ({start:.1f}-{end:.1f}s)")
         vp = video_list[_src_idx]
         all_clips_meta.append({
             "idx": tc, "type": c_type, "text": text,
@@ -3097,7 +3244,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _clip_ends.append(end)
 
         mirror_vf = ""
-        if random.random() < 0.5:
+        if _mirror_enabled and random.random() < 0.5:
             mirror_vf = "hflip"
 
         # Smart crop or default 9:16
@@ -3299,7 +3446,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         shutil.copy2(raw_concat, nosub_file)
     else:
         _log(f"Dedup ({dedup_preset})...")
-        dedup = build_dedup_filters(w, h, 0)
+        dedup = build_dedup_filters(w, h, 0, mirror_enabled=_mirror_enabled)
         applied = ",".join(dedup["applied"]) if dedup.get("applied") else "none"
         _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
 

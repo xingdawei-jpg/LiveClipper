@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """AI 扫描独立页面——支持多视频排队处理，使用云端ASR/Whisper，不包含去重/裁切/画中画"""
 
@@ -160,6 +160,14 @@ class ProductScanPage(tk.Frame):
             self._log("请先在结果列表中选择要导出的单品", "warn")
             return
 
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("单品扫描导出", self.winfo_toplevel(), self._log, refresh=False):
+                return
+        except Exception as e:
+            self._log("授权检查异常: " + str(e), "err")
+            return
+
         # 使用用户设置的输出目录，未设置则弹窗选择
         out_dir = getattr(self, '_scan_output_dir', None)
         if not out_dir:
@@ -183,6 +191,15 @@ class ProductScanPage(tk.Frame):
         def _worker():
             nonlocal exported
             for item_id in sel:
+                try:
+                    from license_guard import require_feature_access
+                    if not require_feature_access(
+                        "单品扫描导出", None, self._log, show_dialog=False, refresh=False
+                    ):
+                        break
+                except Exception as e:
+                    self._log("授权检查异常: " + str(e), "err")
+                    break
                 values = self._results_tree.item(item_id, "values")
                 prod_name = values[0]
                 # 找到对应 product 数据
@@ -195,6 +212,11 @@ class ProductScanPage(tk.Frame):
                             if path:
                                 exported += 1
                                 self._log(f"  ✓ {os.path.basename(path)}", "ok")
+                                try:
+                                    from license_guard import consume_trial_after_success
+                                    consume_trial_after_success("单品扫描导出", root=None, log_fn=self._log)
+                                except Exception:
+                                    pass
                             else:
                                 self._log(f"  ✗ {prod_name} 导出失败", "err")
                             break
@@ -354,6 +376,13 @@ class ProductScanPage(tk.Frame):
             return
         if self._processing:
             return
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("AI扫描", self.winfo_toplevel(), self._log, refresh=False):
+                return
+        except Exception as e:
+            self._log("授权检查异常: " + str(e), "err")
+            return
         self._processing = True
         self._start_btn.configure(state="disabled", text="扫描中...")
         self._results_tree.delete(*self._results_tree.get_children())
@@ -472,8 +501,21 @@ class ProductScanPage(tk.Frame):
         if not out_dir:
             self._log("请先选择输出目录", "warn")
             return
+        try:
+            from license_guard import require_feature_access
+            if not require_feature_access("单品扫描导出", self.winfo_toplevel(), self._log, refresh=False):
+                return
+        except Exception as e:
+            self._log("授权检查异常: " + str(e), "err")
+            return
         scanner = ProductScanner()
         self._log("开始导出 " + str(len(merged)) + " 个单品...", "info")
         results = scanner.extract_cross_file(merged, out_dir, log_fn=lambda m: self._log(m, "info"))
         ok_count = len([r for r in results if r.get("output_path")])
         self._log("导出完成: " + str(ok_count) + "/" + str(len(merged)), "ok" if ok_count else "warn")
+        if ok_count:
+            try:
+                from license_guard import consume_trial_after_success
+                consume_trial_after_success("单品扫描导出", units=ok_count, root=None, log_fn=self._log)
+            except Exception:
+                pass
