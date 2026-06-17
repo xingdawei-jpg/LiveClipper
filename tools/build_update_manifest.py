@@ -44,11 +44,20 @@ WEB_FILES = [
 ]
 
 
+TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js"}
+
+
+def _manifest_bytes(path: Path) -> bytes:
+    data = path.read_bytes()
+    if path.suffix.lower() in TEXT_SUFFIXES:
+        # GitHub raw serves repository-normalized LF text for these files.
+        data = data.replace(b"\r\n", b"\n")
+    return data
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
+    digest.update(_manifest_bytes(path))
     return digest.hexdigest()
 
 
