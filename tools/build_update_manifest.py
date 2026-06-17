@@ -19,7 +19,6 @@ APP_SKIP = {
     "_package_final.py",
     "_toggle_monitor.py",
     "clip_tuple_check.py",
-    "cutter_logic.py",
     "gui_clean.py",
     "gui_fresh.py",
     "gui_tmp.py",
@@ -39,6 +38,7 @@ APP_SKIP = {
 APP_SUFFIXES = {".py", ".json", ".txt"}
 WEB_FILES = [
     WEB_DIR / "server.py",
+    WEB_DIR / "frontend" / "index.html",
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
 ]

@@ -8,6 +8,7 @@
     "app/asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
     "app/config.py": "1fb499e191443eb0a843cf9320bf47b6ced41d2ebb3ee70acaea23b49bccd773",
     "app/cutter.py": "438d14c8d92c4e9e0806ed0061ebcfe7f1f61b1139210db48e30c08dce2f2d13",
+    "app/cutter_logic.py": "beaa516dacacb5903030de92c12a572aa99e21d5b6693ea36fec72f393a07c74",
     "app/dedup_page.py": "261cc18312541e071a34cddbf8e60824beb9d55dbab0e9925ab85d095d9ba4b2",
     "app/douyin_stream.py": "ffb07341c683114625076179430c470935be5a7fb6979bd28b674bff9ea3e4e7",
     "app/gui.py": "e6a6c17c2241ba2b9b9c9397a0fa948bad7c17aaf501810a87e6aba9af470488",
@@ -37,6 +38,7 @@
     "app/updater.py": "b0e7967b0c8a12260bc96750c0aa819ab923ecde302c3c035947e26d80828843",
     "app/volcengine_asr.py": "bb837a683a9d9506a1ecd4354053eea736067a913157182fa938cb76c0212816",
     "web_client/server.py": "7b2e8e7139162dcc966cdd9048d0b1d17ef1a74d8b07c7063103dc54d73ee7a9",
+    "web_client/frontend/index.html": "ecff4b25a4c677c90debd80dc17fc369a625109106f5cfbf9b06d31cbb767a36",
     "web_client/frontend/assets/app.js": "234b79ddc28eb5719993bb975e18bb93b1031c7a226b716020496d54881fbea5",
     "web_client/frontend/assets/styles.css": "fd3afe6fc96148311f6ed13e87aabd57f95bb7669e82bd6b00873fae5ae591a8"
   },
@@ -44,5 +46,5 @@
   "update_url": "",
   "update_message": "保存成片参数、画中画和AI参数用户偏好，并修复Web增量更新安装",
   "force_update": false,
-  "updated_at": "2026-06-17 16:45:13"
+  "updated_at": "2026-06-17 17:04:41"
 }
