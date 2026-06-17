@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.6.17"
+CURRENT_VERSION = "2026.6.18"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -131,6 +131,13 @@ def get_version_url():
 def parse_version(version_str):
     """解析语义化版本号或日期版本号，返回可比较的元组"""
     import re
+
+    vs = str(version_str or "").strip().lstrip("vV")
+    match = re.match(r"(\d+(?:\.\d+)*)", vs)
+    if match:
+        return tuple(int(part) for part in match.group(1).split("."))
+    return (0, 0, 0)
+
     # Strip optional "v" prefix
     vs = str(version_str).lstrip("vV")
     # Try date format first: 2026.4.26 or 2026.04.26
