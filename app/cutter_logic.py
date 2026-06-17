@@ -3377,16 +3377,10 @@ def _process_version_with_clips(video_path, srt_path, output_path,
     # For now, we use a workaround: temporarily patch ai_analyze_clips to return our clips
     import ai_clipper as _ai
     _original_fn = _ai.ai_analyze_clips
+    _original_is_enabled = _ai.is_enabled
     _prepared_clips = list(clips or [])
     try:
-        _srt_for_fix = ""
-        if srt_path and os.path.exists(srt_path):
-            with open(srt_path, "r", encoding="utf-8", errors="ignore") as _sf:
-                _srt_for_fix = _sf.read()
-        if hasattr(_ai, "_reorder_product_focus_blocks"):
-            _prepared_clips = _ai._reorder_product_focus_blocks(_prepared_clips, log_fn)
-        if _srt_for_fix and hasattr(_ai, "_fix_clip_boundaries"):
-            _prepared_clips = _ai._fix_clip_boundaries(_prepared_clips, _srt_for_fix, log_fn)
+        _log("预览成片: 保留用户调整后的片段顺序，不再自动重排")
     except Exception as _prep_e:
         _log(f"预览片段整理异常，使用原片段: {_prep_e}")
     try:
@@ -3405,6 +3399,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
         return _prepared_clips
     
     _ai.ai_analyze_clips = _mock_analyze
+    _ai.is_enabled = lambda: True
     
     try:
         result = process_video(video_path, srt_path, output_path,
@@ -3416,6 +3411,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn
+        _ai.is_enabled = _original_is_enabled
 
 def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                        subtitle_overlay=True, log_fn=None, cancel_event=None,
