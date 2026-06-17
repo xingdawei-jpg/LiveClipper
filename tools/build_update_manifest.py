@@ -38,7 +38,6 @@ APP_SKIP = {
 APP_SUFFIXES = {".py", ".json", ".txt"}
 WEB_FILES = [
     WEB_DIR / "server.py",
-    WEB_DIR / "frontend" / "index.html",
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
 ]

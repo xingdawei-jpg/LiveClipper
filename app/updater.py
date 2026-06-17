@@ -309,7 +309,8 @@ def _download_file_bytes(fname, expected_sha):
                     content = base64.b64decode(data["content"])
                 else:
                     content = _fetch_file_bytes(url, timeout=timeout)
-                if len(content) < 50 or content[:5] in (b"<htm", b"<!doc"):
+                is_expected_html = source_path.lower().endswith((".html", ".htm"))
+                if len(content) < 50 or (not is_expected_html and content[:5].lower() in (b"<htm", b"<!doc")):
                     continue
                 actual = hashlib.sha256(content).hexdigest().lower()
                 if actual == expected_sha.lower():
