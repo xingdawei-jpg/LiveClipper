@@ -1,0 +1,1382 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LiveClipper</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=20260616-wide-preview">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">LC</div>
+        <div>
+          <div class="brand-name">LiveClipper</div>
+          <div class="brand-version" id="app-version">本地客户端</div>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-item is-active" data-page="smart-cut"><span>智能成片</span></button>
+        <button class="nav-item" data-page="mix"><span>混剪成片</span></button>
+        <button class="nav-item" data-page="ai-scan"><span>AI扫描</span></button>
+        <button class="nav-item" data-page="product-scan"><span>单品扫描</span></button>
+        <button class="nav-item" data-page="dedup"><span>创作辅助</span></button>
+        <button class="nav-item" data-page="live-rec"><span>直播录制</span></button>
+        <button class="nav-item" data-page="settings"><span>设置</span></button>
+      </nav>
+
+      <div class="sidebar-status">
+        <span class="status-dot" id="server-dot"></span>
+        <span id="server-state">连接中</span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section class="page is-active" id="page-smart-cut">
+        <header class="page-header">
+          <div>
+            <h1>智能成片</h1>
+            <p class="page-subtitle">选择直播视频，生成带货短片版本。</p>
+          </div>
+        </header>
+
+        <div class="content-grid smart-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>视频</h2>
+              <div class="log-header-actions">
+                <button class="button button-secondary button-small" data-action="pick-videos" data-target="video-paths">添加视频</button>
+                <button class="button button-muted button-small" data-action="clear-video-list" data-target="video-paths">清空</button>
+              </div>
+            </div>
+            <div class="video-picker-card">
+              <strong>点击“添加视频”选择素材</strong>
+              <span>使用系统文件选择器读取原始路径，自动检测同名 SRT 字幕。</span>
+            </div>
+            <textarea id="video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+            <div class="video-list" data-list-for="video-paths"></div>
+            <input id="srt-path" type="hidden" value="">
+            <div class="field-row">
+              <label for="output-dir">输出目录</label>
+              <div class="input-with-button">
+                <input id="output-dir" type="text" placeholder="可留空，默认输出到视频目录">
+                <button class="button button-secondary" data-action="pick-directory" data-target="output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="output-dir">打开</button>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="button button-danger" data-action="stop-scope" data-scope="smart-cut">停止</button>
+              <button class="button button-secondary" data-action="start-smart-preview">AI选片预览</button>
+              <button class="button button-primary" data-action="start-smart-cut">
+                <span class="button-icon">▶</span>
+                开始成片
+              </button>
+            </div>
+          </section>
+
+          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="sc-params" data-summary-kind="params" data-summary-prefix="sc" data-default-open="true" data-advanced-panel="sc-params">
+            <div class="panel-header">
+              <h2>成片参数</h2>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="sc-duration">成片时长</label>
+                <select id="sc-duration">
+                  <option value="30">30秒</option>
+                  <option value="60" selected>60秒</option>
+                  <option value="90">90秒</option>
+                  <option value="120">120秒</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-versions">版本数</label>
+                <select id="sc-versions">
+                  <option selected>1</option>
+                  <option>2</option>
+                  <option>3</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row advanced-param">
+              <label for="sc-dedup">去重强度</label>
+              <select id="sc-dedup">
+                <option value="off">关闭</option>
+                <option value="light">轻度</option>
+                <option value="medium" selected>中度</option>
+                <option value="heavy">重度</option>
+              </select>
+            </div>
+            <div class="check-grid advanced-param">
+              <label class="check-item"><input id="sc-mirror" type="checkbox" checked> 镜像翻转</label>
+              <label class="check-item"><input id="sc-subtitle" type="checkbox" checked> 字幕叠加</label>
+              <label class="check-item"><input id="sc-crop" type="checkbox" checked> 智能裁切</label>
+              <label class="check-item"><input id="sc-kenburns" type="checkbox" checked> 动态缩放</label>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="sc-crop-level">裁切强度</label>
+                <select id="sc-crop-level">
+                  <option value="light">轻</option>
+                  <option value="medium" selected>中</option>
+                  <option value="heavy">重</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-kb-intensity">缩放强度</label>
+                <select id="sc-kb-intensity">
+                  <option value="轻">轻</option>
+                  <option value="中" selected>中</option>
+                  <option value="重">重</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="sc-pip" data-summary-kind="pip" data-summary-prefix="sc">
+            <div class="panel-header">
+              <h2>画中画</h2>
+            </div>
+            <div class="field-row">
+              <label for="sc-pip-mode">画中画模式</label>
+              <select id="sc-pip-mode">
+                <option value="off" selected>关闭</option>
+                <option value="auto">自身缩略</option>
+                <option value="asset">素材文件</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="sc-pip-path">素材视频</label>
+              <div class="input-with-button" data-file-drop-target="sc-pip-path" data-file-kind="video">
+                <input id="sc-pip-path" type="text" placeholder="选择后自动启用素材文件模式">
+                <button class="button button-secondary" data-action="pick-file" data-target="sc-pip-path" data-kind="video">浏览</button>
+              </div>
+            </div>
+            <div class="field-row">
+              <label for="sc-pip-folder">素材文件夹</label>
+              <div class="input-with-button">
+                <input id="sc-pip-folder" type="text" placeholder="按文件名顺序使用，成功后移入已使用">
+                <button class="button button-secondary" data-action="pick-directory" data-target="sc-pip-folder">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="sc-pip-folder">打开</button>
+              </div>
+            </div>
+            <p class="panel-note">填写素材文件夹时优先使用文件夹队列；用过的素材会移入“已使用”子文件夹。</p>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="sc-pip-size">大小</label>
+                <select id="sc-pip-size">
+                  <option value="0.10">10%</option>
+                  <option value="0.15" selected>15%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.25">25%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-pip-opacity">不透明度</label>
+                <select id="sc-pip-opacity">
+                  <option value="0.01">1%</option>
+                  <option value="0.03" selected>3%</option>
+                  <option value="0.05">5%</option>
+                  <option value="0.10">10%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="0.80">80%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <label for="sc-pip-pos">位置</label>
+              <select id="sc-pip-pos">
+                <option>右下</option>
+                <option>右上</option>
+                <option>左下</option>
+                <option>左上</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="panel panel-wide ai-params-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-default-open="true" data-advanced-panel="sc-ai">
+            <div class="panel-header">
+              <h2>AI参数</h2>
+            </div>
+            <div class="field-row compact ai-preset-row">
+              <label for="sc-ai-preset">选片预设</label>
+              <div class="preset-control">
+                <select id="sc-ai-preset" data-ai-preset="sc">
+                  <option value="custom" selected>自定义</option>
+                  <option value="viral">爆款种草</option>
+                  <option value="slim">显瘦转化</option>
+                  <option value="quality">质感高级</option>
+                  <option value="commute">通勤场景</option>
+                  <option value="fast">快速促单</option>
+                  <option value="gentle">温柔讲解</option>
+                </select>
+                <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="sc">保存</button>
+                <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
+              </div>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="sc-category">主推品类</label>
+                <select id="sc-category">
+                  <option>自动检测</option>
+                  <option>上衣</option>
+                  <option>裤子</option>
+                  <option>裙子</option>
+                  <option>外套</option>
+                  <option>套装</option>
+                  <option>鞋子</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-focus">AI偏好</label>
+                <select id="sc-focus">
+                  <option>自动</option>
+                  <option>面料质感</option>
+                  <option>版型显瘦</option>
+                  <option>颜色氛围</option>
+                  <option>场景搭配</option>
+                  <option>情绪感染</option>
+                  <option>性价比</option>
+                  <option>紧迫稀缺</option>
+                  <option>流行趋势</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="sc-goal">成片目标</label>
+                <select id="sc-goal">
+                  <option>自动</option>
+                  <option>爆款种草</option>
+                  <option>专业讲解</option>
+                  <option>显瘦转化</option>
+                  <option>质感高级</option>
+                  <option>快速促单</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-hook-style">开头方式</label>
+                <select id="sc-hook-style">
+                  <option>自动</option>
+                  <option>痛点开头</option>
+                  <option>上身效果开头</option>
+                  <option>爆点金句开头</option>
+                  <option>主播强推荐开头</option>
+                  <option>不强制Hook</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row field-row-stack advanced-param">
+              <label>主卖点优先</label>
+              <div class="chip-grid chip-grid-14">
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="面料质感"> 面料质感</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="品质细节"> 品质细节</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="颜色氛围"> 颜色氛围</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="场景搭配"> 场景搭配</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="穿着体验"> 穿着体验</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="性价比"> 性价比</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="情绪感染"> 情绪感染</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="流行趋势"> 流行趋势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="紧迫稀缺"> 紧迫稀缺</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="尺寸长度"> 尺寸长度</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="工艺细节"> 工艺细节</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="对比优势"> 对比优势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="通用卖点"> 通用卖点</label>
+              </div>
+              <div class="field-row">
+                <label for="sc-selling-custom">自定义词</label>
+                <input id="sc-selling-custom" type="text" data-ai-control="sc-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、显高">
+              </div>
+            </div>
+            <div class="field-row field-row-stack advanced-param">
+              <label>不要选这些</label>
+              <div class="chip-grid">
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="价格"> 价格</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="尺码"> 尺码</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="库存"> 库存</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="闲聊"> 闲聊</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="搭配其他品"> 搭配其他品</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="重复卖点"> 重复卖点</label>
+              </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="sc-ending-style">结尾方式</label>
+                <select id="sc-ending-style">
+                  <option>自动</option>
+                  <option>尺码引导</option>
+                  <option>信任背书</option>
+                  <option>场景收尾</option>
+                  <option>自然结束</option>
+                  <option>不要促单</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-strictness">严格度</label>
+                <select id="sc-strictness">
+                  <option>宽松</option>
+                  <option selected>标准</option>
+                  <option>严格</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-header">
+              <h2>AI选片预览</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="smart-preview-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-cache">清缓存</button>
+                <button class="button button-primary button-small" data-action="start-smart-from-preview">用预览成片</button>
+              </div>
+            </div>
+            <div class="clip-preview-player is-hidden" id="smart-preview-player">
+              <div class="clip-preview-player-head">
+                <strong id="smart-preview-player-title">片段预览</strong>
+                <button class="button button-muted button-small" data-action="close-preview-video">关闭</button>
+              </div>
+              <video id="smart-preview-video" controls playsinline></video>
+            </div>
+            <div class="clip-preview empty" id="smart-preview">
+              <p>点击“AI选片预览”，先看 AI 会选哪些片段，再决定是否成片。</p>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="smart-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="smart-cut">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-smart-cut"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-mix">
+        <header class="page-header">
+          <div>
+            <h1>混剪成片</h1>
+            <p class="page-subtitle">多素材组合，统一生成成片。</p>
+          </div>
+        </header>
+
+        <div class="content-grid smart-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>视频素材</h2>
+              <button class="icon-button" title="选择视频" data-action="pick-videos" data-target="mix-video-paths">+</button>
+            </div>
+            <div class="path-entry">
+              <input id="mix-path-input" type="text" data-path-target="mix-video-paths" placeholder="粘贴视频完整路径后按 Enter">
+              <button class="button button-secondary" data-action="pick-videos" data-target="mix-video-paths">选择视频</button>
+              <button class="button button-muted" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
+            </div>
+            <textarea id="mix-video-paths" class="path-box" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+            <div class="video-dropzone" data-drop-target="mix-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <div class="video-list" data-list-for="mix-video-paths"></div>
+            <div class="field-row">
+              <label for="mix-output-dir">输出目录</label>
+              <div class="input-with-button">
+                <input id="mix-output-dir" type="text" placeholder="可留空，默认输出到第一个视频目录">
+                <button class="button button-secondary" data-action="pick-directory" data-target="mix-output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="mix-output-dir">打开</button>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="button button-danger" data-action="stop-scope" data-scope="mix">停止</button>
+              <button class="button button-secondary" data-action="start-mix-preview">AI选片预览</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="mix">开始混剪</button>
+            </div>
+          </section>
+
+          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="mix-params" data-summary-kind="params" data-summary-prefix="mix" data-default-open="true" data-advanced-panel="mix-params">
+            <div class="panel-header">
+              <h2>成片参数</h2>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="mix-duration">成片时长</label>
+                <select id="mix-duration">
+                  <option value="30">30秒</option>
+                  <option value="60" selected>60秒</option>
+                  <option value="90">90秒</option>
+                  <option value="120">120秒</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-versions">版本数</label>
+                <select id="mix-versions">
+                  <option selected>1</option>
+                  <option>2</option>
+                  <option>3</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row advanced-param">
+              <label for="mix-dedup">去重强度</label>
+              <select id="mix-dedup">
+                <option value="off">关闭</option>
+                <option value="light">轻度</option>
+                <option value="medium" selected>中度</option>
+                <option value="heavy">重度</option>
+              </select>
+            </div>
+            <div class="check-grid advanced-param">
+              <label class="check-item"><input id="mix-mirror" type="checkbox" checked> 镜像翻转</label>
+              <label class="check-item"><input id="mix-subtitle" type="checkbox" checked> 字幕叠加</label>
+              <label class="check-item"><input id="mix-crop" type="checkbox" checked> 智能裁切</label>
+              <label class="check-item"><input id="mix-kenburns" type="checkbox" checked> 动态缩放</label>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="mix-crop-level">裁切强度</label>
+                <select id="mix-crop-level">
+                  <option value="light">轻</option>
+                  <option value="medium" selected>中</option>
+                  <option value="heavy">重</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-kb-intensity">缩放强度</label>
+                <select id="mix-kb-intensity">
+                  <option value="轻">轻</option>
+                  <option value="中" selected>中</option>
+                  <option value="重">重</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="mix-pip" data-summary-kind="pip" data-summary-prefix="mix">
+            <div class="panel-header">
+              <h2>画中画</h2>
+            </div>
+            <div class="field-row">
+              <label for="mix-pip-mode">画中画模式</label>
+              <select id="mix-pip-mode">
+                <option value="off" selected>关闭</option>
+                <option value="auto">自身缩略</option>
+                <option value="asset">素材文件</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="mix-pip-path">素材视频</label>
+              <div class="input-with-button" data-file-drop-target="mix-pip-path" data-file-kind="video">
+                <input id="mix-pip-path" type="text" placeholder="选择后自动启用素材文件模式">
+                <button class="button button-secondary" data-action="pick-file" data-target="mix-pip-path" data-kind="video">浏览</button>
+              </div>
+            </div>
+            <div class="field-row">
+              <label for="mix-pip-folder">素材文件夹</label>
+              <div class="input-with-button">
+                <input id="mix-pip-folder" type="text" placeholder="按文件名顺序使用，成功后移入已使用">
+                <button class="button button-secondary" data-action="pick-directory" data-target="mix-pip-folder">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="mix-pip-folder">打开</button>
+              </div>
+            </div>
+            <p class="panel-note">填写素材文件夹时优先使用文件夹队列；用过的素材会移入“已使用”子文件夹。</p>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="mix-pip-size">大小</label>
+                <select id="mix-pip-size">
+                  <option value="0.10">10%</option>
+                  <option value="0.15" selected>15%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.25">25%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-pip-opacity">不透明度</label>
+                <select id="mix-pip-opacity">
+                  <option value="0.01">1%</option>
+                  <option value="0.03" selected>3%</option>
+                  <option value="0.05">5%</option>
+                  <option value="0.10">10%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="0.80">80%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <label for="mix-pip-pos">位置</label>
+              <select id="mix-pip-pos">
+                <option>右上</option>
+                <option selected>右下</option>
+                <option>左上</option>
+                <option>左下</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="panel panel-wide ai-params-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-default-open="true" data-advanced-panel="mix-ai">
+            <div class="panel-header">
+              <h2>AI参数</h2>
+            </div>
+            <div class="field-row compact ai-preset-row">
+              <label for="mix-ai-preset">选片预设</label>
+              <div class="preset-control">
+                <select id="mix-ai-preset" data-ai-preset="mix">
+                  <option value="custom" selected>自定义</option>
+                  <option value="viral">爆款种草</option>
+                  <option value="slim">显瘦转化</option>
+                  <option value="quality">质感高级</option>
+                  <option value="commute">通勤场景</option>
+                  <option value="fast">快速促单</option>
+                  <option value="gentle">温柔讲解</option>
+                </select>
+                <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="mix">保存</button>
+                <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
+              </div>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="mix-category">主推品类</label>
+                <select id="mix-category">
+                  <option>自动检测</option>
+                  <option>上衣</option>
+                  <option>裤子</option>
+                  <option>裙子</option>
+                  <option>外套</option>
+                  <option>套装</option>
+                  <option>鞋子</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-focus">AI偏好</label>
+                <select id="mix-focus">
+                  <option>自动</option>
+                  <option>面料质感</option>
+                  <option>版型显瘦</option>
+                  <option>颜色氛围</option>
+                  <option>场景搭配</option>
+                  <option>情绪感染</option>
+                  <option>性价比</option>
+                  <option>紧迫稀缺</option>
+                  <option>流行趋势</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="mix-goal">成片目标</label>
+                <select id="mix-goal">
+                  <option>自动</option>
+                  <option>爆款种草</option>
+                  <option>专业讲解</option>
+                  <option>显瘦转化</option>
+                  <option>质感高级</option>
+                  <option>快速促单</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-hook-style">开头方式</label>
+                <select id="mix-hook-style">
+                  <option>自动</option>
+                  <option>痛点开头</option>
+                  <option>上身效果开头</option>
+                  <option>爆点金句开头</option>
+                  <option>主播强推荐开头</option>
+                  <option>不强制Hook</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row field-row-stack advanced-param">
+              <label>主卖点优先</label>
+              <div class="chip-grid chip-grid-14">
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="面料质感"> 面料质感</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="品质细节"> 品质细节</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="颜色氛围"> 颜色氛围</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="场景搭配"> 场景搭配</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="穿着体验"> 穿着体验</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="性价比"> 性价比</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="情绪感染"> 情绪感染</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="流行趋势"> 流行趋势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="紧迫稀缺"> 紧迫稀缺</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="尺寸长度"> 尺寸长度</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="工艺细节"> 工艺细节</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="对比优势"> 对比优势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="通用卖点"> 通用卖点</label>
+              </div>
+              <div class="field-row">
+                <label for="mix-selling-custom">自定义词</label>
+                <input id="mix-selling-custom" type="text" data-ai-control="mix-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、显高">
+              </div>
+            </div>
+            <div class="field-row field-row-stack advanced-param">
+              <label>不要选这些</label>
+              <div class="chip-grid">
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="价格"> 价格</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="尺码"> 尺码</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="库存"> 库存</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="闲聊"> 闲聊</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="搭配其他品"> 搭配其他品</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="重复卖点"> 重复卖点</label>
+              </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="mix-ending-style">结尾方式</label>
+                <select id="mix-ending-style">
+                  <option>自动</option>
+                  <option>尺码引导</option>
+                  <option>信任背书</option>
+                  <option>场景收尾</option>
+                  <option>自然结束</option>
+                  <option>不要促单</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-strictness">严格度</label>
+                <select id="mix-strictness">
+                  <option>宽松</option>
+                  <option selected>标准</option>
+                  <option>严格</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-header">
+              <h2>AI选片预览</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="mix-preview-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-cache">清缓存</button>
+                <button class="button button-primary button-small" data-action="start-mix-from-preview">用预览混剪</button>
+              </div>
+            </div>
+            <div class="clip-preview-player is-hidden" id="mix-preview-player">
+              <div class="clip-preview-player-head">
+                <strong id="mix-preview-player-title">片段预览</strong>
+                <button class="button button-muted button-small" data-action="close-preview-video" data-preview-scope="mix">关闭</button>
+              </div>
+              <video id="mix-preview-video" controls playsinline></video>
+            </div>
+            <div class="clip-preview empty" id="mix-preview">
+              <p>点击“AI选片预览”，先看混剪会从哪些素材里选哪些片段。</p>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="mix-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="mix">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-mix"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-ai-scan">
+        <header class="page-header">
+          <div>
+            <h1>AI扫描</h1>
+            <p class="page-subtitle">按时间表和直播素材扫描可用片段。</p>
+          </div>
+        </header>
+
+        <div class="content-grid two-column-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>待扫描视频</h2>
+              <button class="icon-button" title="选择视频" data-action="pick-videos" data-target="scan-video-paths">+</button>
+            </div>
+            <div class="path-entry">
+              <input id="scan-path-input" type="text" data-path-target="scan-video-paths" placeholder="粘贴视频完整路径后按 Enter">
+              <button class="button button-secondary" data-action="pick-videos" data-target="scan-video-paths">选择视频</button>
+              <button class="button button-muted" data-action="clear-video-list" data-target="scan-video-paths">清空</button>
+            </div>
+            <textarea id="scan-video-paths" class="path-box" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+            <div class="video-dropzone" data-drop-target="scan-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <div class="video-list" data-list-for="scan-video-paths"></div>
+            <div class="field-row">
+              <label for="scan-output-dir">导出目录</label>
+              <div class="input-with-button">
+                <input id="scan-output-dir" type="text" placeholder="点击浏览选择，或直接粘贴路径">
+                <button class="button button-secondary" data-action="pick-directory" data-target="scan-output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="scan-output-dir">打开</button>
+              </div>
+            </div>
+            <label class="switch-row">
+              <span>扫描后自动导出到输出目录</span>
+              <input id="scan-auto-export" type="checkbox">
+            </label>
+            <div class="panel-actions">
+              <button class="button button-secondary" data-action="feature-submit" data-feature="ai-scan-merge">跨文件合并</button>
+              <button class="button button-danger" data-action="stop-scope" data-scope="ai-scan">停止</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="ai-scan">开始扫描</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>扫描结果</h2>
+              <span class="log-count" id="scan-selected-count">0</span>
+            </div>
+            <div class="result-list empty" id="scan-results">
+              <p>扫描后会在这里显示可导出的单品片段。</p>
+            </div>
+            <div class="system-actions">
+              <button class="button button-secondary" data-action="feature-submit" data-feature="ai-scan-export">导出选中单品</button>
+              <button class="button button-secondary" data-action="feature-submit" data-feature="ai-scan-export-merge">导出合并结果</button>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="ai-scan-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="ai-scan">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-ai-scan"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-product-scan">
+        <header class="page-header">
+          <div>
+            <h1>单品扫描</h1>
+            <p class="page-subtitle">按单品时间段切分素材。</p>
+          </div>
+        </header>
+
+        <div class="content-grid two-column-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>时间表与视频</h2>
+            </div>
+            <div class="field-row">
+              <label for="ps-excel-path">Excel</label>
+              <div class="input-with-button" data-file-drop-target="ps-excel-path" data-file-kind="excel">
+                <input id="ps-excel-path" type="text" placeholder="飞书导出的 Excel 路径">
+                <button class="button button-secondary" data-action="pick-file" data-target="ps-excel-path" data-kind="excel">浏览</button>
+              </div>
+            </div>
+            <div class="path-entry">
+              <input id="ps-video-input" type="text" data-path-target="ps-video-paths" placeholder="粘贴直播视频路径后按 Enter">
+              <button class="button button-secondary" data-action="pick-videos" data-target="ps-video-paths">选择视频</button>
+              <button class="button button-muted" data-action="clear-video-list" data-target="ps-video-paths">清空</button>
+            </div>
+            <textarea id="ps-video-paths" class="path-box" spellcheck="false" placeholder="每行一个直播视频路径"></textarea>
+            <div class="video-dropzone" data-drop-target="ps-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <div class="video-list" data-list-for="ps-video-paths"></div>
+            <div class="field-row">
+              <label for="ps-output-dir">导出目录</label>
+              <div class="input-with-button">
+                <input id="ps-output-dir" type="text" placeholder="输出到指定目录">
+                <button class="button button-secondary" data-action="pick-directory" data-target="ps-output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <label for="ps-advance">提前秒数</label>
+              <input id="ps-advance" type="number" value="0" min="0" max="120">
+            </div>
+            <div class="panel-actions">
+              <button class="button button-secondary" data-action="feature-submit" data-feature="product-scan-read">读取时间表</button>
+              <button class="button button-danger" data-action="stop-scope" data-scope="product-scan">停止</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="product-scan">开始分割</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>预览</h2>
+            </div>
+            <div class="result-list empty" id="product-preview">
+              <p>读取 Excel 后显示单品时间段、标题和导出状态。</p>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="product-scan-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="product-scan">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-product-scan"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-dedup">
+        <header class="page-header">
+          <div>
+            <h1>创作辅助</h1>
+            <p class="page-subtitle">批量处理成品视频，提升画面、音频和素材结构差异。</p>
+          </div>
+        </header>
+
+        <div class="content-grid two-column-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>视频素材</h2>
+              <button class="icon-button" title="选择视频" data-action="pick-videos" data-target="dedup-video-paths">+</button>
+            </div>
+            <div class="path-entry">
+              <input id="dedup-path-input" type="text" data-path-target="dedup-video-paths" placeholder="粘贴视频完整路径后按 Enter">
+              <button class="button button-secondary" data-action="pick-videos" data-target="dedup-video-paths">选择视频</button>
+              <button class="button button-muted" data-action="clear-video-list" data-target="dedup-video-paths">清空</button>
+            </div>
+            <textarea id="dedup-video-paths" class="path-box" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+            <div class="video-dropzone" data-drop-target="dedup-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <div class="video-list" data-list-for="dedup-video-paths"></div>
+            <div class="field-row">
+              <label for="dedup-output-dir">输出目录</label>
+              <div class="input-with-button">
+                <input id="dedup-output-dir" type="text" placeholder="可留空，默认输出到第一个视频目录">
+                <button class="button button-secondary" data-action="pick-directory" data-target="dedup-output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="dedup-output-dir">打开</button>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="button button-muted" data-action="reset-dedup">重置默认</button>
+              <button class="button button-danger" data-action="stop-scope" data-scope="dedup">停止</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="dedup">开始创作辅助</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>创作辅助方案</h2>
+            </div>
+            <div class="field-row">
+              <label for="dedup-preset">去重强度</label>
+              <select id="dedup-preset">
+                <option value="light">轻度</option>
+                <option value="medium">标准</option>
+                <option value="heavy" selected>强力</option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            <div class="helper-text">强力预设会加大画面指纹差异和音频扰动，建议配合画中画素材池使用；它能降低重复识别风险，但不能保证解除平台限流。</div>
+            <div class="dedup-grid">
+              <label class="dedup-control"><input id="dedup-mirror" type="checkbox" checked> 镜像</label>
+              <label class="dedup-control"><input id="dedup-crop" type="checkbox" checked> 微裁剪 <input id="dedup-crop-value" type="range" min="0" max="20" value="5"></label>
+              <label class="dedup-control"><input id="dedup-speed" type="checkbox" checked> 变速 <input id="dedup-speed-value" type="range" min="90" max="130" value="115"></label>
+              <label class="dedup-control"><input id="dedup-frame-structure" type="checkbox" checked> 帧结构扰动</label>
+              <label class="dedup-control"><input id="dedup-blur" type="checkbox"> 模糊 <input id="dedup-blur-value" type="range" min="0" max="10" value="2"></label>
+              <label class="dedup-control"><input id="dedup-sharpen" type="checkbox"> 锐化 <input id="dedup-sharpen-value" type="range" min="0" max="100" value="30"></label>
+              <label class="dedup-control"><input id="dedup-color" type="checkbox" checked> 伽马微调</label>
+              <label class="dedup-control"><input id="dedup-mask" type="checkbox" checked> 四角微遮罩</label>
+              <label class="dedup-control"><input id="dedup-bg-fill" type="checkbox"> 背景填充</label>
+            </div>
+            <div class="field-row compact">
+              <label for="dedup-frame-level">扰动强度</label>
+              <select id="dedup-frame-level">
+                <option value="light">轻度</option>
+                <option value="medium">标准</option>
+                <option value="heavy" selected>强力</option>
+              </select>
+            </div>
+            <p class="panel-note">帧结构扰动会轻量重采样帧序列，改变视频指纹；强力预设默认开启，轻度/标准可手动选择。</p>
+            <div class="field-row">
+              <label for="dedup-bg-image">背景图片</label>
+              <div class="input-with-button" data-file-drop-target="dedup-bg-image" data-file-kind="image">
+                <input id="dedup-bg-image" type="text" placeholder="可选背景图路径">
+                <button class="button button-secondary" data-action="pick-file" data-target="dedup-bg-image" data-kind="image">浏览</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="dedup-pip" data-summary-kind="pip" data-summary-prefix="dedup">
+            <div class="panel-header">
+              <h2>画中画</h2>
+            </div>
+            <div class="field-row">
+              <label for="dedup-pip-mode">画中画模式</label>
+              <select id="dedup-pip-mode">
+                <option value="off" selected>关闭</option>
+                <option value="auto">自身缩略</option>
+                <option value="asset">素材文件</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="dedup-pip-path">素材视频</label>
+              <div class="input-with-button" data-file-drop-target="dedup-pip-path" data-file-kind="video">
+                <input id="dedup-pip-path" type="text" placeholder="选择后自动启用素材文件模式">
+                <button class="button button-secondary" data-action="pick-file" data-target="dedup-pip-path" data-kind="video">浏览</button>
+              </div>
+            </div>
+            <div class="field-row">
+              <label for="dedup-pip-folder">素材文件夹</label>
+              <div class="input-with-button">
+                <input id="dedup-pip-folder" type="text" placeholder="按文件名顺序使用，成功后移入已使用">
+                <button class="button button-secondary" data-action="pick-directory" data-target="dedup-pip-folder">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="dedup-pip-folder">打开</button>
+              </div>
+            </div>
+            <p class="panel-note">填写素材文件夹时优先使用文件夹队列；用过的素材会移入“已使用”子文件夹。</p>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="dedup-pip-size">大小</label>
+                <select id="dedup-pip-size">
+                  <option value="0.10">10%</option>
+                  <option value="0.15" selected>15%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.25">25%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="dedup-pip-opacity">不透明度</label>
+                <select id="dedup-pip-opacity">
+                  <option value="0.01">1%</option>
+                  <option value="0.03" selected>3%</option>
+                  <option value="0.05">5%</option>
+                  <option value="0.10">10%</option>
+                  <option value="0.20">20%</option>
+                  <option value="0.30">30%</option>
+                  <option value="0.50">50%</option>
+                  <option value="0.80">80%</option>
+                  <option value="1.00">100%</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <label for="dedup-pip-pos">位置</label>
+              <select id="dedup-pip-pos">
+                <option>右下</option>
+                <option>右上</option>
+                <option>左下</option>
+                <option>左上</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>音频扰动</h2>
+            </div>
+            <div class="rule-grid">
+              <label class="check-item"><input id="dedup-audio-pitch" type="checkbox" checked> 音高微调</label>
+              <label class="check-item"><input id="dedup-audio-reverb" type="checkbox"> 轻混响</label>
+              <label class="check-item"><input id="dedup-noise-fusion" type="checkbox" checked> 双音轨融合</label>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="dedup-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="dedup">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-dedup"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-live-rec">
+        <header class="page-header">
+          <div>
+            <h1>直播录制</h1>
+            <p class="page-subtitle">录制直播流并管理本地素材。</p>
+          </div>
+        </header>
+
+        <div class="content-grid two-column-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>录制设置</h2>
+            </div>
+            <div class="field-row">
+              <label for="live-save-dir">保存目录</label>
+              <div class="input-with-button">
+                <input id="live-save-dir" type="text" placeholder="录制视频保存目录">
+                <button class="button button-secondary" data-action="pick-directory" data-target="live-save-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="live-save-dir">打开</button>
+              </div>
+            </div>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="live-segment">分段</label>
+                <select id="live-segment">
+                  <option selected>不限</option>
+                  <option>30分钟</option>
+                  <option>60分钟</option>
+                  <option>120分钟</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="live-check-interval">检测</label>
+                <input id="live-check-interval" type="number" value="30" min="5" max="300">
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button class="button button-danger" data-action="stop-scope" data-scope="live-rec">停止</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="live-rec-monitor">开始监控</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>添加直播间</h2>
+            </div>
+            <div class="field-row">
+              <label for="live-room-name">名称</label>
+              <input id="live-room-name" type="text" placeholder="主播或直播间名称">
+            </div>
+            <div class="field-row">
+              <label for="live-room-url">地址</label>
+              <input id="live-room-url" type="text" placeholder="直播间链接或 rtmp 地址">
+            </div>
+            <div class="field-row">
+              <label for="live-platform">平台</label>
+              <select id="live-platform">
+                <option>抖音</option>
+                <option>快手</option>
+                <option>B站</option>
+                <option selected>自定义RTMP</option>
+              </select>
+            </div>
+            <div class="system-actions">
+              <button class="button button-secondary" data-action="feature-submit" data-feature="live-rec-detect">检测流地址</button>
+              <button class="button button-primary" data-action="add-live-room">添加</button>
+            </div>
+          </section>
+
+          <section class="panel panel-wide">
+            <div class="panel-header">
+              <h2>录制管理</h2>
+              <button class="button button-muted" data-action="feature-submit" data-feature="live-rec-delete-all">删除全部</button>
+            </div>
+            <div class="table-like">
+              <div class="table-row table-head">
+                <span>名称</span><span>平台</span><span>地址</span><span>状态</span><span>时长</span><span>文件</span><span>操作</span>
+              </div>
+              <div class="table-row empty-row">
+                <span>暂无直播间</span><span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+            </div>
+            <p class="panel-note">免责声明：本工具仅用于录制您拥有版权或已获授权的直播内容。</p>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="live-rec-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="live-rec">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-live-rec"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <header class="page-header">
+          <div>
+            <h1>设置</h1>
+            <p class="page-subtitle">集中管理 AI、语音识别、关键词和系统选项。</p>
+          </div>
+          <div class="page-actions">
+            <button class="button button-secondary" data-action="reload-settings">重新载入</button>
+            <button class="button button-primary" data-action="save-settings">保存设置</button>
+          </div>
+        </header>
+
+        <div class="settings-layout">
+          <div class="settings-tabs" role="tablist">
+            <button class="settings-tab is-active" data-settings-tab="ai">AI模型</button>
+            <button class="settings-tab" data-settings-tab="asr">语音识别</button>
+            <button class="settings-tab" data-settings-tab="rules">规则词库</button>
+            <button class="settings-tab" data-settings-tab="system">系统</button>
+          </div>
+
+          <div class="settings-pages">
+            <section class="settings-page is-active" id="settings-ai">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>AI模型</h2>
+                  <button class="button button-secondary" data-action="test-ai">测试连接</button>
+                </div>
+                <label class="switch-row">
+                  <span>启用 AI 选片</span>
+                  <input id="s-enabled" type="checkbox">
+                </label>
+                <div class="field-row">
+                  <label for="s-api-key">API Key</label>
+                  <div class="secret-field">
+                    <input id="s-api-key" type="password" autocomplete="off">
+                    <button class="secret-toggle" type="button" data-action="toggle-secret" data-target="s-api-key" aria-label="显示或隐藏 AI API Key">
+                      <span class="eye-icon"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <label for="s-base-url">Base URL</label>
+                  <input id="s-base-url" type="text">
+                </div>
+                <div class="field-row">
+                  <label for="s-model">模型</label>
+                  <input id="s-model" type="text">
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>AI偏好设置</h2>
+                </div>
+                <p class="panel-note">设置偏好权重，影响成片叙事方向。</p>
+                <div class="slider-list">
+                  <label class="slider-row">
+                    <span>版型显瘦</span>
+                    <input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="版型显瘦">
+                    <strong data-pref-value="版型显瘦">2</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>面料质感</span>
+                    <input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="面料质感">
+                    <strong data-pref-value="面料质感">2</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>颜色氛围</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="颜色氛围">
+                    <strong data-pref-value="颜色氛围">1.5</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>场景搭配</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="场景搭配">
+                    <strong data-pref-value="场景搭配">1.5</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>情绪感染</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="情绪感染">
+                    <strong data-pref-value="情绪感染">1</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>性价比</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="性价比">
+                    <strong data-pref-value="性价比">1</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>流行趋势</span>
+                    <input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="流行趋势">
+                    <strong data-pref-value="流行趋势">0.5</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>紧迫稀缺</span>
+                    <input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="紧迫稀缺">
+                    <strong data-pref-value="紧迫稀缺">0.5</strong>
+                  </label>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>AI选片规则</h2>
+                </div>
+                <p class="panel-note">硬约束，直接控制 AI 选什么不选什么。</p>
+                <div class="field-row textarea-row">
+                  <label for="s-rule-narrative">叙事结构</label>
+                  <textarea id="s-rule-narrative" rows="3" placeholder="默认: 开场圈人→提高预期→产品介绍→促单收尾"></textarea>
+                </div>
+                <div class="rule-grid">
+                  <label class="check-item"><input id="s-rule-category-filter" type="checkbox" checked> 强制同一品类</label>
+                  <label class="check-item"><input id="s-rule-time-coherence" type="checkbox" checked> 时间连贯</label>
+                </div>
+                <div class="field-row compact">
+                  <label for="s-rule-hook-cap">Hook上限</label>
+                  <select id="s-rule-hook-cap">
+                    <option>3秒</option>
+                    <option selected>5秒</option>
+                    <option>8秒</option>
+                    <option>不限</option>
+                  </select>
+                </div>
+                <div class="field-row textarea-row">
+                  <label for="s-rule-custom-text">自定义规则</label>
+                  <textarea id="s-rule-custom-text" rows="3" placeholder="例如: 优先选提到裙长、露脚踝的片段"></textarea>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-page" id="settings-asr">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>语音识别</h2>
+                </div>
+                <label class="switch-row">
+                  <span>启用云端识别</span>
+                  <input id="s-asr-enabled" type="checkbox">
+                </label>
+                <input id="s-asr-provider" type="hidden" value="火山引擎">
+                <div class="field-row">
+                  <label for="s-whisper-model">本地模型</label>
+                  <select id="s-whisper-model">
+                    <option>tiny</option>
+                    <option>base</option>
+                    <option selected>small</option>
+                    <option>medium</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>火山引擎</h2>
+                  <button class="button button-secondary" data-action="diagnose-volc">完整诊断</button>
+                </div>
+                <div class="field-row">
+                  <label for="s-volc-api-key">API Key</label>
+                  <div class="secret-field">
+                    <input id="s-volc-api-key" type="password" autocomplete="off">
+                    <button class="secret-toggle" type="button" data-action="toggle-secret" data-target="s-volc-api-key" aria-label="显示或隐藏火山 API Key">
+                      <span class="eye-icon"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <label for="s-volc-tos-ak">TOS AK</label>
+                  <div class="secret-field">
+                    <input id="s-volc-tos-ak" type="password" autocomplete="off">
+                    <button class="secret-toggle" type="button" data-action="toggle-secret" data-target="s-volc-tos-ak" aria-label="显示或隐藏 TOS AK">
+                      <span class="eye-icon"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <label for="s-volc-tos-sk">TOS SK</label>
+                  <div class="secret-field">
+                    <input id="s-volc-tos-sk" type="password" autocomplete="off">
+                    <button class="secret-toggle" type="button" data-action="toggle-secret" data-target="s-volc-tos-sk" aria-label="显示或隐藏 TOS SK">
+                      <span class="eye-icon"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <label for="s-volc-bucket">Bucket</label>
+                  <input id="s-volc-bucket" type="text">
+                </div>
+                <div class="field-row">
+                  <label for="s-volc-region">地域</label>
+                  <select id="s-volc-region">
+                    <option value="cn-beijing">cn-beijing</option>
+                    <option value="cn-shanghai">cn-shanghai</option>
+                    <option value="cn-guangzhou">cn-guangzhou</option>
+                    <option value="ap-southeast-1">ap-southeast-1</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-page" id="settings-rules">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>规则词库</h2>
+                  <button class="button button-secondary" data-action="load-keywords">刷新</button>
+                </div>
+                <p class="panel-note">规则词库给 AI 和本地过滤器提供“判定词”：卖点词、违禁词、废话词、负面信号、偏好关键词。它不是模型设置，而是决定哪些字幕更容易被选中、哪些片段必须避开的业务词典。</p>
+                <div class="metric-row">
+                  <div>
+                    <span class="metric-label">当前词条</span>
+                    <strong id="keyword-count">0</strong>
+                  </div>
+                  <div>
+                    <span class="metric-label">来源</span>
+                    <strong id="keyword-source">本地</strong>
+                  </div>
+                </div>
+                <div class="system-actions">
+                  <button class="button button-secondary" data-action="load-keywords">刷新词库信息</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-page" id="settings-system">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>系统</h2>
+                </div>
+                <div class="field-row">
+                  <label>用户数据</label>
+                  <input id="runtime-user-data" type="text" readonly>
+                </div>
+                <div class="field-row">
+                  <label>源码目录</label>
+                  <input id="runtime-repo-root" type="text" readonly>
+                </div>
+                <div class="field-row">
+                  <label>在线更新</label>
+                  <input id="update-status" type="text" value="未检查" readonly>
+                </div>
+                <div class="field-row">
+                  <label for="s-ui-theme">界面颜色</label>
+                  <select id="s-ui-theme">
+                    <option value="system">跟随系统</option>
+                    <option value="light">浅色模式</option>
+                    <option value="dark">深色模式</option>
+                  </select>
+                </div>
+                <label class="switch-row">
+                  <span>启用硬件加速</span>
+                  <input id="s-hardware-encoder" type="checkbox">
+                </label>
+                <p class="panel-note">实验选项：优先尝试显卡编码，不可用时会自动回退稳定编码。</p>
+                <div class="field-row">
+                  <label for="license-code">激活码</label>
+                  <input id="license-code" type="text" placeholder="输入激活码">
+                </div>
+                <div class="field-row">
+                  <label>剩余天数</label>
+                  <input id="license-days-left" type="text" readonly>
+                </div>
+                <div class="system-actions">
+                  <button class="button button-primary" data-action="activate-license">激活</button>
+                  <button class="button button-muted" data-action="unbind-device">解绑设备</button>
+                  <button class="button button-secondary" data-action="check-update">检查更新</button>
+                  <button class="button button-secondary" data-action="apply-update">安装更新</button>
+                  <button class="button button-secondary" data-action="feedback">反馈</button>
+                  <button class="button button-secondary" data-action="clear-cache">清理缓存</button>
+                </div>
+              </div>
+              <div class="panel log-panel">
+                <div class="panel-header">
+                  <h2>诊断日志</h2>
+                  <span class="log-count" id="settings-log-count">0</span>
+                </div>
+                <div class="log-view" id="log-settings"></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toast-stack"></div>
+  <script src="/assets/app.js?v=20260617-update" defer></script>
+</body>
+</html>

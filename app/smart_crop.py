@@ -28,9 +28,9 @@ _CASCADES = {}
 
 # 裁切程度配置
 CROP_LEVELS = {
-    'light':  {'max_zoom': 1.05, 'label': '轻'},
-    'medium': {'max_zoom': 1.12, 'label': '中'},
-    'heavy':  {'max_zoom': 1.25, 'label': '重'},
+    'light':  {'max_zoom': 1.05, 'min_zoom': 1.02, 'keep_body': 0.94, 'head_pos': 0.055, 'label': '轻'},
+    'medium': {'max_zoom': 1.12, 'min_zoom': 1.055, 'keep_body': 0.88, 'head_pos': 0.070, 'label': '中'},
+    'heavy':  {'max_zoom': 1.25, 'min_zoom': 1.08, 'keep_body': 0.82, 'head_pos': 0.085, 'label': '重'},
 }
 
 
@@ -208,6 +208,9 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
         person_xs = []
         person_ys = []
         person_sizes = []
+        person_ws = []
+        person_hs = []
+        person_bottoms = []
         head_tops = []
 
         for ti, t in enumerate(sample_times):
@@ -233,18 +236,27 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
                 person_xs.append(cx)
                 person_ys.append(cy)
                 person_sizes.append(max(best[2], best[3]) / max(frame_w, frame_h))
+                person_ws.append(best[2] / frame_w)
+                person_hs.append(best[3] / frame_h)
+                person_bottoms.append((best[1] + best[3]) / frame_h)
                 head_tops.append(best[1] / frame_h)
 
         if person_xs:
             cx = sorted(person_xs)[len(person_xs) // 2]
             cy = sorted(person_ys)[len(person_ys) // 2]
             avg_size = sum(person_sizes) / len(person_sizes)
+            avg_w = sum(person_ws) / len(person_ws) if person_ws else 0
+            avg_h = sum(person_hs) / len(person_hs) if person_hs else avg_size
+            avg_bottom = sum(person_bottoms) / len(person_bottoms) if person_bottoms else min(1.0, cy + avg_h / 2)
             min_head_top = min(head_tops)
 
             results[i] = {
                 'person_cx_ratio': cx,
                 'person_cy_ratio': cy,
                 'person_size_ratio': avg_size,
+                'person_w_ratio': avg_w,
+                'person_h_ratio': avg_h,
+                'person_bottom_ratio': avg_bottom,
                 'head_top_ratio': min_head_top,
                 'frame_w': frame_w,
                 'frame_h': frame_h,
@@ -306,67 +318,59 @@ def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_f
     """
     level_cfg = CROP_LEVELS.get(crop_level, CROP_LEVELS['medium'])
     max_zoom = level_cfg['max_zoom']
+    min_zoom = level_cfg.get('min_zoom', 1.03)
+    keep_body = level_cfg.get('keep_body', 0.88)
+    target_head_pos = level_cfg.get('head_pos', 0.07)
 
     if person_info is None:
         return _random_crop(max_zoom)
 
     cx = person_info['person_cx_ratio']
     person_size = person_info.get('person_size_ratio', 0)
+    person_h = person_info.get('person_h_ratio', person_size)
+    person_bottom = person_info.get(
+        'person_bottom_ratio',
+        min(1.0, person_info.get('person_cy_ratio', 0.5) + person_h / 2),
+    )
     head_top = person_info.get('head_top_ratio', 0.1)
 
-    # ====== 头部安全兜底 ======
-    # 底部不裁切：crop_y + crop_h = 1.0
-    # 需要头部在裁切区域内且上方留5%边距
-    # 即 crop_y <= head_top - 0.05
-    # 所以 crop_h >= 1.0 - (head_top - 0.05)
-    # safe_zoom = 1.0 / crop_h <= 1.0 / (1.0 - head_top + 0.05)
-    head_margin = 0.05
-    if head_top > 0:
-        safe_max_zoom = 1.0 / (1.0 - head_top + head_margin)
-        safe_max_zoom = max(1.0, min(safe_max_zoom, 2.0))
-    else:
-        safe_max_zoom = max_zoom
+    # 封面构图：优先保护头部，同时保留大部分身体，不再强制底部完全不裁。
+    head_margin = 0.035
+    body_margin = 0.025
+    safe_top = max(0.0, head_top - head_margin)
+    protected_bottom = min(1.0, min(person_bottom, head_top + person_h * keep_body) + body_margin)
+    protected_h = max(0.35, protected_bottom - safe_top)
+    safe_max_zoom = max(1.0, min(1.0 / protected_h, 2.0))
 
-    # 实际最大zoom = min(用户选择程度, 安全上限)
     actual_max_zoom = min(max_zoom, safe_max_zoom)
 
-    # 根据人物大小决定zoom力度
-    if person_size > 0.5:
-        # 人物已经很大，几乎不zoom
-        zoom = 1.0 + random.uniform(0.0, min(0.03, actual_max_zoom - 1.0))
-    elif person_size > 0.3:
-        # 中等距离
-        zoom = 1.0 + random.uniform(0.01, min(0.06, actual_max_zoom - 1.0))
+    if actual_max_zoom >= min_zoom:
+        zoom = random.uniform(min_zoom, actual_max_zoom)
+    elif actual_max_zoom > 1.01:
+        zoom = random.uniform(1.01, actual_max_zoom)
     else:
-        # 人物较远，正常zoom
-        upper = actual_max_zoom - 1.0
-        if upper > 0.02:
-            zoom = 1.0 + random.uniform(0.02, upper)
-        else:
-            zoom = 1.0 + random.uniform(0.0, max(0.01, upper))
+        zoom = actual_max_zoom
 
     zoom = max(1.0, min(zoom, actual_max_zoom))
 
     crop_w = 1.0 / zoom
     crop_h = 1.0 / zoom
 
-    # 水平居中于人物，加微小随机偏移
-    crop_x = cx - crop_w / 2 + random.uniform(-0.02, 0.02)
+    # 水平居中于人物，加微小构图偏移。
+    crop_x = cx - crop_w / 2 + random.uniform(-0.015, 0.015)
     crop_x = max(0, min(crop_x, 1.0 - crop_w))
 
-    # 垂直：底部不裁切
-    crop_y = 1.0 - crop_h
+    crop_y = head_top - (target_head_pos * crop_h)
 
-    # 二次安全检查：确保头部在裁切区域内
-    if head_top > 0 and crop_y > head_top - head_margin:
-        crop_y = max(0, head_top - head_margin)
-        crop_h = 1.0 - crop_y
-        zoom = 1.0 / min(crop_w, crop_h)
-
+    if head_top > 0:
+        crop_y = min(crop_y, max(0.0, head_top - head_margin))
     crop_y = max(0, min(crop_y, 1.0 - crop_h))
 
     if log_fn:
-        log_fn("SmartCrop: zoom=%.2fx (安全上限=%.2fx, 程度=%s)" % (zoom, safe_max_zoom, crop_level))
+        log_fn(
+            "SmartCrop: cover zoom=%.2fx (safe=%.2fx, level=%s, head=%.2f, body=%.2f, y=%.2f)"
+            % (zoom, safe_max_zoom, crop_level, head_top, person_h, crop_y)
+        )
 
     return {
         'crop_w': crop_w,
@@ -406,42 +410,102 @@ def _clamp(v, lo, hi):
     return max(lo, min(int(v), hi))
 
 
-def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None):
-    """Ken Burns: crop+scale 二次编码, 用 n(帧号) 做动画
-
-    在已切好的片段上做动画, n 从0开始, 不受 seeking 影响。
-    crop 居中 (iw-ow)/2, 不做平移。scale 回原尺寸保证输出稳定。
-
-    返回: FFmpeg 滤镜字符串, 可直接用于二次编码的 -vf
-    """
+def _ken_burns_motion(intensity=None, max_zoom_delta=None):
     direction = random.choice(['in', 'out'])
-    if intensity == 'light':
+    if intensity in ('light', '轻'):
         target_zoom = random.uniform(0.03, 0.10)
-    elif intensity == 'heavy':
+    elif intensity in ('heavy', '重'):
         target_zoom = random.uniform(0.15, 0.40)
     else:
         target_zoom = random.uniform(0.08, 0.25)
-    total_frames = max(1, int(fps * clip_duration))
+    if max_zoom_delta is not None:
+        try:
+            cap = max(0.02, float(max_zoom_delta))
+            target_zoom = min(target_zoom, cap)
+        except Exception:
+            pass
+    return direction, target_zoom
+
+
+def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None, intensity=None, max_zoom_delta=None):
+    """Ken Burns filter using FFmpeg zoompan with stable CFR timestamps."""
+    direction, target_zoom = _ken_burns_motion(intensity, max_zoom_delta=max_zoom_delta)
+    target_fps = max(15.0, min(float(fps or 30), 60.0))
+    total_frames = max(1, int(round(target_fps * clip_duration)))
+    denom = max(total_frames - 1, 1)
+    progress_expr = "(on/%d)" % denom
+    ease_expr = "(3*pow(%s,2)-2*pow(%s,3))" % (progress_expr, progress_expr)
 
     if direction == 'in':
-        # 推进: n=0时满画幅, n=total时缩到1-target_zoom
-        cw_expr = "iw-iw*%.4f*n/%d" % (target_zoom, total_frames)
-        ch_expr = "ih-ih*%.4f*n/%d" % (target_zoom, total_frames)
+        zoom_expr = "1+%.6f*%s" % (target_zoom, ease_expr)
     else:
-        # 拉远: n=0时缩到1-target_zoom, n=total时满画幅
-        cw_expr = "iw-iw*%.4f*(%d-n)/%d" % (target_zoom, total_frames, total_frames)
-        ch_expr = "ih-ih*%.4f*(%d-n)/%d" % (target_zoom, total_frames, total_frames)
+        zoom_expr = "1+%.6f*(1-%s)" % (target_zoom, ease_expr)
 
-    result = "crop=%s:%s:(iw-ow)/2:(ih-oh)/2,scale=%d:%d" % (cw_expr, ch_expr, w, h)
+    result = (
+        "fps=fps=%.3f:round=near,"
+        "zoompan=z='%s':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        "d=1:s=%dx%d:fps=%.3f,"
+        "setpts=N/(%.3f*TB),format=yuv420p"
+    ) % (target_fps, zoom_expr, w, h, target_fps, target_fps)
 
     if log_fn:
         label = '\u63a8\u8fdb' if direction == 'in' else '\u62c9\u8fdc'
-        log_fn("KenBurns: %s %.0f%% (%d frames)" % (label, target_zoom * 100, total_frames))
+        cap_text = ""
+        if max_zoom_delta is not None:
+            try:
+                cap_text = ", 画质上限 %.0f%%" % (float(max_zoom_delta) * 100)
+            except Exception:
+                cap_text = ""
+        log_fn("KenBurns: %s %.0f%% (%d frames @ %.0ffps%s, FFmpeg)" % (label, target_zoom * 100, total_frames, target_fps, cap_text))
 
     return result
 
 
-def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None):
+def apply_ken_burns_ffmpeg(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None, max_zoom_delta=None):
+    """Apply Ken Burns with FFmpeg zoompan. Much faster than Python/OpenCV frame piping."""
+    import subprocess as _sp
+
+    actual_fps = max(15.0, min(float(fps or 30), 60.0))
+    safe_duration = max(0.05, float(clip_duration or 0.05))
+    vf = ken_burns_filter(clip_duration, w=w, h=h, fps=actual_fps, log_fn=log_fn, intensity=intensity, max_zoom_delta=max_zoom_delta)
+    af = "atrim=0:%.3f,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0" % safe_duration
+    _cflags = 0x08000000 if sys.platform == "win32" else 0
+    cmd = [
+        ffmpeg_cmd, "-y",
+        "-i", clip_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+        "-pix_fmt", "yuv420p",
+        "-af", af,
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-shortest",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    try:
+        proc = _sp.run(cmd, stdout=_sp.DEVNULL, stderr=_sp.PIPE,
+                       text=True, encoding="utf-8", errors="replace",
+                       timeout=max(60, int(float(clip_duration or 1) * 12)),
+                       creationflags=_cflags)
+    except Exception as e:
+        if log_fn:
+            log_fn("KenBurns: FFmpeg zoompan failed: %s" % e)
+        return False
+
+    if proc.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) <= 1000:
+        if log_fn:
+            err = (proc.stderr or "").strip().split("\n")[-2:]
+            log_fn("KenBurns: FFmpeg zoompan failed rc=%d %s" % (proc.returncode, " ".join(err)[:180]))
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None, max_zoom_delta=None):
     """Ken Burns effect using OpenCV frame-by-frame processing.
     
     Reads each frame via cv2, applies animated zoom (crop+resize),
@@ -455,23 +519,27 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
         return False
 
     import subprocess as _sp
+    import time as _time
 
-    direction = random.choice(['in', 'out'])
-    if intensity == 'light':
-        target_zoom = random.uniform(0.03, 0.10)
-    elif intensity == 'heavy':
-        target_zoom = random.uniform(0.15, 0.40)
-    else:
-        target_zoom = random.uniform(0.08, 0.25)
-    total_frames = max(1, int(fps * clip_duration))
+    direction, target_zoom = _ken_burns_motion(intensity, max_zoom_delta=max_zoom_delta)
+    target_fps = max(15.0, min(float(fps or 30), 60.0))
+    safe_duration = max(0.05, float(clip_duration or 0.05))
+    total_frames = max(1, int(round(target_fps * safe_duration)))
+    started_at = _time.perf_counter()
 
     cap = cv2.VideoCapture(clip_path)
     if not cap.isOpened():
         if log_fn:
             log_fn("KenBurns: cannot open video")
         return False
-
-    actual_fps = cap.get(cv2.CAP_PROP_FPS) or fps
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or target_fps
+    if not source_fps or source_fps <= 1 or source_fps > 240:
+        source_fps = target_fps
+    source_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if source_frames > 0:
+        source_duration = source_frames / float(source_fps)
+        if source_duration > 0:
+            total_frames = max(1, min(total_frames, int(round(source_duration * target_fps))))
 
     # FFmpeg pipe: raw video from stdin + audio from original clip
     _cflags = 0x08000000 if sys.platform == "win32" else 0
@@ -479,14 +547,16 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
         ffmpeg_cmd, "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", "%dx%d" % (w, h), "-pix_fmt", "bgr24",
-        "-r", str(actual_fps),
+        "-r", str(target_fps),
         "-i", "-",
         "-i", clip_path,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
+        "-af", "atrim=0:%.3f,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0" % safe_duration,
         "-map", "0:v:0",
         "-map", "1:a:0?",
+        "-shortest",
         "-movflags", "+faststart",
         output_path
     ]
@@ -501,17 +571,37 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
             log_fn("KenBurns: FFmpeg pipe failed: %s" % e)
         return False
 
-    frame_idx = 0
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
+        last_frame = None
+        src_idx = -1
+        eof_padding = 0
+        written_frames = 0
+        for out_idx in range(total_frames):
+            desired_src_idx = int(round((out_idx / target_fps) * source_fps))
+            while src_idx < desired_src_idx:
+                ret, next_frame = cap.read()
+                if not ret:
+                    eof_padding += 1
+                    break
+                src_idx += 1
+                last_frame = next_frame
+                eof_padding = 0
+
+            if last_frame is None:
+                ret, last_frame = cap.read()
+                if not ret:
+                    break
+                src_idx += 1
+
+            if last_frame is None:
                 break
+            if eof_padding > 3:
+                break
+            frame = last_frame
 
             # Calculate zoom for this frame (ease-in-out curve)
-            progress = min(frame_idx, total_frames) / max(total_frames, 1)
-            # Smooth ease-in-out: slow start, fast middle, slow end
-            eased = 0.5 - 0.5 * (1.0 - 2.0 * progress) * abs(1.0 - 2.0 * progress) if progress < 0.5 else 0.5 + 0.5 * (2.0 * progress - 1.0) * abs(2.0 * progress - 1.0)
+            progress = min(out_idx, total_frames - 1) / max(total_frames - 1, 1)
+            eased = (3 * progress * progress) - (2 * progress * progress * progress)
             if direction == 'in':
                 zoom = 1.0 + target_zoom * eased
             else:
@@ -531,16 +621,15 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
 
             # Resize to target
             if cropped.shape[1] != w or cropped.shape[0] != h:
-                resized = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+                resized = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LANCZOS4)
             else:
                 resized = cropped
 
             try:
                 proc.stdin.write(resized.tobytes())
+                written_frames += 1
             except BrokenPipeError:
                 break
-
-            frame_idx += 1
     except Exception as e:
         if log_fn:
             log_fn("KenBurns: frame processing error: %s" % e)
@@ -558,9 +647,19 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
         if os.path.exists(output_path):
             os.remove(output_path)
         return False
+    if written_frames < max(1, int(total_frames * 0.85)):
+        if log_fn:
+            log_fn("KenBurns: OpenCV wrote too few frames (%d/%d), fallback needed" % (written_frames, total_frames))
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
 
     label = '\u63a8\u8fdb' if direction == 'in' else '\u62c9\u8fdc'
     if log_fn:
-        log_fn("KenBurns: %s %.0f%% (%d frames, OpenCV)" % (label, target_zoom * 100, total_frames))
+        elapsed = max(0.0, _time.perf_counter() - started_at)
+        output_duration = written_frames / target_fps if target_fps > 0 else float(clip_duration or 0)
+        speed = (output_duration / elapsed) if elapsed > 0 else 0.0
+        log_fn("KenBurns: %s %.0f%% (%d/%d frames @ %.0ffps, OpenCV, %.1fs, %.2fx)" % (
+            label, target_zoom * 100, written_frames, total_frames, target_fps, elapsed, speed))
 
     return True

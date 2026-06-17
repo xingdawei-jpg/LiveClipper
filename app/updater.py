@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.6.2"
+CURRENT_VERSION = "2026.6.17"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -67,16 +67,20 @@ def _get_installed_version_file():
 
 def _get_installed_version():
     """Read installed version from local file, fallback to CURRENT_VERSION"""
+    installed = ""
     try:
         vf = _get_installed_version_file()
         if os.path.exists(vf):
             with open(vf, "r", encoding="utf-8") as f:
                 v = f.read().strip()
             if v:
-                return v
+                installed = v
     except Exception:
         pass
-    return CURRENT_VERSION
+    try:
+        return max([installed, CURRENT_VERSION], key=parse_version)
+    except Exception:
+        return installed or CURRENT_VERSION
 
 def _set_installed_version(version):
     """Write installed version to local file after update"""
@@ -278,13 +282,14 @@ def _fetch_file_bytes(url, timeout=30):
 def _download_file_bytes(fname, expected_sha):
     """下载单个文件的 bytes，尝试多个源+重试，验证 SHA256"""
     repo = GITHUB_REPO
+    source_path = _manifest_source_path(fname)
     sources = [
-        ("GitHub API", f"https://api.github.com/repos/{repo}/contents/app/{fname}?ref=main"),
-        ("Raw", f"https://raw.githubusercontent.com/{repo}/main/app/{fname}"),
-        ("jsDelivr", f"https://cdn.jsdelivr.net/gh/{repo}@main/app/{fname}"),
+        ("GitHub API", f"https://api.github.com/repos/{repo}/contents/{source_path}?ref=main"),
+        ("Raw", f"https://raw.githubusercontent.com/{repo}/main/{source_path}"),
+        ("jsDelivr", f"https://cdn.jsdelivr.net/gh/{repo}@main/{source_path}"),
     ]
     for prefix in ["https://ghfast.top/https://", "https://gh-proxy.com/https://"]:
-        sources.append((f"Mirror", prefix + f"raw.githubusercontent.com/{repo}/main/app/{fname}"))
+        sources.append((f"Mirror", prefix + f"raw.githubusercontent.com/{repo}/main/{source_path}"))
 
     # 每个源尝试2次，超时递减
     for name, url in sources:
@@ -305,6 +310,97 @@ def _download_file_bytes(fname, expected_sha):
             except Exception:
                 continue
     return None
+
+
+def _manifest_source_path(fname):
+    normalized = str(fname or "").replace("\\", "/").lstrip("/")
+    if normalized.startswith(("app/", "web_client/")):
+        return normalized
+    return "app/" + normalized
+
+
+def _manifest_target_path(fname):
+    normalized = str(fname or "").replace("\\", "/").lstrip("/")
+    if normalized.startswith(("app/", "web_client/")):
+        return normalized
+    return "app/" + normalized
+
+
+def _update_root():
+    return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper")
+
+
+def _write_update_file(relative_path, content):
+    relative_path = _manifest_target_path(relative_path)
+    target = os.path.join(_update_root(), *relative_path.split("/"))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "wb") as f:
+        f.write(content)
+    return target
+
+
+def apply_update_headless(version_info):
+    """Apply an update without Tk dialogs. Used by the Web desktop client."""
+    files_info = (version_info or {}).get("files", {})
+    if files_info:
+        updated = []
+        failed = []
+        for fname, expected_sha in files_info.items():
+            content = _download_file_bytes(fname, expected_sha)
+            if content is None:
+                failed.append(fname)
+                continue
+            actual_sha = hashlib.sha256(content).hexdigest().lower()
+            if actual_sha != str(expected_sha).lower():
+                failed.append(fname)
+                continue
+            try:
+                _write_update_file(fname, content)
+                updated.append(fname)
+            except Exception:
+                failed.append(fname)
+
+        if "version.json" not in files_info and "app/version.json" not in files_info:
+            try:
+                version_bytes = json.dumps(version_info, ensure_ascii=False, indent=2).encode("utf-8")
+                _write_update_file("app/version.json", version_bytes)
+            except Exception:
+                pass
+
+        new_ver = version_info.get("latest_version") or version_info.get("version") or ""
+        if new_ver and not failed:
+            _set_installed_version(new_ver)
+        return {
+            "ok": bool(updated) and not failed,
+            "updated": updated,
+            "failed": failed,
+            "restart_required": bool(updated),
+            "version": new_ver,
+        }
+
+    download_url = (version_info or {}).get("update_url") or (version_info or {}).get("download_url") or ""
+    if not download_url:
+        return {"ok": False, "msg": "没有可用的更新文件", "updated": [], "failed": []}
+
+    temp_dir = tempfile.mkdtemp(prefix="liveclipper_update_web_")
+    try:
+        zip_path = os.path.join(temp_dir, download_url.split("/")[-1] or "update.zip")
+        download_file(download_url, zip_path)
+        ok = _apply_update(zip_path)
+        return {
+            "ok": bool(ok),
+            "updated": ["package"] if ok else [],
+            "failed": [] if ok else ["package"],
+            "restart_required": bool(ok),
+            "version": version_info.get("latest_version") or version_info.get("version") or "",
+        }
+    finally:
+        try:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ============ GUI 组件 ============
@@ -462,7 +558,7 @@ class DownloadDialog(tk.Toplevel):
         files_info = self.version_info.get("files", {})
         has_update_url = self.version_info.get("update_url", "") or self.version_info.get("download_url", "")
 
-        if files_info and not has_update_url:
+        if files_info:
             # Incremental update: download individual files
             self._do_incremental_update(files_info)
         elif has_update_url:

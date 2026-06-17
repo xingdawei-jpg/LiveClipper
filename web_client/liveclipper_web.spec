@@ -1,0 +1,223 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+LiveClipper Web desktop client - PyInstaller onedir build config.
+
+Entry: web_client/desktop.py
+Output: release_dist/LiveClipperWeb
+"""
+import glob
+import importlib.util
+import os
+
+block_cipher = None
+
+WEB_DIR = SPECPATH
+ROOT_DIR = os.path.dirname(WEB_DIR)
+APP_DIR = os.path.join(ROOT_DIR, "app")
+FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
+FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
+
+
+def _existing(items):
+    return [(src, dest) for src, dest in items if src and os.path.exists(src)]
+
+
+def _module_file(module_name, *parts):
+    spec = importlib.util.find_spec(module_name)
+    if not spec or not spec.origin:
+        return None
+    return os.path.join(os.path.dirname(spec.origin), *parts)
+
+
+def _app_datas():
+    datas = []
+    skip_suffixes = (
+        ".bak",
+        ".bak_corrupted",
+        ".bak_task7_done",
+        ".bak_pre_task7_redo",
+        ".bak_cat_merge",
+    )
+    skip_names = {
+        "ai_settings.json",
+        ".installed_version",
+        "_package_final.py",
+        "_toggle_monitor.py",
+        "clip_tuple_check.py",
+        "generated_codes.json",
+        "gui_clean.py",
+        "gui_fresh.py",
+        "gui_tmp.py",
+        "licenses.json",
+        "live_recorder_page_BACKUP.py",
+        "license_generator.py",
+        "license_server.py",
+        "license_feishu_backend.py",
+        "license_stats_store.py",
+        "feishu_scheduler.py",
+        "verify.py",
+    }
+
+    for path in glob.glob(os.path.join(APP_DIR, "*")):
+        name = os.path.basename(path)
+        if os.path.isdir(path):
+            continue
+        if name.startswith("_"):
+            continue
+        if name in skip_names:
+            continue
+        if name.endswith(skip_suffixes):
+            continue
+        if name.endswith((".py", ".json")) or name == "license_public_key.txt":
+            datas.append((path, "app"))
+    return datas
+
+
+cv2_data_dir = _module_file("cv2", "data")
+fw_assets_dir = _module_file("faster_whisper", "assets")
+certifi_pem = _module_file("certifi", "cacert.pem")
+
+datas = []
+datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
+datas += _app_datas()
+datas += _existing([
+    (r"C:\Windows\Fonts\msyhbd.ttc", "fonts"),
+    (r"C:\Windows\Fonts\msyh.ttc", "fonts"),
+    (os.path.join(cv2_data_dir, "haarcascade_frontalface_default.xml") if cv2_data_dir else "", "."),
+    (os.path.join(cv2_data_dir, "haarcascade_upperbody.xml") if cv2_data_dir else "", "."),
+    (os.path.join(cv2_data_dir, "haarcascade_fullbody.xml") if cv2_data_dir else "", "."),
+    (os.path.join(fw_assets_dir, "silero_vad_v6.onnx") if fw_assets_dir else "", os.path.join("faster_whisper", "assets")),
+    (certifi_pem if certifi_pem else "", "certifi"),
+])
+
+binaries = _existing([
+    (os.path.join(FFMPEG_DIR, "ffmpeg.exe"), "ffmpeg"),
+    (os.path.join(FFMPEG_DIR, "ffprobe.exe"), "ffmpeg"),
+])
+
+a = Analysis(
+    [os.path.join(WEB_DIR, "desktop.py")],
+    pathex=[WEB_DIR, APP_DIR],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=[
+        "server",
+        "fastapi",
+        "uvicorn",
+        "starlette",
+        "pydantic",
+        "webview",
+        "webview.platforms.edgechromium",
+        "webview.platforms.winforms",
+        "anyio",
+        "httpx",
+        "httpcore",
+        "h11",
+        "sniffio",
+        "requests",
+        "urllib3",
+        "charset_normalizer",
+        "idna",
+        "certifi",
+        "cv2",
+        "numpy",
+        "PIL",
+        "PIL.Image",
+        "openpyxl",
+        "tos",
+        "fsspec",
+        "av",
+        "av.descriptor",
+        "faster_whisper",
+        "ctranslate2",
+        "tokenizers",
+        "ai_clipper",
+        "aliyun_asr",
+        "aliyun_asr_v2",
+        "asr_api",
+        "config",
+        "cutter_logic",
+        "dedup_page",
+        "douyin_stream",
+        "license_client",
+        "license_events",
+        "license_guard",
+        "license_token",
+        "live_recorder_page",
+        "mix_page",
+        "multi_version",
+        "platform_config",
+        "product_scan_page",
+        "product_scanner",
+        "schedule_splitter",
+        "smart_crop",
+        "srt_parser",
+        "stt",
+        "volcengine_asr",
+    ],
+    excludes=[
+        "test",
+        "unittest",
+        "pdb",
+        "doctest",
+        "ensurepip",
+        "venv",
+        "turtledemo",
+        "idlelib",
+        "tkinter.test",
+        "matplotlib",
+        "scipy",
+        "pandas",
+        "tensorflow",
+        "torch",
+        "keras",
+        "jupyter",
+        "IPython",
+        "boto3",
+        "botocore",
+        "sphinx",
+        "docutils",
+        "flask",
+        "django",
+        "graphviz",
+        "notebook",
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="LiveClipperWeb",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="LiveClipperWeb",
+)

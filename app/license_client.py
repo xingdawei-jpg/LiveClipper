@@ -33,44 +33,63 @@ _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW - hide console window
 
 
 # ============================================================
-# 密钥（与 license_generator.py 一致）
+# Legacy local validation key is no longer embedded in the client.
 # ============================================================
-_K1 = "6c63386633613265"
-_K2 = "3764316239633666"
-_K3 = "3465306135643863"
-_K4 = "3366376232653961"
-_K5 = "3164346336663065"
-_K6 = "3862336135643763"
-_K7 = "3966326534623661"
-_K8 = "38643063336637"
-
-def _get_key():
-    return bytes.fromhex(_K1 + _K2 + _K3 + _K4 + _K5 + _K6 + _K7 + _K8).decode()
-
-SECRET_KEY = _get_key()
+_LEGACY_HMAC_KEY_ENV = "LIVECLIPPER_LEGACY_HMAC_KEY"
 
 # ============================================================
 # 飞书多维表格配置（设备绑定服务端）
 # 凭据以混淆 hex 存储，防止简单字符串搜索
 # ============================================================
-# TODO: David 需要在飞书开放平台创建一个应用，获取 app_id 和 app_secret
+# Legacy note: direct Feishu app credentials must stay outside the client.
 # 然后把 hex 编码后的值填入下面
 # 编码方法: python -c "print(''.join(f'{ord(c):02x}' for c in '你的值'))"
-_FS_APP_ID_HEX = "636c695f61393532633963373039373935626339"       # 飞书应用 app_id 的 hex 编码
-_FS_APP_SECRET_HEX = ""   # 飞书应用 app_secret 的 hex 编码
-
-_BITABLE_APP_TOKEN = ""
-_BITABLE_TABLE_ID = ""
-_FIELD_CODE = "fld4Vbhds7"         # 激活码
-_FIELD_DEVICE = "fldPfARnF7"       # 设备ID
-_FIELD_DEVICE_INFO = "fldZ09gLPn"  # 设备信息
+# Feishu is now a server/tool concern. The client keeps these direct calls as
+# inert legacy stubs so old code paths fail closed instead of carrying secrets.
 
 CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
 TRIAL_USES = 10
 
-PLAN_NAMES = {"01": "月付", "02": "季付", "03": "年付", "04": "永久"}
-PLAN_DAYS = {"01": 30, "02": 90, "03": 365, "04": 36500}  # 04=永久, 36500天=100年
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Direct Feishu writes are legacy compatibility only. Normal clients should
+# register/bind through the authorization API, then Feishu can be synced server-side.
+_FEISHU_WRITE_ENABLED = _env_flag("LIVECLIPPER_FEISHU_WRITE", False)
+_LEGACY_HMAC_ENABLED = _env_flag("LIVECLIPPER_ALLOW_LEGACY_HMAC", False)
+_TOKEN_REQUIRED = _env_flag("LIVECLIPPER_REQUIRE_LICENSE_TOKEN", False)
+_LEGACY_CACHE_ENABLED = _env_flag("LIVECLIPPER_ALLOW_LEGACY_CACHE", True)
+
+
+def _legacy_hmac_key():
+    if not _LEGACY_HMAC_ENABLED:
+        return ""
+    return os.environ.get(_LEGACY_HMAC_KEY_ENV, "").strip()
+
+
+def _record_license_event(event_type, feature="", units=1, metadata=None, dedupe_seconds=0):
+    try:
+        import license_events
+
+        return license_events.record_event(
+            event_type,
+            feature=feature,
+            units=units,
+            metadata=metadata or {},
+            dedupe_seconds=dedupe_seconds,
+        )
+    except Exception:
+        return False
+
+PLAN_NAMES = {"00": "3天试用", "01": "月付", "02": "季付", "03": "年付", "04": "永久"}
+PLAN_DAYS = {"00": 3, "01": 30, "02": 90, "03": 365, "04": 36500}  # 04=永久, 36500天=100年
+PLAN_SLUGS = {"00": "trial", "01": "monthly", "02": "quarterly", "03": "yearly", "04": "permanent"}
 
 B36_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -121,6 +140,15 @@ def _save_cache(data):
         pass
 
 
+def _save_activation_cache(data):
+    existing = _load_cache() or {}
+    merged = dict(data)
+    for key in ("license_token", "license_token_verified_at", "offline_until", "last_online_verify"):
+        if key in existing and key not in merged:
+            merged[key] = existing[key]
+    _save_cache(merged)
+
+
 def _save_license_code(code):
     path = os.path.join(_get_data_path(), LICENSE_FILE)
     try:
@@ -140,6 +168,67 @@ def _load_license_code():
         return None
 
 
+def _token_activation_result(cache=None):
+    cache = cache or _load_cache() or {}
+    token = cache.get("license_token", "")
+    if not token:
+        return None
+    try:
+        from license_token import verify_license_token
+
+        verified = verify_license_token(token, machine_id=_get_machine_id())
+        if not verified.get("ok"):
+            return None
+        payload = verified.get("payload") or {}
+        expires_at = int(payload.get("expires_at") or 0)
+        now = int(time.time())
+        if expires_at and now > expires_at:
+            return {"need_activate": True, "reason": "license token expired"}
+        days_left = max(0, (expires_at - now) // 86400) if expires_at else 0
+        expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d") if expires_at else ""
+        plan = payload.get("plan", "")
+        return {
+            "activated": True,
+            "plan_name": payload.get("plan_name") or cache.get("plan_name") or plan,
+            "days_left": days_left,
+            "expires_date": expires_date,
+            "token_verified": True,
+        }
+    except Exception:
+        return None
+
+
+def _store_license_token_from_response(result):
+    if not isinstance(result, dict):
+        return False
+    token = result.get("license_token") or result.get("licenseToken") or result.get("token")
+    if not token:
+        return False
+    cache = _load_cache() or {}
+    cache["license_token"] = token
+    try:
+        from license_token import decode_license_token, verify_license_token
+
+        decoded = decode_license_token(token).get("payload") or {}
+        verified = verify_license_token(token, machine_id=_get_machine_id())
+        if verified.get("ok"):
+            decoded = verified.get("payload") or decoded
+            cache["license_token_verified_at"] = int(time.time())
+        if decoded.get("expires_at"):
+            cache["expires_at"] = int(decoded["expires_at"])
+            cache["expires_date"] = datetime.fromtimestamp(int(decoded["expires_at"])).strftime("%Y-%m-%d")
+        if decoded.get("offline_until"):
+            cache["offline_until"] = int(decoded["offline_until"])
+        if decoded.get("plan"):
+            cache["plan"] = decoded.get("plan")
+        if decoded.get("plan_name"):
+            cache["plan_name"] = decoded.get("plan_name")
+    except Exception:
+        pass
+    _save_cache(cache)
+    return True
+
+
 # ============================================================
 # 飞书 API 调用
 # ============================================================
@@ -154,13 +243,14 @@ def _hex_decode(hex_str):
 
 def _get_feishu_token():
     """获取飞书 app_access_token"""
-    app_id = _hex_decode(_FS_APP_ID_HEX)
-    app_secret = _hex_decode(_FS_APP_SECRET_HEX)
-    if not app_id or not app_secret:
+    return None
+    app_id = ""
+    legacy_secret = ""
+    if not app_id or not legacy_secret:
         return None
     try:
-        url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
-        data = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8")
+        url = ""
+        data = json.dumps({"app_id": app_id, "secret": legacy_secret}).encode("utf-8")
         req = urllib.request.Request(url, data=data,
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -178,7 +268,7 @@ def _feishu_request(method, path, body=None):
     if not token:
         return None
     try:
-        url = f"https://open.feishu.cn/open-apis{path}"
+        url = ""
         raw = json.dumps(body).encode("utf-8") if body else None
         req = urllib.request.Request(url, data=raw, method=method,
                                      headers={"Authorization": f"Bearer {token}",
@@ -189,28 +279,36 @@ def _feishu_request(method, path, body=None):
         return None
 
 
-def _query_device_binding(code):
+def _legacy_feishu_table_ref():
+    return "", ""
+
+
+def _query_device_binding(code, cleanup=False):
     """查询激活码的设备绑定，返回 {record_id, machine_id, activate_date, status, distributor_id} 或 None"""
     try:
         raw_code = code.replace("-", "").strip().lower()
+        legacy_app, legacy_table = _legacy_feishu_table_ref()
+        if not legacy_app or not legacy_table:
+            return None
         # 先精确匹配
         import urllib.parse as _urlp
         filt = _urlp.quote(f'CurrentValue.[激活码]="{raw_code}"', safe="")
         resp = _feishu_request("GET",
-            f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
+            f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records"
             f"?filter={filt}&page_size=50")
         if resp and resp.get("code") == 0:
             items = resp.get("data", {}).get("items", [])
             if items:
                 rec = items[0]
-                _cleanup_duplicates(raw_code, items, rec["record_id"])
+                if cleanup:
+                    _cleanup_duplicates(raw_code, items, rec["record_id"])
                 return _parse_record_to_binding(rec)
         
         # 精确匹配没找到，尝试后8位模糊匹配
         short_code = raw_code[-8:] if len(raw_code) >= 8 else raw_code
         filt2 = _urlp.quote(f'find("{short_code}", {{激活码}})', safe="")
         resp2 = _feishu_request("GET",
-            f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records"
+            f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records"
             f"?filter={filt2}&page_size=50")
         if resp2 and resp2.get("code") == 0:
             items2 = resp2.get("data", {}).get("items", [])
@@ -222,7 +320,8 @@ def _query_device_binding(code):
                     matched_items.append(item)
             if matched_items:
                 rec = matched_items[0]
-                _cleanup_duplicates(raw_code, matched_items, rec["record_id"])
+                if cleanup:
+                    _cleanup_duplicates(raw_code, matched_items, rec["record_id"])
                 return _parse_record_to_binding(rec)
         
         return None
@@ -233,14 +332,17 @@ def _query_device_binding(code):
 def _cleanup_duplicates(raw_code, matched_items, keep_id):
     """清理同激活码的重复记录，只保留 keep_id 一条"""
     dup_ids = [item["record_id"] for item in matched_items if item["record_id"] != keep_id]
+    legacy_app, legacy_table = _legacy_feishu_table_ref()
+    if not legacy_app or not legacy_table:
+        return
     if dup_ids:
         # 分批删除（飞书每批最多500条）
         for i in range(0, len(dup_ids), 100):
             batch = dup_ids[i:i+100]
             try:
-                _feishu_request("DELETE",
-                    f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
-                    {"record_ids": batch})
+                _feishu_request("POST",
+                    f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records/batch_delete",
+                    {"records": batch})
             except Exception:
                 pass
 
@@ -311,6 +413,11 @@ def _get_dynamic_status(code):
 
 def _bind_device(code, machine_id, device_info="", status=None):
     """绑定设备（写入或更新多维表格记录，自动去重+动态状态）"""
+    if not _FEISHU_WRITE_ENABLED:
+        return False
+    legacy_app, legacy_table = _legacy_feishu_table_ref()
+    if not legacy_app or not legacy_table:
+        return False
     try:
         raw_code = code.replace("-", "").strip().lower()
         if status is None:
@@ -338,7 +445,7 @@ def _bind_device(code, machine_id, device_info="", status=None):
                     date_fields["激活日期"] = cache_for_dates["activated_at"] * 1000
         
         # 先查已有记录（_query_device_binding 已内含清理重复）
-        existing = _query_device_binding(code)
+        existing = _query_device_binding(code, cleanup=True)
         
         fields = {
             "设备ID": machine_id,
@@ -352,7 +459,7 @@ def _bind_device(code, machine_id, device_info="", status=None):
         if existing:
             # 更新
             resp = _feishu_request("PUT",
-                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
+                f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records/{existing['record_id']}",
                 {"fields": fields})
             return resp and resp.get("code") == 0
         else:
@@ -360,7 +467,7 @@ def _bind_device(code, machine_id, device_info="", status=None):
             fields["多行文本"] = f"用户_{machine_id[:8]}"
             fields["激活码"] = raw_code
             resp = _feishu_request("POST",
-                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records",
+                f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records",
                 {"fields": fields})
             return resp and resp.get("code") == 0
     except Exception:
@@ -368,11 +475,16 @@ def _bind_device(code, machine_id, device_info="", status=None):
 
 def _unbind_device(code):
     """解绑设备（清空多维表格中的设备ID字段）"""
+    if not _FEISHU_WRITE_ENABLED:
+        return True
+    legacy_app, legacy_table = _legacy_feishu_table_ref()
+    if not legacy_app or not legacy_table:
+        return True
     try:
-        existing = _query_device_binding(code)
+        existing = _query_device_binding(code, cleanup=True)
         if existing:
             resp = _feishu_request("PUT",
-                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
+                f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records/{existing['record_id']}",
                 {"fields": {"设备ID": "", "设备信息": ""}})
             return resp and resp.get("code") == 0
         return True
@@ -567,7 +679,7 @@ def _get_fingerprints():
 # 服务器验证配置
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
-_VERIFY_API_URL = "https://livecli-unified-xfsribggth.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
+_VERIFY_API_URL = "https://liveclinse-auth-cfofyfzuwg.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
 
 
 # ========== Activation result cache (avoid blocking main thread) ==========
@@ -584,24 +696,30 @@ def _check_activation_local_fast():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
         cache = _load_cache() or {}
+        token_result = _token_activation_result(cache)
+        if token_result:
+            return token_result
+        if _TOKEN_REQUIRED:
+            return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
+
         code = cache.get("code") or _load_license_code()
         if code:
-            result = validate_code(code)
+            result = _cached_code_info(code, cache)
             if result.get("ok"):
                 cached_mid = cache.get("machine_id", "")
                 current_mid = _get_machine_id()
                 if cached_mid and cached_mid != current_mid:
                     return {"need_activate": True, "reason": "设备已更换，请重新激活"}
 
-                _, hex_expire = _parse_code_dates(code)
-                if hex_expire:
-                    expires_at = hex_expire // 1000
-                else:
-                    expires_at = cache.get("expires_at", 0)
-                    if not expires_at:
-                        activated_at = cache.get("activated_at", int(time.time()))
-                        plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
-                        expires_at = activated_at + plan_days * 86400
+                expires_at = int(cache.get("expires_at", 0) or 0)
+                if not expires_at and result.get("local_signature_verified"):
+                    _, hex_expire = _parse_code_dates(code)
+                    if hex_expire:
+                        expires_at = hex_expire // 1000
+                if not expires_at:
+                    activated_at = cache.get("activated_at", int(time.time()))
+                    plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+                    expires_at = activated_at + plan_days * 86400
 
                 now = int(time.time())
                 if expires_at and now > expires_at and result.get("plan_hex") != "04":
@@ -706,6 +824,7 @@ def _verify_online(code, machine_id):
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=8) as resp:
             result = json.loads(resp.read().decode("utf-8"))
+            _store_license_token_from_response(result)
             return result
     except Exception:
         return None  # 网络失败，走离线宽限
@@ -734,9 +853,23 @@ def _fc_activate(code, machine_id, result_info, expires_at):
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            return result.get("valid", False)
+            _store_license_token_from_response(result)
+            return result
     except Exception:
-        return False
+        return None
+
+
+def _server_result_ok(result):
+    return bool(isinstance(result, dict) and result.get("valid", result.get("ok", False)))
+
+
+def _server_expires_at(result):
+    if not isinstance(result, dict):
+        return 0
+    try:
+        return int(result.get("expires_at") or result.get("expires") or 0)
+    except Exception:
+        return 0
 
 
 def _fc_unbind(code, machine_id):
@@ -811,11 +944,16 @@ def _revoke_device(code):
     管理员在飞书多维表格中将状态改为"已吊销"，
     客户端下次联网验证时会收到revoked=true并写入本地熔断标记
     """
+    if not _FEISHU_WRITE_ENABLED:
+        return False
+    legacy_app, legacy_table = _legacy_feishu_table_ref()
+    if not legacy_app or not legacy_table:
+        return False
     try:
-        existing = _query_device_binding(code)
+        existing = _query_device_binding(code, cleanup=True)
         if existing:
             resp = _feishu_request("PUT",
-                f"/bitable/v1/apps/{_BITABLE_APP_TOKEN}/tables/{_BITABLE_TABLE_ID}/records/{existing['record_id']}",
+                f"/bitable/v1/apps/{legacy_app}/tables/{legacy_table}/records/{existing['record_id']}",
                 {"fields": {"状态": "已吊销", "设备ID": "", "设备信息": ""}})
             return resp and resp.get("code") == 0
         return False
@@ -841,6 +979,7 @@ def _start_trial():
     cache["trial_machine_id"] = mid
     cache["trial_uses_left"] = TRIAL_USES
     _save_cache(cache)
+    _record_license_event("trial_start", metadata={"uses_left": TRIAL_USES})
     return cache
 
 
@@ -862,6 +1001,7 @@ def consume_trial_use():
     uses_left -= 1
     trial["trial_uses_left"] = uses_left
     _save_cache(trial)
+    _record_license_event("trial_consume", units=1, metadata={"uses_left": uses_left})
     try:
         if uses_left > 0:
             _set_activation_cache({"trial": True, "uses_left": uses_left})
@@ -890,6 +1030,57 @@ def check_trial():
 # ============================================================
 # 激活验证核心
 # ============================================================
+
+def _parse_code_public_info(code):
+    if not code:
+        return {"ok": False, "msg": "激活码为空"}
+    raw = code.replace("-", "").strip()
+    if len(raw) not in (32, 34, 36):
+        return {"ok": False, "msg": "激活码格式错误"}
+    try:
+        if len(raw) == 36:
+            plan_hex = raw[0:2].lower()
+            dist_id = raw[2:6].upper()
+            expires_hex = raw[6:14].lower()
+            nonce_hex = raw[14:16].lower()
+            signature = raw[16:36].lower()
+            payload = plan_hex + dist_id + expires_hex + nonce_hex
+        elif len(raw) == 34:
+            raw_lower = raw.lower()
+            plan_hex = raw_lower[0:2]
+            dist_id = raw_lower[2:4]
+            expires_hex = raw_lower[4:12]
+            nonce_hex = raw_lower[12:14]
+            signature = raw_lower[14:34]
+            payload = plan_hex + dist_id + expires_hex + nonce_hex
+        else:
+            raw_lower = raw.lower()
+            plan_hex = raw_lower[0:2]
+            dist_id = ""
+            expires_hex = raw_lower[2:10]
+            nonce_hex = raw_lower[10:12]
+            signature = raw_lower[12:32]
+            payload = plan_hex + expires_hex + nonce_hex
+
+        if plan_hex not in PLAN_NAMES:
+            return {"ok": False, "msg": "激活码无效（未知套餐）"}
+        int(expires_hex, 16)
+        int(nonce_hex, 16)
+        int(signature, 16)
+        return {
+            "ok": True,
+            "plan": PLAN_SLUGS.get(plan_hex, "monthly"),
+            "plan_name": PLAN_NAMES[plan_hex],
+            "days": PLAN_DAYS[plan_hex],
+            "plan_hex": plan_hex,
+            "dist_id": dist_id,
+            "payload": payload,
+            "signature": signature,
+            "local_signature_verified": False,
+        }
+    except Exception as e:
+        return {"ok": False, "msg": f"激活码解析失败: {str(e)}"}
+
 
 def validate_code(code):
     if not code:
@@ -929,21 +1120,51 @@ def validate_code(code):
         
         if plan_hex not in PLAN_NAMES:
             return {"ok": False, "msg": "激活码无效（未知套餐）"}
+        key = _legacy_hmac_key()
+        if not key:
+            return {
+                "ok": False,
+                "msg": "本地旧激活码校验未启用，请联网激活",
+                "public_info": _parse_code_public_info(code),
+            }
         expected_sig = hmac.new(
-            SECRET_KEY.encode(), payload.encode(), hashlib.sha256
+            key.encode(), payload.encode(), hashlib.sha256
         ).hexdigest()[:20]
         if not hmac.compare_digest(signature, expected_sig):
             return {"ok": False, "msg": "激活码无效（签名错误）"}
         return {
             "ok": True,
-            "plan": {"01": "monthly", "02": "quarterly", "03": "yearly", "04": "permanent"}.get(plan_hex, "monthly"),
+            "plan": PLAN_SLUGS.get(plan_hex, "monthly"),
             "plan_name": PLAN_NAMES[plan_hex],
             "days": PLAN_DAYS[plan_hex],
             "plan_hex": plan_hex,
             "dist_id": dist_id,
+            "local_signature_verified": True,
         }
     except Exception as e:
         return {"ok": False, "msg": f"激活码解析失败: {str(e)}"}
+
+
+def _cached_code_info(code, cache=None):
+    if _TOKEN_REQUIRED or not _LEGACY_CACHE_ENABLED:
+        return {"ok": False, "msg": "需要联网更新签名授权 token"}
+
+    result = validate_code(code)
+    if result.get("ok"):
+        return result
+
+    cache = cache or {}
+    public_info = result.get("public_info") or _parse_code_public_info(code)
+    if not public_info.get("ok"):
+        return result
+
+    cached_mid = cache.get("machine_id", "")
+    current_mid = _get_machine_id()
+    if cache.get("expires_at") and cached_mid and cached_mid == current_mid:
+        public_info["ok"] = True
+        public_info["legacy_cache_only"] = True
+        return public_info
+    return result
 
 
 def activate_with_code(code):
@@ -958,8 +1179,12 @@ def activate_with_code(code):
     """
     # Step 1: 本地验证
     result = validate_code(code)
+    local_signature_verified = bool(result.get("ok"))
     if not result["ok"]:
-        return result
+        public_info = result.get("public_info") or _parse_code_public_info(code)
+        if not public_info.get("ok"):
+            return public_info
+        result = public_info
 
     current_mid = _get_machine_id()
 
@@ -976,26 +1201,42 @@ def activate_with_code(code):
     # Step 3: 清除旧熔断标记
     _clear_revoked_marker()
 
-    # Step 4: 联网服务器注册（新增）
-    online_result = _verify_online(code.replace("-", "").strip().lower(), current_mid)
-    if online_result is not None:
-        if online_result.get("revoked"):
+    # Step 4: 联网服务器激活。新码在 verify 阶段会返回“尚未激活”，
+    # 所以这里直接调用 activate，由服务端负责首次写入激活日和到期日。
+    plan_days_pre = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
+    server_result = _fc_activate(
+        code,
+        current_mid,
+        result,
+        int(time.time()) + plan_days_pre * 86400,
+    )
+    fc_ok = _server_result_ok(server_result)
+    if server_result is not None:
+        if server_result.get("revoked"):
             return {"ok": False, "msg": "该激活码已被吊销，无法激活"}
-        if online_result.get("valid") == False:
-            return {"ok": False, "msg": online_result.get("msg", "服务器验证失败")}
+        if not fc_ok:
+            return {"ok": False, "msg": server_result.get("msg", "服务器激活失败")}
         _update_online_verify_time()
+    elif not local_signature_verified:
+        return {"ok": False, "msg": "需要联网验证激活码，请联网后重试"}
+
+    if _TOKEN_REQUIRED and not _token_activation_result(_load_cache()):
+        return {"ok": False, "msg": "服务端未签发可验证的 license token"}
 
     # Step 5: 本地保存（到期时间优先从激活码hex解析）
     plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
     activated_at = int(time.time())
+    server_expires = _server_expires_at(server_result)
     _, hex_expire_ts = _parse_code_dates(code)
-    if hex_expire_ts:
+    if server_expires:
+        expires_at = server_expires
+    elif local_signature_verified and hex_expire_ts:
         expires_at = hex_expire_ts // 1000  # 毫秒转秒
     else:
         expires_at = activated_at + plan_days * 86400  # 降级：now + 套餐天数
     expires_date = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d")
     _save_license_code(code)
-    _save_cache({
+    _save_activation_cache({
         "code": code,
         "plan": result["plan"],
         "plan_name": result["plan_name"],
@@ -1008,13 +1249,24 @@ def activate_with_code(code):
     # Step 6: 防盗2.0 FC注册（优先）
     plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
     fc_expires_at = activated_at + plan_days * 86400
-    fc_ok = _fc_activate(code, current_mid, result, fc_expires_at)
+    if not fc_ok:
+        server_result = _fc_activate(code, current_mid, result, fc_expires_at)
+        fc_ok = _server_result_ok(server_result)
     if fc_ok:
         _update_online_verify_time()
 
     # Step 7: 飞书服务端绑定（兼容旧版，非阻塞）
     device_info = _get_device_info()
     _bind_device(code, current_mid, device_info)
+    _record_license_event(
+        "license_activate",
+        metadata={
+            "plan": result.get("plan", ""),
+            "plan_hex": result.get("plan_hex", ""),
+            "fc_ok": bool(fc_ok),
+            "feishu_write_enabled": bool(_FEISHU_WRITE_ENABLED),
+        },
+    )
 
     return {"ok": True, "msg": "激活成功", "info": result}
 
@@ -1047,6 +1299,15 @@ def deactivate_device(force=False):
     
     # 飞书服务端解绑（兼容旧版）
     unbind_ok = _unbind_device(code) if not fc_ok else True
+    _record_license_event(
+        "license_unbind",
+        metadata={
+            "force": bool(force),
+            "fc_ok": bool(fc_ok),
+            "feishu_ok": bool(unbind_ok),
+            "feishu_write_enabled": bool(_FEISHU_WRITE_ENABLED),
+        },
+    )
 
     # 清空本地
     _save_cache({"trial_uses_left": 0, "previously_activated": True})
@@ -1093,16 +1354,23 @@ def check_activation():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
     cache = _load_cache()
+    token_result = _token_activation_result(cache)
+    if token_result:
+        return token_result
+    if _TOKEN_REQUIRED:
+        return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
 
     if cache and cache.get("code"):
         code = cache["code"]
-        result = validate_code(code)
+        result = _cached_code_info(code, cache)
         if result["ok"]:
-            # 到期时间：优先从hex解析，降级到 activated_at + 套餐天数
-            _, hex_expire = _parse_code_dates(code)
-            if hex_expire:
-                expires_at = hex_expire // 1000
-            else:
+            # 到期时间：优先用服务端缓存，其次才兼容旧本地签名码的内嵌日期。
+            expires_at = int(cache.get("expires_at", 0) or 0)
+            if not expires_at and result.get("local_signature_verified"):
+                _, hex_expire = _parse_code_dates(code)
+                if hex_expire:
+                    expires_at = hex_expire // 1000
+            if not expires_at:
                 activated_at = cache.get("activated_at", 0)
                 plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
                 if activated_at > 0:
@@ -1116,9 +1384,9 @@ def check_activation():
                             cache["activated_at"] = activated_at
                             _save_cache(cache)
                         else:
-                            expires_at = cache.get("expires_at", 0)
+                            expires_at = int(cache.get("expires_at", 0) or 0)
                     except Exception:
-                        expires_at = cache.get("expires_at", 0)
+                        expires_at = int(cache.get("expires_at", 0) or 0)
             
             now = int(time.time())
             days_left = max(0, (expires_at - now) // 86400)
@@ -1138,6 +1406,15 @@ def check_activation():
             if online_result is not None:
                 # 联网成功
                 _update_online_verify_time()
+                _record_license_event(
+                    "license_verify",
+                    metadata={
+                        "valid": online_result.get("valid"),
+                        "revoked": bool(online_result.get("revoked")),
+                        "source": "online",
+                    },
+                    dedupe_seconds=3600,
+                )
                 
                 if online_result.get("revoked"):
                     # 服务器说已吊销 → 写入本地熔断标记
@@ -1154,7 +1431,7 @@ def check_activation():
                         return {"need_activate": True, "reason": online_result.get("msg", "激活码无效")}
                 
                 # 服务器验证通过，同步过期信息
-                server_expires = online_result.get("expires", 0)
+                server_expires = _server_expires_at(online_result)
                 if server_expires and server_expires != expires_at:
                     # 服务器有过期时间且与本地不同，以服务器为准
                     expires_at = server_expires
@@ -1168,6 +1445,9 @@ def check_activation():
                     return {"need_activate": True, "reason": f"已离线超过{_OFFLINE_GRACE_HOURS}小时，请联网验证"}
             
             # Step: 飞书多维表格状态校验（远程吊销/过期检测）
+            # 验证流程必须保持只读；只有激活/解绑才写飞书。
+            # 之前这里会在每次启动和定时刷新时 _bind_device，查询失败时会 POST 新记录，
+            # 容易把用户管理表写出大量重复行。
             try:
                 binding = _query_device_binding(code)
                 if binding:
@@ -1179,11 +1459,6 @@ def check_activation():
                     if bstatus == "已过期":
                         _write_revoked_marker()
                         return {"need_activate": True, "reason": "激活码已在服务端过期，请续费"}
-                    # 状态正常，静默更新设备绑定
-                    _bind_device(code, _get_machine_id(), _get_device_info())
-                else:
-                    # 无记录时自动绑定
-                    _bind_device(code, _get_machine_id(), _get_device_info())
             except Exception:
                 pass
             
@@ -1221,11 +1496,8 @@ def check_activation():
                 "activated_at": activated_at_s,
                 "machine_id": current_mid,
             })
-            # 同步服务端绑定
-            try:
-                _bind_device(code, current_mid, _get_device_info())
-            except Exception:
-                pass
+            # 恢复本地缓存时不写飞书，避免启动检查造成重复记录。
+            # 设备绑定只在 activate_with_code() 里同步。
             days_left_s = max(0, (expires_at_s - int(time.time())) // 86400)
             return {
                 "activated": True,

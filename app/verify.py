@@ -91,7 +91,7 @@ try:
     from license_client import PLAN_DAYS, validate_code
 
     result = validate_code("invalid")
-    expected_plans = {"01": 30, "02": 90, "03": 365, "04": 36500}
+    expected_plans = {"00": 3, "01": 30, "02": 90, "03": 365, "04": 36500}
     check("validate_code", not result["ok"], ok_msg="rejects invalid", fail_msg="ACCEPTED invalid!")
     check("PLAN_DAYS", PLAN_DAYS == expected_plans, ok_msg=str(PLAN_DAYS), fail_msg=str(PLAN_DAYS))
 except Exception as e:

@@ -1,39 +1,47 @@
 # LiveClipper
 
-#### 介绍
-{**以下是 Gitee 平台说明，您可以替换此简介**
-Gitee 是 OSCHINA 推出的基于 Git 的代码托管平台（同时支持 SVN）。专为开发者提供稳定、高效、安全的云端软件开发协作平台
-无论是个人、团队、或是企业，都能够用 Gitee 实现代码托管、项目管理、协作开发。企业项目请看 [https://gitee.com/enterprises](https://gitee.com/enterprises)}
+LiveClipper 是面向直播带货素材的本地剪辑工具，核心能力包括智能成片、混剪成片、AI 扫描、单品扫描、去重、字幕处理、画中画和直播录制。
 
-#### 软件架构
-软件架构说明
+当前仓库采用“一个核心，两套入口”的结构：
 
+- `app/`：现有桌面版入口和剪辑核心逻辑。
+- `web_client/`：新版 Web 桌面客户端，复用 `app/` 内的核心处理能力。
+- `packaging/`：后续集中放打包配置、自检脚本、发布流程。
+- `tools/`：后续集中放开发维护、诊断、迁移工具。
+- `tests/`：后续集中放核心流程测试。
 
-#### 安装教程
+## 当前开发原则
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+1. 不拆成两个 Git 仓库，避免桌面版和 Web 版核心逻辑分叉。
+2. Web 版和桌面版共用剪辑核心，优先把差异放在入口层。
+3. 不随便升级版本号，只有确认要发布时才更新版本文件。
+4. 不自动推送 GitHub，推送由维护者手动确认或手动执行。
+5. 正式打包只从本仓库执行，不从临时工作目录打包。
 
-#### 使用说明
+## 常用入口
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+桌面版旧入口：
 
-#### 参与贡献
+```powershell
+python app\launcher.py
+```
 
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
+Web 本地服务：
 
+```powershell
+cd web_client
+python server.py
+```
 
-#### 特技
+Web 桌面壳：
 
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+```powershell
+cd web_client
+python desktop.py
+```
+
+## 重要提醒
+
+- `release_artifacts/`、`release_dist/`、`build/`、`dist/`、日志、用户配置和密钥类文件不要提交。
+- `app/ffmpeg/*.exe` 用于本地打包和测试，但不提交到 Git。
+- Web 桌面版结构变化较大时，优先发布全量包，不直接套旧版增量更新。

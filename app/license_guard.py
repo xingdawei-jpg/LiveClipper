@@ -28,6 +28,20 @@ def _safe_int(value, default=0):
         return default
 
 
+def _record_event(event_type, feature_name, units=1, metadata=None):
+    try:
+        import license_events
+
+        return license_events.record_event(
+            event_type,
+            feature=feature_name,
+            units=units,
+            metadata=metadata or {},
+        )
+    except Exception:
+        return False
+
+
 def get_feature_access(refresh=False):
     """Return normalized access state without showing UI."""
     try:
@@ -83,11 +97,20 @@ def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=Tru
     """Gate a user-facing feature before it starts running."""
     access = get_feature_access(refresh=refresh)
     if access.get("ok"):
+        _record_event(
+            "feature_start",
+            feature_name,
+            metadata={
+                "activated": bool(access.get("activated")),
+                "trial": bool(access.get("trial")),
+            },
+        )
         if access.get("trial"):
             _log(log_fn, f"试用模式：{feature_name}可用，剩余 {access.get('uses_left', 0)} 次。", "warn")
         return True
 
     reason = access.get("reason") or LOCKED_REASON
+    _record_event("feature_denied", feature_name, metadata={"reason": reason})
     _log(log_fn, f"{feature_name}已锁定：{reason}", "err")
     if show_dialog and root is not None:
         try:
@@ -107,6 +130,15 @@ def consume_trial_after_success(feature_name, units=1, root=None, log_fn=None):
         import license_client as lc
 
         access = get_feature_access(refresh=False)
+        _record_event(
+            "feature_success",
+            feature_name,
+            units=units,
+            metadata={
+                "activated": bool(access.get("activated")),
+                "trial": bool(access.get("trial")),
+            },
+        )
         if not access.get("trial"):
             return None
 

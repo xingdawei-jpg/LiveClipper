@@ -10,6 +10,9 @@ dist/
 release_build/
 release_dist/
 release_artifacts/
+packaging/build/
+packaging/dist/
+packaging/release_*/
 *.spec.bak
 *.zip
 *.exe
@@ -19,6 +22,8 @@ releases/**/*.zip
 .installed_version
 ai_settings.json
 generated_codes.json
+admin_outputs/
+legacy_wechat_function/
 tasks.json
 logs/
 *.log
@@ -35,9 +40,12 @@ app/generated_codes.json
 app/tasks.json
 app/ffmpeg/*.exe
 app/haarcascade_*.xml
+web_client/web_server.*.log
+web_client/__pycache__/
 
 # Backups and scratch scripts kept out of the clean source tree
 *.bak
+*.before_*
 *.bak*
 *_BACKUP.py
 app/gui_clean.py

@@ -79,6 +79,25 @@ FFPROBE_CMD = os.path.join(FFMPEG_DIR, "ffprobe" + (".exe" if IS_WIN else "")) i
 # 硬件编码检测
 # ============================================================
 HARDWARE_ENCODER = None
+HARDWARE_ENCODER_DIAGNOSTICS = []
+
+
+def _hw_diag(message):
+    try:
+        HARDWARE_ENCODER_DIAGNOSTICS.append(str(message))
+    except Exception:
+        pass
+
+
+def _hw_error_summary(stderr):
+    lines = [line.strip() for line in str(stderr or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    picked = []
+    for line in lines[:2] + lines[-2:]:
+        if line not in picked:
+            picked.append(line)
+    return " | ".join(picked)[:260]
 
 def _hardware_encoder_enabled_from_settings():
     try:
@@ -100,8 +119,10 @@ ENABLE_HARDWARE_ENCODER = (
     os.environ.get("LIVECLIPPER_ENABLE_HWENC", "").strip().lower() in ("1", "true", "yes", "on")
     or _hardware_encoder_enabled_from_settings()
 )
+_hw_diag("硬件加速开关: 开" if ENABLE_HARDWARE_ENCODER else "硬件加速开关: 关")
 if FFMPEG_CMD and ENABLE_HARDWARE_ENCODER:
     import subprocess
+    _hw_diag(f"FFmpeg: {FFMPEG_CMD}")
 
     def _hw_creationflags():
         return subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -112,7 +133,7 @@ if FFMPEG_CMD and ENABLE_HARDWARE_ENCODER:
         if encoder == "h264_amf":
             return ["-c:v", "h264_amf", "-quality", "speed", "-qp", "22"]
         if encoder == "h264_nvenc":
-            return ["-c:v", "h264_nvenc", "-preset", "p1", "-qp", "22"]
+            return ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "22", "-b:v", "0"]
         return []
 
     def _can_run_hw_encoder(encoder):
@@ -126,23 +147,37 @@ if FFMPEG_CMD and ENABLE_HARDWARE_ENCODER:
             cmd += _hw_encoder_args(encoder)
             cmd += ["-f", "null", "-"]
             ret = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=4, creationflags=_hw_creationflags()
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=8, creationflags=_hw_creationflags()
             )
+            if ret.returncode != 0:
+                _hw_diag(f"{encoder}: 自检失败 rc={ret.returncode} {_hw_error_summary(ret.stderr)}")
+            else:
+                _hw_diag(f"{encoder}: 自检通过")
             return ret.returncode == 0
-        except Exception:
+        except Exception as exc:
+            _hw_diag(f"{encoder}: 自检异常 {type(exc).__name__}: {exc}")
             return False
 
     try:
         ret = subprocess.run([FFMPEG_CMD, "-encoders"], capture_output=True, text=True, timeout=5,
                              creationflags=_hw_creationflags())
         encoders = ret.stdout + ret.stderr
+        visible = [name for name in ("h264_nvenc", "h264_amf", "h264_qsv") if name in encoders]
+        _hw_diag("可见硬件编码器: " + (", ".join(visible) if visible else "无"))
         for _encoder in ("h264_nvenc", "h264_amf", "h264_qsv"):
             if _encoder in encoders and _can_run_hw_encoder(_encoder):
                 HARDWARE_ENCODER = _encoder
+                _hw_diag(f"最终硬件编码器: {HARDWARE_ENCODER}")
                 break
-    except Exception:
+        if HARDWARE_ENCODER is None:
+            _hw_diag("最终硬件编码器: 无，使用软件编码")
+    except Exception as exc:
+        _hw_diag(f"硬件编码检测异常 {type(exc).__name__}: {exc}")
         pass
+elif ENABLE_HARDWARE_ENCODER:
+    _hw_diag("FFmpeg 未找到，无法启用硬件编码")
 
 # ============================================================
 # 应用数据目录（缓存、许可证等）
