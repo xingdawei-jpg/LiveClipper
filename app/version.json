@@ -8,7 +8,6 @@
     "app/asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
     "app/config.py": "1fb499e191443eb0a843cf9320bf47b6ced41d2ebb3ee70acaea23b49bccd773",
     "app/cutter.py": "438d14c8d92c4e9e0806ed0061ebcfe7f1f61b1139210db48e30c08dce2f2d13",
-    "app/cutter_logic.py": "beaa516dacacb5903030de92c12a572aa99e21d5b6693ea36fec72f393a07c74",
     "app/dedup_page.py": "261cc18312541e071a34cddbf8e60824beb9d55dbab0e9925ab85d095d9ba4b2",
     "app/douyin_stream.py": "ffb07341c683114625076179430c470935be5a7fb6979bd28b674bff9ea3e4e7",
     "app/gui.py": "e6a6c17c2241ba2b9b9c9397a0fa948bad7c17aaf501810a87e6aba9af470488",
@@ -45,5 +44,5 @@
   "update_url": "",
   "update_message": "保存成片参数、画中画和AI参数用户偏好，并修复Web增量更新安装",
   "force_update": false,
-  "updated_at": "2026-06-17 16:18:45"
+  "updated_at": "2026-06-17 16:45:13"
 }
