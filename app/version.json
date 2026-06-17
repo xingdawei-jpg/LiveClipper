@@ -42,9 +42,9 @@
     "web_client/frontend/assets/app.js": "234b79ddc28eb5719993bb975e18bb93b1031c7a226b716020496d54881fbea5",
     "web_client/frontend/assets/styles.css": "fd3afe6fc96148311f6ed13e87aabd57f95bb7669e82bd6b00873fae5ae591a8"
   },
-  "release_notes": "测试更新：完整下发Web参数保存与预览成片顺序修复",
+  "release_notes": "Test update: web preferences and preview order fixes",
   "update_url": "",
-  "update_message": "测试更新：完整下发Web参数保存与预览成片顺序修复",
+  "update_message": "Test update: web preferences and preview order fixes",
   "force_update": false,
-  "updated_at": "2026-06-17 17:19:37"
+  "updated_at": "2026-06-17 17:21:38"
 }
