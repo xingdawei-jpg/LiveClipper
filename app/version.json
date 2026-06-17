@@ -1,6 +1,6 @@
 {
-  "version": "2026.6.18",
-  "latest_version": "2026.6.18",
+  "version": "2026.6.19",
+  "latest_version": "2026.6.19",
   "files": {
     "app/ai_clipper.py": "24fd11a2076aba2bdfa0371f8bd76af494da10874693d92ebf1e19c98c65983e",
     "app/aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
@@ -35,16 +35,16 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "b0e7967b0c8a12260bc96750c0aa819ab923ecde302c3c035947e26d80828843",
+    "app/updater.py": "badc13873ba6a054aec7332453e1db29d2e6ac0385cf57b0b40daf3c84b3e8b7",
     "app/volcengine_asr.py": "bb837a683a9d9506a1ecd4354053eea736067a913157182fa938cb76c0212816",
     "web_client/server.py": "7b2e8e7139162dcc966cdd9048d0b1d17ef1a74d8b07c7063103dc54d73ee7a9",
     "web_client/frontend/index.html": "ecff4b25a4c677c90debd80dc17fc369a625109106f5cfbf9b06d31cbb767a36",
     "web_client/frontend/assets/app.js": "234b79ddc28eb5719993bb975e18bb93b1031c7a226b716020496d54881fbea5",
     "web_client/frontend/assets/styles.css": "fd3afe6fc96148311f6ed13e87aabd57f95bb7669e82bd6b00873fae5ae591a8"
   },
-  "release_notes": "保存成片参数、画中画和AI参数用户偏好，并修复Web增量更新安装",
+  "release_notes": "测试更新：完整下发Web参数保存与预览成片顺序修复",
   "update_url": "",
-  "update_message": "保存成片参数、画中画和AI参数用户偏好，并修复Web增量更新安装",
+  "update_message": "测试更新：完整下发Web参数保存与预览成片顺序修复",
   "force_update": false,
-  "updated_at": "2026-06-17 17:04:41"
+  "updated_at": "2026-06-17 17:19:37"
 }
