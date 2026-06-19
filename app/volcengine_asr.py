@@ -49,6 +49,47 @@ _TOS_REGIONS = [
     ("tos-ap-southeast-1.volces.com", "ap-southeast-1"),
 ]
 
+_VOLC_REGION_ALIASES = {
+    "": "cn-beijing",
+    "beijing": "cn-beijing",
+    "bj": "cn-beijing",
+    "cn-beijing": "cn-beijing",
+    "\u5317\u4eac": "cn-beijing",
+    "\u4e2d\u56fd\u5317\u4eac": "cn-beijing",
+    "shanghai": "cn-shanghai",
+    "sh": "cn-shanghai",
+    "cn-shanghai": "cn-shanghai",
+    "\u4e0a\u6d77": "cn-shanghai",
+    "\u4e2d\u56fd\u4e0a\u6d77": "cn-shanghai",
+    "guangzhou": "cn-guangzhou",
+    "gz": "cn-guangzhou",
+    "cn-guangzhou": "cn-guangzhou",
+    "\u5e7f\u5dde": "cn-guangzhou",
+    "\u4e2d\u56fd\u5e7f\u5dde": "cn-guangzhou",
+    "singapore": "ap-southeast-1",
+    "ap-southeast-1": "ap-southeast-1",
+    "\u65b0\u52a0\u5761": "ap-southeast-1",
+}
+
+
+def _normalize_region(value):
+    text = str(value or "").strip()
+    compact = text.replace(" ", "").replace("_", "-").lower()
+    return _VOLC_REGION_ALIASES.get(text) or _VOLC_REGION_ALIASES.get(compact) or compact or "cn-beijing"
+
+
+def _ordered_tos_regions(preferred_region=""):
+    preferred = _normalize_region(preferred_region)
+    ordered = []
+    for endpoint, region in _TOS_REGIONS:
+        if region == preferred:
+            ordered.append((endpoint, region))
+            break
+    for item in _TOS_REGIONS:
+        if item not in ordered:
+            ordered.append(item)
+    return ordered
+
 
 def _volc_ssl_context():
     import ssl
@@ -111,7 +152,7 @@ def _explain_tos_error(error_text):
 
 
 def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
-                        bucket="", api_key=None, log_fn=None, timeout=45):
+                        bucket="", region="", api_key=None, log_fn=None, timeout=45):
     """Run an end-to-end Volcengine ASR diagnostic without using user media."""
     def _log(msg):
         if log_fn:
@@ -123,6 +164,7 @@ def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
     access_token = (access_token or "").strip()
     tos_ak = (tos_ak or "").strip()
     tos_sk = (tos_sk or "").strip()
+    region = _normalize_region(region)
 
     if not _TOS_AVAILABLE:
         return {"ok": False, "stage": "sdk", "message": "tos SDK is not available in this build."}
@@ -149,23 +191,23 @@ def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
         _make_diagnostic_wav(wav_path)
         _log("1/4 Created 1-second diagnostic WAV.")
 
-        for endpoint, region in _TOS_REGIONS:
-            _log(f"2/4 Testing TOS upload: bucket={bucket}, region={region}, endpoint={endpoint}")
+        for endpoint, test_region in _ordered_tos_regions(region):
+            _log(f"2/4 Testing TOS upload: bucket={bucket}, region={test_region}, endpoint={endpoint}")
             try:
                 client = tos.TosClientV2(
                     ak=tos_ak,
                     sk=tos_sk,
                     endpoint=endpoint,
-                    region=region,
+                    region=test_region,
                 )
                 client.put_object_from_file(bucket, obj_key, wav_path)
                 uploaded = True
-                selected_region = region
-                _log(f"2/4 TOS upload OK: region={region}")
+                selected_region = test_region
+                _log(f"2/4 TOS upload OK: region={test_region}")
                 break
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
-                _log(f"2/4 TOS upload failed on {region}: {last_error[:600]}")
+                _log(f"2/4 TOS upload failed on {test_region}: {last_error[:600]}")
                 if "AccessDenied" in last_error or "access denied" in last_error.lower():
                     break
                 if "Signature" in last_error or "signature" in last_error.lower():
@@ -241,6 +283,13 @@ def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
                     "message": f"Full diagnostic passed. TOS region={selected_region}; ASR status={query_status or 'empty'} {query_message}".strip(),
                     "detail": query_text[:800],
                 }
+            if query_status == "20000003" and "no valid speech" in query_message.lower():
+                return {
+                    "ok": True,
+                    "stage": "submit_ok_no_speech",
+                    "message": f"TOS upload and ASR submit passed. Diagnostic audio has no valid speech, which is expected. TOS region={selected_region}",
+                    "detail": query_text[:800],
+                }
             return {
                 "ok": False,
                 "stage": "asr_query",
@@ -265,7 +314,7 @@ def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
 
 
 def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
-                   bucket="", timeout=300, log_fn=None, api_key=None):
+                   bucket="", region="", timeout=300, log_fn=None, api_key=None):
     """
     调用火山引擎大模型 ASR 识别音频文件，返回 segments 列表。
     
@@ -300,6 +349,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
         return None
 
     # 生成 TOS 上的临时对象 key
+    region = _normalize_region(region)
     ext = os.path.splitext(audio_path)[1].lower()
     if not ext:
         ext = ".wav"
@@ -310,7 +360,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
     _upload_ok = False
     _last_error = ""
     _tos_client = None
-    for _ep, _region in _TOS_REGIONS:
+    for _ep, _region in _ordered_tos_regions(region):
         try:
             _tos_client = tos.TosClientV2(
                 ak=tos_ak,

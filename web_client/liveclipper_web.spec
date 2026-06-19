@@ -16,6 +16,7 @@ ROOT_DIR = os.path.dirname(WEB_DIR)
 APP_DIR = os.path.join(ROOT_DIR, "app")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
 FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
+ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
 
 
 def _existing(items):
@@ -79,6 +80,7 @@ certifi_pem = _module_file("certifi", "cacert.pem")
 
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
+datas += _existing([(ICON_FILE, "assets")])
 datas += _app_datas()
 datas += _existing([
     (r"C:\Windows\Fonts\msyhbd.ttc", "fonts"),
@@ -208,7 +210,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=ICON_FILE if os.path.exists(ICON_FILE) else None,
 )
 
 coll = COLLECT(

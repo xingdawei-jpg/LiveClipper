@@ -45,6 +45,25 @@ def _configure_update_path() -> None:
     sys.path.insert(0, str(update_web))
 
 
+def _icon_path() -> str | None:
+    candidates = []
+    update_icon = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "web_client" / "frontend" / "assets" / "liveclipper.ico"
+    candidates.append(update_icon)
+
+    web_dir = Path(__file__).resolve().parent
+    candidates.append(web_dir / "frontend" / "assets" / "liveclipper.ico")
+
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "_internal" / "web_client" / "frontend" / "assets" / "liveclipper.ico")
+        candidates.append(exe_dir / "_internal" / "assets" / "liveclipper.ico")
+
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return None
+
+
 def _pick_port(preferred: int = 8765) -> int:
     for port in range(preferred, preferred + 20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -92,7 +111,11 @@ def main() -> None:
             min_size=(980, 640),
             text_select=True,
         )
-        webview.start()
+        icon_path = _icon_path()
+        try:
+            webview.start(icon=icon_path) if icon_path else webview.start()
+        except TypeError:
+            webview.start()
         server.should_exit = True
         return
     except Exception:

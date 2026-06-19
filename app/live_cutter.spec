@@ -7,6 +7,8 @@ import os
 import importlib.util
 
 block_cipher = None
+ROOT_DIR = os.path.dirname(SPECPATH)
+ICON_FILE = os.path.join(ROOT_DIR, 'assets', 'liveclipper.ico')
 
 
 def _existing(items):
@@ -131,7 +133,7 @@ exe = EXE(
     runtime_tmpdir=None, console=False,
     disable_windowed_traceback=False, argv_emulation=False,
     target_arch=None, codesign_identity=None, entitlements_file=None,
-    icon=None,
+    icon=ICON_FILE if os.path.exists(ICON_FILE) else None,
 )
 
 coll = COLLECT(

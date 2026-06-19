@@ -14,7 +14,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
-from config import FFMPEG_PATH
+from config import FFMPEG_PATH, sanitize_forbidden_title
 
 
 # ---------- SRT 工具 ----------
@@ -668,7 +668,7 @@ class ProductScanner:
         if not os.path.exists(video_path):
             return []
         os.makedirs(output_dir, exist_ok=True)
-        name = output_name or product.get("name", "product")
+        name = sanitize_forbidden_title(output_name or product.get("name", "product"), fallback="product")
         safe_name = re.sub(r"[" + chr(92) + r'/:*?"<>|]', "_", name)
         short_name = safe_name[:40]
         ffmpeg = FFMPEG_PATH or "ffmpeg"
@@ -813,7 +813,7 @@ class ProductScanner:
         ffmpeg = "ffmpeg"
         results = []
         for prod in merged_products:
-            name = prod.get("name", "product")
+            name = sanitize_forbidden_title(prod.get("name", "product"), fallback="product")
             safe = re.sub(r'[\\/:*?"<>|]', "_", name)[:40]
             segments = prod.get("segments", [])
             if not segments:

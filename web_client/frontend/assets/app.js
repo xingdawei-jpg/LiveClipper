@@ -8,6 +8,20 @@ const state = {
   videoInfoRequestSeq: {},
   pipPoolByPrefix: {},
   pipPoolRequestSeq: {},
+  keywordConfig: {},
+  progressByScope: {},
+  previewDrafts: {},
+  previewDraftSaveTimers: {},
+  previewDetailSelection: { smart: null, mix: null },
+  update: {
+    checked: false,
+    checking: false,
+    installing: false,
+    available: false,
+    info: null,
+    message: "\u672a\u68c0\u67e5",
+    error: "",
+  },
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
   logs: {
@@ -45,11 +59,35 @@ const settingFields = {
   volc_region: "s-volc-region",
   ui_theme: "s-ui-theme",
   hardware_encoder_enabled: "s-hardware-encoder",
+  subtitle_font_size: "s-subtitle-font-size",
+  ui_font_size: "s-ui-font-size",
+};
+
+const keywordFields = {
+  clip_keywords: "kw-clip-keywords",
+  forbidden_phrases: "kw-forbidden-phrases",
+  filler_words: "kw-filler-words",
+  preference_keywords: "kw-preference-keywords",
 };
 
 const customAiPresetsKey = "lc:custom-ai-presets";
 const themeStorageKey = "lc:ui-theme";
+const uiFontSizeStorageKey = "lc:ui-font-size";
+const previewDraftStoragePrefix = "lc:preview-draft:";
 const validThemes = new Set(["system", "light", "dark"]);
+
+const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "dedup", "live-rec", "settings"];
+
+const progressStageRules = [
+  { label: "准备素材", percent: 12, tokens: ["任务已启动", "启动", "目标时长", "读取", "上传", "路径"] },
+  { label: "标准化素材", percent: 20, tokens: ["TS", "标准化", "normalized", "remux", "转码", "CFR"] },
+  { label: "识别字幕", percent: 34, tokens: ["SRT", "字幕", "ASR", "识别", "Whisper", "火山", "阿里云", "语音"] },
+  { label: "AI 分析", percent: 52, tokens: ["AI", "候选", "评分", "选片", "片单", "预览"] },
+  { label: "去重变速", percent: 68, tokens: ["去重", "变速", "dedup", "speed", "重复"] },
+  { label: "剪辑合成", percent: 82, tokens: ["剪辑", "裁剪", "片段", "合成", "混剪", "Cut", "Concat"] },
+  { label: "导出成品", percent: 92, tokens: ["导出", "输出", "成品", "保存", "路径"] },
+  { label: "已完成", percent: 100, tokens: ["完成", "成功", "ready", "已生成"] },
+];
 
 const featurePreferenceGroups = {
   smart_cut: {
@@ -141,6 +179,15 @@ const featurePreferenceGroups = {
       "dedup-noise-fusion",
     ],
   },
+  product_scan: {
+    prefixes: [],
+    ids: [
+      "ps-output-dir",
+      "ps-advance",
+      "ps-video-start-offset",
+      "ps-live-start-time",
+    ],
+  },
 };
 const featurePreferenceControlIds = new Set(
   Object.values(featurePreferenceGroups).flatMap((group) => group.ids)
@@ -163,7 +210,27 @@ function applyTheme(theme) {
   if (select && select.value !== normalized) select.value = normalized;
 }
 
+function normalizeUiFontSize(value) {
+  const size = Number(value || 14);
+  return Math.max(12, Math.min(18, Number.isFinite(size) ? Math.round(size) : 14));
+}
+
+function applyUiFontSize(value) {
+  const size = normalizeUiFontSize(value);
+  document.documentElement.style.setProperty("--ui-font-size", `${size}px`);
+  try {
+    localStorage.setItem(uiFontSizeStorageKey, String(size));
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+  const input = $("s-ui-font-size");
+  const label = $("s-ui-font-size-value");
+  if (input && input.value !== String(size)) input.value = String(size);
+  if (label) label.textContent = String(size);
+}
+
 applyTheme(localStorage.getItem(themeStorageKey) || document.documentElement.dataset.theme || "system");
+applyUiFontSize(localStorage.getItem(uiFontSizeStorageKey) || 14);
 
 const aiPresets = {
   viral: {
@@ -237,6 +304,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindFeaturePreferenceAutoSave();
   setupCollapsiblePanels();
   setupAdvancedParamToggles();
+  setupLogProgressBars();
   bindPreviewModalShortcuts();
   loadRuntime();
   loadSettings();
@@ -248,10 +316,20 @@ document.addEventListener("DOMContentLoaded", () => {
   loadScanResults();
   loadLatestSmartPreview();
   loadLatestMixPreview();
+  renderUpdateState();
+  setTimeout(() => {
+    checkUpdate({ quiet: true }).catch((error) => {
+      console.warn("Update check failed", error);
+    });
+  }, 1200);
   setInterval(refreshTasks, 2500);
   setInterval(loadScanResults, 4000);
   setInterval(loadLatestSmartPreview, 5000);
   setInterval(loadLatestMixPreview, 5000);
+  window.addEventListener("resize", () => {
+    updatePreviewStickyOffset("smart");
+    updatePreviewStickyOffset("mix");
+  });
 });
 
 function $(id) {
@@ -401,6 +479,10 @@ function bindActions() {
       if (action === "test-ai") await testAI();
       if (action === "diagnose-volc") await diagnoseVolcengine();
       if (action === "load-keywords") await loadKeywords(true);
+      if (action === "open-keyword-editor") await openKeywordEditor();
+      if (action === "close-keyword-editor") closeKeywordEditor();
+      if (action === "save-keywords") await saveKeywords();
+      if (action === "reset-keywords") await resetKeywords();
       if (action === "clear-cache") await clearCache();
       if (action === "toggle-diagnostics") toggleDiagnostics();
       if (action === "save-ai-preset") saveCurrentAiPreset(target.dataset.prefix);
@@ -414,6 +496,8 @@ function bindActions() {
       if (action === "unbind-device") await unbindDevice();
       if (action === "check-update") await checkUpdate();
       if (action === "apply-update") await applyUpdate();
+      if (action === "toggle-update-card") toggleUpdateCard();
+      if (action === "close-update-card") closeUpdateCard();
       if (action === "feedback") feedback();
     } catch (error) {
       toast(error.message || String(error), "error");
@@ -433,6 +517,8 @@ function bindActions() {
   document.querySelectorAll("[data-pref-key]").forEach((input) => {
     input.addEventListener("input", () => syncPreferenceSlider(input));
   });
+  $("s-ui-font-size")?.addEventListener("input", (event) => applyUiFontSize(event.target.value));
+  $("s-subtitle-font-size")?.addEventListener("input", syncSubtitleFontSize);
   $("s-ui-theme")?.addEventListener("change", (event) => {
     applyTheme(event.target.value);
   });
@@ -757,7 +843,50 @@ function bindFeaturePreferenceAutoSave() {
 }
 
 function bindPreviewControls() {
+  document.body.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-preview-segment-toggle]");
+    if (toggle) {
+      event.preventDefault();
+      togglePreviewSegments(
+        Number(toggle.dataset.previewClip),
+        toggle.dataset.previewScope || "smart"
+      );
+      return;
+    }
+    const row = event.target.closest("[data-preview-segment-row]");
+    if (row && !event.target.closest("input, button")) {
+      event.preventDefault();
+      const input = row.querySelector("[data-preview-segment]");
+      if (!input) return;
+      input.checked = !input.checked;
+      updatePreviewSegmentSelection(
+        Number(row.dataset.previewSegmentParent),
+        Number(row.dataset.previewSegmentIndex),
+        input.checked,
+        row.dataset.previewScope || "smart"
+      );
+      return;
+    }
+    const previewRow = event.target.closest("[data-preview-row]");
+    if (!previewRow || event.target.closest("input, button, a, label, [data-action]")) return;
+    event.preventDefault();
+    setPreviewDetailSelection(
+      previewRow.dataset.previewScope || "smart",
+      Number(previewRow.dataset.previewIndex)
+    );
+  });
+
   document.body.addEventListener("change", (event) => {
+    const segment = event.target.closest("[data-preview-segment]");
+    if (segment) {
+      updatePreviewSegmentSelection(
+        Number(segment.dataset.previewSegmentParent),
+        Number(segment.dataset.previewSegmentIndex),
+        segment.checked,
+        segment.dataset.previewScope || "smart"
+      );
+      return;
+    }
     const target = event.target.closest("[data-preview-clip]");
     if (!target) return;
     updatePreviewClipSelection(Number(target.dataset.previewClip), target.checked, target.dataset.previewScope || "smart");
@@ -766,7 +895,10 @@ function bindPreviewControls() {
 
 function bindPreviewModalShortcuts() {
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closePreviewVideo();
+    if (event.key !== "Escape") return;
+    closeKeywordEditor();
+    closePreviewVideo();
+    closeUpdateCard();
   });
 }
 
@@ -822,6 +954,152 @@ function setupAdvancedParamToggles() {
     });
     header.appendChild(button);
   });
+}
+
+function setupLogProgressBars() {
+  document.querySelectorAll(".log-panel .log-view").forEach((logView) => {
+    const scope = (logView.id || "").replace(/^log-/, "");
+    if (!scope || logView.parentElement?.querySelector(`[data-log-progress="${scope}"]`)) return;
+
+    const progress = document.createElement("div");
+    progress.className = "log-progress is-idle";
+    progress.dataset.logProgress = scope;
+    progress.innerHTML = `
+      <div class="log-progress-meta">
+        <span class="log-progress-title">进度</span>
+        <strong class="log-progress-label">等待任务</strong>
+        <span class="log-progress-percent">0%</span>
+      </div>
+      <div class="log-progress-track"><span class="log-progress-fill"></span></div>
+    `;
+    logView.parentElement?.insertBefore(progress, logView);
+    updateLogProgressBar(scope, { label: "等待任务", percent: 0, status: "idle" });
+  });
+}
+
+function updateLogProgressFromTasks(tasks = []) {
+  progressScopes.forEach((scope) => {
+    const scoped = scopedProgressTasks(tasks, scope);
+    const active = newestTask(scoped.filter((task) => ["queued", "running"].includes(task.status)));
+    const latest = newestTask(scoped);
+    const current = state.progressByScope[scope];
+
+    if (active) {
+      updateLogProgressBar(scope, progressFromTask(active));
+      return;
+    }
+    if (latest && current?.taskId === latest.id) {
+      updateLogProgressBar(scope, progressFromTask(latest));
+      return;
+    }
+    if (!current) {
+      updateLogProgressBar(scope, { label: "等待任务", percent: 0, status: "idle" });
+    }
+  });
+}
+
+function scopedProgressTasks(tasks, scope) {
+  return (tasks || []).filter((task) => task.scope === scope || (scope === "settings" && task.scope === "settings"));
+}
+
+function newestTask(tasks) {
+  return [...tasks].sort((a, b) => taskTime(b) - taskTime(a))[0] || null;
+}
+
+function taskTime(task) {
+  const fromId = String(task?.id || "").match(/-(\d{10,})-/)?.[1];
+  return Number(task?.finished_at || task?.started_at || fromId || 0);
+}
+
+function progressFromTask(task) {
+  const scope = task.scope || "settings";
+  const status = task.status || "queued";
+  const text = [task.title, task.message, task.error].filter(Boolean).join(" ");
+  const inferred = inferProgressStage(text);
+  const explicitProgress = Number(task.progress);
+  const hasExplicitProgress = Number.isFinite(explicitProgress);
+  const statusLabels = {
+    queued: "排队中",
+    running: task.message || inferred.label || "运行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已停止",
+  };
+
+  if (status === "completed") return { taskId: task.id, label: statusLabels.completed, percent: 100, status, source: "task" };
+  if (status === "failed") return { taskId: task.id, label: task.error || statusLabels.failed, percent: 100, status, source: "task" };
+  if (status === "cancelled") return { taskId: task.id, label: statusLabels.cancelled, percent: 100, status, source: "task" };
+  if (status === "queued") {
+    return { taskId: task.id, label: task.message || statusLabels.queued, percent: hasExplicitProgress ? explicitProgress : 6, status, source: "task" };
+  }
+
+  const previous = state.progressByScope[scope];
+  const previousPercent = previous?.taskId === task.id ? previous.percent || 0 : 0;
+  return {
+    taskId: task.id,
+    label: statusLabels.running,
+    percent: Math.max(previousPercent, hasExplicitProgress ? explicitProgress : inferred.percent || 10),
+    status,
+    source: "task",
+  };
+}
+
+function updateProgressFromLog(scope, item = {}) {
+  const level = String(item.level || "info").toLowerCase();
+  const text = [item.message, item.raw].filter(Boolean).join(" ");
+  if (!scope || !text) return;
+
+  if (level === "error") {
+    updateLogProgressBar(scope, { label: "处理失败", percent: 100, status: "failed" });
+    return;
+  }
+  if (level === "success" || /任务完成|成片完成|混剪完成|预览完成|处理完成|成功|已生成/.test(text)) {
+    updateLogProgressBar(scope, { label: "已完成", percent: 100, status: "completed" });
+    return;
+  }
+
+  const inferred = inferProgressStage(text);
+  if (!inferred.label) return;
+  const previous = state.progressByScope[scope] || {};
+  if (previous.source === "task" && previous.taskId && previous.status === "running") return;
+  updateLogProgressBar(scope, {
+    label: inferred.label,
+    percent: Math.max(previous.percent || 0, inferred.percent),
+    status: "running",
+    taskId: previous.taskId,
+  });
+}
+
+function inferProgressStage(text) {
+  const value = String(text || "");
+  for (const stage of progressStageRules) {
+    if (stage.tokens.some((token) => value.includes(token))) {
+      return { label: stage.label, percent: stage.percent };
+    }
+  }
+  return { label: "", percent: 0 };
+}
+
+function updateLogProgressBar(scope, progress) {
+  const el = document.querySelector(`[data-log-progress="${scope}"]`);
+  if (!el) return;
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
+  const status = progress.status || "idle";
+  const label = progress.label || "等待任务";
+  state.progressByScope[scope] = { ...progress, percent, label, status };
+
+  el.className = `log-progress is-${status}`;
+  const labelEl = el.querySelector(".log-progress-label");
+  const percentEl = el.querySelector(".log-progress-percent");
+  const fill = el.querySelector(".log-progress-fill");
+  if (labelEl) labelEl.textContent = label;
+  if (percentEl) percentEl.textContent = `${percent}%`;
+  if (fill) fill.style.width = `${percent}%`;
+}
+
+function resetLogProgress(scope) {
+  delete state.progressByScope[scope];
+  updateLogProgressBar(scope, { label: "等待任务", percent: 0, status: "idle" });
 }
 
 function fieldText(id, fallback = "-") {
@@ -937,6 +1215,33 @@ function providerToPreset(value) {
   return "火山引擎";
 }
 
+function normalizeVolcRegion(value) {
+  const text = String(value || "").trim();
+  const compact = text.replace(/\s+/g, "").replace(/_/g, "-").toLowerCase();
+  const aliases = {
+    "": "cn-beijing",
+    "beijing": "cn-beijing",
+    "bj": "cn-beijing",
+    "cn-beijing": "cn-beijing",
+    "\u5317\u4eac": "cn-beijing",
+    "\u4e2d\u56fd\u5317\u4eac": "cn-beijing",
+    "shanghai": "cn-shanghai",
+    "sh": "cn-shanghai",
+    "cn-shanghai": "cn-shanghai",
+    "\u4e0a\u6d77": "cn-shanghai",
+    "\u4e2d\u56fd\u4e0a\u6d77": "cn-shanghai",
+    "guangzhou": "cn-guangzhou",
+    "gz": "cn-guangzhou",
+    "cn-guangzhou": "cn-guangzhou",
+    "\u5e7f\u5dde": "cn-guangzhou",
+    "\u4e2d\u56fd\u5e7f\u5dde": "cn-guangzhou",
+    "singapore": "ap-southeast-1",
+    "ap-southeast-1": "ap-southeast-1",
+    "\u65b0\u52a0\u5761": "ap-southeast-1",
+  };
+  return aliases[text] || aliases[compact] || compact || "cn-beijing";
+}
+
 async function loadSettings(showToast = false) {
   const data = await api("/api/settings");
   Object.entries(settingFields).forEach(([key, id]) => {
@@ -944,12 +1249,15 @@ async function loadSettings(showToast = false) {
     if (!element) return;
     let value = data[key];
     if (key === "asr_provider") value = normalizeProvider(value || data.asr_preset);
+    if (key === "volc_region") value = normalizeVolcRegion(value);
     if (element.type === "checkbox") {
       element.checked = Boolean(value);
     } else {
       element.value = value ?? "";
     }
   });
+  applyUiFontSize(data.ui_font_size || 14);
+  syncSubtitleFontSize();
   applyTheme(data.ui_theme || "system");
   applyPreferenceWeights(data.preference_weights || {});
   applyAiRules(data.ai_rules || {});
@@ -965,8 +1273,11 @@ function collectSettings() {
   });
   data.asr_provider = "火山引擎";
   data.asr_preset = providerToPreset(data.asr_provider);
+  data.volc_region = normalizeVolcRegion(data.volc_region);
   data.volc_app_id = "";
   data.volc_access_token = "";
+  data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
+  data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
   data.preference_weights = collectPreferenceWeights();
   data.ai_rules = collectAiRules();
   return data;
@@ -999,11 +1310,134 @@ async function diagnoseVolcengine() {
   toast(result.message || "诊断完成", result.ok ? "success" : "error");
 }
 
+function uniqueTexts(items) {
+  const result = [];
+  const seen = new Set();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const text = String(item || "").trim();
+    if (text && !seen.has(text)) {
+      result.push(text);
+      seen.add(text);
+    }
+  });
+  return result;
+}
+
+function formatKeywordMap(value) {
+  if (!value || typeof value !== "object") return "";
+  const lines = [];
+  Object.entries(value).forEach(([group, items]) => {
+    uniqueTexts(items).forEach((word) => lines.push(`${group}=${word}`));
+    if (lines.length && lines[lines.length - 1] !== "") lines.push("");
+  });
+  while (lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
+}
+
+function parseKeywordMap(text) {
+  const result = {};
+  String(text || "")
+    .split(/\r?\n/)
+    .forEach((line) => {
+      const value = line.trim();
+      if (!value || value.startsWith("#")) return;
+      const sep = value.indexOf("=");
+      if (sep <= 0) return;
+      const group = value.slice(0, sep).trim();
+      const word = value.slice(sep + 1).trim();
+      if (!group || !word) return;
+      if (!result[group]) result[group] = [];
+      result[group].push(word);
+    });
+  Object.keys(result).forEach((group) => {
+    result[group] = uniqueTexts(result[group]);
+  });
+  return result;
+}
+
+function formatKeywordList(value) {
+  return uniqueTexts(value).join("\n");
+}
+
+function parseKeywordList(text) {
+  return uniqueTexts(
+    String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+  );
+}
+
+function applyKeywordConfig(config = {}) {
+  state.keywordConfig = config && typeof config === "object" ? config : {};
+  const clip = $(keywordFields.clip_keywords);
+  const forbidden = $(keywordFields.forbidden_phrases);
+  const filler = $(keywordFields.filler_words);
+  const preference = $(keywordFields.preference_keywords);
+  if (clip) clip.value = formatKeywordMap(state.keywordConfig.clip_keywords);
+  if (forbidden) forbidden.value = formatKeywordList(state.keywordConfig.forbidden_phrases);
+  if (filler) filler.value = formatKeywordList(state.keywordConfig.filler_words);
+  if (preference) preference.value = formatKeywordMap(state.keywordConfig.preference_keywords);
+}
+
+function collectKeywordConfig() {
+  return {
+    ...state.keywordConfig,
+    clip_keywords: parseKeywordMap($(keywordFields.clip_keywords)?.value || ""),
+    forbidden_phrases: parseKeywordList($(keywordFields.forbidden_phrases)?.value || ""),
+    filler_words: parseKeywordList($(keywordFields.filler_words)?.value || ""),
+    preference_keywords: parseKeywordMap($(keywordFields.preference_keywords)?.value || ""),
+  };
+}
+
+function updateKeywordSummary(data) {
+  const count = $("keyword-count");
+  const source = $("keyword-source");
+  if (count) count.textContent = String(data.count || 0);
+  if (source) source.textContent = data.source || data.path || "本地";
+}
+
+async function openKeywordEditor() {
+  if (!Object.keys(state.keywordConfig || {}).length) await loadKeywords(false);
+  const modal = $("keyword-editor-modal");
+  if (!modal) return;
+  modal.classList.remove("is-hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("keyword-modal-open");
+  setTimeout(() => $(keywordFields.clip_keywords)?.focus(), 0);
+}
+
+function closeKeywordEditor() {
+  const modal = $("keyword-editor-modal");
+  if (!modal) return;
+  modal.classList.add("is-hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("keyword-modal-open");
+}
+
 async function loadKeywords(showToast = false) {
   const data = await api("/api/keywords");
-  $("keyword-count").textContent = String(data.count || 0);
-  $("keyword-source").textContent = data.source || "本地";
+  updateKeywordSummary(data);
+  applyKeywordConfig(data.keywords || {});
   if (showToast) toast("关键词信息已刷新", "success");
+}
+
+async function saveKeywords() {
+  const result = await api("/api/keywords", {
+    method: "POST",
+    body: JSON.stringify(collectKeywordConfig()),
+  });
+  updateKeywordSummary(result);
+  applyKeywordConfig(result.keywords || collectKeywordConfig());
+  toast(result.message || "词库已保存", "success");
+}
+
+async function resetKeywords() {
+  if (!window.confirm("恢复默认词库会删除当前用户自定义词库，确认继续？")) return;
+  const result = await api("/api/keywords/reset", { method: "POST", body: "{}" });
+  updateKeywordSummary(result);
+  applyKeywordConfig(result.keywords || {});
+  toast(result.message || "词库已恢复默认", "success");
 }
 
 async function clearCache() {
@@ -1025,6 +1459,13 @@ function syncPreferenceSlider(input) {
   const value = input.value;
   const label = document.querySelector(`[data-pref-value="${key}"]`);
   if (label) label.textContent = value;
+}
+
+function syncSubtitleFontSize() {
+  const input = $("s-subtitle-font-size");
+  const label = $("s-subtitle-font-size-value");
+  if (!input || !label) return;
+  label.textContent = input.value;
 }
 
 function applyPreferenceWeights(weights) {
@@ -1086,6 +1527,9 @@ async function activateLicense() {
     body: JSON.stringify({ code }),
   });
   toast(result.message || "激活完成", result.ok ? "success" : "warning");
+  if (result.ok && result.restart_required) {
+    alert(result.message || "激活完成，请重启客户端后再使用。");
+  }
   await loadLicense();
 }
 
@@ -1116,12 +1560,171 @@ async function applyUpdate() {
   if (status) status.value = "正在安装更新...";
   const result = await api("/api/update/apply", { method: "POST", body: "{}" });
   if (result.ok) {
-    if (status) status.value = result.restart_required ? "更新完成，请重启客户端" : "当前已是最新版本";
-    toast(result.restart_required ? "更新完成，请重启客户端" : "当前已是最新版本", "success");
+    const message = result.auto_restart
+      ? "更新完成，客户端即将自动重启..."
+      : result.restart_required
+        ? "更新完成，请重启客户端"
+        : "当前已是最新版本";
+    if (status) status.value = message;
+    toast(message, "success");
+    return;
   } else {
     if (status) status.value = "更新失败";
     toast(result.msg || "更新失败", "error");
   }
+}
+
+function setUpdateState(patch = {}) {
+  state.update = { ...state.update, ...patch };
+  renderUpdateState();
+}
+
+function renderUpdateState() {
+  const update = state.update || {};
+  const info = update.info || {};
+  const version = info.version || info.latest_version || "";
+  const hasUpdate = Boolean(update.available);
+  const busy = Boolean(update.checking || update.installing);
+  const message = update.message || "\u672a\u68c0\u67e5";
+  const status = $("update-status");
+  if (status) status.value = message;
+
+  const indicator = $("update-indicator");
+  if (indicator) {
+    indicator.classList.toggle("has-update", hasUpdate);
+    indicator.classList.toggle("is-busy", busy);
+    indicator.classList.toggle("is-error", Boolean(update.error));
+    const title = hasUpdate && version
+      ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}`
+      : message;
+    indicator.title = title;
+    indicator.setAttribute("aria-label", title);
+  }
+
+  const cardStatus = $("update-card-status");
+  if (cardStatus) cardStatus.textContent = message;
+  const cardVersion = $("update-card-version");
+  if (cardVersion) {
+    cardVersion.textContent = hasUpdate && version
+      ? `v${version}`
+      : "\u5f53\u524d\u7248\u672c";
+  }
+  const notes = $("update-card-notes");
+  if (notes) {
+    const releaseNotes = info.release_notes || info.update_message || "";
+    const fileCount = Number(info.file_count || 0);
+    const suffix = fileCount ? `\n${fileCount} \u4e2a\u6587\u4ef6\u5c06\u66f4\u65b0` : "";
+    notes.textContent = (releaseNotes || (hasUpdate ? "\u53d1\u73b0\u53ef\u5b89\u88c5\u66f4\u65b0\u3002" : "\u6ca1\u6709\u53ef\u7528\u66f4\u65b0\u3002")) + suffix;
+  }
+  const applyButton = $("update-card-apply");
+  if (applyButton) applyButton.disabled = !hasUpdate || busy;
+}
+
+function openUpdateCard() {
+  const card = $("update-popover");
+  if (!card) return;
+  card.classList.remove("is-hidden");
+  card.setAttribute("aria-hidden", "false");
+  renderUpdateState();
+  if (!state.update.checked && !state.update.checking) {
+    checkUpdate({ quiet: true }).catch((error) => console.warn("Update check failed", error));
+  }
+}
+
+function closeUpdateCard() {
+  const card = $("update-popover");
+  if (!card) return;
+  card.classList.add("is-hidden");
+  card.setAttribute("aria-hidden", "true");
+}
+
+function toggleUpdateCard() {
+  const card = $("update-popover");
+  if (!card || card.classList.contains("is-hidden")) openUpdateCard();
+  else closeUpdateCard();
+}
+
+async function checkUpdate(options = {}) {
+  const quiet = Boolean(options.quiet);
+  setUpdateState({
+    checked: true,
+    checking: true,
+    installing: false,
+    error: "",
+    message: "\u6b63\u5728\u68c0\u67e5\u66f4\u65b0...",
+  });
+  try {
+    const result = await api("/api/update/check");
+    if (!result.update_available) {
+      setUpdateState({
+        checking: false,
+        available: false,
+        info: null,
+        message: "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c",
+      });
+      if (!quiet) toast("\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c", "success");
+      return result;
+    }
+    const update = result.update || {};
+    const version = update.version || "";
+    setUpdateState({
+      checking: false,
+      available: true,
+      info: update,
+      message: version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c",
+    });
+    if (!quiet) toast(version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c", "success");
+    return result;
+  } catch (error) {
+    setUpdateState({
+      checking: false,
+      available: false,
+      error: error.message || String(error),
+      message: "\u68c0\u67e5\u66f4\u65b0\u5931\u8d25",
+    });
+    if (!quiet) throw error;
+    return null;
+  }
+}
+
+async function applyUpdate() {
+  if (!state.update.available && !state.update.checking) {
+    const result = await checkUpdate({ quiet: true });
+    if (!result?.update_available) {
+      toast("\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c", "success");
+      return;
+    }
+  }
+  if (!confirm("\u5b89\u88c5\u66f4\u65b0\u540e\u9700\u8981\u91cd\u542f\u5ba2\u6237\u7aef\u624d\u80fd\u751f\u6548\uff0c\u7ee7\u7eed\u5417\uff1f")) return;
+  setUpdateState({
+    installing: true,
+    checking: false,
+    error: "",
+    message: "\u6b63\u5728\u5b89\u88c5\u66f4\u65b0...",
+  });
+  const result = await api("/api/update/apply", { method: "POST", body: "{}" });
+  if (result.ok) {
+    const message = result.auto_restart
+      ? "\u66f4\u65b0\u5b8c\u6210\uff0c\u5ba2\u6237\u7aef\u5373\u5c06\u81ea\u52a8\u91cd\u542f..."
+      : result.restart_required
+        ? "\u66f4\u65b0\u5b8c\u6210\uff0c\u8bf7\u91cd\u542f\u5ba2\u6237\u7aef"
+        : "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c";
+    setUpdateState({
+      installing: false,
+      available: false,
+      message,
+    });
+    toast(message, "success");
+    return result;
+  }
+  const message = result.msg || "\u66f4\u65b0\u5931\u8d25";
+  setUpdateState({
+    installing: false,
+    error: message,
+    message,
+  });
+  toast(message, "error");
+  return result;
 }
 
 function feedback() {
@@ -1618,10 +2221,8 @@ async function startSmartFromPreview() {
     return;
   }
   syncPreviewClipSelections();
-  const selected = (state.smartPreview.clips || [])
-    .filter((clip) => clip.selected !== false)
-    .map((clip) => Number(clip.index))
-    .filter((value) => Number.isInteger(value));
+  const selection = collectPreviewSelection("smart");
+  const selected = selection.selectedIndices;
   if (!selected.length) {
     toast("请至少保留一个片段", "warning");
     return;
@@ -1630,6 +2231,7 @@ async function startSmartFromPreview() {
     ...collectSmartPayload({ requireVideos: false }),
     preview_id: state.smartPreview.id,
     selected_indices: selected,
+    selected_segments: selection.selectedSegments,
   };
   await runPreflight("smart-from-preview", payload, "smart-cut");
   const result = await api("/api/smart-cut/from-preview/start", {
@@ -1647,10 +2249,8 @@ async function startMixFromPreview() {
     return;
   }
   syncPreviewClipSelections("mix");
-  const selected = (state.mixPreview.clips || [])
-    .filter((clip) => clip.selected !== false)
-    .map((clip) => Number(clip.index))
-    .filter((value) => Number.isInteger(value));
+  const selection = collectPreviewSelection("mix");
+  const selected = selection.selectedIndices;
   if (!selected.length) {
     toast("请至少保留一个片段", "warning");
     return;
@@ -1659,6 +2259,7 @@ async function startMixFromPreview() {
     ...collectFeaturePayload("mix"),
     preview_id: state.mixPreview.id,
     selected_indices: selected,
+    selected_segments: selection.selectedSegments,
   };
   await runPreflight("mix", payload, "mix");
   const result = await api("/api/mix/from-preview/start", {
@@ -1678,6 +2279,175 @@ function renderPreviewState(scope = "smart") {
   else renderSmartPreview(state.smartPreview);
 }
 
+function previewDraftKey(scope, previewId) {
+  return `${scope}:${previewId || ""}`;
+}
+
+function previewDraftStorageKey(scope, previewId) {
+  return `${previewDraftStoragePrefix}${previewDraftKey(scope, previewId)}`;
+}
+
+function normalizedIntegerList(values) {
+  const result = [];
+  const seen = new Set();
+  (Array.isArray(values) ? values : []).forEach((value) => {
+    const number = Number(value);
+    if (!Number.isInteger(number) || seen.has(number)) return;
+    seen.add(number);
+    result.push(number);
+  });
+  return result;
+}
+
+function buildPreviewDraftFromState(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const draft = {
+    preview_id: preview?.id || "",
+    scope,
+    order: [],
+    selected_indices: [],
+    selected_segments: {},
+    updated_at: Date.now(),
+  };
+  (preview?.clips || []).forEach((clip) => {
+    const clipIndex = Number(clip.index);
+    if (!Number.isInteger(clipIndex)) return;
+    draft.order.push(clipIndex);
+    const segments = previewSegments(clip);
+    const keptSegments = segments
+      .filter((segment) => segment.selected !== false)
+      .map((segment) => Number(segment.index))
+      .filter((value) => Number.isInteger(value));
+    const clipSelected = clip.selected !== false && (!segments.length || keptSegments.length > 0);
+    if (!clipSelected) return;
+    draft.selected_indices.push(clipIndex);
+    if (segments.length) draft.selected_segments[String(clipIndex)] = keptSegments;
+  });
+  return draft;
+}
+
+function readStoredPreviewDraft(scope, preview) {
+  if (!preview?.id) return null;
+  const key = previewDraftStorageKey(scope, preview.id);
+  let local = null;
+  try {
+    local = JSON.parse(localStorage.getItem(key) || "null");
+  } catch (error) {
+    local = null;
+  }
+  const server = preview.selection_draft && typeof preview.selection_draft === "object"
+    ? preview.selection_draft
+    : null;
+  const candidates = [local, server]
+    .filter((draft) => draft && draft.preview_id === preview.id)
+    .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+  return candidates[0] || null;
+}
+
+function applyPreviewDraftToState(scope = "smart", draft = null) {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips?.length || !draft) return;
+  const order = normalizedIntegerList(draft.order);
+  if (order.length) {
+    const positionByIndex = new Map(order.map((index, position) => [index, position]));
+    preview.clips.sort((a, b) => {
+      const aIndex = Number(a.index);
+      const bIndex = Number(b.index);
+      const aPosition = positionByIndex.has(aIndex) ? positionByIndex.get(aIndex) : Number.MAX_SAFE_INTEGER;
+      const bPosition = positionByIndex.has(bIndex) ? positionByIndex.get(bIndex) : Number.MAX_SAFE_INTEGER;
+      if (aPosition !== bPosition) return aPosition - bPosition;
+      return aIndex - bIndex;
+    });
+  }
+  const hasSelectedIndices = Array.isArray(draft.selected_indices);
+  const selectedSet = new Set(normalizedIntegerList(draft.selected_indices));
+  const segmentMap = draft.selected_segments && typeof draft.selected_segments === "object"
+    ? draft.selected_segments
+    : {};
+  preview.clips.forEach((clip) => {
+    const clipIndex = Number(clip.index);
+    const segments = previewSegments(clip);
+    const selectedByDraft = hasSelectedIndices ? selectedSet.has(clipIndex) : clip.selected !== false;
+    if (!selectedByDraft) {
+      clip.selected = false;
+      segments.forEach((segment) => {
+        segment.selected = false;
+      });
+      return;
+    }
+    const segmentValues = segmentMap[String(clipIndex)];
+    if (segments.length && Array.isArray(segmentValues)) {
+      const segmentSet = new Set(normalizedIntegerList(segmentValues));
+      segments.forEach((segment) => {
+        segment.selected = segmentSet.has(Number(segment.index));
+      });
+    } else if (segments.length) {
+      segments.forEach((segment) => {
+        if (segment.selected === undefined) segment.selected = true;
+      });
+    }
+    clip.selected = !segments.length || segments.some((segment) => segment.selected !== false);
+  });
+}
+
+function savePreviewDraft(scope = "smart", draft = null, { remote = true } = {}) {
+  const preview = getPreviewState(scope);
+  const nextDraft = draft || buildPreviewDraftFromState(scope);
+  if (!preview?.id || !nextDraft.preview_id) return nextDraft;
+  const key = previewDraftKey(scope, preview.id);
+  state.previewDrafts[key] = nextDraft;
+  try {
+    localStorage.setItem(previewDraftStorageKey(scope, preview.id), JSON.stringify(nextDraft));
+  } catch (error) {
+    console.warn("Failed to persist preview draft", error);
+  }
+  if (remote) {
+    clearTimeout(state.previewDraftSaveTimers[key]);
+    state.previewDraftSaveTimers[key] = setTimeout(async () => {
+      try {
+        await api("/api/preview/selection/save", {
+          method: "POST",
+          body: JSON.stringify(nextDraft),
+        });
+      } catch (error) {
+        console.warn("Failed to save preview draft", error);
+      }
+    }, 300);
+  }
+  return nextDraft;
+}
+
+function ensurePreviewDraft(scope = "smart") {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || !preview?.clips?.length) return null;
+  const key = previewDraftKey(scope, preview.id);
+  let draft = state.previewDrafts[key] || readStoredPreviewDraft(scope, preview);
+  if (draft) {
+    applyPreviewDraftToState(scope, draft);
+  } else {
+    draft = buildPreviewDraftFromState(scope);
+  }
+  state.previewDrafts[key] = draft;
+  savePreviewDraft(scope, draft, { remote: false });
+  return draft;
+}
+
+function commitPreviewDraft(scope = "smart", options = {}) {
+  const draft = buildPreviewDraftFromState(scope);
+  return savePreviewDraft(scope, draft, options);
+}
+
+function updatePreviewStickyOffset(scope = "smart") {
+  const box = scope === "mix" ? $("mix-preview") : $("smart-preview");
+  const summary = box?.querySelector(`[data-preview-summary="${scope}"]`);
+  if (!box || !summary) return;
+  box.style.setProperty("--preview-summary-offset", `${Math.ceil(summary.getBoundingClientRect().height)}px`);
+}
+
+function refreshPreviewSelectionUi(scope = "smart") {
+  renderPreviewState(scope);
+}
+
 function syncPreviewClipSelections(scope = "smart") {
   const preview = getPreviewState(scope);
   if (!preview?.clips) return;
@@ -1687,9 +2457,26 @@ function syncPreviewClipSelections(scope = "smart") {
       node.checked,
     ])
   );
+  const segmentChecked = new Map(
+    Array.from(document.querySelectorAll(`[data-preview-segment][data-preview-scope="${scope}"]`)).map((node) => [
+      `${Number(node.dataset.previewSegmentParent)}:${Number(node.dataset.previewSegmentIndex)}`,
+      node.checked,
+    ])
+  );
   preview.clips.forEach((clip) => {
-    if (checked.has(Number(clip.index))) clip.selected = checked.get(Number(clip.index));
+    const clipIndex = Number(clip.index);
+    const segments = Array.isArray(clip.segments) ? clip.segments : [];
+    segments.forEach((segment) => {
+      const key = `${clipIndex}:${Number(segment.index)}`;
+      if (segmentChecked.has(key)) segment.selected = segmentChecked.get(key);
+      else if (segment.selected === undefined) segment.selected = true;
+    });
+    const anySegmentSelected = segments.length ? segments.some((segment) => segment.selected !== false) : true;
+    if (checked.has(clipIndex)) {
+      clip.selected = checked.get(clipIndex) && anySegmentSelected;
+    }
     else if (clip.selected === undefined) clip.selected = true;
+    if (segments.length && !anySegmentSelected) clip.selected = false;
   });
 }
 
@@ -1698,8 +2485,48 @@ function updatePreviewClipSelection(index, selected, scope = "smart") {
   const clip = preview?.clips?.find((item) => Number(item.index) === index);
   if (clip) {
     clip.selected = selected;
-    renderPreviewState(scope);
+    if (Array.isArray(clip.segments)) {
+      clip.segments.forEach((segment) => {
+        segment.selected = selected;
+      });
+    }
+    commitPreviewDraft(scope);
+    refreshPreviewSelectionUi(scope);
   }
+}
+
+function updatePreviewSegmentSelection(index, segmentIndex, selected, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === index);
+  if (!clip || !Array.isArray(clip.segments)) return;
+  const segment = clip.segments.find((item) => Number(item.index) === segmentIndex);
+  if (segment) segment.selected = selected;
+  clip.selected = clip.segments.some((item) => item.selected !== false);
+  commitPreviewDraft(scope);
+  refreshPreviewSelectionUi(scope);
+}
+
+function togglePreviewSegments(index, scope = "smart") {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips) return;
+  syncPreviewClipSelections(scope);
+  const clip = preview.clips.find((item) => Number(item.index) === index);
+  if (!clip) return;
+  const nextExpanded = clip.segmentsExpanded !== true;
+  preview.clips.forEach((item) => {
+    item.segmentsExpanded = false;
+  });
+  clip.segmentsExpanded = nextExpanded;
+  renderPreviewState(scope);
+}
+
+function collectPreviewSelection(scope = "smart") {
+  syncPreviewClipSelections(scope);
+  const draft = commitPreviewDraft(scope, { remote: true });
+  return {
+    selectedIndices: draft.selected_indices || [],
+    selectedSegments: draft.selected_segments || {},
+  };
 }
 
 function reorderPreviewClip(scope, fromIndex, toIndex) {
@@ -1712,12 +2539,17 @@ function reorderPreviewClip(scope, fromIndex, toIndex) {
   if (from < 0 || from === to) return;
   const [clip] = clips.splice(from, 1);
   clips.splice(to, 0, clip);
+  commitPreviewDraft(scope);
   renderPreviewState(scope);
 }
 
 function bindPreviewRowDrag(box, scope = "smart") {
   box.querySelectorAll(`[data-preview-row][data-preview-scope="${scope}"]`).forEach((row) => {
     row.addEventListener("dragstart", (event) => {
+      if (event.target?.closest?.("input, button, [data-preview-segment-row]")) {
+        event.preventDefault();
+        return;
+      }
       row.classList.add("is-dragging");
       event.dataTransfer?.setData("text/plain", JSON.stringify({
         scope,
@@ -1761,11 +2593,12 @@ async function previewClipVideo(index, scope = "smart") {
   if (!video) return;
   if (title) title.textContent = `片段预览 ${clip ? formatSeconds(clip.start) + "-" + formatSeconds(clip.end) : ""}`;
   if (status) {
-    status.textContent = "正在生成片段预览，首次预览会稍慢...";
+    status.textContent = "正在生成片段预览...";
     status.classList.remove("is-hidden", "is-error");
   }
   modal.classList.remove("is-hidden");
   modal.setAttribute("aria-hidden", "false");
+  video.pause();
   video.removeAttribute("src");
   video.load();
   const endpoint = scope === "mix" ? "/api/mix/preview/clip-video" : "/api/smart-cut/preview/clip-video";
@@ -1897,8 +2730,10 @@ function scopeForFeature(feature) {
 async function refreshTasks() {
   try {
     const data = await api("/api/tasks");
-    const latest = (data.tasks || []).slice(-8).reverse();
+    const tasks = data.tasks || [];
+    const latest = tasks.slice(-8).reverse();
     renderTaskBadges(latest);
+    updateLogProgressFromTasks(tasks);
   } catch (error) {
     // The log websocket already reports connection state; keep this quiet.
   }
@@ -1960,6 +2795,205 @@ async function pollMixPreview(previewId, attempt = 0) {
   setTimeout(() => pollMixPreview(previewId, attempt + 1), 2000);
 }
 
+function previewSegments(clip) {
+  return Array.isArray(clip?.segments) ? clip.segments : [];
+}
+
+function selectedPreviewSegments(clip) {
+  return previewSegments(clip).filter((segment) => segment.selected !== false);
+}
+
+function selectedPreviewText(clip) {
+  const segments = previewSegments(clip);
+  if (segments.length) {
+    const selected = selectedPreviewSegments(clip);
+    if (!selected.length) return "\u672a\u9009\u62e9\u53e5\u5b50";
+    return selected.map((segment) => String(segment.text || "").trim()).filter(Boolean).join(" ");
+  }
+  return String(clip?.text || "").trim();
+}
+
+function selectedSegmentCountText(clip) {
+  const segments = previewSegments(clip);
+  if (!segments.length) return "";
+  return `${selectedPreviewSegments(clip).length}/${segments.length}\u53e5`;
+}
+
+function effectiveClipDuration(clip) {
+  if (clip?.selected === false) return 0;
+  const segments = previewSegments(clip);
+  if (segments.length) {
+    return selectedPreviewSegments(clip).reduce((sum, segment) => {
+      const start = Number(segment.start || 0);
+      const end = Number(segment.end || start);
+      return sum + Math.max(0, Number(segment.duration || end - start));
+    }, 0);
+  }
+  const start = Number(clip?.start || 0);
+  const end = Number(clip?.end || start);
+  return Math.max(0, Number(clip?.duration || end - start));
+}
+
+function effectiveClipBounds(clip) {
+  const allSegments = previewSegments(clip);
+  const segments = selectedPreviewSegments(clip);
+  if (allSegments.length && segments.length) {
+    const start = Math.min(...segments.map((segment) => Number(segment.start || 0)));
+    const end = Math.max(...segments.map((segment) => Number(segment.end || Number(segment.start || 0))));
+    return { start, end, duration: effectiveClipDuration(clip) };
+  }
+  const start = Number(clip?.start || 0);
+  const end = Number(clip?.end || start);
+  if (allSegments.length || clip?.selected === false) return { start, end, duration: 0 };
+  return { start, end, duration: Math.max(0, Number(clip?.duration || end - start)) };
+}
+
+function previewClipRisk(clip, analysis) {
+  const risk = analysis.riskByIndex.get(Number(clip.index));
+  const riskLabel = clip.selected === false ? "未选" : (risk?.label || "正常");
+  const riskClass = clip.selected === false ? "muted" : (risk?.level || "ok");
+  return { risk, riskLabel, riskClass };
+}
+
+function previewDetailIndex(scope, clips) {
+  const stored = Number(state.previewDetailSelection?.[scope]);
+  if (Number.isInteger(stored) && clips.some((clip) => Number(clip.index) === stored)) return stored;
+  const first = clips.find((clip) => clip.selected !== false) || clips[0];
+  const next = Number(first?.index);
+  state.previewDetailSelection[scope] = Number.isInteger(next) ? next : null;
+  return state.previewDetailSelection[scope];
+}
+
+function setPreviewDetailSelection(scope = "smart", index) {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips?.some((clip) => Number(clip.index) === index)) return;
+  syncPreviewClipSelections(scope);
+  state.previewDetailSelection[scope] = index;
+  renderPreviewState(scope);
+}
+
+function renderClipStoryText(clip, repeatTags = "") {
+  const segments = previewSegments(clip);
+  if (segments.length > 1) {
+    const selectedText = selectedPreviewText(clip);
+    const rows = segments.map((segment) => {
+      const text = String(segment.text || "").trim();
+      if (!text) return "";
+      return `<span class="clip-story-sentence ${segment.selected === false ? "is-context" : "is-kept"}">${escapeHtml(text)}</span>`;
+    }).filter(Boolean).join("");
+    return `<div class="clip-text clip-story-text clip-story-context" data-preview-selected-text title="${escapeHtml(selectedText || "")}">${rows}${repeatTags}</div>`;
+  }
+  const selectedText = selectedPreviewText(clip);
+  const text = selectedText || clip?.text || "";
+  return `<strong class="clip-text clip-story-text clip-selected-summary" data-preview-selected-text title="${escapeHtml(text)}">${escapeHtml(text)}${repeatTags}</strong>`;
+}
+
+function renderClipStoryCard(clip, position, scope, analysis, activeIndex) {
+  const typeLabel = clipTypeLabel(clip.clip_type);
+  const bounds = effectiveClipBounds(clip);
+  const time = `${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)}`;
+  const duration = `${bounds.duration.toFixed(1)}s`;
+  const checked = clip.selected === false ? "" : "checked";
+  const { risk, riskLabel, riskClass } = previewClipRisk(clip, analysis);
+  const repeatTags = renderManualRepeatTags(clip);
+  const segmentCount = selectedSegmentCountText(clip) || "整段";
+  const source = scope === "mix"
+    ? `<span class="clip-story-source" title="${escapeHtml(clip.source_name || clip.source || "-")}">${escapeHtml(clip.source_name || "-")}</span>`
+    : "";
+  return `
+    <article class="clip-preview-row clip-story-card ${clip.selected === false ? "is-unselected" : ""} ${Number(clip.index) === activeIndex ? "is-active" : ""}" draggable="true" data-preview-row data-preview-scope="${scope}" data-preview-index="${clip.index}">
+      <div class="clip-story-select">
+        <input type="checkbox" data-preview-clip="${clip.index}" data-preview-scope="${scope}" ${checked} title="保留这个片段">
+        <div class="clip-drag-handle" title="拖拽排序" aria-label="拖拽排序">&#9776;</div>
+      </div>
+      <div class="clip-story-main">
+        <div class="clip-story-topline">
+          <span class="clip-story-order">#${position + 1}</span>
+          ${source}
+          <span class="clip-type clip-type-${escapeHtml(clip.clip_type || "product")}">${escapeHtml(typeLabel)}</span>
+          <span data-preview-time>${escapeHtml(time)}</span>
+          <span data-preview-duration>${escapeHtml(duration)}</span>
+          <span class="clip-segment-count" data-preview-segment-count>${escapeHtml(segmentCount)}</span>
+          <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
+        </div>
+        <div class="clip-content">
+          ${renderClipStoryText(clip, repeatTags)}
+        </div>
+      </div>
+      <div class="clip-story-actions">
+        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">预览</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
+  const clips = preview?.clips || [];
+  const clip = clips.find((item) => Number(item.index) === activeIndex) || clips[0];
+  if (!clip) {
+    return `<aside class="clip-detail-panel"><p>请选择左侧片段查看句子。</p></aside>`;
+  }
+  const position = Math.max(0, clips.findIndex((item) => Number(item.index) === Number(clip.index)));
+  const typeLabel = clipTypeLabel(clip.clip_type);
+  const bounds = effectiveClipBounds(clip);
+  const time = `${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)}`;
+  const duration = `${bounds.duration.toFixed(1)}s`;
+  const { risk, riskLabel, riskClass } = previewClipRisk(clip, analysis);
+  const segments = previewSegments(clip);
+  const segmentCountText = selectedSegmentCountText(clip) || "整段";
+  const segmentRows = segments.length ? segments.map((segment) => {
+    const checked = segment.selected === false ? "" : "checked";
+    const start = Number(segment.start || 0);
+    const end = Number(segment.end || start);
+    const segmentDuration = Math.max(0, Number(segment.duration || end - start));
+    const segmentTitle = escapeHtml(segment.text || "");
+    return `
+      <label class="clip-segment clip-detail-segment ${segment.selected === false ? "is-unselected" : ""}" title="${segmentTitle}" data-preview-segment-row data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" draggable="false">
+        <input type="checkbox" data-preview-segment data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" ${checked}>
+        <span class="clip-segment-time">${escapeHtml(formatSeconds(start))}-${escapeHtml(formatSeconds(end))}<em>${segmentDuration.toFixed(1)}s</em></span>
+        <span class="clip-segment-text">${segmentTitle}</span>
+      </label>
+    `;
+  }).join("") : `<div class="clip-detail-empty">这个片段没有句子拆分，将按整段参与成片。</div>`;
+  return `
+    <aside class="clip-detail-panel" data-preview-detail="${scope}">
+      <div class="clip-detail-head">
+        <div>
+          <span>句子选择</span>
+          <strong>#${position + 1} ${escapeHtml(typeLabel)}</strong>
+        </div>
+        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">预览</button>
+      </div>
+      <div class="clip-detail-stats">
+        <span>${escapeHtml(time)}</span>
+        <span>${escapeHtml(duration)}</span>
+        <span>${escapeHtml(segmentCountText)}</span>
+        <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
+      </div>
+      <div class="clip-detail-segments">
+        ${segmentRows}
+      </div>
+    </aside>
+  `;
+}
+
+function renderPreviewWorkbench(scope, preview, targetId) {
+  ensurePreviewDraft(scope);
+  const clips = preview?.clips || [];
+  const analysis = analyzeSmartPreview(preview, targetId);
+  const activeIndex = previewDetailIndex(scope, clips);
+  const rows = clips.map((clip, position) => renderClipStoryCard(clip, position, scope, analysis, activeIndex));
+  return `
+    <div data-preview-summary="${scope}">${renderPreviewSummary(analysis)}</div>
+    <div class="clip-preview-workbench">
+      <div class="clip-story-list" role="list">
+        ${rows.join("")}
+      </div>
+      ${renderPreviewDetailPanel(scope, preview, analysis, activeIndex)}
+    </div>
+  `;
+}
+
 function renderSmartPreview(preview) {
   const box = $("smart-preview");
   const count = $("smart-preview-count");
@@ -1986,43 +3020,8 @@ function renderSmartPreview(preview) {
     box.innerHTML = "<p>还没有可预览的片段。</p>";
     return;
   }
-  const analysis = analyzeSmartPreview(preview, "sc-duration");
-  const rows = clips.map((clip, position) => {
-    const typeLabel = clipTypeLabel(clip.clip_type);
-    const time = `${formatSeconds(clip.start)}-${formatSeconds(clip.end)}`;
-    const duration = `${Math.max(0, Number(clip.duration || 0)).toFixed(1)}s`;
-    const checked = clip.selected === false ? "" : "checked";
-    const risk = analysis.riskByIndex.get(Number(clip.index));
-    const riskLabel = clip.selected === false ? "未选" : (risk?.label || "正常");
-    const riskClass = clip.selected === false ? "muted" : (risk?.level || "ok");
-    const tags = renderClipScoreTags(clip);
-    const repeatTags = renderManualRepeatTags(clip);
-    const meta = renderClipMeta(clip, position, riskLabel);
-    return `
-      <div class="clip-preview-row ${clip.selected === false ? "is-unselected" : ""}" draggable="true" data-preview-row data-preview-scope="smart" data-preview-index="${clip.index}">
-        <input type="checkbox" data-preview-clip="${clip.index}" data-preview-scope="smart" ${checked}>
-        <div class="clip-drag-handle" title="拖拽排序" aria-label="拖拽排序">&#9776;</div>
-        <span class="clip-type clip-type-${escapeHtml(clip.clip_type || "product")}">${escapeHtml(typeLabel)}</span>
-        <span>${escapeHtml(time)}</span>
-        <span>${escapeHtml(duration)}</span>
-        <div class="clip-content">
-          <strong class="clip-text" title="${escapeHtml(clip.text || "")}">${escapeHtml(clip.text || "")}${repeatTags}</strong>
-          ${meta}
-        </div>
-        <span class="clip-score-tags">${tags}</span>
-        <span title="${escapeHtml(clip.focus || "")}">${escapeHtml(clip.focus || "-")}</span>
-        <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
-        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="smart" data-preview-index="${clip.index}">预览</button>
-      </div>
-    `;
-  });
-  box.innerHTML = `
-    ${renderPreviewSummary(analysis)}
-    <div class="clip-preview-head">
-      <span></span><span>排序</span><span>类型</span><span>时间</span><span>时长</span><span>字幕内容/片段信息</span><span>评分</span><span>卖点/理由</span><span>风险</span><span>视频</span>
-    </div>
-    ${rows.join("")}
-  `;
+  box.innerHTML = renderPreviewWorkbench("smart", preview, "sc-duration");
+  updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
 }
 
@@ -2052,44 +3051,8 @@ function renderMixPreview(preview) {
     box.innerHTML = "<p>还没有可预览的混剪片段。</p>";
     return;
   }
-  const analysis = analyzeSmartPreview(preview, "mix-duration");
-  const rows = clips.map((clip, position) => {
-    const typeLabel = clipTypeLabel(clip.clip_type);
-    const time = `${formatSeconds(clip.start)}-${formatSeconds(clip.end)}`;
-    const duration = `${Math.max(0, Number(clip.duration || 0)).toFixed(1)}s`;
-    const checked = clip.selected === false ? "" : "checked";
-    const risk = analysis.riskByIndex.get(Number(clip.index));
-    const riskLabel = clip.selected === false ? "未选" : (risk?.label || "正常");
-    const riskClass = clip.selected === false ? "muted" : (risk?.level || "ok");
-    const tags = renderClipScoreTags(clip);
-    const repeatTags = renderManualRepeatTags(clip);
-    const meta = renderClipMeta(clip, position, riskLabel);
-    return `
-      <div class="clip-preview-row clip-preview-row-mix ${clip.selected === false ? "is-unselected" : ""}" draggable="true" data-preview-row data-preview-scope="mix" data-preview-index="${clip.index}">
-        <input type="checkbox" data-preview-clip="${clip.index}" data-preview-scope="mix" ${checked}>
-        <div class="clip-drag-handle" title="拖拽排序" aria-label="拖拽排序">&#9776;</div>
-        <span title="${escapeHtml(clip.source_name || clip.source || "-")}">${escapeHtml(clip.source_name || "-")}</span>
-        <span class="clip-type clip-type-${escapeHtml(clip.clip_type || "product")}">${escapeHtml(typeLabel)}</span>
-        <span>${escapeHtml(time)}</span>
-        <span>${escapeHtml(duration)}</span>
-        <div class="clip-content">
-          <strong class="clip-text" title="${escapeHtml(clip.text || "")}">${escapeHtml(clip.text || "")}${repeatTags}</strong>
-          ${meta}
-        </div>
-        <span class="clip-score-tags">${tags}</span>
-        <span title="${escapeHtml(clip.focus || "")}">${escapeHtml(clip.focus || "-")}</span>
-        <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
-        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="mix" data-preview-index="${clip.index}">预览</button>
-      </div>
-    `;
-  });
-  box.innerHTML = `
-    ${renderPreviewSummary(analysis)}
-    <div class="clip-preview-head clip-preview-head-mix">
-      <span></span><span>排序</span><span>来源</span><span>类型</span><span>时间</span><span>时长</span><span>字幕内容/片段信息</span><span>评分</span><span>卖点/理由</span><span>风险</span><span>视频</span>
-    </div>
-    ${rows.join("")}
-  `;
+  box.innerHTML = renderPreviewWorkbench("mix", preview, "mix-duration");
+  updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
 }
 
@@ -2158,7 +3121,7 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const clips = (preview?.clips || []).filter((clip) => clip.selected !== false);
   const dedupSummary = preview?.dedup_summary || {};
   const target = Number($(targetId)?.value || preview?.target_duration || 60);
-  const total = clips.reduce((sum, clip) => sum + Math.max(0, Number(clip.duration || Number(clip.end || 0) - Number(clip.start || 0))), 0);
+  const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
   const riskByIndex = new Map();
   const warnings = [];
 
@@ -2174,9 +3137,10 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
       riskByIndex.set(Number(clip.index), risk);
       warnings.push(risk.detail);
     }
-    const start = Number(clip.start || 0);
-    const end = Number(clip.end || start);
-    const duration = Math.max(0, Number(clip.duration || end - start));
+    const bounds = effectiveClipBounds(clip);
+    const start = bounds.start;
+    const end = bounds.end;
+    const duration = bounds.duration;
     if (duration < 1.2) {
       riskByIndex.set(Number(clip.index), {
         level: "warn",
@@ -2193,7 +3157,8 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     }
     if (index === 0) return;
     const prev = clips[index - 1];
-    const gap = start - Number(prev.end || 0);
+    const prevBounds = effectiveClipBounds(prev);
+    const gap = start - Number(prevBounds.end || 0);
     if (gap < -0.05) {
       const risk = {
         level: "bad",
@@ -2298,7 +3263,15 @@ function renderTaskBadges(tasks) {
 
 function taskItem(task) {
   const cls = `task-pill is-${task.status || "queued"}`;
-  const text = `${escapeHtml(task.title || task.scope)} · ${escapeHtml(task.status || "")}`;
+  const statusLabels = {
+    queued: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已停止",
+  };
+  const stateText = task.message || statusLabels[task.status] || task.status || "";
+  const text = `${escapeHtml(task.title || task.scope)} · ${escapeHtml(stateText)}`;
   return `<span class="${cls}" title="${escapeHtml(task.error || "")}">${text}</span>`;
 }
 
@@ -2383,6 +3356,8 @@ function collectFeaturePayload(feature) {
       video_paths: getLines("ps-video-paths"),
       output_dir: $("ps-output-dir").value.trim(),
       advance_seconds: Number($("ps-advance").value || 0),
+      video_start_offset: $("ps-video-start-offset")?.value.trim() || "",
+      live_start_time: $("ps-live-start-time")?.value.trim() || "",
     };
   }
 
@@ -2526,6 +3501,7 @@ function appendLog(scope, item) {
   const row = createLogRow(item);
   destination.appendChild(row);
   destination.scrollTop = destination.scrollHeight;
+  updateProgressFromLog(targetScope, item);
 
   if (diagnostic) {
     state.diagnosticLogs[targetScope] = (state.diagnosticLogs[targetScope] || 0) + 1;
@@ -2651,6 +3627,7 @@ function clearLog(scope) {
   state.diagnosticLogs[scope] = 0;
   const counter = $(logCounterId(scope));
   if (counter) counter.textContent = "0";
+  resetLogProgress(scope);
   document.querySelectorAll(`.diagnostic-toggle[data-scope="${scope}"]`).forEach(updateDiagnosticButton);
 }
 

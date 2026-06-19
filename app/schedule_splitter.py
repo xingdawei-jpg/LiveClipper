@@ -5,6 +5,7 @@
 """
 
 import os, re, subprocess
+from config import sanitize_forbidden_title
 
 from datetime import datetime
 
@@ -13,11 +14,13 @@ from typing import Optional, List
 
 
 def _parse_datetime_from_name(path):
-    m = re.search(r"(\d{14})", os.path.basename(str(path)))
+    m = re.search(r"(20\d{10}(?:\d{2})?)", os.path.basename(str(path)))
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        value = m.group(1)
+        fmt = "%Y%m%d%H%M%S" if len(value) == 14 else "%Y%m%d%H%M"
+        return datetime.strptime(value, fmt)
     except Exception:
         return None
 
@@ -253,13 +256,15 @@ def _parse_video_time(filename):
 
     from datetime import datetime as _dt
 
-    m = _re.search(r"(\d{14})", os.path.basename(filename))
+    m = _re.search(r"(20\d{10}(?:\d{2})?)", os.path.basename(filename))
 
     if m:
 
         try:
 
-            dt = _dt.strptime(m.group(1), "%Y%m%d%H%M%S")
+            value = m.group(1)
+            fmt = "%Y%m%d%H%M%S" if len(value) == 14 else "%Y%m%d%H%M"
+            dt = _dt.strptime(value, fmt)
 
             return dt.hour * 3600 + dt.minute * 60 + dt.second
 
@@ -287,13 +292,15 @@ def _get_video_timeline(video_list, durations):
 
     for v in video_list:
 
-        m = _re.search(r"(\d{14})", os.path.basename(v))
+        m = _re.search(r"(20\d{10}(?:\d{2})?)", os.path.basename(v))
 
         if m:
 
             try:
 
-                dt = _dt.strptime(m.group(1), "%Y%m%d%H%M%S")
+                value = m.group(1)
+                fmt = "%Y%m%d%H%M%S" if len(value) == 14 else "%Y%m%d%H%M"
+                dt = _dt.strptime(value, fmt)
 
                 starts.append(dt.hour * 3600 + dt.minute * 60 + dt.second)
 
@@ -424,6 +431,8 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
     import os, subprocess, shutil, tempfile
 
     results = []
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     video_list = sort_videos_by_start(video_list)
 
@@ -447,11 +456,11 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
         return parts
 
     for g in groups:
-        name = g.get("name", "")
+        name = sanitize_forbidden_title(g.get("name", ""), fallback="未命名商品")
         segs = g.get("segments", [])
         if not segs:
             continue
-        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)[:40]
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)[:40] or "未命名商品"
         out_dir = os.path.join(output_dir, safe_name)
         os.makedirs(out_dir, exist_ok=True)
         exported = 0
@@ -468,20 +477,35 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
             for part_idx, (video, rel_st, part_dur, _, _) in enumerate(parts):
                 suffix = "%d" % (si + 1) if len(parts) == 1 else "%d_%d" % (si + 1, part_idx + 1)
                 out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_name[:30], suffix))
+                last_error = ""
                 try:
                     # 快切 -c copy
                     r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
                         "-t", str(float(part_dur)), "-c", "copy", out_path],
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300, creationflags=0x8000000)
                     if r.returncode != 0 or not (os.path.exists(out_path) and os.path.getsize(out_path) > 1000):
+                        last_error = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:] or [""]
+                        last_error = last_error[0]
                         # 快切失败，重编码
                         r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
                             "-t", str(float(part_dur)), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out_path],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600, creationflags=0x8000000)
+                        if r.returncode != 0:
+                            lines = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()
+                            last_error = lines[-1] if lines else last_error
                     if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                         mb = os.path.getsize(out_path) / 1024 / 1024
                         results.append({"name": name, "output_path": out_path, "size_mb": round(mb, 1)})
                         exported += 1
+                    else:
+                        try:
+                            if os.path.exists(out_path):
+                                os.remove(out_path)
+                        except Exception:
+                            pass
+                        if log_fn:
+                            detail = (" " + last_error[:160]) if last_error else ""
+                            log_fn("  导出失败: %s%s" % (os.path.basename(out_path), detail))
                 except Exception as _ee:
                     if log_fn: log_fn("  切割失败: " + str(_ee)[:60])
         if exported and log_fn:
@@ -531,12 +555,12 @@ def align_schedule_to_video(schedule, video_list, live_start, log_fn=None, ffmpe
         max_end = max(float(item.get("end_offset", 0)) for item in schedule)
     except Exception:
         min_start, max_end = 0, 0
-    if total_duration > 0 and min_start >= -300 and max_end <= total_duration + 300:
+    has_any_video_ts = any(_parse_video_time(v) is not None for v in video_list)
+    if total_duration > 0 and min_start >= -300 and max_end <= total_duration + 300 and not has_any_video_ts:
         if log_fn:
             log_fn("[align] schedule already matches selected video timeline, no adjustment")
         return schedule
 
-    has_any_video_ts = any(_parse_video_time(v) is not None for v in video_list)
     if not has_any_video_ts:
         if log_fn:
             log_fn("[align] video filenames have no precise start timestamp, keep schedule offsets")

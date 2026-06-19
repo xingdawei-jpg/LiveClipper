@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260616-wide-preview">
+  <link rel="icon" href="/assets/liveclipper.ico?v=20260618">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260619-sidebar-update-entry">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">LC</div>
+        <div class="brand-mark"><img src="/assets/liveclipper.ico?v=20260618" alt="" aria-hidden="true"></div>
         <div>
           <div class="brand-name">LiveClipper</div>
           <div class="brand-version" id="app-version">本地客户端</div>
@@ -28,8 +29,30 @@
       </nav>
 
       <div class="sidebar-status">
-        <span class="status-dot" id="server-dot"></span>
+        <div class="server-status">
+          <span class="status-dot" id="server-dot"></span>
         <span id="server-state">连接中</span>
+        </div>
+        <button class="update-indicator" id="update-indicator" type="button" data-action="toggle-update-card" aria-label="检查更新" title="检查更新">
+          <span class="update-icon" aria-hidden="true">⇩</span>
+        </button>
+      </div>
+      <div class="update-popover is-hidden" id="update-popover" aria-hidden="true">
+        <div class="update-card-head">
+          <div>
+            <strong>在线更新</strong>
+            <span id="update-card-status">未检查</span>
+          </div>
+          <button class="button button-muted button-small" type="button" data-action="close-update-card">关闭</button>
+        </div>
+        <div class="update-card-body">
+          <div class="update-card-version" id="update-card-version">当前版本</div>
+          <div class="update-card-notes" id="update-card-notes">点击检查更新获取最新状态。</div>
+        </div>
+        <div class="update-card-actions">
+          <button class="button button-secondary button-small" type="button" data-action="check-update">检查</button>
+          <button class="button button-primary button-small" type="button" id="update-card-apply" data-action="apply-update" disabled>安装</button>
+        </div>
       </div>
     </aside>
 
@@ -376,15 +399,16 @@
           <section class="panel panel-large">
             <div class="panel-header">
               <h2>视频素材</h2>
-              <button class="icon-button" title="选择视频" data-action="pick-videos" data-target="mix-video-paths">+</button>
+              <div class="log-header-actions">
+                <button class="button button-secondary button-small" data-action="pick-videos" data-target="mix-video-paths">添加视频</button>
+                <button class="button button-muted button-small" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
+              </div>
             </div>
-            <div class="path-entry">
-              <input id="mix-path-input" type="text" data-path-target="mix-video-paths" placeholder="粘贴视频完整路径后按 Enter">
-              <button class="button button-secondary" data-action="pick-videos" data-target="mix-video-paths">选择视频</button>
-              <button class="button button-muted" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
+            <div class="video-picker-card">
+              <strong>点击“添加视频”选择素材</strong>
+              <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
             </div>
-            <textarea id="mix-video-paths" class="path-box" spellcheck="false" placeholder="每行一个视频路径"></textarea>
-            <div class="video-dropzone" data-drop-target="mix-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
             <div class="video-list" data-list-for="mix-video-paths"></div>
             <div class="field-row">
               <label for="mix-output-dir">输出目录</label>
@@ -796,6 +820,14 @@
             <div class="field-row compact">
               <label for="ps-advance">提前秒数</label>
               <input id="ps-advance" type="number" value="0" min="0" max="120">
+            </div>
+            <div class="field-row compact">
+              <label for="ps-video-start-offset">所选视频起点</label>
+              <input id="ps-video-start-offset" type="text" placeholder="如 26:49 或 1:28:13，留空自动">
+            </div>
+            <div class="field-row compact">
+              <label for="ps-live-start-time">直播开始时间</label>
+              <input id="ps-live-start-time" type="text" placeholder="如 17:08 或 2026-03-13 17:08">
             </div>
             <div class="panel-actions">
               <button class="button button-secondary" data-action="feature-submit" data-feature="product-scan-read">读取时间表</button>
@@ -1313,6 +1345,16 @@
                   <button class="button button-secondary" data-action="load-keywords">刷新词库信息</button>
                 </div>
               </div>
+              <div class="panel keyword-editor-panel">
+                <div class="panel-header">
+                  <h2>自定义规则</h2>
+                  <button class="button button-primary" data-action="open-keyword-editor"><span class="button-icon" aria-hidden="true">✎</span><span>打开编辑器</span></button>
+                </div>
+                <div class="keyword-actions">
+                  <button class="button button-primary" data-action="open-keyword-editor"><span class="button-icon" aria-hidden="true">✎</span><span>编辑关键词 / 违禁词 / 废话词</span></button>
+                  <button class="button button-muted" data-action="reset-keywords"><span class="button-icon" aria-hidden="true">↺</span><span>恢复默认</span></button>
+                </div>
+              </div>
             </section>
 
             <section class="settings-page" id="settings-system">
@@ -1340,6 +1382,16 @@
                     <option value="dark">深色模式</option>
                   </select>
                 </div>
+                <label class="slider-row">
+                  <span>界面字号</span>
+                  <input id="s-ui-font-size" type="range" min="12" max="18" step="1" value="14">
+                  <strong id="s-ui-font-size-value">14</strong>
+                </label>
+                <label class="slider-row">
+                  <span>成片字幕字号</span>
+                  <input id="s-subtitle-font-size" type="range" min="32" max="96" step="2" value="52">
+                  <strong id="s-subtitle-font-size-value">52</strong>
+                </label>
                 <label class="switch-row">
                   <span>启用硬件加速</span>
                   <input id="s-hardware-encoder" type="checkbox">
@@ -1376,7 +1428,39 @@
     </main>
   </div>
 
+  <div class="keyword-modal is-hidden" id="keyword-editor-modal" aria-hidden="true">
+    <div class="keyword-modal-backdrop" data-action="close-keyword-editor"></div>
+    <div class="keyword-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="keyword-modal-title">
+      <div class="keyword-modal-head">
+        <strong id="keyword-modal-title">规则词库编辑器</strong>
+        <div class="keyword-modal-actions">
+          <button class="button button-secondary button-small" data-action="load-keywords"><span class="button-icon" aria-hidden="true">↻</span><span>重新加载</span></button>
+          <button class="button button-primary button-small" data-action="save-keywords"><span class="button-icon" aria-hidden="true">✓</span><span>保存词库</span></button>
+          <button class="button button-muted button-small" data-action="close-keyword-editor"><span class="button-icon" aria-hidden="true">×</span><span>关闭</span></button>
+        </div>
+      </div>
+      <div class="keyword-editor-grid">
+        <div class="keyword-editor">
+          <label for="kw-clip-keywords">卖点关键词</label>
+          <textarea id="kw-clip-keywords" class="keyword-textarea" spellcheck="false" placeholder="hook=显瘦&#10;product=面料舒服&#10;product=版型好"></textarea>
+        </div>
+        <div class="keyword-editor">
+          <label for="kw-forbidden-phrases">违禁词</label>
+          <textarea id="kw-forbidden-phrases" class="keyword-textarea" spellcheck="false" placeholder="一个词一行"></textarea>
+        </div>
+        <div class="keyword-editor">
+          <label for="kw-filler-words">废话词</label>
+          <textarea id="kw-filler-words" class="keyword-textarea" spellcheck="false" placeholder="对&#10;好的&#10;嗯嗯"></textarea>
+        </div>
+        <div class="keyword-editor">
+          <label for="kw-preference-keywords">偏好关键词</label>
+          <textarea id="kw-preference-keywords" class="keyword-textarea" spellcheck="false" placeholder="版型显瘦=遮肉&#10;面料质感=亲肤"></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260617-update" defer></script>
+  <script src="/assets/app.js?v=20260619-sidebar-update-entry" defer></script>
 </body>
 </html>

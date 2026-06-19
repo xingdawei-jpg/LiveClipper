@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,7 @@ _LOG_LAST_BY_SCOPE: dict[str, str] = {}
 _TASKS: dict[str, dict[str, Any]] = {}
 _TASK_LOCK = threading.Lock()
 _CANCELLED_TASKS: set[str] = set()
+_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _SCAN_RESULTS: dict[str, Any] = {"products": [], "merged": []}
 _SCAN_LOCK = threading.Lock()
 _LIVE_PROCS: dict[str, dict[str, Any]] = {}
@@ -107,6 +109,31 @@ _LIVE_LOCK = threading.Lock()
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
 _AI_PREVIEW_CACHE_SCHEMA = "focus_blocks_v2"
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+LEGACY_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
+VOLC_REGION_ALIASES = {
+    "": "cn-beijing",
+    "beijing": "cn-beijing",
+    "bj": "cn-beijing",
+    "cn-beijing": "cn-beijing",
+    "\u5317\u4eac": "cn-beijing",
+    "\u4e2d\u56fd\u5317\u4eac": "cn-beijing",
+    "shanghai": "cn-shanghai",
+    "sh": "cn-shanghai",
+    "cn-shanghai": "cn-shanghai",
+    "\u4e0a\u6d77": "cn-shanghai",
+    "\u4e2d\u56fd\u4e0a\u6d77": "cn-shanghai",
+    "guangzhou": "cn-guangzhou",
+    "gz": "cn-guangzhou",
+    "cn-guangzhou": "cn-guangzhou",
+    "\u5e7f\u5dde": "cn-guangzhou",
+    "\u4e2d\u56fd\u5e7f\u5dde": "cn-guangzhou",
+    "singapore": "ap-southeast-1",
+    "ap-southeast-1": "ap-southeast-1",
+    "\u65b0\u52a0\u5761": "ap-southeast-1",
+}
 _PREVIEW_CLEARED_AT = 0.0
 _VIDEO_INFO_CACHE: dict[str, dict[str, Any]] = {}
 _VIDEO_FP_CACHE: dict[str, dict[str, Any]] = {}
@@ -617,7 +644,99 @@ def _keyword_config_path() -> Path:
 
 
 def _load_keyword_config() -> dict[str, Any]:
-    return _read_json_file(_keyword_config_path())
+    default_data = _read_json_file(APP_DIR / "keywords.json")
+    user_file = _safe_user_child("keywords.json")
+    user_data = _read_json_file(user_file)
+    if not user_data:
+        return default_data
+    return user_data
+
+
+def _load_effective_keyword_config() -> dict[str, Any]:
+    try:
+        from ai_clipper import load_keywords
+
+        effective = load_keywords()
+        return {
+            "clip_keywords": effective.get("clip_keywords", {}),
+            "forbidden_phrases": effective.get("forbidden_phrases", []),
+            "filler_words": effective.get("filler_words", []),
+            "negative_signals": effective.get("negative_signals", []),
+            "preference_keywords": effective.get("preference_keywords", {}),
+            "detail_keywords": effective.get("detail_keywords", []),
+            "_web_vocab_full_override": True,
+        }
+    except Exception:
+        return dict(_load_keyword_config())
+
+
+def _keyword_count(data: dict[str, Any]) -> int:
+    count = 0
+    for value in data.values():
+        if isinstance(value, dict):
+            for nested in value.values():
+                if isinstance(nested, list):
+                    count += len(nested)
+        elif isinstance(value, list):
+            count += len(value)
+    return count
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            items.append(text)
+            seen.add(text)
+    return items
+
+
+def _clean_keyword_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key, items in value.items():
+        name = str(key or "").strip()
+        cleaned = _clean_string_list(items)
+        if name and cleaned:
+            result[name] = cleaned
+    return result
+
+
+def _normalize_keyword_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(_load_effective_keyword_config())
+    map_keys = {"clip_keywords", "preference_keywords"}
+    list_keys = {"forbidden_phrases", "filler_words", "negative_signals", "detail_keywords"}
+    handled = map_keys | list_keys
+    derived_keys = {"hook_keywords", "_source"}
+
+    for key in map_keys:
+        if key in payload:
+            data[key] = _clean_keyword_map(payload.get(key))
+    for key in list_keys:
+        if key in payload:
+            data[key] = _clean_string_list(payload.get(key))
+    for key, value in payload.items():
+        if key not in handled and key not in derived_keys and not str(key).startswith("_"):
+            data[key] = value
+    data["_web_vocab_full_override"] = True
+    return data
+
+
+def _clear_ai_keyword_cache() -> None:
+    try:
+        import ai_clipper
+
+        cache = getattr(ai_clipper, "_keywords_cache", None)
+        if isinstance(cache, dict):
+            cache["_data"] = None
+            cache["_mtime"] = 0
+    except Exception:
+        pass
 
 
 def _update_keyword_config(updates: dict[str, Any]) -> Path:
@@ -634,8 +753,8 @@ def _load_settings() -> dict[str, Any]:
     keyword_config = _load_keyword_config()
     defaults = {
         "api_key": "",
-        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "model": "doubao-1-5-pro-32k-250115",
+        "base_url": DEEPSEEK_DEFAULT_BASE_URL,
+        "model": DEEPSEEK_DEFAULT_MODEL,
         "enabled": False,
         "asr_enabled": False,
         "asr_provider": "火山引擎",
@@ -660,6 +779,8 @@ def _load_settings() -> dict[str, Any]:
         "ai_rules": dict(DEFAULT_AI_RULES),
         "ui_theme": "system",
         "hardware_encoder_enabled": False,
+        "subtitle_font_size": 52,
+        "ui_font_size": 14,
     }
     loaded = load_settings()
     defaults.update(loaded or {})
@@ -673,13 +794,51 @@ def _load_settings() -> dict[str, Any]:
     if isinstance((loaded or {}).get("ai_rules"), dict):
         ai_rules.update((loaded or {}).get("ai_rules", {}))
     defaults["ai_rules"] = ai_rules
-    return defaults
+    defaults["volc_region"] = _normalize_volc_region(defaults.get("volc_region"))
+    return _normalize_ai_model_defaults(defaults)
 
 
 def _save_settings(settings: dict[str, Any]) -> bool:
     from ai_clipper import save_settings
 
-    return bool(save_settings(settings))
+    data = _normalize_ai_model_defaults(settings)
+    data["volc_region"] = _normalize_volc_region(data.get("volc_region"))
+    try:
+        data["subtitle_font_size"] = max(32, min(96, int(float(data.get("subtitle_font_size", 52)))))
+    except Exception:
+        data["subtitle_font_size"] = 52
+    try:
+        data["ui_font_size"] = max(12, min(18, int(float(data.get("ui_font_size", 14)))))
+    except Exception:
+        data["ui_font_size"] = 14
+    return bool(save_settings(data))
+
+
+def _normalize_ai_model_defaults(settings: dict[str, Any]) -> dict[str, Any]:
+    data = dict(settings or {})
+    api_key = str(data.get("api_key") or "").strip()
+    base_url = str(data.get("base_url") or "").strip().rstrip("/")
+    model = str(data.get("model") or "").strip()
+
+    if not base_url:
+        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
+    if not model:
+        data["model"] = DEEPSEEK_DEFAULT_MODEL
+
+    if (
+        not api_key
+        and base_url == LEGACY_DOUBAO_BASE_URL
+        and model == LEGACY_DOUBAO_MODEL
+    ):
+        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
+        data["model"] = DEEPSEEK_DEFAULT_MODEL
+    return data
+
+
+def _normalize_volc_region(value: Any) -> str:
+    text = str(value or "").strip()
+    compact = text.replace(" ", "").replace("_", "-").lower()
+    return VOLC_REGION_ALIASES.get(text) or VOLC_REGION_ALIASES.get(compact) or compact or "cn-beijing"
 
 
 def _get_user_data_dir() -> Path:
@@ -925,6 +1084,8 @@ class SettingsPayload(BaseModel):
     ai_rules: dict[str, Any] = Field(default_factory=dict)
     ui_theme: str = "system"
     hardware_encoder_enabled: bool = False
+    subtitle_font_size: int = Field(default=52, ge=32, le=96)
+    ui_font_size: int = Field(default=14, ge=12, le=18)
 
 
 class LicensePayload(BaseModel):
@@ -1009,11 +1170,22 @@ class AiScanPayload(BaseModel):
 class SmartPreviewCutPayload(SmartCutPayload):
     preview_id: str = ""
     selected_indices: list[int] = Field(default_factory=list)
+    selected_segments: dict[str, list[int]] = Field(default_factory=dict)
 
 
 class MixPreviewCutPayload(MixPayload):
     preview_id: str = ""
     selected_indices: list[int] = Field(default_factory=list)
+    selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+
+
+class PreviewSelectionPayload(BaseModel):
+    preview_id: str = ""
+    scope: str = "smart"
+    order: list[int] = Field(default_factory=list)
+    selected_indices: list[int] = Field(default_factory=list)
+    selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    updated_at: float = 0
 
 
 class SmartPreviewClipPayload(BaseModel):
@@ -1026,6 +1198,8 @@ class ProductScanPayload(BaseModel):
     video_paths: list[str] = Field(default_factory=list)
     output_dir: str = ""
     advance_seconds: int = Field(default=0, ge=0, le=600)
+    video_start_offset: str = ""
+    live_start_time: str = ""
 
 
 class DedupPayload(BaseModel):
@@ -1056,16 +1230,28 @@ class LiveRecPayload(BaseModel):
 def _new_task(scope: str, title: str) -> str:
     task_id = f"{scope}-{int(time.time())}-{os.urandom(3).hex()}"
     with _TASK_LOCK:
+        _TASK_CANCEL_EVENTS[task_id] = threading.Event()
         _TASKS[task_id] = {
             "id": task_id,
             "scope": scope,
             "title": title,
             "status": "queued",
+            "progress": 0,
+            "message": "排队中",
             "started_at": None,
             "finished_at": None,
             "error": "",
         }
     return task_id
+
+
+def _task_cancel_event(task_id: str) -> threading.Event:
+    with _TASK_LOCK:
+        event = _TASK_CANCEL_EVENTS.get(task_id)
+        if event is None:
+            event = threading.Event()
+            _TASK_CANCEL_EVENTS[task_id] = event
+        return event
 
 
 def _ensure_scope_idle(scope: str, current_title: str = "任务") -> None:
@@ -1086,7 +1272,62 @@ def _set_task(task_id: str, **updates: Any) -> None:
             next_status = updates.get("status")
             if current.get("status") == "cancelled" and next_status in {"running", "completed", "failed"}:
                 return
+            if next_status == "running" and "progress" not in updates:
+                updates["progress"] = max(float(current.get("progress") or 0), 5)
+            if next_status == "completed":
+                updates.setdefault("progress", 100)
+                updates.setdefault("message", "已完成")
+            if next_status == "failed":
+                updates.setdefault("progress", 100)
+                updates.setdefault("message", "失败")
+            if next_status == "cancelled":
+                updates.setdefault("progress", 100)
+                updates.setdefault("message", "已停止")
             _TASKS[task_id].update(updates)
+
+
+_TASK_PROGRESS_RULES: tuple[tuple[float, str, tuple[str, ...]], ...] = (
+    (12, "准备素材", ("任务已启动", "开始处理", "目标时长", "读取", "上传", "路径")),
+    (22, "标准化素材", ("TS", "标准化", "normalized", "remux", "转码", "CFR", "genpts")),
+    (36, "识别字幕", ("SRT", "字幕", "ASR", "识别", "Whisper", "火山", "阿里云", "语音")),
+    (56, "AI 选片", ("AI", "候选", "评分", "选片", "片单", "预览")),
+    (68, "去重变速", ("去重", "变速", "dedup", "speed", "重复")),
+    (82, "剪辑合成", ("剪辑", "裁剪", "片段", "合成", "混剪", "Cut", "Concat")),
+    (92, "导出成品", ("导出", "输出", "成品", "保存", "路径")),
+)
+
+
+def _set_task_progress(task_id: str, progress: float, message: str | None = None) -> None:
+    with _TASK_LOCK:
+        task = _TASKS.get(task_id)
+        if not task or task.get("status") == "cancelled":
+            return
+        current = float(task.get("progress") or 0)
+        task["progress"] = max(0, min(99, max(current, float(progress))))
+        if message:
+            task["message"] = message
+
+
+def _task_progress_from_log(raw: str) -> tuple[float, str] | None:
+    text = str(raw or "")
+    if not text:
+        return None
+    for progress, label, tokens in _TASK_PROGRESS_RULES:
+        if any(token in text for token in tokens):
+            return progress, label
+    return None
+
+
+def _task_log_fn(task_id: str, scope: str, base: float = 10, span: float = 80):
+    def _log(message: str) -> None:
+        emit_log("info", message, scope)
+        stage = _task_progress_from_log(message)
+        if stage:
+            progress, label = stage
+            scaled = base + (progress / 100.0) * span
+            _set_task_progress(task_id, scaled, label)
+
+    return _log
 
 
 def _is_task_cancelled(task_id: str) -> bool:
@@ -1098,20 +1339,40 @@ def _cancel_scope(scope: str) -> int:
     if not scope:
         return 0
     stopped = 0
+    cancelled_ids: list[str] = []
+    cancel_events: list[threading.Event] = []
     with _TASK_LOCK:
         for task_id, task in _TASKS.items():
             if task.get("scope") != scope or task.get("status") not in {"queued", "running"}:
                 continue
             _CANCELLED_TASKS.add(task_id)
+            event = _TASK_CANCEL_EVENTS.get(task_id)
+            if event:
+                event.set()
+                cancel_events.append(event)
+            cancelled_ids.append(task_id)
             task.update(
                 status="cancelled",
+                progress=100,
+                message="已停止",
                 finished_at=time.time(),
                 error="用户已停止",
             )
             stopped += 1
+    killed = 0
+    if cancelled_ids:
+        try:
+            import cutter_logic as cutter_mod
+
+            cancel_processes = getattr(cutter_mod, "cancel_active_processes", None)
+            if callable(cancel_processes):
+                for event in cancel_events:
+                    killed += int(cancel_processes(event) or 0)
+        except Exception:
+            pass
     if scope == "live-rec":
         stopped += _stop_live_all()
-    emit_log("warning", "已发送停止请求。当前步骤结束后会停止。", scope)
+    emit_log("warning", f"已停止任务，并尝试终止当前处理进程。{f'已终止 {killed} 个子进程。' if killed else ''}", scope)
     return stopped
 
 
@@ -1255,8 +1516,26 @@ def _probe_video_info(path_value: str) -> dict[str, Any]:
     return info
 
 
+def _clean_forbidden_title_text(name: str, fallback: str = "output") -> str:
+    try:
+        from ai_clipper import load_keywords
+        from config import sanitize_forbidden_title
+
+        words = load_keywords().get("forbidden_phrases", [])
+        return sanitize_forbidden_title(name, extra_phrases=words, fallback=fallback)
+    except Exception:
+        return str(name or fallback)
+
+
 def _safe_stem(name: str) -> str:
-    return "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip()[:48] or "output"
+    cleaned = _clean_forbidden_title_text(name, fallback="output")
+    return "".join(c if c.isalnum() or c in " _-" else "_" for c in cleaned).strip()[:48] or "output"
+
+
+def _mix_output_path(out_dir: Path, first_video: Path) -> Path:
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", first_video.stem or "素材").strip(" ._")
+    stem = stem[:80] or "素材"
+    return out_dir / f"{stem}_mix_{_stamp_name()}.mp4"
 
 
 def _default_output_dir(video: Path, explicit: str, folder: str = "output") -> Path:
@@ -1392,10 +1671,90 @@ def _hms(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _parse_offset_seconds(value: Any) -> float | None:
+    text = str(value or "").strip().replace("：", ":")
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return float(text)
+    parts = text.split(":")
+    if len(parts) not in {2, 3}:
+        raise ValueError("请填写 26:49 或 1:28:13 这样的时间格式")
+    try:
+        numbers = [int(part.strip()) for part in parts]
+    except Exception as exc:
+        raise ValueError("请填写 26:49 或 1:28:13 这样的时间格式") from exc
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        hours = 0
+    else:
+        hours, minutes, seconds = numbers
+    if minutes < 0 or seconds < 0 or seconds >= 60 or (len(numbers) == 3 and minutes >= 60):
+        raise ValueError("时间格式不正确，分钟和秒数不能超过 59")
+    return float(hours * 3600 + minutes * 60 + seconds)
+
+
+def _datetime_from_video_name(path: str) -> datetime | None:
+    match = re.search(r"(20\d{10}(?:\d{2})?)", Path(str(path)).name)
+    if not match:
+        return None
+    value = match.group(1)
+    fmt = "%Y%m%d%H%M%S" if len(value) == 14 else "%Y%m%d%H%M"
+    try:
+        return datetime.strptime(value, fmt)
+    except Exception:
+        return None
+
+
+def _parse_live_start_datetime(value: Any, video_values: list[str] | None = None) -> datetime | None:
+    text = str(value or "").strip().replace("：", ":").replace("T", " ")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y%m%d%H%M%S", "%Y%m%d%H%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
+    match = re.fullmatch(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?", text)
+    if not match:
+        raise ValueError("请填写 17:08 或 2026-03-13 17:08 这样的时间格式")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    second = int(match.group(3) or 0)
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError("直播开始时间格式不正确")
+    base_date = None
+    for path in video_values or []:
+        dt = _datetime_from_video_name(path)
+        if dt:
+            base_date = dt.date()
+            break
+    if base_date is None:
+        base_date = datetime.now().date()
+    return datetime.combine(base_date, datetime.min.time()).replace(hour=hour, minute=minute, second=second)
+
+
+def _shift_schedule_offsets(schedule: list[dict[str, Any]], offset_seconds: float) -> None:
+    for item in schedule:
+        item["start_offset"] = float(item.get("start_offset", 0) or 0) - offset_seconds
+        item["end_offset"] = float(item.get("end_offset", 0) or 0) - offset_seconds
+
+
 def _schedule_range(schedule: list[dict[str, Any]]) -> tuple[float, float]:
     starts = [float(item.get("start_offset", 0) or 0) for item in schedule]
     ends = [float(item.get("end_offset", 0) or 0) for item in schedule]
     return (min(starts), max(ends)) if starts and ends else (0.0, 0.0)
+
+
+def _schedule_overlap_count(schedule: list[dict[str, Any]], total_seconds: float) -> int:
+    total = float(total_seconds or 0)
+    count = 0
+    for item in schedule:
+        start = float(item.get("start_offset", 0) or 0)
+        end = float(item.get("end_offset", 0) or 0)
+        if min(end, total) - max(start, 0.0) >= 0.5:
+            count += 1
+    return count
 
 
 def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], errors: list[str]) -> None:
@@ -1404,8 +1763,18 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
     if not excel or not video_values:
         return
     try:
+        requested_video_start = _parse_offset_seconds(data.get("video_start_offset"))
+    except ValueError as exc:
+        errors.append(f"所选视频起点格式不正确：{exc}")
+        return
+    try:
+        requested_live_start = _parse_live_start_datetime(data.get("live_start_time"), video_values)
+    except ValueError as exc:
+        errors.append(f"直播开始时间格式不正确：{exc}")
+        return
+    try:
         from copy import deepcopy
-        from schedule_splitter import _probe_durations, align_schedule_to_video, read_excel
+        from schedule_splitter import _parse_video_time, _probe_durations, align_schedule_to_video, read_excel
 
         schedule, live_start = read_excel(excel)
         if not schedule:
@@ -1417,16 +1786,39 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
             warnings.append("未能读取视频总时长，无法提前校验排品表时间范围。")
             return
 
+        if requested_video_start is not None:
+            _shift_schedule_offsets(schedule, requested_video_start)
+            min_start, max_end = _schedule_range(schedule)
+            overlap_count = _schedule_overlap_count(schedule, total)
+            if overlap_count:
+                skipped = max(0, len(schedule) - overlap_count)
+                note = f"，会跳过 {skipped} 条不在所选视频范围内的时段" if skipped else ""
+                warnings.append(
+                    f"已按所选视频起点 {_hms(requested_video_start)} 定位：可切 {overlap_count} 条时段{note}。"
+                )
+                return
+            errors.append(
+                "按所选视频起点定位后，排品表时间仍不在视频范围内："
+                f"对齐后 {_hms(min_start)}~{_hms(max_end)}，所选视频总时长 {_hms(total)}。"
+            )
+            return
+
         min_start, max_end = _schedule_range(schedule)
-        if min_start >= -5 and max_end <= total + 5:
+        has_video_timestamps = any(_parse_video_time(path) is not None for path in video_values)
+        live_start_for_align = requested_live_start or live_start
+        if requested_live_start is not None and not has_video_timestamps:
+            errors.append("已填写直播开始时间，但所选视频文件名没有可识别时间戳，无法自动定位。")
+            return
+        if min_start >= -5 and max_end <= total + 5 and not (live_start_for_align and has_video_timestamps):
             return
 
         aligned = deepcopy(schedule)
-        align_schedule_to_video(aligned, video_values, live_start, ffmpeg_cmd=_ffmpeg_cmd())
+        align_schedule_to_video(aligned, video_values, live_start_for_align, ffmpeg_cmd=_ffmpeg_cmd())
         aligned_min, aligned_max = _schedule_range(aligned)
         if aligned_min >= -5 and aligned_max <= total + 5:
+            label = "直播开始时间" if requested_live_start is not None else "视频文件名"
             warnings.append(
-                f"排品表时间已按视频文件名自动对齐：表格范围 {_hms(min_start)}~{_hms(max_end)}，对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}。"
+                f"排品表时间已按{label}自动对齐：表格范围 {_hms(min_start)}~{_hms(max_end)}，对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}。"
             )
             return
 
@@ -1798,6 +2190,30 @@ def _normalize_preview_final_clips(
             _step("expanded_overlap_dedup", lambda items: ai_mod._remove_expanded_overlap_clips(items, None))
         if hasattr(ai_mod, "_reorder_product_focus_blocks"):
             normalized = list(ai_mod._reorder_product_focus_blocks(normalized, None) or normalized)
+        if srt_text:
+            try:
+                from cutter_logic import _apply_srt_cut_alignment, _parse_srt_to_segments, _srt_text_for_range
+
+                srt_segments = _parse_srt_to_segments(srt_text)
+                refreshed = []
+                total_clips = len(normalized)
+                for clip_idx, clip in enumerate(normalized):
+                    values = list(_clip_to_tuple(clip, default_source=default_source))
+                    clip_type = values[0] if values else "product"
+                    start = float(values[2] if len(values) > 2 else 0)
+                    end = float(values[3] if len(values) > 3 else start)
+                    start, end, _ = _apply_srt_cut_alignment(clip_type, start, end, srt_segments, clip_idx, total_clips)
+                    values[2] = start
+                    values[3] = end
+                    if len(values) > 5:
+                        values[5] = max(0.0, end - start)
+                    range_text = _srt_text_for_range(srt_segments, start, end)
+                    if range_text:
+                        values[1] = _repair_mojibake_text(range_text)
+                    refreshed.append(tuple(values))
+                normalized = refreshed
+            except Exception as exc:
+                emit_log("warning", f"preview srt text refresh skipped: {exc}", "system")
     except Exception as exc:
         emit_log("warning", f"preview cleanup failed: {exc}", "system")
 
@@ -1906,6 +2322,377 @@ def _clip_public(index: int, clip: Any) -> dict[str, Any]:
     }
 
 
+def _strip_preview_source_marker(text: Any) -> str:
+    return re.sub(r"\[[vV]\d+\]\s*", "", _repair_mojibake_text(text)).strip()
+
+
+def _preview_text_marker_and_body(text: Any) -> tuple[str, str]:
+    value = _repair_mojibake_text(text).strip()
+    match = re.match(r"^(\[[vV]\d+\]\s*)(.*)$", value)
+    if not match:
+        return "", value
+    return match.group(1), match.group(2).strip()
+
+
+def _preview_compact_text(text: Any) -> str:
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", _strip_preview_source_marker(text))
+
+
+def _preview_filler_words() -> set[str]:
+    fallback = {
+        "是的", "对", "对的", "好的", "好", "嗯", "嗯嗯", "啊", "哦", "噢",
+        "呃", "额", "好吧", "对吧", "是吧", "没错", "可以", "行",
+    }
+    try:
+        data = _load_effective_keyword_config()
+        words = data.get("filler_words", [])
+    except Exception:
+        words = []
+    normalized = {
+        re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(word or "").strip())
+        for word in words
+    }
+    return {word for word in normalized if word} | fallback
+
+
+def _preview_is_pure_filler(text: Any) -> bool:
+    compact = _preview_compact_text(text)
+    if not compact:
+        return True
+    if compact in _preview_filler_words():
+        return True
+    filler_chars = set("对嗯啊哦噢呃额哈呀呢嘛啦哇好是的没错可以行")
+    return len(compact) <= 4 and set(compact) <= filler_chars
+
+
+def _clean_preview_filler_prefix(text: Any) -> str:
+    marker, body = _preview_text_marker_and_body(text)
+    prefixes = [
+        "好的是的", "是的是的", "好的", "是的", "对的", "嗯嗯",
+        "对吧", "是吧", "好吧", "嗯", "啊", "呃", "额", "哦", "噢", "对",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        stripped = body.lstrip(" ，,。.!！?？、")
+        leading_space = body[: len(body) - len(stripped)]
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            if not stripped.startswith(prefix):
+                continue
+            rest = stripped[len(prefix):].lstrip(" ，,。.!！?？、")
+            if len(rest) < 4:
+                continue
+            if prefix == "对" and stripped.startswith(("对比", "对应", "对称")):
+                continue
+            body = leading_space + rest
+            changed = True
+            break
+    return f"{marker}{body.strip()}" if marker else body.strip()
+
+
+def _preview_source_marker(text: Any) -> str:
+    match = re.search(r"\[([vV]\d+)\]", str(text or ""))
+    return match.group(1).upper() if match else ""
+
+
+def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    try:
+        start = float(public_clip.get("start") or 0)
+        end = float(public_clip.get("end") or start)
+    except Exception:
+        start, end = 0.0, 0.0
+    marker = _preview_source_marker(public_clip.get("text") or "")
+    pieces: list[dict[str, Any]] = []
+    if end > start:
+        boundary_slack = 0.65
+        for seg in srt_segments or []:
+            try:
+                seg_start = float(seg.get("start") or 0)
+                seg_end = float(seg.get("end") or seg_start)
+            except Exception:
+                continue
+            overlap_start = max(start, seg_start)
+            overlap_end = min(end, seg_end)
+            overlap = overlap_end - overlap_start
+            touches_start = -0.02 <= start - seg_end <= boundary_slack
+            touches_end = -0.02 <= seg_start - end <= boundary_slack
+            if overlap < 0.04 and not touches_start and not touches_end:
+                continue
+            seg_text = _repair_mojibake_text(seg.get("text") or "")
+            if marker and marker not in _preview_source_marker(seg_text):
+                continue
+            text = _strip_preview_source_marker(seg_text)
+            if not text:
+                continue
+            if _preview_is_pure_filler(text):
+                continue
+            text = _clean_preview_filler_prefix(text)
+            if not text:
+                continue
+            pieces.append({
+                "index": len(pieces),
+                "start": round(seg_start, 3),
+                "end": round(seg_end, 3),
+                "duration": round(max(0.0, seg_end - seg_start), 3),
+                "text": text,
+                "selected": overlap >= 0.04,
+            })
+    if pieces:
+        return pieces
+    text = _strip_preview_source_marker(public_clip.get("text") or "")
+    if not text:
+        text = str(public_clip.get("text") or "")
+    text = _clean_preview_filler_prefix(text)
+    return [{
+        "index": 0,
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration": round(max(0.0, end - start), 3),
+        "text": text,
+        "selected": not _preview_is_pure_filler(text),
+    }]
+
+
+def _preview_public_clips(clips: list[Any], srt_text: str = "") -> list[dict[str, Any]]:
+    srt_segments: list[dict[str, Any]] = []
+    if srt_text:
+        try:
+            from cutter_logic import _parse_srt_to_segments
+
+            srt_segments = list(_parse_srt_to_segments(srt_text) or [])
+        except Exception as exc:
+            emit_log("warning", f"preview segment split skipped: {exc}", "system")
+    public_clips = [_clip_public(index, clip) for index, clip in enumerate(clips)]
+    for clip in public_clips:
+        clip["segments"] = _preview_segments_for_clip(clip, srt_segments)
+    return public_clips
+
+
+def _merge_selected_segments(
+    public_clip: dict[str, Any],
+    raw_clip: Any,
+    segment_indices: list[int] | None,
+) -> list[tuple[Any, ...]]:
+    segments = list(public_clip.get("segments") or [])
+    if segment_indices is None:
+        selected = [seg for seg in segments if seg.get("selected") is not False]
+    else:
+        wanted = {int(value) for value in segment_indices if isinstance(value, int) or str(value).lstrip("-").isdigit()}
+        selected = [seg for seg in segments if int(seg.get("index", -1)) in wanted]
+    if not selected:
+        return []
+    selected.sort(key=lambda seg: (float(seg.get("start") or 0), int(seg.get("index") or 0)))
+
+    groups: list[list[dict[str, Any]]] = []
+    for seg in selected:
+        if not groups:
+            groups.append([seg])
+            continue
+        prev = groups[-1][-1]
+        gap = float(seg.get("start") or 0) - float(prev.get("end") or 0)
+        if gap <= 0.35:
+            groups[-1].append(seg)
+        else:
+            groups.append([seg])
+
+    base = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
+    while len(base) < 8:
+        base.append("")
+    result: list[tuple[Any, ...]] = []
+    for group_index, group in enumerate(groups):
+        start = min(float(seg.get("start") or 0) for seg in group)
+        end = max(float(seg.get("end") or start) for seg in group)
+        text = "".join(_strip_preview_source_marker(seg.get("text") or "") for seg in group).strip()
+        if _preview_source_marker(public_clip.get("text") or ""):
+            text = f"[{_preview_source_marker(public_clip.get('text') or '')}] {text}"
+        values = list(base)
+        values[1] = text or str(public_clip.get("text") or "")
+        values[2] = start
+        values[3] = end
+        values[5] = max(0.0, end - start)
+        if len(values) >= 8 and not values[7]:
+            values[7] = str(public_clip.get("source") or "")
+        values.append({
+            "preview_exact": True,
+            "preview_parent_index": int(public_clip.get("index", -1)),
+            "preview_group_index": group_index,
+            "preview_group_count": len(groups),
+            "selected_segment_indices": [int(seg.get("index", -1)) for seg in group],
+        })
+        result.append(tuple(values))
+    return result
+
+
+def _clips_from_preview_selection(
+    preview: dict[str, Any],
+    selected_indices: list[int],
+    selected_segments: dict[str, list[int]] | None = None,
+) -> list[tuple[Any, ...]]:
+    raw_clips = list(preview.get("raw_clips") or [])
+    public_clips = {
+        int(clip.get("index")): clip
+        for clip in list(preview.get("clips") or [])
+        if str(clip.get("index", "")).lstrip("-").isdigit()
+    }
+    segment_map = selected_segments or {}
+    result: list[tuple[Any, ...]] = []
+    for raw_index in selected_indices:
+        try:
+            idx = int(raw_index)
+        except Exception:
+            continue
+        if idx < 0 or idx >= len(raw_clips):
+            continue
+        public_clip = public_clips.get(idx) or _clip_public(idx, raw_clips[idx])
+        key = str(idx)
+        requested_segments = segment_map.get(key)
+        if requested_segments is None:
+            requested_segments = segment_map.get(idx) if isinstance(segment_map, dict) else None
+        result.extend(_merge_selected_segments(public_clip, raw_clips[idx], requested_segments))
+    return result
+
+
+def _preview_selection_segment_count(selected_segments: dict[str, list[int]] | None) -> int:
+    if not isinstance(selected_segments, dict):
+        return 0
+    total = 0
+    for values in selected_segments.values():
+        if isinstance(values, list):
+            total += len(values)
+    return total
+
+
+def _clip_has_preview_exact_marker(clip: Any) -> bool:
+    if not isinstance(clip, (list, tuple)):
+        return False
+    return any(isinstance(item, dict) and item.get("preview_exact") for item in clip)
+
+
+def _clip_preview_exact_meta(clip: Any) -> dict[str, Any]:
+    if not isinstance(clip, (list, tuple)):
+        return {}
+    meta = next((item for item in clip if isinstance(item, dict) and item.get("preview_exact")), None)
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
+def _log_preview_selection(
+    scope: str,
+    label: str,
+    selected_indices: list[int],
+    selected_segments: dict[str, list[int]] | None,
+    clips: list[tuple[Any, ...]],
+) -> None:
+    exact_count = sum(1 for clip in clips if _clip_has_preview_exact_marker(clip))
+    segment_count = _preview_selection_segment_count(selected_segments)
+    emit_log(
+        "info",
+        f"{label}：收到 {len(selected_indices)} 个片段选择、{segment_count} 条子句选择，生成 {len(clips)} 个剪辑区间（精确子句 {exact_count} 个）。",
+        scope,
+    )
+    for idx, clip in enumerate(clips[:8], start=1):
+        try:
+            text = str(clip[1] if len(clip) > 1 else "").strip()
+            start = float(clip[2] if len(clip) > 2 else 0)
+            end = float(clip[3] if len(clip) > 3 else start)
+            exact = "精确" if _clip_has_preview_exact_marker(clip) else "整段"
+            meta = _clip_preview_exact_meta(clip)
+            seg_note = ""
+            if meta:
+                parent = meta.get("preview_parent_index")
+                group_index = int(meta.get("preview_group_index", 0) or 0) + 1
+                group_count = int(meta.get("preview_group_count", 1) or 1)
+                segs = meta.get("selected_segment_indices") or []
+                display_segs = [int(item) + 1 for item in segs if str(item).lstrip("-").isdigit()]
+                seg_note = f" 父片段{parent} 子句{display_segs} 组{group_index}/{group_count}"
+            emit_log("info", f"{label}片段[{idx}] {exact}{seg_note} {start:.3f}-{end:.3f}s | {text[:80]}", scope)
+        except Exception:
+            continue
+
+
+def _clean_preview_int_list(values: Any, limit: int | None = None) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for value in values if isinstance(values, list) else []:
+        try:
+            number = int(value)
+        except Exception:
+            continue
+        if number < 0 or number in seen:
+            continue
+        if limit is not None and number >= limit:
+            continue
+        seen.add(number)
+        result.append(number)
+    return result
+
+
+def _preview_selection_draft(preview: dict[str, Any] | None) -> dict[str, Any]:
+    draft = (preview or {}).get("selection_draft")
+    return dict(draft) if isinstance(draft, dict) else {}
+
+
+def _normalize_preview_selection_draft(
+    preview: dict[str, Any],
+    scope: str,
+    selected_indices: list[int] | None,
+    selected_segments: dict[str, list[int]] | None,
+    order: list[int] | None = None,
+    updated_at: float | None = None,
+) -> dict[str, Any]:
+    raw_count = max(len(preview.get("raw_clips") or []), len(preview.get("clips") or []))
+    selected = _clean_preview_int_list(selected_indices or [], raw_count)
+    selected_set = set(selected)
+    ordered = _clean_preview_int_list(order or [], raw_count)
+    ordered.extend(index for index in range(raw_count) if index not in set(ordered))
+    public_clips = {
+        int(clip.get("index")): clip
+        for clip in list(preview.get("clips") or [])
+        if str(clip.get("index", "")).lstrip("-").isdigit()
+    }
+    raw_segment_map = selected_segments if isinstance(selected_segments, dict) else {}
+    normalized_segments: dict[str, list[int]] = {}
+    for index in selected:
+        public_clip = public_clips.get(index) or {}
+        segment_count = len(public_clip.get("segments") or [])
+        values = raw_segment_map.get(str(index))
+        if values is None:
+            values = raw_segment_map.get(index) if isinstance(raw_segment_map, dict) else None
+        if segment_count and isinstance(values, list):
+            kept = _clean_preview_int_list(values, segment_count)
+            if kept:
+                normalized_segments[str(index)] = kept
+            else:
+                selected_set.discard(index)
+    selected = [index for index in selected if index in selected_set]
+    return {
+        "preview_id": str(preview.get("id") or ""),
+        "scope": scope,
+        "order": ordered,
+        "selected_indices": selected,
+        "selected_segments": normalized_segments,
+        "updated_at": float(updated_at or time.time() * 1000),
+    }
+
+
+def _apply_preview_payload_draft(
+    preview_id: str,
+    preview: dict[str, Any],
+    scope: str,
+    selected_indices: list[int],
+    selected_segments: dict[str, list[int]] | None,
+    order: list[int] | None = None,
+) -> dict[str, Any]:
+    draft = _normalize_preview_selection_draft(
+        preview,
+        scope,
+        selected_indices,
+        selected_segments,
+        order=order,
+    )
+    _store_preview(preview_id, selection_draft=draft)
+    return draft
+
+
 def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
     if not preview:
         return {"ok": False, "status": "missing", "message": "暂无选片预览。"}
@@ -1922,6 +2709,7 @@ def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
         "srt_path": preview.get("srt_path", ""),
         "created_at": preview.get("created_at", 0),
         "clips": preview.get("clips", []),
+        "selection_draft": preview.get("selection_draft", {}),
         "dedup_summary": preview.get("dedup_summary", {}),
     }
 
@@ -1961,6 +2749,15 @@ def _preview_clip_video(preview_id: str, clip_index: int) -> Path:
     video = Path(clip_source) if clip_source else Path(str(preview.get("video", "")))
     if not video.exists():
         raise HTTPException(status_code=404, detail="源视频不存在，请重新选择视频。")
+    cut_video = video
+    try:
+        from cutter_logic import _remux_ts_for_editing
+
+        cut_video = Path(_remux_ts_for_editing(str(video), None, _ffmpeg_cmd(), None))
+    except Exception:
+        cut_video = video
+    if not cut_video.exists():
+        raise HTTPException(status_code=404, detail="片段预览源视频不存在，请重新生成预览。")
 
     start = max(0.0, float(clip_info.get("start") or 0.0))
     end = max(start + 0.2, float(clip_info.get("end") or start + 0.2))
@@ -1970,38 +2767,51 @@ def _preview_clip_video(preview_id: str, clip_index: int) -> Path:
 
     preview_dir = _safe_user_child("clip_previews", preview_id)
     preview_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cut_stat = cut_video.stat()
+        source_sig = hashlib.md5(
+            f"{cut_video.resolve()}|{cut_stat.st_size}|{int(cut_stat.st_mtime)}".encode("utf-8", errors="ignore")
+        ).hexdigest()[:8]
+    except Exception:
+        source_sig = "source"
     stamp = f"{clip_index}_{int(start * 1000)}_{int(end * 1000)}"
-    target = preview_dir / f"clip_{stamp}.mp4"
+    target = preview_dir / f"clip_{stamp}_{source_sig}.mp4"
     if target.exists() and target.stat().st_size > 1000:
         return target
 
+    input_seek = max(0.0, start - 2.0)
+    output_seek = max(0.0, start - input_seek)
     cmd = [
         _ffmpeg_cmd(),
         "-y",
-        "-i",
-        str(video),
-        "-ss",
-        f"{start:.3f}",
-        "-t",
-        f"{duration:.3f}",
         "-fflags",
         "+genpts",
+        "-ss",
+        f"{input_seek:.3f}",
+        "-i",
+        str(cut_video),
+    ]
+    if output_seek > 0.001:
+        cmd += ["-ss", f"{output_seek:.3f}"]
+    cmd += [
+        "-t",
+        f"{duration:.3f}",
         "-avoid_negative_ts",
         "make_zero",
         "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,setpts=PTS-STARTPTS",
+        "scale='min(480,iw)':-2,scale=trunc(iw/2)*2:trunc(ih/2)*2,setpts=PTS-STARTPTS",
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        "23",
+        "26",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "96k",
         "-ar",
         "44100",
         "-ac",
@@ -2060,6 +2870,7 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
     access_token = settings.get("volc_access_token", "") or ""
     api_key = settings.get("volc_api_key", "") or ""
     bucket = settings.get("volc_bucket", "livec") or "livec"
+    region = _normalize_volc_region(settings.get("volc_region"))
     if not all([tos_ak, tos_sk]) or not (api_key or all([app_id, access_token])):
         emit_log("warning", "云端语音识别未配置完整，正在使用本地语音识别。", scope)
         return None
@@ -2104,6 +2915,7 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
             tos_ak,
             tos_sk,
             bucket=bucket,
+            region=region,
             log_fn=lambda msg: emit_log("info", msg, scope),
             api_key=api_key or None,
         )
@@ -2139,22 +2951,25 @@ def _product_scanner():
 
 def _run_mix(task_id: str, payload: MixPayload) -> None:
     scope = "mix"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备混剪")
     try:
         _ensure_feature_access("娣峰壀鎴愮墖")
         from cutter_logic import process_video_mix
 
         paths = _existing_paths(payload.video_paths, "视频")
+        _set_task_progress(task_id, 10, f"校验 {len(paths)} 个素材")
         out_dir = _default_output_dir(paths[0], payload.output_dir, "mix_output")
-        output_path = out_dir / f"mix_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        output_path = _mix_output_path(out_dir, paths[0])
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
         emit_log("info", f"混剪开始：{len(paths)} 个视频，版本数={payload.versions}，目标时长={payload.duration}秒，输出 {output_path}", scope)
+        _set_task_progress(task_id, 18, "分析并编排混剪")
         result = process_video_mix(
             [str(p) for p in paths],
             output_path=str(output_path),
             dedup_preset=payload.dedup_preset,
             subtitle_overlay=payload.subtitle_overlay,
-            log_fn=lambda msg: emit_log("info", msg, scope),
+            log_fn=_task_log_fn(task_id, scope, base=18, span=70),
+            cancel_event=_task_cancel_event(task_id),
             force_category=None if payload.category in ("", "自动检测", "自动检测") else payload.category,
             focus_hint=payload.focus_hint,
             ai_controls=payload.ai_controls,
@@ -2172,6 +2987,7 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
         )
         if not result:
             raise RuntimeError("混剪处理失败。")
+        _set_task_progress(task_id, 94, "整理输出")
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
@@ -2186,7 +3002,7 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
 
 def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None:
     scope = "mix"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message="准备混剪 AI 预览")
     _store_preview(
         preview_id,
         task_id=task_id,
@@ -2203,15 +3019,18 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         from cutter_logic import process_video_mix
 
         paths = _existing_paths(payload.video_paths, "视频")
+        _set_task_progress(task_id, 12, "校验素材")
         out_dir = _default_output_dir(paths[0], payload.output_dir, "mix_output")
         preview_output = str(out_dir / f"mix_preview_placeholder_{int(time.time())}.mp4")
         cutter_mod._multi_result_cache = {}
+        _set_task_progress(task_id, 18, "分析多素材")
         result = process_video_mix(
             [str(p) for p in paths],
             output_path=preview_output,
             dedup_preset=payload.dedup_preset,
             subtitle_overlay=payload.subtitle_overlay,
-            log_fn=lambda msg: emit_log("info", msg, scope),
+            log_fn=_task_log_fn(task_id, scope, base=18, span=66),
+            cancel_event=_task_cancel_event(task_id),
             force_category=None if payload.category in ("", "自动检测") else payload.category,
             focus_hint=payload.focus_hint,
             ai_controls=payload.ai_controls,
@@ -2230,6 +3049,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         )
         if not result:
             raise RuntimeError("混剪 AI 选片预览失败。")
+        _set_task_progress(task_id, 86, "整理候选片段")
         raw_clips = list(cutter_mod._multi_result_cache.get("clips") or [])
         if not raw_clips:
             raise RuntimeError("AI 没有选到可预览片段。")
@@ -2237,7 +3057,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
         if category_summary:
             dedup_summary["category_summary"] = category_summary
-        public_clips = [_clip_public(index, clip) for index, clip in enumerate(raw_clips)]
+        srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
+        public_clips = _preview_public_clips(raw_clips, srt_text)
+        _set_task_progress(task_id, 94, "生成预览列表")
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
             preview_id,
@@ -2245,6 +3067,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             message=f"混剪 AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(paths[0]),
             video_name=paths[0].name,
+            srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
             dedup_summary=dedup_summary,
@@ -2259,11 +3082,13 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
 
 def _run_ai_scan(task_id: str, payload: AiScanPayload) -> None:
     scope = "ai-scan"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备 AI 扫描")
     try:
         _ensure_feature_access("AI扫描")
         scanner = _product_scanner()
         paths = _existing_paths(payload.video_paths, "视频")
+        total_videos = max(1, len(paths))
+        _set_task_progress(task_id, 8, f"准备扫描 {total_videos} 个视频")
         out_dir = _default_output_dir(paths[0], payload.output_dir, "scan_output") if payload.output_dir.strip() else None
         all_file_products: list[list[dict[str, Any]]] = []
         flat_products: list[dict[str, Any]] = []
@@ -2272,20 +3097,26 @@ def _run_ai_scan(task_id: str, payload: AiScanPayload) -> None:
                 emit_log("warning", "任务已停止。", scope)
                 return
             emit_log("info", f"[{index}/{len(paths)}] 扫描 {video.name}", scope)
+            file_base = 10 + ((index - 1) / total_videos) * 78
+            file_span = 78 / total_videos
+            _set_task_progress(task_id, file_base, f"扫描 {index}/{total_videos}: {video.name}")
             srt = _ensure_srt(video, scope)
             if not srt:
                 continue
-            products = scanner.scan(str(srt), log_fn=lambda msg: emit_log("info", msg, scope))
+            products = scanner.scan(str(srt), log_fn=_task_log_fn(task_id, scope, base=file_base + 5, span=max(8, file_span * 0.65)))
             for product in products:
                 product["_video"] = str(video)
             all_file_products.append(products)
             flat_products.extend(products)
             emit_log("success" if products else "warning", f"{video.name} 发现 {len(products)} 个单品。", scope)
+            _set_task_progress(task_id, min(90, 10 + (index / total_videos) * 78), f"完成扫描 {index}/{total_videos}: {video.name}")
             if payload.auto_export and out_dir and products:
+                _set_task_progress(task_id, 92, "导出扫描片段")
                 for product in products:
-                    paths_out = scanner.extract_clip(str(video), product, str(out_dir), product.get("name"))
+                    safe_name = _clean_forbidden_title_text(product.get("name") or "product", fallback="product")
+                    paths_out = scanner.extract_clip(str(video), product, str(out_dir), safe_name)
                     if paths_out:
-                        emit_log("success", f"已导出：{product.get('name')} ({len(paths_out)} 段)", scope)
+                        emit_log("success", f"已导出：{safe_name} ({len(paths_out)} 段)", scope)
         with _SCAN_LOCK:
             _SCAN_RESULTS["products"] = all_file_products
             _SCAN_RESULTS["flat"] = flat_products
@@ -2304,15 +3135,17 @@ def _run_ai_scan(task_id: str, payload: AiScanPayload) -> None:
 
 def _run_ai_scan_merge(task_id: str) -> None:
     scope = "ai-scan"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备跨文件合并")
     try:
         from product_scanner import merge_across_files
 
         with _SCAN_LOCK:
             products = list(_SCAN_RESULTS.get("products") or [])
-        merged = merge_across_files(products, log_fn=lambda msg: emit_log("info", msg, scope))
+        _set_task_progress(task_id, 35, "合并单品结果")
+        merged = merge_across_files(products, log_fn=_task_log_fn(task_id, scope, base=35, span=52))
         with _SCAN_LOCK:
             _SCAN_RESULTS["merged"] = merged
+        _set_task_progress(task_id, 94, "保存合并结果")
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
@@ -2325,7 +3158,7 @@ def _run_ai_scan_merge(task_id: str) -> None:
 
 def _run_ai_scan_export(task_id: str, payload: AiScanPayload, merged: bool = False) -> None:
     scope = "ai-scan"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备导出扫描结果")
     try:
         _ensure_feature_access("AI扫描导出")
         scanner = _product_scanner()
@@ -2340,18 +3173,24 @@ def _run_ai_scan_export(task_id: str, payload: AiScanPayload, merged: bool = Fal
         if merged:
             if not merged_products:
                 raise ValueError("请先执行跨文件合并。")
-            results = scanner.extract_cross_file(merged_products, str(out_dir), log_fn=lambda msg: emit_log("info", msg, scope))
+            _set_task_progress(task_id, 24, f"导出合并结果 {len(merged_products)} 个")
+            results = scanner.extract_cross_file(merged_products, str(out_dir), log_fn=_task_log_fn(task_id, scope, base=24, span=66))
             ok_count = len([r for r in results if r.get("output_path")])
         else:
             if not flat:
                 raise ValueError("没有可导出的扫描结果。")
-            for product in flat:
+            total_products = max(1, len(flat))
+            for index, product in enumerate(flat, start=1):
                 video = product.get("_video", "")
                 if not video:
                     continue
-                paths_out = scanner.extract_clip(video, product, str(out_dir), product.get("name"))
+                _set_task_progress(task_id, 18 + ((index - 1) / total_products) * 72, f"导出 {index}/{total_products}")
+                safe_name = _clean_forbidden_title_text(product.get("name") or "product", fallback="product")
+                paths_out = scanner.extract_clip(video, product, str(out_dir), safe_name)
                 if paths_out:
                     ok_count += len(paths_out)
+                _set_task_progress(task_id, min(92, 18 + (index / total_products) * 72), f"完成导出 {index}/{total_products}")
+        _set_task_progress(task_id, 95, "整理导出结果")
         if ok_count:
             _consume_trial("AI扫描导出", units=ok_count, scope=scope)
         if _is_task_cancelled(task_id):
@@ -2366,14 +3205,25 @@ def _run_ai_scan_export(task_id: str, payload: AiScanPayload, merged: bool = Fal
 
 def _run_product_scan_read(task_id: str, payload: ProductScanPayload) -> None:
     scope = "product-scan"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="读取时间表")
     try:
-        from schedule_splitter import group_by_product, read_excel
+        from schedule_splitter import align_schedule_to_video, group_by_product, read_excel
 
         excel = _clean_path(payload.excel_path)
         if not excel.exists():
             raise FileNotFoundError("Excel 文件不存在。")
-        schedule, live_start = read_excel(str(excel), log_fn=lambda msg: emit_log("info", msg, scope))
+        schedule, live_start = read_excel(str(excel), log_fn=_task_log_fn(task_id, scope, base=10, span=18))
+        _set_task_progress(task_id, 35, "对齐时间表")
+        video_start_offset = _parse_offset_seconds(payload.video_start_offset)
+        if video_start_offset is not None:
+            _shift_schedule_offsets(schedule, video_start_offset)
+            emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
+        else:
+            live_start_override = _parse_live_start_datetime(payload.live_start_time, payload.video_paths)
+            if live_start_override is not None and payload.video_paths:
+                align_schedule_to_video(schedule, [str(v) for v in payload.video_paths], live_start_override, log_fn=lambda msg: emit_log("info", msg, scope), ffmpeg_cmd=_ffmpeg_cmd())
+                emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
+        _set_task_progress(task_id, 78, "分组商品")
         groups = group_by_product(schedule)
         with _SCAN_LOCK:
             _SCAN_RESULTS["schedule"] = schedule
@@ -2391,7 +3241,7 @@ def _run_product_scan_read(task_id: str, payload: ProductScanPayload) -> None:
 
 def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
     scope = "product-scan"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message="准备单品分割")
     try:
         _ensure_feature_access("单品扫描")
         from schedule_splitter import align_schedule_to_video, extract_by_schedule, group_by_product, read_excel
@@ -2404,26 +3254,62 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
         if not excel.exists():
             raise FileNotFoundError("Excel 文件不存在。")
         out_dir.mkdir(parents=True, exist_ok=True)
-        schedule, live_start = read_excel(str(excel), log_fn=lambda msg: emit_log("info", msg, scope))
-        align_schedule_to_video(schedule, [str(v) for v in videos], live_start, log_fn=lambda msg: emit_log("info", msg, scope), ffmpeg_cmd=_ffmpeg_cmd())
+        _set_task_progress(task_id, 12, "读取时间表")
+        schedule, live_start = read_excel(str(excel), log_fn=_task_log_fn(task_id, scope, base=12, span=14))
+        _set_task_progress(task_id, 30, "对齐视频时间")
+        video_start_offset = _parse_offset_seconds(payload.video_start_offset)
+        if video_start_offset is not None:
+            _shift_schedule_offsets(schedule, video_start_offset)
+            emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
+        else:
+            live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+            align_schedule_to_video(schedule, [str(v) for v in videos], live_start_override or live_start, log_fn=_task_log_fn(task_id, scope, base=30, span=20), ffmpeg_cmd=_ffmpeg_cmd())
+            if live_start_override is not None:
+                emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
         groups = group_by_product(schedule)
+        _set_task_progress(task_id, 58, "整理商品片段")
         if payload.advance_seconds > 0:
             for group in groups:
                 segments = [(max(0, s - payload.advance_seconds), max(0, e - payload.advance_seconds)) for s, e in group.get("segments", [])]
                 group["segments"] = [(s, e) for s, e in segments if e - s >= 10]
                 group["total_duration"] = sum(e - s for s, e in group["segments"])
         groups = [g for g in groups if g.get("segments")]
-        results = extract_by_schedule(groups, [str(v) for v in videos], str(out_dir), ffmpeg=_ffmpeg_cmd(), log_fn=lambda msg: emit_log("info", msg, scope))
-        ok_count = len([r for r in results if r.get("output_path")])
+        for group in groups:
+            group["name"] = _clean_forbidden_title_text(group.get("name") or "未命名商品", fallback="未命名商品")
+        _set_task_progress(task_id, 68, f"导出 {len(groups)} 个商品")
+        results = extract_by_schedule(groups, [str(v) for v in videos], str(out_dir), ffmpeg=_ffmpeg_cmd(), log_fn=_task_log_fn(task_id, scope, base=68, span=24))
+        exported_results = []
+        for item in results:
+            output_path = Path(str(item.get("output_path") or ""))
+            if output_path.is_file() and output_path.stat().st_size > 1000:
+                exported_results.append({**item, "output_path": str(output_path)})
+        ok_count = len(exported_results)
+        _set_task_progress(task_id, 95, "校验导出结果")
+        if not exported_results:
+            raise RuntimeError("没有导出任何视频。请检查 Excel 时间段是否落在所选视频范围内，并确认源视频可读、输出目录可写。")
+        for item in exported_results[:10]:
+            output_path = Path(str(item.get("output_path") or ""))
+            emit_log("success", f"已导出：{output_path.parent.name}\\{output_path.name}（{item.get('size_mb', 0)} MB）", scope)
+        if len(exported_results) > 10:
+            emit_log("success", f"另有 {len(exported_results) - 10} 个视频已导出到：{out_dir}", scope)
         if ok_count:
             _consume_trial("单品扫描", units=ok_count, scope=scope)
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
-        _set_task(task_id, status="completed", finished_at=time.time(), result_count=ok_count)
-        emit_log("success", f"单品扫描完成：{ok_count}/{len(groups)} 个商品导出成功。", scope)
+        exported_names = {str(item.get("name") or "") for item in exported_results}
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            result_count=ok_count,
+            message=f"分割完成：{ok_count} 个视频",
+            output_dir=str(out_dir),
+            outputs=[item["output_path"] for item in exported_results],
+        )
+        emit_log("success", f"单品分割完成：导出 {ok_count} 个视频，覆盖 {len(exported_names)}/{len(groups)} 个商品。输出目录：{out_dir}", scope)
     except Exception as exc:
-        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc), message="分割失败")
         emit_log("error", f"单品扫描失败：{exc}", scope)
 
 
@@ -3001,12 +3887,14 @@ def _run_dedup_one(video: Path, output: Path, payload: DedupPayload, index: int,
 
 def _run_dedup(task_id: str, payload: DedupPayload) -> None:
     scope = "dedup"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备创作辅助")
     try:
         _ensure_feature_access("创作辅助")
         videos = _dedup_paths_from_payload(payload)
         if not videos:
             raise ValueError("请先添加视频。")
+        total_videos = max(1, len(videos))
+        _set_task_progress(task_id, 8, f"准备处理 {total_videos} 个视频")
         base_dir = _default_output_dir(videos[0], payload.output_dir, "dedup_output")
         emit_log("info", f"开始批量二创消重，共 {len(videos)} 个视频。", scope)
         outputs: list[str] = []
@@ -3022,13 +3910,16 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             out_dir = base_dir if payload.output_dir.strip() else _default_output_dir(video, "", "dedup_output")
             output = _unique_output_path(out_dir, _safe_stem(video.stem))
             emit_log("info", f"[{index}/{len(videos)}] 正在处理：{video.name}", scope)
+            _set_task_progress(task_id, 10 + ((index - 1) / total_videos) * 84, f"处理 {index}/{total_videos}: {video.name}")
             ok, applied, stderr_text, used_pip_file = _run_dedup_one(video, output, payload, index, scope=scope)
             if ok:
                 outputs.append(str(output))
+                _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"完成 {index}/{total_videos}: {video.name}")
                 emit_log("success", f"[{index}/{len(videos)}] 完成：{output.name}（{applied}）", scope)
                 _archive_used_pip(used_pip_file, scope)
             else:
                 failures.append(f"{video.name}: {stderr_text or '视频处理失败'}")
+                _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"跳过失败 {index}/{total_videos}: {video.name}")
                 emit_log("error", f"[{index}/{len(videos)}] 处理失败：{_short_error(stderr_text)}。解决办法：{_solution_for_error(stderr_text)}", scope)
         if not outputs:
             raise RuntimeError(failures[0] if failures else "没有生成成功的视频。")
@@ -3059,12 +3950,13 @@ def _resolve_live_url(url: str, scope: str) -> str:
 
 def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
     scope = "live-rec"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=10, message="检测直播流")
     try:
         url = (payload.room_url or "").strip()
         if not url:
             raise ValueError("请填写直播间地址。")
         resolved = _resolve_live_url(url, scope)
+        _set_task_progress(task_id, 65, "验证直播流")
         proc = subprocess.run([_ffprobe_cmd(), "-v", "quiet", "-show_streams", "-of", "json", resolved], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         if proc.returncode != 0:
             raise RuntimeError("未检测到可用直播流。")
@@ -3077,13 +3969,14 @@ def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
 
 def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
     scope = "live-rec"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备直播录制")
     try:
         _ensure_feature_access("鐩存挱褰曞埗")
         url = (payload.room_url or "").strip()
         if not url:
             raise ValueError("请填写直播间地址。")
         stream_url = _resolve_live_url(url, scope)
+        _set_task_progress(task_id, 24, "解析直播流")
         save_dir = _clean_path(payload.save_dir) if payload.save_dir.strip() else Path.home() / "Videos" / "鐩存挱褰曞埗"
         name = _safe_stem(payload.room_name or "live")
         room_dir = save_dir / name
@@ -3093,6 +3986,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with _LIVE_LOCK:
             _LIVE_PROCS[task_id] = {"process": proc, "output": str(output), "name": name}
+        _set_task_progress(task_id, 35, "录制中")
         emit_log("success", f"开始录制：{name}", scope)
         rc = proc.wait()
         size = output.stat().st_size if output.exists() else 0
@@ -3134,7 +4028,7 @@ def _stop_live_all() -> int:
 
 
 def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备智能成片")
     emit_log("info", "智能成片任务已启动。", "smart-cut")
     try:
         _ensure_feature_access("智能成片")
@@ -3143,6 +4037,8 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         paths = [Path(p.strip().strip('"')) for p in payload.video_paths if p.strip()]
         if not paths:
             raise ValueError("请至少填写一个视频文件路径。")
+        total_videos = max(1, len(paths))
+        _set_task_progress(task_id, 8, f"校验 {total_videos} 个素材")
 
         output_dir = Path(payload.output_dir.strip().strip('"')) if payload.output_dir.strip() else None
         if output_dir:
@@ -3157,17 +4053,21 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
 
             out_path = None
             if output_dir:
-                out_path = str(output_dir / f"{video.stem}_smart_cut_{_stamp_name()}.mp4")
+                out_path = str(output_dir / f"{_safe_stem(video.stem)}_smart_cut_{_stamp_name()}.mp4")
 
             pip_path, used_pip_file = _pick_pip_asset(payload, "smart-cut")
             emit_log("info", f"[{index}/{len(paths)}] 开始处理 {video.name}", "smart-cut")
+            file_base = 10 + ((index - 1) / total_videos) * 82
+            file_span = 82 / total_videos
+            _set_task_progress(task_id, file_base, f"处理 {index}/{total_videos}: {video.name}")
             version_count = payload.versions
             common_kwargs = dict(
                 srt_path=payload.srt_path.strip() or None,
                 output_path=out_path,
                 dedup_preset=payload.dedup_preset,
                 subtitle_overlay=payload.subtitle_overlay,
-                log_fn=lambda msg: emit_log("info", msg, "smart-cut"),
+                log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.78)),
+                cancel_event=_task_cancel_event(task_id),
                 force_category=None if payload.category in ("", "自动检测") else payload.category,
                 pip_path=pip_path,
                 pip_size=payload.pip_size,
@@ -3200,6 +4100,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 emit_log("warning", "任务已停止。", "smart-cut")
                 return
             _archive_used_pip(used_pip_file, "smart-cut")
+            _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"完成 {index}/{total_videos}: {video.name}")
             emit_log("success", f"处理完成: {video.name}", "smart-cut")
             _consume_trial("智能成片", scope="smart-cut")
 
@@ -3215,7 +4116,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
 
 def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
     scope = "mix"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取混剪预览片段")
     emit_log("info", "使用混剪 AI 选片预览开始成片。", scope)
     try:
         _ensure_feature_access("娣峰壀鎴愮墖")
@@ -3226,11 +4127,15 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         if not raw_clips:
             raise RuntimeError("混剪选片预览里没有可用片段。")
 
-        selected = payload.selected_indices or list(range(len(raw_clips)))
+        draft = _preview_selection_draft(preview)
+        selected = payload.selected_indices or list(draft.get("selected_indices") or [])
+        selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
-        clips = [raw_clips[index] for index in selected_indices]
+        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
         if not clips:
             raise RuntimeError("请至少保留一个片段再混剪。")
+        _log_preview_selection(scope, "预览混剪子句选择", selected_indices, selected_segments, clips)
+        _set_task_progress(task_id, 16, f"确认 {len(clips)} 个片段")
 
         sources: list[Path] = []
         seen_sources: set[str] = set()
@@ -3253,6 +4158,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         existing_sources = [path for path in sources if path.exists()]
         if not existing_sources:
             raise FileNotFoundError("预览片段对应的原视频不存在，请重新选择素材并生成预览。")
+        _set_task_progress(task_id, 26, f"校验 {len(existing_sources)} 个素材")
 
         source_index = {
             str(path.resolve()).lower(): index
@@ -3266,7 +4172,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             except Exception:
                 return fallback
 
-        emit_log("info", f"预览混剪：按预览保留结果使用 {len(clips)} 个片段，不二次去重。", scope)
+        emit_log("info", f"预览混剪：按预览保留结果使用 {len(clips)} 个片段/子句组，不二次去重。", scope)
 
         def _clip_tuple(clip: Any) -> tuple[Any, ...]:
             clip_info = _clip_public(0, clip)
@@ -3279,7 +4185,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             start = _num(clip_info.get("start"), 0.0)
             end = _num(clip_info.get("end"), start)
             duration = _num(clip_info.get("duration"), max(0.0, end - start))
-            return (
+            values: list[Any] = [
                 clip_info.get("clip_type") or "product",
                 text,
                 start,
@@ -3287,12 +4193,21 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 _num(clip_info.get("score"), 0.0),
                 duration,
                 str(clip_info.get("focus") or ""),
-            )
+            ]
+            if isinstance(clip, (list, tuple)):
+                meta = next(
+                    (item for item in clip if isinstance(item, dict) and item.get("preview_exact")),
+                    None,
+                )
+                if meta:
+                    values.append(meta)
+            return tuple(values)
 
         selected_tuples = [_clip_tuple(clip) for clip in clips]
         out_dir = _default_output_dir(existing_sources[0], payload.output_dir, "mix_output")
-        output_path = out_dir / f"mix_preview_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        output_path = _mix_output_path(out_dir, existing_sources[0])
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
+        _set_task_progress(task_id, 34, "准备混剪输出")
 
         import ai_clipper as ai_mod
         from cutter_logic import process_video_mix
@@ -3301,7 +4216,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         original_ai_enabled = ai_mod.is_enabled
 
         def _preview_ai_analyze(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
-            emit_log("info", f"预览混剪：使用已调整的 {len(selected_tuples)} 个片段，不重新 AI 选片。", scope)
+            emit_log("info", f"预览混剪：使用已调整的 {len(selected_tuples)} 个片段/子句组，不重新 AI 选片。", scope)
             return list(selected_tuples)
 
         ai_mod.ai_analyze_clips = _preview_ai_analyze
@@ -3312,7 +4227,8 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 output_path=str(output_path),
                 dedup_preset=payload.dedup_preset,
                 subtitle_overlay=payload.subtitle_overlay,
-                log_fn=lambda msg: emit_log("info", msg, scope),
+                log_fn=_task_log_fn(task_id, scope, base=34, span=54),
+                cancel_event=_task_cancel_event(task_id),
                 force_category=None if payload.category in ("", "自动检测") else payload.category,
                 focus_hint=payload.focus_hint,
                 ai_controls=payload.ai_controls,
@@ -3334,6 +4250,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
 
         if not result:
             raise RuntimeError("预览混剪处理失败。")
+        _set_task_progress(task_id, 94, "整理输出")
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
@@ -3348,7 +4265,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
 
 def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) -> None:
     scope = "smart-cut"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message="准备 AI 选片预览")
     _store_preview(
         preview_id,
         task_id=task_id,
@@ -3366,21 +4283,24 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
 
         paths = _existing_paths(payload.video_paths, "视频")
         video = paths[0]
+        _set_task_progress(task_id, 12, "校验素材")
         if len(paths) > 1:
             emit_log("warning", "当前预览先处理第 1 个视频；多视频批量预览后续补齐。", scope)
 
         cutter_mod._multi_result_cache = {}
         srt_path = payload.srt_path.strip() or None
         out_dir = _default_output_dir(video, payload.output_dir, "output")
-        preview_output = str(out_dir / f"{video.stem}_preview_placeholder.mp4")
+        preview_output = str(out_dir / f"{_safe_stem(video.stem)}_preview_placeholder.mp4")
         emit_log("info", f"正在分析视频并生成片预览：{video.name}", scope)
+        _set_task_progress(task_id, 18, "分析素材")
         result = process_video(
             str(video),
             srt_path=srt_path,
             output_path=preview_output,
             dedup_preset=payload.dedup_preset,
             subtitle_overlay=payload.subtitle_overlay,
-            log_fn=lambda msg: emit_log("info", msg, scope),
+            log_fn=_task_log_fn(task_id, scope, base=18, span=66),
+            cancel_event=_task_cancel_event(task_id),
             force_category=None if payload.category in ("", "自动检测") else payload.category,
             _clips_only=True,
             focus_hint=payload.focus_hint,
@@ -3394,6 +4314,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         )
         if not result:
             raise RuntimeError("AI 选片预览失败。")
+        _set_task_progress(task_id, 86, "整理候选片段")
         raw_clips = list(cutter_mod._multi_result_cache.get("clips") or [])
         if not raw_clips:
             raise RuntimeError("AI 没有选到可预览片段。")
@@ -3403,7 +4324,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
         if category_summary:
             dedup_summary["category_summary"] = category_summary
-        public_clips = [_clip_public(index, clip) for index, clip in enumerate(raw_clips)]
+        _set_task_progress(task_id, 94, "生成预览列表")
+        public_clips = _preview_public_clips(raw_clips, srt_text)
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
             preview_id,
@@ -3412,6 +4334,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             video=str(video),
             video_name=video.name,
             srt_path=resolved_srt,
+            srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
             dedup_summary=dedup_summary,
@@ -3426,7 +4349,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
 
 def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -> None:
     scope = "smart-cut"
-    _set_task(task_id, status="running", started_at=time.time())
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取预览片段")
     emit_log("info", "使用 AI 选片预览开始成片。", scope)
     try:
         _ensure_feature_access("智能成片")
@@ -3438,20 +4361,25 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         raw_clips = list(preview.get("raw_clips") or [])
         if not raw_clips:
             raise RuntimeError("选片预览里没有可用片段。")
-        selected = payload.selected_indices or list(range(len(raw_clips)))
+        draft = _preview_selection_draft(preview)
+        selected = payload.selected_indices or list(draft.get("selected_indices") or [])
+        selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
-        clips = [raw_clips[index] for index in selected_indices]
+        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
         if not clips:
             raise RuntimeError("请至少保留一个片段再成片。")
+        _log_preview_selection(scope, "预览成片子句选择", selected_indices, selected_segments, clips)
+        _set_task_progress(task_id, 18, f"确认 {len(clips)} 个片段")
 
         video = Path(str(preview.get("video", "")))
         if not video.exists():
             raise FileNotFoundError(f"视频不存在：{video}")
         srt_path = str(preview.get("srt_path") or video.with_suffix(".srt"))
-        emit_log("info", f"预览成片：按预览保留结果使用 {len(clips)} 个片段，不二次去重。", scope)
+        emit_log("info", f"预览成片：按预览保留结果使用 {len(clips)} 个片段/子句组，不二次去重。", scope)
+        _set_task_progress(task_id, 28, "准备输出")
         output_dir = Path(payload.output_dir.strip().strip('"')) if payload.output_dir.strip() else video.parent / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(output_dir / f"{video.stem}_preview_cut_{_stamp_name()}.mp4")
+        output_path = str(output_dir / f"{_safe_stem(video.stem)}_preview_cut_{_stamp_name()}.mp4")
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
 
         result = _process_version_with_clips(
@@ -3461,8 +4389,8 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
             clips,
             payload.dedup_preset,
             payload.subtitle_overlay,
-            lambda msg: emit_log("info", msg, scope),
-            None,
+            _task_log_fn(task_id, scope, base=30, span=58),
+            _task_cancel_event(task_id),
             pip_path,
             payload.pip_size,
             payload.pip_opacity,
@@ -3476,6 +4404,7 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         )
         if not result:
             raise RuntimeError("预览成片失败。")
+        _set_task_progress(task_id, 94, "整理输出")
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("智能成片", scope=scope)
         _set_task(task_id, status="completed", finished_at=time.time())
@@ -3498,6 +4427,40 @@ def runtime() -> dict[str, Any]:
         "user_data_dir": str(_get_user_data_dir()),
         "mode": "local-web-client",
     }
+
+
+def _schedule_client_restart(delay: float = 1.5) -> bool:
+    if not getattr(sys, "frozen", False):
+        return False
+    executable = Path(sys.executable)
+    if not executable.exists():
+        return False
+
+    def _restart() -> None:
+        time.sleep(delay)
+        try:
+            flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0)
+            )
+            subprocess.Popen(
+                [str(executable)],
+                cwd=str(executable.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=flags,
+            )
+        except Exception as exc:
+            emit_log("error", f"自动重启失败：{exc}", "settings")
+        finally:
+            time.sleep(0.2)
+            os._exit(0)
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return True
 
 
 @app.get("/api/update/check")
@@ -3539,7 +4502,10 @@ def apply_update_api() -> dict[str, Any]:
         else:
             result = apply_update_headless(info)
             if result.get("ok"):
-                emit_log("success", "更新已安装，重启客户端后生效。", "settings")
+                if result.get("restart_required"):
+                    result["auto_restart"] = _schedule_client_restart()
+                    result["msg"] = "更新已安装，客户端即将自动重启。" if result.get("auto_restart") else "更新已安装，请重启客户端后生效。"
+                emit_log("success", result.get("msg") or "更新已安装，重启客户端后生效。", "settings")
             else:
                 emit_log("error", f"更新安装失败：{result.get('failed') or result.get('msg')}", "settings")
         with _UPDATE_LOCK:
@@ -3685,12 +4651,19 @@ def activate_license(payload: LicensePayload) -> dict[str, Any]:
     if not code:
         return {"ok": False, "message": "请先输入激活码。"}
     try:
-        from license_client import activate_with_code
+        from license_client import activate_with_code, check_activation_cached
 
         result = activate_with_code(code)
         ok = bool(result.get("ok"))
-        emit_log("success" if ok else "warning", result.get("msg", "激活完成"), "settings")
-        return {"ok": ok, "message": result.get("msg", "激活完成")}
+        message = result.get("msg", "激活完成")
+        restart_required = False
+        if ok:
+            status = check_activation_cached(allow_stale=False, refresh_async=False)
+            restart_required = not bool(status.get("activated"))
+            if restart_required:
+                message = f"{message}，请重启客户端后再使用。"
+        emit_log("success" if ok else "warning", message, "settings")
+        return {"ok": ok, "message": message, "restart_required": restart_required}
     except Exception as exc:
         emit_log("error", f"激活失败：{exc}", "settings")
         return {"ok": False, "message": f"激活失败：{exc}"}
@@ -3710,13 +4683,54 @@ def unbind_license() -> dict[str, Any]:
         return {"ok": False, "message": f"瑙ｇ粦澶辫触: {exc}"}
 
 
+def _ai_provider_warning(base_url: str, model: str) -> str:
+    lower_url = (base_url or "").lower()
+    lower_model = (model or "").lower()
+    if "deepseek" in lower_url and lower_model and "deepseek" not in lower_model:
+        return "当前 Base URL 是 DeepSeek，但模型名不像 DeepSeek；建议模型填写 deepseek-chat。"
+    if ("volces" in lower_url or "ark.cn-" in lower_url) and "deepseek" in lower_model:
+        return "当前 Base URL 是火山/豆包，但模型名是 DeepSeek；请把 Base URL 改为 https://api.deepseek.com。"
+    return ""
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="ignore")[:300]
+    except Exception:
+        return ""
+
+
+def _ai_test_error_message(code: int, base_url: str, model: str, body: str = "") -> str:
+    lower_url = (base_url or "").lower()
+    lower_model = (model or "").lower()
+    is_deepseek = "deepseek" in lower_url or "deepseek" in lower_model
+    if code in (401, 403):
+        if is_deepseek:
+            return (
+                "AI 连接失败：HTTP 401。DeepSeek API Key 无效、已失效，"
+                "或仍在使用豆包/火山的 Key。请确认 Base URL=https://api.deepseek.com，"
+                "模型=deepseek-chat，并重新填写 DeepSeek 控制台里的 API Key。"
+            )
+        return f"AI 连接失败：HTTP {code}。API Key 无效或没有权限，请重新填写对应平台的 Key。"
+    if code == 404:
+        return "AI 连接失败：HTTP 404。Base URL 不正确，请检查是否填写为 https://api.deepseek.com。"
+    if code == 429:
+        return "AI 连接失败：HTTP 429。调用过于频繁或额度受限，请稍后再试。"
+    if code in (500, 502, 503, 504):
+        return f"AI 连接失败：HTTP {code}。服务商暂时不可用，请稍后再试。"
+    detail = f"；服务返回：{body}" if body else ""
+    return f"AI 连接失败：HTTP {code}{detail}"
+
+
 @app.post("/api/settings/test-ai")
 def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
     cfg = _load_settings()
     if payload:
         cfg.update(payload.model_dump(exclude_unset=True))
+    cfg = _normalize_ai_model_defaults(cfg)
     api_key = (cfg.get("api_key") or "").strip()
     base_url = (cfg.get("base_url") or "").strip().rstrip("/")
+    model = (cfg.get("model") or "").strip()
     if not api_key or not base_url:
         return {"ok": False, "message": "请先填写 AI API Key 和 Base URL。"}
 
@@ -3726,13 +4740,16 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
         ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
             if 200 <= resp.status < 300:
+                warning = _ai_provider_warning(base_url, model)
+                if warning:
+                    return {"ok": False, "message": f"AI Key 验证通过，但配置不一致：{warning}"}
                 emit_log("success", "AI 连接测试通过。", "settings")
                 return {"ok": True, "message": "AI 连接测试通过。"}
             return {"ok": False, "message": f"AI 连接异常: HTTP {resp.status}"}
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "message": f"AI 杩炴帴澶辫触: HTTP {exc.code}"}
+        return {"ok": False, "message": _ai_test_error_message(exc.code, base_url, model, _read_http_error_body(exc))}
     except Exception as exc:
-        return {"ok": False, "message": f"AI 杩炴帴澶辫触: {exc}"}
+        return {"ok": False, "message": f"AI 连接失败：{exc}"}
 
 
 @app.post("/api/settings/diagnose-volcengine")
@@ -3740,6 +4757,7 @@ async def diagnose_volcengine_endpoint(payload: SettingsPayload | None = None) -
     cfg = _load_settings()
     if payload:
         cfg.update(payload.model_dump(exclude_unset=True))
+    cfg["volc_region"] = _normalize_volc_region(cfg.get("volc_region"))
 
     emit_log("info", "开始火山完整诊断。", "settings")
 
@@ -3752,6 +4770,7 @@ async def diagnose_volcengine_endpoint(payload: SettingsPayload | None = None) -
             tos_ak=cfg.get("volc_tos_ak", ""),
             tos_sk=cfg.get("volc_tos_sk", ""),
             bucket=cfg.get("volc_bucket", ""),
+            region=cfg.get("volc_region", "cn-beijing"),
             api_key=cfg.get("volc_api_key", "") or None,
             log_fn=lambda msg: emit_log("info", msg, "settings"),
             timeout=35,
@@ -3765,26 +4784,45 @@ async def diagnose_volcengine_endpoint(payload: SettingsPayload | None = None) -
 @app.get("/api/keywords")
 def get_keywords() -> dict[str, Any]:
     source = _keyword_config_path()
-    data = _load_keyword_config()
-
-    count = 0
-    for value in data.values():
-        if isinstance(value, dict):
-            for nested in value.values():
-                if isinstance(nested, list):
-                    count += len(nested)
-        elif isinstance(value, list):
-            count += len(value)
-
-    return {"ok": True, "count": count, "keywords": data, "source": str(source)}
+    data = _load_effective_keyword_config()
+    return {"ok": True, "count": _keyword_count(data), "keywords": data, "source": str(source)}
 
 
 @app.post("/api/keywords")
 def save_keywords(payload: dict[str, Any]) -> dict[str, Any]:
     target = _safe_user_child("keywords.json")
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    saved = _normalize_keyword_payload(payload)
+    _write_json_file(target, saved)
+    _clear_ai_keyword_cache()
+    data = _load_effective_keyword_config()
     emit_log("success", "关键词配置已保存。", "settings")
-    return {"ok": True, "message": "关键词已保存", "path": str(target)}
+    return {
+        "ok": True,
+        "message": "词库已保存，会影响下一次 AI 选片",
+        "path": str(target),
+        "source": str(target),
+        "count": _keyword_count(data),
+        "keywords": data,
+    }
+
+
+@app.post("/api/keywords/reset")
+def reset_keywords() -> dict[str, Any]:
+    target = _safe_user_child("keywords.json")
+    if target.exists():
+        target.unlink()
+    _clear_ai_keyword_cache()
+    data = _load_effective_keyword_config()
+    source = _keyword_config_path()
+    emit_log("success", "规则词库已恢复默认。", "settings")
+    return {
+        "ok": True,
+        "message": "词库已恢复默认",
+        "path": str(source),
+        "source": str(source),
+        "count": _keyword_count(data),
+        "keywords": data,
+    }
 
 
 @app.post("/api/cache/clear")
@@ -3850,7 +4888,7 @@ def list_tasks() -> dict[str, Any]:
 def stop_scope(payload: StopScopePayload) -> dict[str, Any]:
     scope = (payload.scope or "").strip()
     stopped = _cancel_scope(scope)
-    return {"ok": True, "message": f"已发送停止请求（{stopped} 个任务）", "stopped": stopped}
+    return {"ok": True, "message": f"已停止（{stopped} 个任务）", "stopped": stopped}
 
 
 @app.get("/api/scan-results")
@@ -3924,6 +4962,29 @@ def start_smart_preview(payload: SmartCutPayload) -> dict[str, Any]:
     return {"ok": True, "task_id": task_id, "preview_id": preview_id, "message": "AI 选片预览已启动。"}
 
 
+@app.post("/api/preview/selection/save")
+def save_preview_selection(payload: PreviewSelectionPayload) -> dict[str, Any]:
+    preview_id = payload.preview_id.strip()
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="请先生成 AI 选片预览。")
+    preview = _get_preview(preview_id)
+    if not preview:
+        raise HTTPException(status_code=404, detail="没有找到这次 AI 选片预览，请重新生成。")
+    if preview.get("status") != "ready":
+        raise HTTPException(status_code=400, detail="AI 选片预览还没有完成，请稍后再试。")
+    scope = "mix" if payload.scope == "mix" or preview.get("scope") == "mix" else "smart"
+    draft = _normalize_preview_selection_draft(
+        preview,
+        scope,
+        payload.selected_indices,
+        payload.selected_segments,
+        order=payload.order,
+        updated_at=payload.updated_at,
+    )
+    _store_preview(preview_id, selection_draft=draft)
+    return {"ok": True, "selection_draft": draft}
+
+
 @app.get("/api/smart-cut/preview/latest")
 def get_latest_smart_preview() -> dict[str, Any]:
     return _preview_public(_latest_preview("smart-cut"))
@@ -3947,6 +5008,11 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="AI 选片预览还没有完成，请稍后再试。")
     if not preview.get("raw_clips"):
         raise HTTPException(status_code=400, detail="这次预览没有可用片段，请重新生成。")
+    draft = _preview_selection_draft(preview)
+    if not payload.selected_indices and isinstance(draft.get("selected_indices"), list):
+        payload.selected_indices = list(draft.get("selected_indices") or [])
+    if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
+        payload.selected_segments = dict(draft.get("selected_segments") or {})
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再成片。")
     clip_count = len(preview.get("raw_clips") or [])
@@ -3954,6 +5020,7 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再成片。")
     payload.selected_indices = selected
+    _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments)
     task_id = _new_task("smart-cut", "预览成片")
     threading.Thread(target=_run_smart_cut_from_preview, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "预览成片任务已启动。"}
@@ -4021,6 +5088,19 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="混剪 AI 选片预览尚未完成。")
     if not preview.get("raw_clips"):
         raise HTTPException(status_code=400, detail="混剪 AI 选片预览里没有可用片段。")
+    draft = _preview_selection_draft(preview)
+    if not payload.selected_indices and isinstance(draft.get("selected_indices"), list):
+        payload.selected_indices = list(draft.get("selected_indices") or [])
+    if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
+        payload.selected_segments = dict(draft.get("selected_segments") or {})
+    if not payload.selected_indices:
+        raise HTTPException(status_code=400, detail="请至少保留一个片段再混剪。")
+    clip_count = len(preview.get("raw_clips") or [])
+    selected = [int(index) for index in payload.selected_indices if 0 <= int(index) < clip_count]
+    if not selected:
+        raise HTTPException(status_code=400, detail="请至少保留一个有效片段再混剪。")
+    payload.selected_indices = selected
+    _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments)
     task_id = _new_task("mix", "预览混剪成片")
     threading.Thread(target=_run_mix_from_preview, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "预览混剪任务已启动。"}
@@ -4081,9 +5161,10 @@ def start_product_scan_read(payload: ProductScanPayload) -> dict[str, Any]:
 @app.post("/api/product-scan/start")
 def start_product_scan(payload: ProductScanPayload) -> dict[str, Any]:
     _raise_preflight_errors("product-scan", payload)
-    task_id = _new_task("product-scan", "单品扫描")
+    task_id = _new_task("product-scan", "单品分割")
+    _set_task(task_id, message="分割中")
     threading.Thread(target=_run_product_scan, args=(task_id, payload), daemon=True).start()
-    return {"ok": True, "task_id": task_id, "message": "单品扫描任务已启动。"}
+    return {"ok": True, "task_id": task_id, "message": "分割中"}
 
 
 @app.post("/api/dedup/start")

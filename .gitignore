@@ -44,6 +44,7 @@ web_client/web_server.*.log
 web_client/__pycache__/
 
 # Backups and scratch scripts kept out of the clean source tree
+.codex_backups/
 *.bak
 *.before_*
 *.bak*
@@ -59,9 +60,14 @@ app/_*.py
 app/clip_tuple_check.py
 
 # Do not publish local licensing/server tooling or third-party webhook secrets
+deploy/
+packaging_smoke/
 license_generator.py
 updater.py
 version.json
 app/license_generator.py
 app/license_server.py
+app/license_feishu_backend.py
+app/license_stats_store.py
 app/feishu_scheduler.py
+tools/internal_license_generator.py

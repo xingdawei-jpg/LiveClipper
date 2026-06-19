@@ -19,6 +19,7 @@ import glob
 import random
 import math
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,6 +31,111 @@ _hw_encoder = None
 _hw_fallback = False  # 硬件编码回退标志
 _sw_encoder_checked = False
 _sw_encoder_args = None
+_ACTIVE_PROCS = {}
+_ACTIVE_PROCS_LOCK = threading.Lock()
+
+
+def _register_process(proc, cancel_event=None):
+    if not proc:
+        return proc
+    with _ACTIVE_PROCS_LOCK:
+        _ACTIVE_PROCS[proc] = cancel_event
+    return proc
+
+
+def _unregister_process(proc):
+    if not proc:
+        return
+    with _ACTIVE_PROCS_LOCK:
+        _ACTIVE_PROCS.pop(proc, None)
+
+
+def _associate_process_cancel_event(proc, cancel_event=None):
+    if not proc or cancel_event is None:
+        return
+    with _ACTIVE_PROCS_LOCK:
+        if proc in _ACTIVE_PROCS:
+            _ACTIVE_PROCS[proc] = cancel_event
+
+
+def _terminate_process(proc):
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=globals().get("_NO_WINDOW", 0),
+            )
+        else:
+            proc.terminate()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def cancel_active_processes(cancel_event=None):
+    with _ACTIVE_PROCS_LOCK:
+        items = list(_ACTIVE_PROCS.items())
+    stopped = 0
+    for proc, proc_cancel_event in items:
+        if cancel_event is not None and proc_cancel_event is not cancel_event:
+            continue
+        if proc and proc.poll() is None:
+            _terminate_process(proc)
+            stopped += 1
+    return stopped
+
+
+def _wait_process(proc, timeout=None, cancel_event=None, poll_interval=0.2):
+    _associate_process_cancel_event(proc, cancel_event)
+    deadline = time.time() + timeout if timeout else None
+    try:
+        while True:
+            if cancel_event and cancel_event.is_set():
+                _terminate_process(proc)
+                raise RuntimeError("cancelled")
+            try:
+                rc = proc.wait(timeout=poll_interval)
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                return rc
+            except subprocess.TimeoutExpired:
+                if deadline and time.time() >= deadline:
+                    raise
+    finally:
+        _unregister_process(proc)
+
+
+def _communicate_process(proc, timeout=None, cancel_event=None, poll_interval=0.2):
+    _associate_process_cancel_event(proc, cancel_event)
+    deadline = time.time() + timeout if timeout else None
+    try:
+        while True:
+            if cancel_event and cancel_event.is_set():
+                _terminate_process(proc)
+                raise RuntimeError("cancelled")
+            try:
+                result = proc.communicate(timeout=poll_interval)
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                return result
+            except subprocess.TimeoutExpired:
+                if deadline and time.time() >= deadline:
+                    raise
+    finally:
+        _unregister_process(proc)
+
+
+def _clip_preview_exact(clip):
+    if not isinstance(clip, (list, tuple)):
+        return False
+    return any(isinstance(item, dict) and item.get("preview_exact") for item in clip)
 
 
 def _get_video_encoder():
@@ -173,7 +279,7 @@ def _command_uses_hardware_encoder(cmd):
     return any(isinstance(arg, str) and arg.startswith("h264_") for arg in (cmd or []))
 
 
-def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, output_path, software_args=None):
+def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, output_path, software_args=None, cancel_event=None):
     """Run FFmpeg once, then retry with software encoding if the hardware encoder fails."""
     global _hw_fallback
     try:
@@ -181,11 +287,11 @@ def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, outpu
             os.remove(output_path)
     except Exception:
         pass
-    proc = subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW)
+    proc = _register_process(subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW))
     try:
-        _, stderr_data = proc.communicate(timeout=timeout)
+        _, stderr_data = _communicate_process(proc, timeout=timeout, cancel_event=cancel_event)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _terminate_process(proc)
         proc.communicate()
         raise
     ok = proc.returncode == 0 and (not output_path or (os.path.exists(output_path) and os.path.getsize(output_path) > 1000))
@@ -203,11 +309,11 @@ def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, outpu
         except Exception:
             pass
         retry_cmd = _with_software_encoder(cmd, sw_args)
-        proc2 = subprocess.Popen(retry_cmd, **popen_kw, creationflags=_NO_WINDOW)
+        proc2 = _register_process(subprocess.Popen(retry_cmd, **popen_kw, creationflags=_NO_WINDOW))
         try:
-            _, stderr_retry = proc2.communicate(timeout=timeout)
+            _, stderr_retry = _communicate_process(proc2, timeout=timeout, cancel_event=cancel_event)
         except subprocess.TimeoutExpired:
-            proc2.kill()
+            _terminate_process(proc2)
             proc2.communicate()
             raise
         ok2 = proc2.returncode == 0 and (not output_path or (os.path.exists(output_path) and os.path.getsize(output_path) > 1000))
@@ -321,10 +427,13 @@ def _is_ts_like_video(video_path):
     return os.path.splitext(str(video_path or ""))[1].lower() in {".ts", ".mts", ".m2ts"}
 
 
-def _append_seek_input_args(cmd, video_path, start):
+def _append_seek_input_args(cmd, video_path, start, accurate=False):
     if _is_ts_like_video(video_path):
         cmd += ["-fflags", "+genpts"]
-    cmd += ["-ss", f"{float(start):.3f}", "-i", video_path]
+    if accurate:
+        cmd += ["-i", video_path, "-ss", f"{float(start):.3f}"]
+    else:
+        cmd += ["-ss", f"{float(start):.3f}", "-i", video_path]
     return cmd
 
 
@@ -1616,7 +1725,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                         _p2 = subprocess.Popen(_ext_cmd, **_pk2, creationflags=_NO_WINDOW)
                         _p2.wait(timeout=120)
                         if _p2.returncode == 0 and _os2.path.exists(_wav2):
-                            _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
+                            _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, region=_cfg2.get("volc_region", "cn-beijing"), log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
                             if _segs2:
                                 # 生成 SRT 文件
                                 _srt_lines = []
@@ -1968,22 +2077,33 @@ def process_video(video_path, srt_path=None, output_path=None,
     try:
         _clip_starts = []
         _clip_ends = []
+        _clip_cut_maps = []
         for clip_idx, clip in enumerate(ordered_clips):
             c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
+            _orig_start, _orig_end = float(start), float(end)
+            _preview_exact = _clip_preview_exact(clip)
+            _preview_meta = next((item for item in clip if isinstance(item, dict) and item.get("preview_exact")), {}) if isinstance(clip, (list, tuple)) else {}
             _log(f"[T] [{time.strftime('%H:%M:%S')}] loop clip_idx={clip_idx}")
             if _cancelled():
                 _log("已取消，跳过剩余切割。"); break
-            _log(f"切割 [{clip_idx+1}/{total_clips}] {c_type} ({start:.1f}s-{end:.1f}s)...")
+            _preview_note = ""
+            if _preview_meta:
+                try:
+                    _parent = _preview_meta.get("preview_parent_index")
+                    _group_i = int(_preview_meta.get("preview_group_index", 0) or 0) + 1
+                    _group_n = int(_preview_meta.get("preview_group_count", 1) or 1)
+                    _segs = [int(v) + 1 for v in (_preview_meta.get("selected_segment_indices") or [])]
+                    _preview_note = f" 父片段{_parent} 子句{_segs} 组{_group_i}/{_group_n}"
+                except Exception:
+                    _preview_note = " 精确子句"
+            _log(f"切割 [{clip_idx+1}/{total_clips}] {c_type}{_preview_note} ({start:.1f}s-{end:.1f}s)...")
             temp_file = os.path.join(temp_dir, f"clip_{clip_idx:02d}.mp4")
-            _clip_starts.append(start)
-            _clip_ends.append(end)
-
             # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
             end_buf = 0
             # [v9.6] 所有片段SRT边界对齐：防止说半句话
             # 找到start/end所在的SRT条目→对齐到该条目边界；口播长句允许适度补尾。
-            if _srt_boundaries:
+            if _srt_boundaries and not _preview_exact:
                 start_srt, end_srt = None, None
                 for _ts, _te in _srt_boundaries:
                     if _ts <= end <= _te:
@@ -1994,7 +2114,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     end = end_srt
                 if start_srt and start - start_srt <= 3.0:
                     start = start_srt
-            if _srt_segments_for_cut and (clip_idx == total_clips - 1 or str(c_type).lower() in ("close", "cta", "call_to_action")):
+            if (not _preview_exact) and _srt_segments_for_cut and (clip_idx == total_clips - 1 or str(c_type).lower() in ("close", "cta", "call_to_action")):
                 try:
                     for _si, _seg in enumerate(_srt_segments_for_cut):
                         _ts = float(_seg.get("start", 0))
@@ -2023,6 +2143,20 @@ def process_video(video_path, srt_path=None, output_path=None,
                     continue
 
             # [v9.2] 切割编码模式 + Smart Crop + mirror
+            if _preview_exact:
+                _shared_boundary_changed = False
+            else:
+                start, end, _shared_boundary_changed = _apply_srt_cut_alignment(
+                    c_type, start, end, _srt_segments_for_cut, clip_idx, total_clips
+                )
+            if end > video_duration:
+                end = video_duration - 0.1
+                if end <= start:
+                    continue
+            _actual_clip_text = _srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or "")
+            if abs(start - _orig_start) > 0.01 or abs(end - _orig_end) > 0.01:
+                _log(f"实际切割 [{clip_idx+1}/{total_clips}] {_orig_start:.1f}-{_orig_end:.1f}s -> {start:.1f}-{end:.1f}s | {_actual_clip_text[:120]}")
+
             mirror_vf = ""
             if _mirror_enabled and random.random() < 0.5:
                 mirror_vf = "hflip"
@@ -2051,8 +2185,8 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log("[T] VF: " + combined_vf[:200])
 
             cmd = [ffmpeg, "-y"]
-            # 快速 seek：-ss 放在 -i 前面。放在 -i 后会从片头解码到目标点，长视频切割会明显变慢。
-            _append_seek_input_args(cmd, video_path, start)
+            # 精确预览子句优先准确 seek；普通整段仍用快速 seek 控制耗时。
+            _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
             cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
@@ -2067,8 +2201,8 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             try:
                 popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
-                rc = proc.wait(timeout=300)
+                proc = _register_process(subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW))
+                rc = _wait_process(proc, timeout=300, cancel_event=cancel_event)
                 _log(f"[T] [{time.strftime('%H:%M:%S')}] rc={rc}")
                 # 失败时重新运行一次捕获 stderr 看错误
                 if rc != 0:
@@ -2082,10 +2216,15 @@ def process_video(video_path, srt_path=None, output_path=None,
                     except Exception:
                         pass
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _terminate_process(proc)
                 _log(f"TIMEOUT [{c_type}] {start:.2f}s-{end:.2f}s")
                 continue
             except Exception as e:
+                if _cancelled():
+                    _log("已取消。")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    DEDUP_PRESET = old_preset
+                    return False
                 _log(f"[T] subprocess error: {type(e).__name__}: {e}")
                 continue
 
@@ -2093,6 +2232,9 @@ def process_video(video_path, srt_path=None, output_path=None,
                 size_kb = os.path.getsize(temp_file) / 1024
                 _log(f"OK [{c_type}] {start:.1f}s-{end:.1f}s -> {size_kb:.0f}KB")
                 temp_files.append(temp_file)
+                _clip_starts.append(start)
+                _clip_ends.append(end)
+                _clip_cut_maps.append({"start": start, "end": end, "text": _actual_clip_text, "type": c_type})
                 _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
                 success_count += 1
             else:
@@ -2107,7 +2249,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _hw_fallback = True
                     # 重新构建命令，用软件编码替换硬件编码
                     cmd = [ffmpeg, "-y"]
-                    _append_seek_input_args(cmd, video_path, start)
+                    _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
                     cmd += ["-t", f"{clip_duration:.3f}"]
                     cmd += ["-fflags", "+genpts"]
                     cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
@@ -2119,11 +2261,14 @@ def process_video(video_path, srt_path=None, output_path=None,
                     cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
                     cmd += [temp_file]
                     try:
-                        proc = subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW)
-                        rc2 = proc.wait(timeout=300)
+                        proc = _register_process(subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW))
+                        rc2 = _wait_process(proc, timeout=300, cancel_event=cancel_event)
                         if rc2 == 0 and os.path.exists(temp_file) and os.path.getsize(temp_file) > 1000:
                             _log(f"OK [{c_type}] {_sw_name} 软件编码成功")
                             temp_files.append(temp_file)
+                            _clip_starts.append(start)
+                            _clip_ends.append(end)
+                            _clip_cut_maps.append({"start": start, "end": end, "text": _actual_clip_text, "type": c_type})
                             _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
                             success_count += 1
                         else:
@@ -2202,16 +2347,26 @@ def process_video(video_path, srt_path=None, output_path=None,
     ]
 
     try:
-        proc = subprocess.Popen(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
-        _, stderr_data = proc.communicate(timeout=120)
+        proc = _register_process(subprocess.Popen(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW))
+        _, stderr_data = _communicate_process(proc, timeout=120, cancel_event=cancel_event)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _terminate_process(proc)
         stderr_out = proc.communicate()[0]
         _log("拼接超时！(>120s)")
         if stderr_out:
             for line in stderr_out.strip().split("\n")[-5:]:
                 if line.strip(): _log(f"  ffmpeg: {line.strip()}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if auto_srt and temp_srt:
+            from stt import cleanup_srt; cleanup_srt(temp_srt)
+        DEDUP_PRESET = old_preset
+        return False
+    except Exception as exc:
+        if _cancelled():
+            _log("已取消。")
+        else:
+            _log(f"拼接失败: {exc}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         if auto_srt and temp_srt:
             from stt import cleanup_srt; cleanup_srt(temp_srt)
@@ -2247,6 +2402,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"整体去重 ({dedup_preset})...")
 
     nosub_file = os.path.join(temp_dir, "nosub.mp4")
+    _subtitle_speed_factor = 1.0
 
     if dedup_preset == "none":
         import shutil as _shutil
@@ -2254,6 +2410,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     else:
         _log(f"去重步骤使用分辨率: {w}x{h}，去重预设: {dedup_preset}")
         dedup = build_dedup_filters(w, h, 0, mirror_enabled=_mirror_enabled)
+        _planned_subtitle_speed = _dedup_speed_factor(dedup)
         # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
@@ -2310,9 +2467,9 @@ def process_video(video_path, srt_path=None, output_path=None,
         dedup_cmd += [nosub_file]
 
         try:
-            proc = subprocess.Popen(dedup_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
-            _, stderr_data = proc.communicate(timeout=600)
+            proc = _register_process(subprocess.Popen(dedup_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW))
+            _, stderr_data = _communicate_process(proc, timeout=600, cancel_event=cancel_event)
             if proc.returncode != 0:
                 _log(f"去重FFmpeg返回 {proc.returncode}")
                 _log(f"去重stderr: {stderr_data[-300:]}")
@@ -2324,10 +2481,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _log(f"硬件编码不可用，已自动改用 {_sw_name} 重新执行去重...")
                     cmd2 = _with_software_encoder(dedup_cmd)
                     try:
-                        p2 = subprocess.Popen(cmd2, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                            creationflags=_NO_WINDOW)
-                        _, _ = p2.communicate(timeout=600)
+                        p2 = _register_process(subprocess.Popen(cmd2, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                            creationflags=_NO_WINDOW))
+                        _, _ = _communicate_process(p2, timeout=600, cancel_event=cancel_event)
                         if p2.returncode == 0 and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 1000:
+                            _subtitle_speed_factor = _planned_subtitle_speed
                             _log(f"  去重已用 {_sw_name} 完成，去重效果已保留")
                         else:
                             _log(f"  {_sw_name} 去重重试失败，使用未去重拼接片继续输出")
@@ -2339,10 +2497,23 @@ def process_video(video_path, srt_path=None, output_path=None,
                 else:
                     import shutil as _shutil
                     _shutil.copy2(raw_file, nosub_file)
+            else:
+                _subtitle_speed_factor = _planned_subtitle_speed
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _terminate_process(proc)
             proc.communicate()
             _log("去重超时，直接输出原始拼接...")
+            import shutil as _shutil
+            _shutil.copy2(raw_file, nosub_file)
+        except Exception as exc:
+            if _cancelled():
+                _log("已取消。")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                if auto_srt and temp_srt:
+                    from stt import cleanup_srt; cleanup_srt(temp_srt)
+                DEDUP_PRESET = old_preset
+                return False
+            _log(f"去重异常，直接输出原始拼接: {exc}")
             import shutil as _shutil
             _shutil.copy2(raw_file, nosub_file)
 
@@ -2375,7 +2546,22 @@ def process_video(video_path, srt_path=None, output_path=None,
         has_pip = False
     _log(f"字幕={will_subtitle}, 画中画={has_pip} ({pip_path})")
     if will_subtitle and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 10000:
-        _add_subtitles_final(nosub_file, output_path, w, h, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
+        _mapped_subtitles = _build_mapped_subtitle_segments(
+            locals().get("_clip_cut_maps", []),
+            _srt_segments_for_cut,
+            _subtitle_speed_factor,
+        )
+        if _mapped_subtitles:
+            _log(f"字幕时间轴: 源SRT映射 {len(_mapped_subtitles)} 条，变速倍率 {_subtitle_speed_factor:.3f}x")
+            _mapped_ok = _burn_mapped_subtitles_final(
+                nosub_file, output_path, w, h, temp_dir, _log, _mapped_subtitles,
+                pip_path, pip_size, pip_opacity, pip_pos,
+            )
+            if not _mapped_ok:
+                _add_subtitles_final(nosub_file, output_path, w, h, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
+        else:
+            _log("字幕时间轴: 源SRT映射不可用，回退成片语音识别。")
+            _add_subtitles_final(nosub_file, output_path, w, h, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
     elif has_pip and os.path.exists(nosub_file):
         # auto模式用视频本身做画中画素材
         _effective_pip = video_path if pip_path == "auto" else pip_path
@@ -2479,6 +2665,177 @@ def _parse_srt_to_segments(srt_text):
     return segments
 
 
+def _srt_text_for_range(srt_segments, start, end, min_overlap=0.04):
+    """Return joined SRT text that is actually covered by a source time range."""
+    pieces = []
+    try:
+        start = float(start)
+        end = float(end)
+    except Exception:
+        return ""
+    if end <= start:
+        return ""
+    for seg in srt_segments or []:
+        try:
+            seg_start = float(seg.get("start", 0))
+            seg_end = float(seg.get("end", seg_start))
+        except Exception:
+            continue
+        overlap_start = max(start, seg_start)
+        overlap_end = min(end, seg_end)
+        if overlap_end - overlap_start < min_overlap:
+            continue
+        text = str(seg.get("text", "")).strip()
+        if text:
+            pieces.append(text)
+    return "".join(pieces).strip()
+
+
+def _dedup_speed_factor(dedup):
+    """Extract the effective final speed multiplier from dedup filters."""
+    if not dedup:
+        return 1.0
+    haystack = " ".join([
+        ",".join(str(x) for x in dedup.get("applied", []) or []),
+        str(dedup.get("video_filters", "") or ""),
+        str(dedup.get("audio_filters", "") or ""),
+    ])
+    for pattern in (r"speed\((\d+(?:\.\d+)?)x\)", r"setpts=PTS/(\d+(?:\.\d+)?)", r"atempo=(\d+(?:\.\d+)?)"):
+        m = re.search(pattern, haystack)
+        if not m:
+            continue
+        try:
+            speed = float(m.group(1))
+            if 0.05 <= speed <= 8.0:
+                return speed
+        except Exception:
+            pass
+    return 1.0
+
+
+def _build_mapped_subtitle_segments(cut_maps, srt_segments, speed_factor=1.0):
+    """Map source SRT segments through actual cut ranges into final output time."""
+    try:
+        speed_factor = float(speed_factor or 1.0)
+    except Exception:
+        speed_factor = 1.0
+    if speed_factor <= 0:
+        speed_factor = 1.0
+
+    mapped = []
+    cursor = 0.0
+    for item in cut_maps or []:
+        try:
+            clip_start = float(item.get("start", 0))
+            clip_end = float(item.get("end", clip_start))
+        except Exception:
+            continue
+        clip_duration = max(0.0, clip_end - clip_start)
+        if clip_duration <= 0:
+            continue
+
+        added_for_clip = 0
+        for seg in srt_segments or []:
+            try:
+                seg_start = float(seg.get("start", 0))
+                seg_end = float(seg.get("end", seg_start))
+            except Exception:
+                continue
+            overlap_start = max(clip_start, seg_start)
+            overlap_end = min(clip_end, seg_end)
+            if overlap_end - overlap_start < 0.04:
+                continue
+            text = str(seg.get("text", "")).strip()
+            if not text:
+                continue
+            out_start = (cursor + (overlap_start - clip_start)) / speed_factor
+            out_end = (cursor + (overlap_end - clip_start)) / speed_factor
+            if out_end - out_start >= 0.04:
+                mapped.append({"start": out_start, "end": out_end, "text": text})
+                added_for_clip += 1
+
+        if added_for_clip == 0:
+            text = str(item.get("text", "")).strip()
+            if text:
+                mapped.append({
+                    "start": cursor / speed_factor,
+                    "end": (cursor + clip_duration) / speed_factor,
+                    "text": text,
+                })
+        cursor += clip_duration
+    return mapped
+
+
+def _cut_needs_next_sentence(text):
+    text = str(text or "").strip().rstrip("。！？!?，,、；;：:")
+    if not text:
+        return False
+    return text.endswith((
+        "然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实",
+        "的话", "你看", "我觉得", "感觉", "给你们", "这个", "这款", "这件",
+        "它是", "它会", "来讲的话", "一点", "一点点", "有没有发现",
+        "你去", "去", "你想象一下", "想象一下"
+    ))
+
+
+def _cut_starts_as_followup(text):
+    text = str(text or "").strip()
+    return text.startswith((
+        "然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实",
+        "它", "这个", "这款", "这件", "你看"
+    ))
+
+
+def _apply_srt_cut_alignment(c_type, start, end, srt_segments, clip_idx=0, total_clips=1):
+    """Apply the same SRT boundary alignment used by final cutting."""
+    try:
+        start = float(start)
+        end = float(end)
+    except Exception:
+        return start, end, False
+    original = (start, end)
+    boundaries = []
+    for seg in srt_segments or []:
+        try:
+            boundaries.append((float(seg.get("start", 0)), float(seg.get("end", 0))))
+        except Exception:
+            continue
+
+    if boundaries:
+        start_srt, end_srt = None, None
+        for seg_start, seg_end in boundaries:
+            if seg_start <= end <= seg_end:
+                end_srt = seg_end
+            if seg_start <= start <= seg_end:
+                start_srt = seg_start
+        if end_srt and end_srt - end <= 8.0:
+            end = end_srt
+        if start_srt and start - start_srt <= 3.0:
+            start = start_srt
+
+    c_type_text = str(c_type or "").lower()
+    is_tail = clip_idx == total_clips - 1 or c_type_text in ("close", "cta", "call_to_action")
+    if srt_segments and is_tail:
+        try:
+            for seg_idx, seg in enumerate(srt_segments):
+                seg_start = float(seg.get("start", 0))
+                seg_end = float(seg.get("end", seg_start))
+                if abs(seg_end - end) <= 0.6 and seg_idx + 1 < len(srt_segments):
+                    next_seg = srt_segments[seg_idx + 1]
+                    next_start = float(next_seg.get("start", seg_end))
+                    next_end = float(next_seg.get("end", next_start))
+                    text = str(seg.get("text", ""))
+                    next_text = str(next_seg.get("text", ""))
+                    if next_start - end <= 1.2 and next_end - start <= 14.0 and (
+                        _cut_needs_next_sentence(text) or _cut_starts_as_followup(next_text)
+                    ):
+                        end = next_end
+                    break
+        except Exception:
+            pass
+
+    return start, end, (abs(start - original[0]) > 0.01 or abs(end - original[1]) > 0.01)
+
 
 def _get_video_duration(path, ffmpeg_cmd):
     """Get video duration in seconds using ffprobe"""
@@ -2543,6 +2900,208 @@ def _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size=0.
     except Exception as e:
         _log(f"\u753b\u4e2d\u753b\u53e0\u52a0\u5f02\u5e38: {e}")
         import shutil as _shutil; _shutil.copy2(video_path, output_path)
+
+
+def _split_mapped_subtitle_text(text, max_chars=14):
+    """Split mapped subtitle text without changing the words."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not text:
+        return []
+    parts = []
+    while len(text) > max_chars:
+        cut = -1
+        for mark in "，。！？、；,.!?; ":
+            pos = text.rfind(mark, 1, max_chars + 1)
+            if pos > 0:
+                cut = pos + (0 if mark == " " else 1)
+                break
+        if cut <= 0:
+            cut = max_chars
+        chunk = text[:cut].strip()
+        if chunk:
+            parts.append(chunk)
+        text = text[cut:].strip()
+    if text:
+        parts.append(text)
+    return parts
+
+
+def _prepare_mapped_subtitle_segments(raw_segments):
+    fixed = []
+    for seg in raw_segments or []:
+        try:
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start))
+        except Exception:
+            continue
+        text = str(seg.get("text", "")).strip()
+        if not text or end <= start:
+            continue
+        fixed.append({"start": start, "end": end, "text": text})
+
+    if len(fixed) > 1:
+        fixed.sort(key=lambda item: (item["start"], item["end"]))
+        deduped = [fixed[0].copy()]
+        for seg in fixed[1:]:
+            prev = deduped[-1]
+            if seg["start"] < prev["end"]:
+                prev["end"] = seg["start"]
+            if seg["end"] > seg["start"]:
+                deduped.append(seg.copy())
+        fixed = deduped
+
+    try:
+        from config import ASR_CORRECTIONS as _asr_corrections
+    except Exception:
+        _asr_corrections = {}
+    if _asr_corrections:
+        for seg in fixed:
+            text = seg["text"]
+            for wrong, right in _asr_corrections.items():
+                if wrong in text:
+                    text = text.replace(wrong, right)
+            seg["text"] = text
+
+    split_segments = []
+    for seg in fixed:
+        parts = _split_mapped_subtitle_text(seg["text"], max_chars=14)
+        if not parts:
+            continue
+        duration = max(0.04, seg["end"] - seg["start"])
+        total_chars = sum(max(1, len(part)) for part in parts)
+        cursor = seg["start"]
+        for idx, part in enumerate(parts):
+            if idx == len(parts) - 1:
+                part_end = seg["end"]
+            else:
+                part_end = cursor + duration * (max(1, len(part)) / total_chars)
+            if part_end > cursor:
+                split_segments.append({"start": cursor, "end": part_end, "text": part})
+            cursor = part_end
+    return split_segments
+
+
+def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, subtitle_segments,
+                                 pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
+    """Burn already-timed subtitle segments. Returns True when output is created."""
+    fixed_segments = _prepare_mapped_subtitle_segments(subtitle_segments)
+    if not fixed_segments:
+        return False
+
+    ffmpeg = get_ffmpeg_cmd()
+    _log(f"字幕：使用源 SRT 映射 {len(fixed_segments)} 条，跳过成片语音识别。")
+    _log("[PROGRESS] 0.78")
+
+    try:
+        from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_PATH, IS_MAC
+
+        font_dest = os.path.join(temp_dir, "drawtext_font.ttc")
+        if os.path.exists(FONT_BOLD_PATH) and not os.path.exists(font_dest):
+            import shutil as _shutil_font
+            _shutil_font.copy2(FONT_BOLD_PATH, font_dest)
+        if os.path.exists(font_dest):
+            drawtext_font = font_dest.replace(os.sep, "/").replace(":", "\\:")
+        else:
+            drawtext_font = DRAWTEXT_FONT_PATH
+
+        sc = SUBTITLE_OVERLAY
+        font_size = sc.get("font_size", 52)
+        try:
+            from ai_clipper import load_settings as _load_subtitle_settings
+            subtitle_settings = _load_subtitle_settings()
+            font_size = max(32, min(96, int(float(subtitle_settings.get("subtitle_font_size", font_size)))))
+        except Exception:
+            pass
+        if w and w > 0:
+            font_size = max(28, int(font_size * w / 1080))
+        margin_v = sc.get("margin_v", 270) + 100
+
+        drawtext_filters = []
+        for idx, seg in enumerate(fixed_segments):
+            txt_path = os.path.join(temp_dir, f"mapped_sub_{idx:04d}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(seg["text"])
+            if IS_MAC:
+                text_file = txt_path.replace("'", "'\\''")
+            else:
+                text_file = txt_path.replace("\\", "/").replace(":", "\\:")
+            font = f"fontfile='{drawtext_font}'"
+            drawtext_filters.append(
+                f"drawtext={font}:textfile='{text_file}'"
+                f":fontsize={font_size}:fontcolor=white"
+                f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
+                f":x=(w-text_w)/2:y=h-{margin_v}"
+                f":enable='between(t\\,{seg['start']:.3f}\\,{seg['end']:.3f})'"
+            )
+
+        if not drawtext_filters:
+            return False
+        vf_chain = ",".join(drawtext_filters)
+        norm_output = output_path.replace("/", os.sep)
+        has_pip = pip_path is not None
+        pos_map = {"左上": "10:10", "右上": "W-w-10:10", "左下": "10:H-h-10", "右下": "W-w-10:H-h-10"}
+        pip_position = pos_map.get(pip_pos, "W-w-10:H-h-10")
+
+        if has_pip:
+            if pip_path and pip_path != "auto" and os.path.exists(pip_path):
+                pip_fc = f"[1:v]scale=iw*{pip_size}:ih*{pip_size},format=rgba,colorchannelmixer=aa={pip_opacity}[pip];[0:v][pip]overlay={pip_position}[with_pip]"
+                drawtext_fc = "[with_pip]" + vf_chain + ",copy[out_v]"
+                loop_n = _calc_pip_loop(video_path, pip_path, ffmpeg)
+                sub_cmd = [
+                    ffmpeg, "-y", "-i", video_path, "-stream_loop", str(loop_n), "-i", pip_path,
+                    "-filter_complex", f"{pip_fc};{drawtext_fc}",
+                    "-map", "[out_v]", "-map", "0:a",
+                ]
+            else:
+                pip_fc = f"[0:v]split[main][pip];[pip]scale=iw*{pip_size}:ih*{pip_size},format=rgba,colorchannelmixer=aa={pip_opacity}[overlay];[main][overlay]overlay={pip_position}[with_pip]"
+                drawtext_fc = "[with_pip]" + vf_chain + ",copy[out_v]"
+                sub_cmd = [
+                    ffmpeg, "-y", "-i", video_path,
+                    "-filter_complex", f"{pip_fc};{drawtext_fc}",
+                    "-map", "[out_v]", "-map", "0:a",
+                ]
+        else:
+            sub_cmd = [ffmpeg, "-y", "-i", video_path, "-vf", vf_chain]
+
+        sub_cmd += _final_vcodec_args()
+        sub_cmd += _final_audio_sync_args()
+        sub_cmd += ["-movflags", "+faststart", norm_output]
+
+        popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=True, encoding="utf-8", errors="replace")
+        if sys.platform == "win32":
+            fc_conf = os.path.join(temp_dir, "fonts.conf")
+            with open(fc_conf, "w", encoding="utf-8") as f:
+                f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig><include ignore_missing="yes"/></fontconfig>\n')
+            fc_dtd = os.path.join(temp_dir, "fonts.dtd")
+            if not os.path.exists(fc_dtd):
+                with open(fc_dtd, "w", encoding="utf-8") as f:
+                    f.write('<!ELEMENT fontconfig (dir|cache|match)*>\n')
+                    f.write('<!ELEMENT dir (#PCDATA)>\n')
+                    f.write('<!ELEMENT cache (#PCDATA)>\n')
+                    f.write('<!ELEMENT match (test|edit)*>\n')
+                    f.write('<!ELEMENT test (#PCDATA)>\n')
+                    f.write('<!ELEMENT edit (#PCDATA)>\n')
+            popen_kw["env"] = dict(os.environ)
+            popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
+
+        ok, rc, stderr_data = _run_ffmpeg_with_hw_fallback(
+            sub_cmd, popen_kw, 450, _log, "源SRT字幕烧录", output_path,
+            software_args=_final_software_vcodec_args()
+        )
+        if ok:
+            _log("源 SRT 映射字幕烧录成功。")
+            _log("[PROGRESS] 0.9")
+            return True
+        _log(f"源 SRT 映射字幕烧录失败，回退成片语音识别。exit={rc}")
+        if stderr_data:
+            for line in stderr_data.strip().split("\n")[-5:]:
+                if line.strip():
+                    _log(f"  ffmpeg: {line.strip()}")
+        return False
+    except Exception as exc:
+        _log(f"源 SRT 映射字幕异常，回退成片语音识别: {exc}")
+        return False
 
 
 def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
@@ -2652,7 +3211,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             from volcengine_asr import volcengine_asr
             v_bucket = cfg.get("volc_bucket", "livec")
             segs = volcengine_asr(wav_path, v_app_id, v_token, v_tos_ak, v_tos_sk,
-                                 bucket=v_bucket, log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
+                                 bucket=v_bucket, region=cfg.get("volc_region", "cn-beijing"), log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
             if segs:
                 raw_segments = segs
                 volcengine_success = True
@@ -3073,9 +3632,17 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _drawtext_font = DRAWTEXT_FONT_PATH  # fallback
     sc = SUBTITLE_OVERLAY
     font_size = sc.get("font_size", 52)
+    try:
+        from ai_clipper import load_settings as _load_subtitle_settings
+        _subtitle_settings = _load_subtitle_settings()
+        font_size = max(32, min(96, int(float(_subtitle_settings.get("subtitle_font_size", font_size)))))
+    except Exception:
+        pass
+    _base_font_size = font_size
     # 根据视频宽度自适应缩放字号（基准1080px）
     if w and w > 0:
         font_size = max(28, int(font_size * w / 1080))
+    _log(f"字幕字号: {_base_font_size}（输出适配后 {font_size}）")
     outline_w = sc.get("outline_width", 4)
     margin_v = sc.get("margin_v", 270) + 100  # 上移100
 
@@ -3539,6 +4106,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                          _cfg4.get("volc_tos_ak", ""),
                                          _cfg4.get("volc_tos_sk", ""),
                                          bucket=_cfg4.get("volc_bucket", "livec"),
+                                         region=_cfg4.get("volc_region", "cn-beijing"),
                                          log_fn=_log,
                                          api_key=_cfg4.get("volc_api_key", "") or None)
                     if srts:
@@ -3776,6 +4344,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     tc = 0
     for clip in ordered_clips:
         c_type, text, start, end, score, dur = clip[:6]
+        preview_exact = _clip_preview_exact(clip)
         _src_idx = -1
         for _vi2 in range(len(video_list)):
             if f"[V{_vi2+1}]" in text:
@@ -3793,6 +4362,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             "idx": tc, "type": c_type, "text": text,
             "start": start, "end": end, "score": score,
             "duration": dur, "source": vp,
+            "preview_exact": preview_exact,
         })
         tc += 1
 
@@ -3855,6 +4425,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if isinstance(_multi_result_cache, dict):
             _multi_result_cache["clips"] = list(sorted_clips)
             _multi_result_cache["sources"] = list(video_list)
+            _multi_result_cache["srt_text"] = merged_srt
             try:
                 import ai_clipper as _ai_meta
                 _multi_result_cache["category_summary"] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
@@ -3961,10 +4532,16 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         vp = clip["source"]
         c_type = clip["type"]
         start = clip["start"]
+        preview_exact = bool(clip.get("preview_exact"))
+        if preview_exact:
+            clip = dict(clip)
+            clip["end"] = clip["end"] - 0.1
         end = clip["end"] + 0.1  # 缓冲避免尾部被切 + 0.1  # +0.1s缓冲避免语音尾部被切
 
         # 混剪每个源视频都有自己的0秒时间轴，按当前source的SRT边界补齐完整句。
         try:
+            if preview_exact:
+                raise RuntimeError("preview exact range")
             _src_entries = [e for e in _mix_srt_entries if e.get("source") == vp]
             _start_srt, _end_srt = None, None
             for _entry in _src_entries:
@@ -4036,7 +4613,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         )
 
         cmd = [ffmpeg, "-y"]
-        _append_seek_input_args(cmd, vp, start)
+        _append_seek_input_args(cmd, vp, start, accurate=preview_exact)
         cmd += ["-t", f"{duration:.3f}"]
         # 去掉最后的淡入淡出避免音频被切（原afade去掉）
         # 改用精准截断：提前0.15s开始保证帧对齐
@@ -4051,14 +4628,18 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         cmd += [out_clip]
 
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    creationflags=_NO_WINDOW)
-            rc = proc.wait(timeout=300)
+            proc = _register_process(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=_NO_WINDOW))
+            rc = _wait_process(proc, timeout=300, cancel_event=cancel_event)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _terminate_process(proc)
             _log(f"  Cut timeout: {start:.1f}s-{end:.1f}s ({duration:.1f}s)")
             continue
         except Exception as e:
+            if _cancelled():
+                _log("Cancelled.")
+                shutil.rmtree(tmp, ignore_errors=True)
+                return False
             _log(f"  Cut failed: {e}")
             continue
 
@@ -4073,7 +4654,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _log(f"  硬件编码切割失败，切换到 {_sw_name} 软件编码重试，后续片段不再尝试硬件编码。")
                 _hw_fallback = True
                 cmd = [ffmpeg, "-y"]
-                _append_seek_input_args(cmd, vp, start)
+                _append_seek_input_args(cmd, vp, start, accurate=preview_exact)
                 cmd += ["-t", f"{duration:.3f}"]
                 cmd += ["-fflags", "+genpts"]
                 cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
@@ -4085,9 +4666,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
                 cmd += [out_clip]
                 try:
-                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            creationflags=_NO_WINDOW)
-                    rc2 = proc.wait(timeout=300)
+                    proc = _register_process(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            creationflags=_NO_WINDOW))
+                    rc2 = _wait_process(proc, timeout=300, cancel_event=cancel_event)
                     if rc2 == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
                         temp_files.append(out_clip)
                         _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
@@ -4095,7 +4676,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     else:
                         _log(f"  Cut retry failed ({_sw_name}, rc={rc2})")
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _terminate_process(proc)
                     _log(f"  Cut retry timeout ({_sw_name})")
                 except Exception as e:
                     _log(f"  Cut retry failed ({_sw_name}): {e}")
@@ -4186,19 +4767,23 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             raw_concat,
         ]
         try:
-            proc = subprocess.Popen(copy_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            proc = _register_process(subprocess.Popen(copy_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     text=True, encoding="utf-8", errors="replace",
-                                    creationflags=_NO_WINDOW)
-            _, stderr_data = proc.communicate(timeout=180)
+                                    creationflags=_NO_WINDOW))
+            _, stderr_data = _communicate_process(proc, timeout=180, cancel_event=cancel_event)
             concat_copy_ok = proc.returncode == 0 and os.path.exists(raw_concat) and os.path.getsize(raw_concat) > 1000
             if concat_copy_ok:
                 _log("Concat copy: 无损拼接成功，跳过拼接重编码")
             else:
                 _log("Concat copy: 无损拼接失败，回退兼容拼接")
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _terminate_process(proc)
             _log("Concat copy: 超时，回退兼容拼接")
         except Exception as e:
+            if _cancelled():
+                _log("Cancelled.")
+                shutil.rmtree(tmp, ignore_errors=True)
+                return False
             _log(f"Concat copy: {e}，回退兼容拼接")
 
     if not concat_copy_ok:
@@ -4253,6 +4838,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 "混剪拼接",
                 raw_concat,
                 software_args=_intermediate_software_vcodec_args(),
+                cancel_event=cancel_event,
             )
         except subprocess.TimeoutExpired:
             _log("Concat timeout!")
@@ -4322,6 +4908,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 "混剪去重",
                 nosub_file,
                 software_args=_final_software_vcodec_args(),
+                cancel_event=cancel_event,
             )
             if not ok:
                 _log(f"Dedup failed (rc={rc}), using raw")

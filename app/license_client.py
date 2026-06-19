@@ -1245,6 +1245,12 @@ def activate_with_code(code):
         "activated_at": activated_at,
         "machine_id": current_mid,
     })
+    _set_activation_cache(_token_activation_result(_load_cache()) or {
+        "activated": True,
+        "plan_name": result["plan_name"],
+        "days_left": max(0, (expires_at - int(time.time())) // 86400),
+        "expires_date": expires_date,
+    })
 
     # Step 6: 防盗2.0 FC注册（优先）
     plan_days = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)
@@ -1311,6 +1317,7 @@ def deactivate_device(force=False):
 
     # 清空本地
     _save_cache({"trial_uses_left": 0, "previously_activated": True})
+    _set_activation_cache({"need_activate": True, "reason": "设备已解绑，请重新激活。"})
     lic_path = os.path.join(_get_data_path(), LICENSE_FILE)
     try:
         if os.path.exists(lic_path):

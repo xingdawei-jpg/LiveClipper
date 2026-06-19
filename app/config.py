@@ -4,6 +4,7 @@
 
 # 用户数据目录（更新不丢失配置）
 import os
+import re
 USER_DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper')
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, 'ai_settings.json')
 
@@ -196,6 +197,39 @@ FORBIDDEN_PHRASES = [
     "购物车", "一号链接", "二号链接", "上链接", "链接拍",
     "321上车", "上车了", "刷新", "去拍", "赶紧拍",
 ]
+
+STRICT_FORBIDDEN_PHRASES = [
+    # 材质/成分类
+    "纯棉", "真丝", "真皮", "牛皮", "羊毛", "羊绒", "桑蚕丝", "蚕丝", "羽绒服", "兔绒毛", "丝绸",
+    # 防晒/检测/数值承诺
+    "防晒值", "防晒值upf+", "UPF", "upf", "UPF+", "upf+", "紫外线隔热99%", "紫外线隔热", "隔热99%",
+    # 等级/材质安全/功能宣称
+    "食品级", "母婴级", "304", "316", "纳米", "抗菌", "抑菌", "除菌", "杀菌", "灭菌", "无菌", "防菌", "消菌", "菌",
+    # 药品/农药/绝对化/销量
+    "药方", "杀虫剂喷雾", "杀虫剂", "高级", "首选", "全网销量第一", "销量50万+", "销量50万",
+    # 严重违禁与功效类
+    "丰胸", "增高", "减肥", "壮阳", "功效", "疗效", "药效", "治疗", "治愈", "改善", "调理", "祛湿", "排毒",
+    # 迷信宗教类
+    "开运", "转运", "招财", "辟邪", "风水", "佛牌", "算命", "占卜", "改命", "消灾", "祈福", "迷信", "宗教",
+]
+
+def forbidden_phrase_list(extra_phrases=None):
+    words = []
+    if extra_phrases:
+        words.extend(str(item).strip() for item in extra_phrases if str(item).strip())
+    words.extend(STRICT_FORBIDDEN_PHRASES)
+    return list(dict.fromkeys(words))
+
+
+def sanitize_forbidden_title(text, extra_phrases=None, fallback="未命名商品"):
+    value = str(text or "")
+    for word in sorted(forbidden_phrase_list(extra_phrases), key=len, reverse=True):
+        if word:
+            value = value.replace(word, "")
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[_\-\s]{2,}", " ", value)
+    value = value.strip(" _-，,。.;；:：|/\\")
+    return value or fallback
 # ============================================================
 # 三、文案优化配置
 # ============================================================

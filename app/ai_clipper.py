@@ -618,6 +618,33 @@ def _friendly_msg(err_str):
 # ============================================================
 # 设置管理
 # ============================================================
+DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+LEGACY_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
+
+
+def _normalize_ai_model_defaults(settings):
+    data = dict(settings or {})
+    api_key = str(data.get("api_key") or "").strip()
+    base_url = str(data.get("base_url") or "").strip().rstrip("/")
+    model = str(data.get("model") or "").strip()
+
+    if not base_url:
+        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
+    if not model:
+        data["model"] = DEEPSEEK_DEFAULT_MODEL
+
+    if (
+        not api_key
+        and base_url == LEGACY_DOUBAO_BASE_URL
+        and model == LEGACY_DOUBAO_MODEL
+    ):
+        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
+        data["model"] = DEEPSEEK_DEFAULT_MODEL
+    return data
+
+
 def _get_base_path():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -629,76 +656,133 @@ def load_settings():
         from config import SETTINGS_PATH as _user_path
         if os.path.exists(_user_path):
             with open(_user_path, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
+                return _normalize_ai_model_defaults(json.load(f))
     except Exception:
         pass
     path = os.path.join(_get_base_path(), "ai_settings.json")
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
+            return _normalize_ai_model_defaults(json.load(f))
     except Exception:
         return _default_settings()
 
-def load_keywords():
-    """加载用户自定义关键词（从keywords.json），合并到config默认值"""
-    import os, json
-    from config import CLIP_KEYWORDS, FORBIDDEN_PHRASES, FILLER_WORDS, NEGATIVE_SIGNALS
+def _keyword_file_paths():
+    import os
 
-    kw_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.json")
-    custom = {}
+    app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.json")
+    user_path = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "LiveClipper",
+        "keywords.json",
+    )
+    return app_path, user_path
+
+
+def _load_keyword_file(path):
+    import json
+    import os
+
     try:
-        if os.path.exists(kw_path):
-            with open(kw_path, "r", encoding="utf-8") as f:
-                custom = json.load(f)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception:
         pass
+    return {}
 
-    # 合并卖点关键词：用户自定义覆盖默认
-    merged_clip_kw = {}
-    for ct, cfg in CLIP_KEYWORDS.items():
-        if ct in custom.get("clip_keywords", {}):
-            merged_clip_kw[ct] = custom["clip_keywords"][ct]
-        else:
-            merged_clip_kw[ct] = cfg.get("keywords", [])
 
-    # 违禁词：合并（用户+默认去重）
-    default_forbidden = list(FORBIDDEN_PHRASES) if hasattr(FORBIDDEN_PHRASES, '__iter__') else []
-    custom_forbidden = custom.get("forbidden_phrases", [])
-    merged_forbidden = list(dict.fromkeys(default_forbidden + custom_forbidden))
+def _merge_keyword_files(app_data, user_data):
+    """Compatibility helper: user-level keys replace app template keys."""
+    merged = {}
+    if isinstance(app_data, dict):
+        merged.update(app_data)
+    if isinstance(user_data, dict):
+        for key, value in user_data.items():
+            merged[key] = value
+    return merged
 
-    # 废话词：用户自定义覆盖默认
-    default_filler = list(FILLER_WORDS) if hasattr(FILLER_WORDS, '__iter__') else []
-    merged_filler = list(dict.fromkeys(default_filler + custom.get("filler_words", [])))
 
-    # Hook爆点词：从hook关键词 + 额外爆点词库
+def _clean_keyword_list(value):
+    if not isinstance(value, list):
+        return []
+    items = []
+    seen = set()
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            items.append(text)
+            seen.add(text)
+    return items
+
+
+def _clean_keyword_map(value):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, items in value.items():
+        name = str(key or "").strip()
+        cleaned = _clean_keyword_list(items)
+        if name and cleaned:
+            result[name] = cleaned
+    return result
+
+
+def _strip_forbidden_keyword_conflicts(keyword_map, forbidden_words):
+    """Remove positive keywords that would be filtered by forbidden phrases."""
+    if not isinstance(keyword_map, dict):
+        return {}
+    forbidden = sorted((str(w or "").strip() for w in forbidden_words or []), key=len, reverse=True)
+    forbidden = [w for w in forbidden if w]
+    cleaned = {}
+    for key, words in keyword_map.items():
+        kept = []
+        for word in _clean_keyword_list(words):
+            if any(bad in word for bad in forbidden):
+                continue
+            kept.append(word)
+        cleaned[key] = kept
+    return cleaned
+
+
+def load_keywords():
+    """Load one effective vocabulary.
+
+    Source order:
+    1. %APPDATA%/LiveClipper/keywords.json when the user has saved settings.
+    2. app/keywords.json as the default/reset template.
+    3. config.STRICT_FORBIDDEN_PHRASES as the only non-editable safety floor.
+    """
+    from config import STRICT_FORBIDDEN_PHRASES
+
+    app_kw_path, user_kw_path = _keyword_file_paths()
+    app_data = _load_keyword_file(app_kw_path)
+    user_data = _load_keyword_file(user_kw_path)
+    source = user_data if user_data else app_data
+
+    def _pick(key, fallback):
+        if isinstance(source, dict) and key in source:
+            return source.get(key)
+        if isinstance(app_data, dict) and key in app_data:
+            return app_data.get(key)
+        return fallback
+
+    merged_forbidden = _clean_keyword_list(_pick("forbidden_phrases", []))
+    merged_forbidden = list(dict.fromkeys(merged_forbidden + _clean_keyword_list(list(STRICT_FORBIDDEN_PHRASES))))
+    merged_clip_kw = _strip_forbidden_keyword_conflicts(
+        _clean_keyword_map(_pick("clip_keywords", {})),
+        merged_forbidden,
+    )
+    merged_pref = _strip_forbidden_keyword_conflicts(
+        _clean_keyword_map(_pick("preference_keywords", {})),
+        merged_forbidden,
+    )
+    merged_filler = _clean_keyword_list(_pick("filler_words", []))
+    merged_negative = _clean_keyword_list(_pick("negative_signals", []))
+
+    # Hook爆点词：只来自可见词库，不再追加隐藏后端词。
     hook_words = merged_clip_kw.get("hook", [])
-    extra_hook = ["太漂亮", "太显瘦", "太惊艳", "绝了", "假不了", "不敢信",
-                  "卖疯", "抢疯", "秒空", "巨好看", "天花板", "被扣爆",
-                  "盲拍", "闭眼入", "不挑人", "不挑身", "美爆了", "炸了",
-                  "封神", "无敌", "太绝了", "绝绝子", "神仙", "yyds",
-                  "信我", "相信我", "美炸", "帅爆", "好看到", "好看哭",
-                  "太爱了", "绝绝",
-                  # 重复强调类（主播最常用的强情绪表达）
-                  "我都给你", "不管你", "我不管", "都给你",
-                  "超级超级", "特别特别", "真的真的", "非常非常",
-                  "随便你", "想怎么穿", "想露的"]
-    # 合并去重
-    all_hook_kw = list(dict.fromkeys(hook_words + extra_hook))
-
-    # 负面信号：合并默认+用户自定义
-    default_negative = list(NEGATIVE_SIGNALS) if hasattr(NEGATIVE_SIGNALS, '__iter__') else []
-    custom_negative = custom.get("negative_signals", [])
-    merged_negative = list(dict.fromkeys(default_negative + custom_negative))
-
-    # 偏好关键词：用户自定义覆盖默认
-    default_pref = _DEFAULT_PREFERENCE_KEYWORDS if "_DEFAULT_PREFERENCE_KEYWORDS" in dir() else {}
-    custom_pref = custom.get("preference_keywords", {})
-    merged_pref = {}
-    for pname, pkws in default_pref.items():
-        merged_pref[pname] = custom_pref.get(pname, pkws)
-    for pname, pkws in custom_pref.items():
-        if pname not in merged_pref:
-            merged_pref[pname] = pkws
+    all_hook_kw = list(dict.fromkeys(hook_words))
 
     return {
         "clip_keywords": merged_clip_kw,
@@ -707,7 +791,9 @@ def load_keywords():
         "hook_keywords": all_hook_kw,
         "negative_signals": merged_negative,
         "preference_keywords": merged_pref,
-        "detail_keywords": custom.get("detail_keywords", []),
+        "detail_keywords": _clean_keyword_list(_pick("detail_keywords", [])),
+        "_web_vocab_full_override": True,
+        "_source": user_kw_path if user_data else app_kw_path,
     }
 
 
@@ -719,15 +805,18 @@ _keywords_cache = {"_data": None, "_mtime": 0}
 def _get_keywords():
     """获取关键词（带文件修改时间缓存，keywords.json更新后自动刷新）"""
     import os
-    from config import CLIP_KEYWORDS  # just for fallback
-    kw_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
-    try:
-        mtime = os.path.getmtime(kw_path)
-    except Exception:
-        mtime = 0
-    if _keywords_cache["_data"] is None or mtime != _keywords_cache["_mtime"]:
+
+    signature = []
+    for kw_path in _keyword_file_paths():
+        try:
+            signature.append((kw_path, os.path.getmtime(kw_path)))
+        except Exception:
+            signature.append((kw_path, 0))
+    signature = tuple(signature)
+
+    if _keywords_cache["_data"] is None or signature != _keywords_cache["_mtime"]:
         _keywords_cache["_data"] = load_keywords()
-        _keywords_cache["_mtime"] = mtime
+        _keywords_cache["_mtime"] = signature
     return _keywords_cache["_data"]
 
 
@@ -802,6 +891,7 @@ def save_settings(settings):
     except ImportError:
         _save_path = os.path.join(_get_base_path(), "ai_settings.json")
     try:
+        settings = _normalize_ai_model_defaults(settings)
         existing = {}
         if os.path.exists(_save_path):
             with open(_save_path, "r", encoding="utf-8-sig") as f:
@@ -817,8 +907,8 @@ def save_settings(settings):
 
 def _default_settings():
     return {
-        "api_key": "", "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-        "model": "doubao-1-5-pro-32k-250115", "enabled": False,
+        "api_key": "", "base_url": DEEPSEEK_DEFAULT_BASE_URL,
+        "model": DEEPSEEK_DEFAULT_MODEL, "enabled": False,
     }
 
 
@@ -1968,46 +2058,11 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     else:
         main_cat = max(valid_cats, key=valid_cats.get)
 
-    # 套装/搭配场景保护：主品类旁边最多保留2个相关服装品类。
-    # 这样“上衣+半裙/裤子/外套”的讲解不会在AI选片前被源头删掉。
-    suit_scene_words = {"套装", "整套", "全套", "成套", "一套", "两件套", "三件套", "四件套", "上下装", "内搭外套"}
-    clothing_cats = {"上衣", "裤子", "裙子", "外套", "套装"}
-    related_groups = [
-        {"上衣", "裤子"},
-        {"上衣", "裙子"},
-        {"上衣", "外套"},
-        {"裙子", "外套"},
-        {"裤子", "外套"},
-    ]
+    # 主推严格过滤：只保护主品类本身。
+    # 同段同时出现主品类和其他品类时可作为搭配说明保留；
+    # 纯讲主品类以外的内容不能因为“套装/搭配场景”被整段放行。
     protected_cats = {main_cat}
-    suit_scene = (
-        main_cat == "套装"
-        or any(word in cleaned_srt for word in suit_scene_words)
-        or any(("套装" in info["cats_found"] and len(info["cats_found"]) >= 2) for info in seg_info)
-    )
-    if suit_scene:
-        related_candidates = set()
-        for info in seg_info:
-            cats = set(info["cats_found"]) - excluded_cats
-            if not cats:
-                continue
-            text = info["text"]
-            has_suit_word = any(word in text for word in suit_scene_words)
-            if has_suit_word or info["has_match"] or "套装" in cats or main_cat == "套装":
-                related_candidates.update(c for c in cats if c in clothing_cats)
-        for group in related_groups:
-            if main_cat in group:
-                related_candidates.update(c for c in group if final_scores.get(c, 0) > 0)
-        ranked_related = sorted(
-            [c for c in related_candidates if c not in {main_cat, "套装"}],
-            key=lambda c: (final_scores.get(c, 0), seg_counts.get(c, 0)),
-            reverse=True,
-        )
-        protected_cats.update(ranked_related[:2])
-        if "套装" in related_candidates:
-            protected_cats.add("套装")
-        if len(protected_cats) > 1:
-            _log(f"  套装/搭配保护品类: {', '.join(sorted(protected_cats))}")
+    _log(f"  主推严格过滤: 仅保护主品类 {main_cat}，跨品类搭配需同段出现主品类词")
 
     # ============================================================
     # 5. SRT 过滤
@@ -2052,7 +2107,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         output_lines.append("")
         kept += 1
 
-    _log(f"品类过滤: 最终主品类={main_cat}({final_scores[main_cat]}分)，移除 {removed} 个片段(预告{preview_removed}+搭配/纯次品类{match_removed})，保留 {kept} 个")
+    _log(f"品类过滤: 最终主品类={main_cat}({final_scores[main_cat]}分)，严格移除 {removed} 个片段(预告{preview_removed}+纯跨品类{match_removed})，保留 {kept} 个")
     _LAST_CATEGORY_FILTER_SUMMARY = {
         "main_category": main_cat,
         "protected_categories": sorted(protected_cats),
@@ -4370,15 +4425,7 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
     no_overlap = []
     # === Forbidden phrase filter (from GUI keyword management) ===
     try:
-        _kw_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
-        _fb_list = []
-        if os.path.exists(_kw_path):
-            import json as _json
-            _fb_data = _json.load(open(_kw_path, "r", encoding="utf-8"))
-            _fb_list = _fb_data.get("forbidden_phrases", [])
-        if not _fb_list:
-            from config import FORBIDDEN_PHRASES
-            _fb_list = list(FORBIDDEN_PHRASES)
+        _fb_list = load_keywords().get("forbidden_phrases", [])
         if _fb_list:
             _before = len(clips)
             _keep = []
@@ -5211,7 +5258,7 @@ def _trim_filler_middle(clips, cleaned_srt, log_fn=None):
             start_s = (int(m.group(1))*3600 + int(m.group(2))*60 +
                        int(m.group(3)) + int(m.group(4))/1000.0)
             end_s = (int(m.group(5))*3600 + int(m.group(6))*60 +
-                     int(m.group(7))*3600 + int(m.group(8))/1000.0)
+                     int(m.group(7)) + int(m.group(8))/1000.0)
             text = ""
             j = i + 1
             while j < len(lines) and lines[j].strip() and '-->' not in lines[j]:
@@ -5577,8 +5624,38 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
     def _norm_text(txt):
         return re.sub(r"\[V\d+\]", "", str(txt or "")).strip()
 
+    try:
+        _filler_words_for_tail = set(_get_keywords().get("filler_words", []))
+    except Exception:
+        _filler_words_for_tail = set()
+    _pure_tail_fillers = {
+        "是的", "对", "对的", "好的", "好", "嗯", "嗯嗯", "啊", "哦", "噢",
+        "呃", "额", "没错", "可以", "行", "好的呀", "好的是的",
+    }
+
+    def _clean_for_filler(txt):
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", _norm_text(txt))
+
+    def _is_pure_filler_entry(txt):
+        t = _clean_for_filler(txt)
+        if not t:
+            return True
+        if t in _pure_tail_fillers or t in _filler_words_for_tail:
+            return True
+        filler_chars = set("对嗯啊哦噢呃额哈呀呢嘛啦哇好是的没错可以行")
+        return len(t) <= 4 and set(t) <= filler_chars
+
+    def _strip_tail_filler_text(clip_text, tail_text):
+        value = str(clip_text or "").rstrip()
+        tail = _norm_text(tail_text).rstrip()
+        if tail and value.endswith(tail):
+            return value[: -len(tail)].rstrip()
+        return value
+
     def _starts_as_continuation(txt):
         t = _norm_text(txt)
+        if _is_pure_filler_entry(t):
+            return False
         return t.startswith((
             "然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实",
             "它", "这个", "这款", "这件", "这个款", "你看",
@@ -5636,6 +5713,9 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
             ptype_l = str(ptype).lower()
             ctype_l = str(ctype).lower()
             if "hook" in ptype_l or "close" in ptype_l or "hook" in ctype_l or "close" in ctype_l:
+                merged.append(clip)
+                continue
+            if _is_pure_filler_entry(ctext):
                 merged.append(clip)
                 continue
             try:
@@ -5800,10 +5880,46 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
         nearest = min(range(len(clip_entries)), key=lambda i: abs(clip_entries[i][0] - start))
         return nearest, nearest
 
+    def _trim_tail_filler_after_context(items):
+        trimmed = []
+        trim_count = 0
+        for clip in items:
+            ct, text, start, end, score, dur, *rest = clip
+            clip_entries = _entry_scope_for_clip(text)
+            if not clip_entries:
+                trimmed.append(clip)
+                continue
+            first_idx, last_idx = _find_entry_span(clip_entries, start, end)
+            new_end = end
+            new_text = str(text or "")
+            changed = False
+            while last_idx >= first_idx:
+                s, e, t = clip_entries[last_idx]
+                tail_aligned = abs(e - new_end) <= 0.6 or (s < new_end <= e)
+                if not tail_aligned or not _is_pure_filler_entry(t):
+                    break
+                candidate_end = float(clip_entries[last_idx - 1][1]) if last_idx - 1 >= first_idx else float(s)
+                candidate_end = max(float(start), candidate_end)
+                if candidate_end - float(start) < 2.0:
+                    break
+                new_end = candidate_end
+                new_text = _strip_tail_filler_text(new_text, t)
+                last_idx -= 1
+                changed = True
+                trim_count += 1
+            if changed:
+                trimmed.append((ct, new_text, start, new_end, score, new_end - start, *rest))
+            else:
+                trimmed.append(clip)
+        if trim_count:
+            _log(f"尾部废话裁剪: 去掉 {trim_count} 个纯语气词尾句")
+        return trimmed
+
     contextual_clips = []
     context_fix_count = 0
     context_skip_count = 0
     context_complete_skip_count = 0
+    context_tail_filler_skip_count = 0
     context_extra_used = 0.0
     total_before_context = sum(c[5] for c in fixed_clips)
     context_total_cap = float(_AI_TARGET_DURATION + max(5, _AI_TARGET_DURATION // 6))
@@ -5849,6 +5965,9 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
             gap = ns - new_end
             if gap > 1.5 or ne - new_start > max_context:
                 break
+            if _is_pure_filler_entry(nt):
+                context_tail_filler_skip_count += 1
+                break
             if not force_append and not (_ends_need_context(pieces[-1]) or _starts_as_continuation(nt)):
                 break
             delta = max(0.0, ne - new_end)
@@ -5882,12 +6001,17 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
         _log(f"语义承接: 当前时长接近上限，跳过 {context_skip_count} 处普通扩展")
     if context_complete_skip_count:
         _log(f"语义承接: 跳过 {context_complete_skip_count} 个完整短句，不强行补长")
+    if context_tail_filler_skip_count:
+        _log(f"语义承接: 跳过 {context_tail_filler_skip_count} 个纯语气词尾句")
+
+    fixed_clips = _trim_tail_filler_after_context(fixed_clips)
 
     fixed_clips, semantic_merge_count = _merge_adjacent_semantic_clips(fixed_clips)
     if semantic_merge_count:
         total_after_merge = sum(c[5] for c in fixed_clips)
         _log(f"语义承接: 合并 {semantic_merge_count} 组相邻同主题短片段，当前 {len(fixed_clips)} 段/{total_after_merge:.1f}s")
 
+    fixed_clips = _trim_tail_filler_after_context(fixed_clips)
     fixed_clips = _semantic_trim_after_context(fixed_clips)
 
     # [强制排序] hook必须在第一，close必须在最后
@@ -6300,7 +6424,7 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
         "裤子": ["裤子","牛仔裤","阔腿裤","打底裤","工装裤","休闲裤","长裤","短裤","九分裤",
                  "小脚裤","直筒裤","牛奶裤","烟管裤","哈伦裤","裤"],
         "裙子": ["裙子","连衣裙","半身裙","A字裙","包臀裙","长裙","短裙","百褶裙","裙",
-                 "吊带裙","碎花裙","鱼尾裙","蛋糕裙","一步裙","旗袍裙","吊带","背心裙"],
+                 "吊带裙","碎花裙","鱼尾裙","蛋糕裙","一步裙","旗袍裙","吊带","背心裙","腰头"],
         "外套": ["外套","风衣","西装","羽绒服","大衣","夹克","棉服","皮衣","马甲"],
         "套装": ["套装","四件套","三件套","两件套","三件","四件","成套","整套","全套"],
         "鞋子": ["鞋","鞋子","凉鞋","运动鞋","高跟鞋","平底鞋","单鞋","靴子","老爹鞋"],
@@ -6321,23 +6445,8 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
         main_cat = max(cat_counts, key=cat_counts.get)
     main_kws = set(ALL_CATEGORIES.get(main_cat, []))
 
-    # 套装保护：如果 SRT 中出现套装相关词，跳过跨品类踢出（套装天然多品类）
-    suit_keywords = ["套装", "整套", "全套", "成套", "两件套", "三件套", "四件套", "三件", "四件"]
-    if any(kw in cleaned_srt for kw in suit_keywords):
-        _log(f"检测到套装场景，跳过跨品类踢出（主品类={main_cat}）")
-        return clips
-
-    # 关联品类保护：套装/上衣+裤子/上衣+裙子 等常见搭配互不踢
-    # 定义关联组
-    related_groups = [
-        {"上衣", "裙子"}, {"上衣", "裤子"}, {"裙子", "外套"}, {"裤子", "外套"}
-    ]
-    protected_cats = set()
-    for group in related_groups:
-        if main_cat in group:
-            protected_cats.update(group)
-    if protected_cats:
-        _log(f"关联品类保护: {main_cat} 的关联品类 {protected_cats - {main_cat}} 不会被踢出")
+    protected_cats = {main_cat}
+    _log(f"跨品类扫描: 主推严格模式，仅保留{main_cat}或同段包含{main_cat}的搭配说明")
 
     # 扫描每个片段
     kept = []
@@ -6354,8 +6463,7 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
                 if kw in text:
                     has_other = True
                     other_cat = cat
-                    if cat not in protected_cats:
-                        _log(f"跨品类踢出 [{ct}] {text[:30]}...(含'{kw}'，非主品类{main_cat})")
+                    _log(f"跨品类检查 [{ct}] {text[:30]}...(含'{kw}'，非主品类{main_cat})")
                     break
             if has_other:
                 break
@@ -6560,9 +6668,9 @@ PRODUCT_CATEGORIES = {
              "牛奶裤", "烟管裤", "哈伦裤", "裤",
              "牛仔褲", "褲子", "褲", "闊腿褲", "直筒褲"],
     "裙子": ["裙子", "连衣裙", "半身裙", "A字裙", "包臀裙", "长裙", "短裙",
-             "百褶裙", "鱼尾裙", "吊带裙", "碎花裙", "蛋糕裙", "一步裙",
-             "背心裙", "旗袍裙", "吊带", "裙",
-             "連衣裙", "半身裙", "百褶裙"],
+              "百褶裙", "鱼尾裙", "吊带裙", "碎花裙", "蛋糕裙", "一步裙",
+              "背心裙", "旗袍裙", "吊带", "腰头", "裙",
+              "連衣裙", "半身裙", "百褶裙"],
     "外套": ["外套", "风衣", "西装", "羽绒服", "大衣", "夹克", "棉服", "皮衣",
              "马甲", "風衣", "夾克", "羽絨服"],
     "套装": ["套装", "两件套", "三件套", "四件套", "三件", "四件", "成套",
@@ -6684,15 +6792,7 @@ def _remove_orphan_cross_category(clips, log_fn):
     if cat_count[main_cat] < 2:
         return clips
 
-    # 套装保护：套装天然包含多品类，跳过孤立踢出
-    all_text = "".join(c[1] for c in clips)
-    suit_kws = ["套装", "整套", "全套", "成套", "两件套", "三件套", "四件套"]
-    if any(kw in all_text for kw in suit_kws):
-        _log(f"检测到套装场景，跳过孤立跨品类踢出")
-        return clips
-
     main_kws = set(PRODUCT_CATEGORIES.get(main_cat, []))
-    match_kws = {"搭", "配", "搭配", "配着穿", "搭什么", "配什么", "同款", "两件套", "穿搭"}
 
     cleaned = []
     removed_texts = []
@@ -6700,17 +6800,16 @@ def _remove_orphan_cross_category(clips, log_fn):
         ct, text, s, e, sc, d = c[0], c[1], c[2], c[3], c[4], c[5]
         other_cat = _detect_product_category(text)
         if other_cat and other_cat != main_cat:
-            # 跨品类 → 必须有主品类词+搭配词才合法
+            # 跨品类 → 必须同段包含主品类词才合法，搭配词只是辅助信号
             has_main = any(kw in text for kw in main_kws)
-            has_match = any(kw in text for kw in match_kws)
-            if not (has_main and has_match):
+            if not has_main:
                 removed_texts.append(text)
                 continue
         cleaned.append(c)
 
     if removed_texts:
         for t in removed_texts[:3]:
-            _log(f"已移除孤立跨品类片段:{t[:30]}...(无搭配绑定，突兀违规)")
+            _log(f"已移除孤立跨品类片段:{t[:30]}...(未同段绑定主品类)")
         if len(removed_texts) > 3:
             _log(f"  ...共移除 {len(removed_texts)} 个孤立跨品类片段")
 
