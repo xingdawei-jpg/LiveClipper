@@ -45,6 +45,10 @@ web_client/__pycache__/
 
 # Backups and scratch scripts kept out of the clean source tree
 .codex_backups/
+.project_docs/
+tests/
+tools/README.md
+tools/feishu_license_dedupe.py
 *.bak
 *.before_*
 *.bak*
