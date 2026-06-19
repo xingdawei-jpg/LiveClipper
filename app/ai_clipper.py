@@ -2325,6 +2325,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # 从Product中提取Hook（如果AI没选Hook）
         clips = _extract_hook_from_products(clips, cleaned_srt, log_fn, focus_hint=focus_hint, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, log_fn, max_hook_sec=_hook_cap_sec, focus_hint=focus_hint, ai_controls=ai_controls)
+        clips = _filter_hook_product_repeats(clips, log_fn)
         removed_from_dedup = [c for c in original_clips if c not in clips]
         # [v9.5] 多版本模式：去重后如果片段不足12个，回收被去除的片段
         if _skip_focus and len(clips) < 12 and removed_from_dedup:
@@ -2377,6 +2378,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             clips = _filter_price_and_cta(clips, log_fn)
             # 语义重复过滤(代码层兜底)
             if not multi_version: clips = _filter_semantic_repeat(clips, log_fn)
+            clips = _filter_hook_product_repeats(clips, log_fn)
             # 明星名字过滤
             clips = _filter_celebrity(clips, log_fn)
             # CTA误判校验
@@ -2390,6 +2392,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             clips = _cap_clip_duration(clips, log_fn, srt_text=srt_text)
             # 片段边界修复:确保首尾对齐到完整句子
             clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
+            clips = _filter_hook_product_repeats(clips, log_fn)
             # [v9.2] 裁掉片段开头的语气词(对/嗯/呃等)对应的画面和音频
             clips = _trim_filler_start(clips, cleaned_srt, log_fn)
             clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
@@ -2454,6 +2457,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _filter_price_and_cta(clips, log_fn)
         # 语义重复过滤(代码层兜底)
         if not multi_version: clips = _filter_semantic_repeat(clips, log_fn)
+        clips = _filter_hook_product_repeats(clips, log_fn)
         # 明星名字过滤
         clips = _filter_celebrity(clips, log_fn)
         # CTA误判校验
@@ -2475,6 +2479,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # 重叠清理：_split_long_clips和_trim_filler_prefix可能引入重叠
         clips = _remove_overlaps(clips, log_fn)
         clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
+        clips = _filter_hook_product_repeats(clips, log_fn)
         # [DISABLED] 延伸已禁用
         # clips = _extend_clips(clips, log_fn, target_min=55, target_max=75, max_end=srt_max_end)
         # 兜底回收：延伸后如果仍不到50s，从去重被砍的片段中回收
@@ -4283,6 +4288,7 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
     for i in range(len(clips)):
         if i in removed:
             continue
+        ci_type, _, ci_start, ci_end, _, _ = clips[i][:6]
         ci_text = clips[i][1]
         ci_chars = set(re.sub(r"[\s\W]+", "", ci_text))
         if not ci_chars:
@@ -4290,12 +4296,25 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
         for j in range(i + 1, len(clips)):
             if j in removed:
                 continue
+            cj_type, _, cj_start, cj_end, _, _ = clips[j][:6]
             cj_text = clips[j][1]
             cj_chars = set(re.sub(r"[\s\W]+", "", cj_text))
             if not cj_chars:
                 continue
             overlap = len(ci_chars & cj_chars) / max(len(ci_chars | cj_chars), 1)
             if overlap > 0.55:
+                ci_is_hook = _is_hook_clip(clips[i])
+                cj_is_hook = _is_hook_clip(clips[j])
+                if ci_is_hook != cj_is_hook:
+                    time_overlap = max(0.0, min(float(ci_end), float(cj_end)) - max(float(ci_start), float(cj_start)))
+                    if time_overlap <= 0.2:
+                        continue
+                    drop_idx = j if ci_is_hook else i
+                    removed.add(drop_idx)
+                    _log(f"内容重复: Hook保护，移除片段{drop_idx+1}(与Hook文案/时间重复, 重叠{overlap:.0%})")
+                    if drop_idx == i:
+                        break
+                    continue
                 if len(cj_text) <= len(ci_text):
                     removed.add(j)
                     _log(f"内容重复: 移除片段{j+1}(与片段{i+1}重复, 重叠{overlap:.0%})")
@@ -6204,6 +6223,134 @@ def _filter_semantic_repeat(clips, log_fn=None):
     if removed > 0:
         _log(f"语义重复过滤: {original} -> {len(keep)} (去掉{removed}条)")
     return keep
+
+
+def _filter_hook_product_repeats(clips, log_fn=None):
+    """Avoid keeping the same sentence as both Hook and Product."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips or len(clips) < 2:
+        return clips
+
+    def _compact(text):
+        text = re.sub(r"\[[vV]\d+\]\s*", "", str(text or ""))
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+        noise = ("这个", "那个", "然后", "就是", "真的", "其实", "我们", "你们", "它是", "的话")
+        for word in noise:
+            text = text.replace(word, "")
+        return text
+
+    def _source_key(clip):
+        if len(clip) >= 8 and str(clip[7] or "").strip():
+            return str(clip[7]).strip()
+        marker = re.search(r"\[[vV]\d+\]", str(clip[1] if len(clip) > 1 else ""))
+        return marker.group(0).upper() if marker else ""
+
+    def _text_repeat_score(left, right):
+        import difflib
+
+        a = _compact(left)
+        b = _compact(right)
+        if not a or not b:
+            return 0.0
+        ratio = difflib.SequenceMatcher(None, a, b).ratio()
+        shorter, longer = sorted((a, b), key=len)
+        if len(shorter) >= 8 and shorter in longer:
+            ratio = max(ratio, 0.92)
+        set_a, set_b = set(a), set(b)
+        if set_a and set_b:
+            char_overlap = len(set_a & set_b) / max(1, min(len(set_a), len(set_b)))
+            if len(shorter) >= 8 and char_overlap >= 0.82:
+                ratio = max(ratio, char_overlap * 0.9)
+        return ratio
+
+    def _same_timeline(left, right):
+        left_src = _source_key(left)
+        right_src = _source_key(right)
+        return not (left_src and right_src and left_src != right_src)
+
+    def _clip_time(clip):
+        try:
+            return float(clip[2]), float(clip[3])
+        except Exception:
+            return 0.0, 0.0
+
+    def _duration(clip):
+        try:
+            return max(0.0, float(clip[5]))
+        except Exception:
+            start, end = _clip_time(clip)
+            return max(0.0, end - start)
+
+    def _trim_product_around_hook(product, hook):
+        ps, pe = _clip_time(product)
+        hs, he = _clip_time(hook)
+        before = max(0.0, hs - ps - 0.1)
+        after = max(0.0, pe - he - 0.1)
+        if max(before, after) < 2.0:
+            return None
+        values = list(product)
+        if after >= before:
+            new_start, new_end = he + 0.1, pe
+        else:
+            new_start, new_end = ps, hs - 0.1
+        if new_end - new_start < 2.0:
+            return None
+        values[2] = new_start
+        values[3] = new_end
+        if len(values) > 5:
+            values[5] = new_end - new_start
+        return tuple(values)
+
+    hooks = [clip for clip in clips if _is_hook_clip(clip)]
+    if not hooks:
+        return clips
+
+    result = list(clips)
+    changed = False
+    for hook in hooks[:1]:
+        hs, he = _clip_time(hook)
+        hook_dur = max(0.1, _duration(hook))
+        for idx, clip in enumerate(list(result)):
+            if clip is hook or _is_hook_clip(clip) or _is_close_clip(clip):
+                continue
+            if len(clip) < 6:
+                continue
+            ps, pe = _clip_time(clip)
+            same_timeline = _same_timeline(hook, clip)
+            overlap = max(0.0, min(he, pe) - max(hs, ps)) if same_timeline else 0.0
+            overlap_ratio = overlap / max(0.1, min(hook_dur, _duration(clip)))
+            text_score = _text_repeat_score(hook[1] if len(hook) > 1 else "", clip[1] if len(clip) > 1 else "")
+
+            repeated_time = overlap >= 0.25 and overlap_ratio >= 0.5
+            repeated_text = text_score >= 0.86
+            if not repeated_time and not repeated_text:
+                continue
+
+            if repeated_time:
+                trimmed = _trim_product_around_hook(clip, hook)
+                if trimmed is not None:
+                    result[idx] = trimmed
+                    changed = True
+                    _log(
+                        f"Hook重复: 裁掉卖点与开头重叠部分 "
+                        f"[{ps:.1f}-{pe:.1f}]→[{trimmed[2]:.1f}-{trimmed[3]:.1f}]"
+                    )
+                    continue
+
+            result[idx] = None
+            changed = True
+            reason = "时间重叠" if repeated_time else f"文案相似{text_score:.0%}"
+            _log(f"Hook重复: 移除重复卖点 [{ps:.1f}-{pe:.1f}] ({reason}) {str(clip[1])[:24]}")
+
+    if not changed:
+        return clips
+    filtered = [clip for clip in result if clip is not None]
+    if len(filtered) != len(clips):
+        _log(f"Hook重复过滤: {len(clips)} -> {len(filtered)}")
+    return filtered
 
 
 def _filter_price_and_cta(clips, log_fn=None):

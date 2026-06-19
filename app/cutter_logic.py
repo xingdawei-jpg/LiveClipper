@@ -430,10 +430,9 @@ def _is_ts_like_video(video_path):
 def _append_seek_input_args(cmd, video_path, start, accurate=False):
     if _is_ts_like_video(video_path):
         cmd += ["-fflags", "+genpts"]
-    if accurate:
-        cmd += ["-i", video_path, "-ss", f"{float(start):.3f}"]
-    else:
-        cmd += ["-ss", f"{float(start):.3f}", "-i", video_path]
+    # Keep seek before input. Output-side -ss runs after filters such as setpts/atrim;
+    # with reset timestamps it can discard the whole clip and produce an empty MP4.
+    cmd += ["-ss", f"{float(start):.3f}", "-i", video_path]
     return cmd
 
 
@@ -2153,6 +2152,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                 end = video_duration - 0.1
                 if end <= start:
                     continue
+            if clip_idx == total_clips - 1:
+                old_end = end
+                end = min(video_duration, end + 0.22)
+                if end > old_end + 0.01:
+                    _log(f"尾音保护: 最后一段延长 {old_end:.2f}s→{end:.2f}s，避免末字被截")
             _actual_clip_text = _srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or "")
             if abs(start - _orig_start) > 0.01 or abs(end - _orig_end) > 0.01:
                 _log(f"实际切割 [{clip_idx+1}/{total_clips}] {_orig_start:.1f}-{_orig_end:.1f}s -> {start:.1f}-{end:.1f}s | {_actual_clip_text[:120]}")
@@ -4568,6 +4572,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                         break
         except Exception:
             pass
+
+        if ci == len(sorted_clips) - 1:
+            old_end = end
+            end += 0.22
+            _log(f"尾音保护: 最后一段延长 {old_end:.2f}s→{end:.2f}s，避免末字被截")
 
         duration = end - start
 

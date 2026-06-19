@@ -104,15 +104,24 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="Do not write; fail if manifest differs.")
     args = parser.parse_args()
 
-    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
-    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     if args.check:
         current = VERSION_FILE.read_text(encoding="utf-8")
+        try:
+            current_manifest = json.loads(current)
+            current_updated_at = current_manifest.get("updated_at")
+        except Exception:
+            current_updated_at = None
+        manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+        if current_updated_at:
+            manifest["updated_at"] = current_updated_at
+        text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
         if current != text:
             print("app/version.json is not up to date.")
             return 1
         print("app/version.json is up to date.")
         return 0
+    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     VERSION_FILE.write_text(text, encoding="utf-8")
     print(f"wrote {VERSION_FILE}")
     print(f"files={len(manifest['files'])}")
