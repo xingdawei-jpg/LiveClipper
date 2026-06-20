@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -90,6 +91,14 @@ ASSETS_DIR = FRONTEND_DIR / "assets"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from ai_model_config import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    DEEPSEEK_DEFAULT_MODEL,
+    ai_models_url,
+    normalize_ai_base_url,
+    normalize_ai_model_defaults as _shared_normalize_ai_model_defaults,
+)
+
 
 app = FastAPI(title="LiveClipper Web Client", version="0.1.0")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
@@ -109,10 +118,6 @@ _LIVE_LOCK = threading.Lock()
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
 _AI_PREVIEW_CACHE_SCHEMA = "focus_blocks_v2"
-DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
-LEGACY_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -815,24 +820,7 @@ def _save_settings(settings: dict[str, Any]) -> bool:
 
 
 def _normalize_ai_model_defaults(settings: dict[str, Any]) -> dict[str, Any]:
-    data = dict(settings or {})
-    api_key = str(data.get("api_key") or "").strip()
-    base_url = str(data.get("base_url") or "").strip().rstrip("/")
-    model = str(data.get("model") or "").strip()
-
-    if not base_url:
-        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
-    if not model:
-        data["model"] = DEEPSEEK_DEFAULT_MODEL
-
-    if (
-        not api_key
-        and base_url == LEGACY_DOUBAO_BASE_URL
-        and model == LEGACY_DOUBAO_MODEL
-    ):
-        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
-        data["model"] = DEEPSEEK_DEFAULT_MODEL
-    return data
+    return _shared_normalize_ai_model_defaults(settings)
 
 
 def _normalize_volc_region(value: Any) -> str:
@@ -1202,6 +1190,15 @@ class ProductScanPayload(BaseModel):
     live_start_time: str = ""
 
 
+class VideoSplitPayload(BaseModel):
+    video_paths: list[str] = Field(default_factory=list)
+    output_dir: str = ""
+    mode: str = "count"
+    segment_count: int = Field(default=2, ge=1, le=500)
+    segment_seconds: float = Field(default=60.0, ge=0.1, le=86400)
+    overrides: dict[str, int] = Field(default_factory=dict)
+
+
 class DedupPayload(BaseModel):
     video_path: str = ""
     video_paths: list[str] = Field(default_factory=list)
@@ -1547,6 +1544,119 @@ def _default_output_dir(video: Path, explicit: str, folder: str = "output") -> P
     return out
 
 
+def _video_split_mode(payload: VideoSplitPayload) -> str:
+    return "duration" if str(payload.mode or "").strip().lower() in {"duration", "seconds", "time"} else "count"
+
+
+def _clamp_segment_count(value: Any) -> int:
+    try:
+        count = int(round(float(value)))
+    except Exception:
+        count = 2
+    return max(1, min(500, count))
+
+
+def _video_split_paths(payload: VideoSplitPayload) -> list[Path]:
+    return _existing_paths(payload.video_paths, "视频")
+
+
+def _video_split_override_count(video: Path, payload: VideoSplitPayload) -> int:
+    count = _clamp_segment_count(payload.segment_count)
+    keys = {str(video), video.name, video.stem}
+    try:
+        keys.add(str(video.resolve()))
+    except Exception:
+        pass
+    normalized = {key.strip().strip('"').lower().replace("/", "\\") for key in keys if key}
+    for key, value in (payload.overrides or {}).items():
+        norm = str(key or "").strip().strip('"').lower().replace("/", "\\")
+        if norm in normalized:
+            return _clamp_segment_count(value)
+    return count
+
+
+def _ffmpeg_timecode(seconds: float) -> str:
+    value = max(0.0, float(seconds or 0.0))
+    whole = int(value)
+    ms = int(round((value - whole) * 1000))
+    if ms >= 1000:
+        whole += 1
+        ms -= 1000
+    h = whole // 3600
+    m = (whole % 3600) // 60
+    s = whole % 60
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _video_split_plan(video: Path, payload: VideoSplitPayload, index: int = 1) -> dict[str, Any]:
+    info = _probe_video_info(str(video))
+    if not info.get("valid"):
+        detail = info.get("message") or "无法读取视频信息"
+        raise ValueError(f"{video.name} 不可分割：{detail}")
+
+    duration = float(info.get("duration") or 0.0)
+    if duration <= 0:
+        raise ValueError(f"{video.name} 没有可用时长。")
+
+    mode = _video_split_mode(payload)
+    if mode == "duration":
+        segment_seconds = max(0.1, float(payload.segment_seconds or 60.0))
+        segment_count = max(1, math.ceil(duration / segment_seconds))
+        if segment_count > 500:
+            raise ValueError(f"{video.name} 将生成 {segment_count} 段，请增大每段秒数。")
+        step = segment_seconds
+    else:
+        segment_count = _video_split_override_count(video, payload)
+        step = duration / segment_count
+
+    stem = _safe_stem(video.stem)
+    segments: list[dict[str, Any]] = []
+    for part_index in range(segment_count):
+        start = min(duration, part_index * step)
+        if mode == "duration":
+            end = duration if part_index == segment_count - 1 else min(duration, start + step)
+        else:
+            end = duration if part_index == segment_count - 1 else min(duration, (part_index + 1) * step)
+        segment_duration = max(0.0, end - start)
+        if segment_duration <= 0:
+            continue
+        segments.append(
+            {
+                "index": part_index + 1,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "duration": round(segment_duration, 3),
+                "output_name": f"{stem}_part_{part_index + 1:03d}.mp4",
+            }
+        )
+
+    return {
+        "index": index,
+        "path": str(video),
+        "name": video.name,
+        "duration": round(duration, 3),
+        "resolution": info.get("resolution") or "",
+        "mode": mode,
+        "segment_count": len(segments),
+        "segment_seconds": round(float(segment_seconds if mode == "duration" else step), 3),
+        "segments": segments,
+    }
+
+
+def _video_split_preview(payload: VideoSplitPayload) -> dict[str, Any]:
+    videos = [
+        _video_split_plan(video, payload, index)
+        for index, video in enumerate(_video_split_paths(payload), start=1)
+    ]
+    return {
+        "ok": True,
+        "mode": _video_split_mode(payload),
+        "videos": videos,
+        "total_segments": sum(len(item.get("segments") or []) for item in videos),
+        "total_duration": round(sum(float(item.get("duration") or 0.0) for item in videos), 3),
+    }
+
+
 def _payload_to_dict(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         return dict(payload)
@@ -1847,6 +1957,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         "ai-scan-export",
         "ai-scan-export-merge",
         "product-scan",
+        "video-split",
         "dedup",
         "dedup-check",
         "live-rec-detect",
@@ -1888,6 +1999,24 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         if not errors:
             _preflight_product_schedule(data, warnings, errors)
+    elif feature == "video-split":
+        _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
+        _preflight_output_dir(data.get("output_dir"), warnings, errors)
+        mode = str(data.get("mode") or "count").strip().lower()
+        if mode in {"duration", "seconds", "time"}:
+            try:
+                seconds = float(data.get("segment_seconds") or 0)
+            except Exception:
+                seconds = 0
+            if seconds <= 0:
+                errors.append("每段秒数必须大于 0。")
+        else:
+            try:
+                count = int(round(float(data.get("segment_count") or 0)))
+            except Exception:
+                count = 0
+            if count < 1 or count > 500:
+                errors.append("分段数量必须在 1 到 500 之间。")
     elif feature in {"dedup", "dedup-check"}:
         _preflight_file_list(_dedup_path_values(data), "视频", errors, min_count=1)
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
@@ -2304,7 +2433,8 @@ def _clip_public(index: int, clip: Any) -> dict[str, Any]:
             score = float(clip[4] if len(clip) > 4 else 0)
             duration = float(clip[5] if len(clip) > 5 else max(0, end - start))
             focus = _repair_mojibake_text(clip[6] if len(clip) > 6 else "").strip()
-            source = str(clip[7] if len(clip) > 7 else "").strip()
+            raw_source = clip[7] if len(clip) > 7 else ""
+            source = "" if isinstance(raw_source, dict) else str(raw_source).strip()
     except Exception:
         clip_type, text, start, end, score, duration, focus, source = "product", str(clip), 0.0, 0.0, 0.0, 0.0, "", ""
     if end < start:
@@ -2433,6 +2563,43 @@ def _preview_source_marker(text: Any) -> str:
     return match.group(1).upper() if match else ""
 
 
+def _preview_segment_start(segment: dict[str, Any]) -> float:
+    try:
+        return float(segment.get("start") or 0)
+    except Exception:
+        return 0.0
+
+
+def _preview_segment_end(segment: dict[str, Any]) -> float:
+    start = _preview_segment_start(segment)
+    try:
+        end = float(segment.get("end") or start)
+    except Exception:
+        end = start
+    return max(start, end)
+
+
+def _preview_segment_index(segment: dict[str, Any]) -> int:
+    try:
+        return int(segment.get("index"))
+    except Exception:
+        return -1
+
+
+def _sort_and_reindex_preview_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        segments,
+        key=lambda seg: (
+            _preview_segment_start(seg),
+            _preview_segment_end(seg),
+            int(seg.get("index") or 0),
+        ),
+    )
+    for index, segment in enumerate(ordered):
+        segment["index"] = index
+    return ordered
+
+
 def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     try:
         start = float(public_clip.get("start") or 0)
@@ -2476,7 +2643,7 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
                 "selected": overlap >= 0.04 and not _preview_has_forbidden_or_price(text),
             })
     if pieces:
-        return pieces
+        return _sort_and_reindex_preview_segments(pieces)
     text = _strip_preview_source_marker(public_clip.get("text") or "")
     if not text:
         text = str(public_clip.get("text") or "")
@@ -2561,19 +2728,35 @@ def _merge_selected_segments(
         selected = [seg for seg in segments if int(seg.get("index", -1)) in wanted]
     if not selected:
         return []
-    selected.sort(key=lambda seg: (float(seg.get("start") or 0), int(seg.get("index") or 0)))
+    selected.sort(key=lambda seg: (_preview_segment_index(seg), _preview_segment_start(seg), _preview_segment_end(seg)))
 
     groups: list[list[dict[str, Any]]] = []
+    group_end = 0.0
+    group_last_index = -1
     for seg in selected:
+        seg_index = _preview_segment_index(seg)
+        seg_start = _preview_segment_start(seg)
+        seg_end = _preview_segment_end(seg)
         if not groups:
             groups.append([seg])
+            group_end = seg_end
+            group_last_index = seg_index
             continue
-        prev = groups[-1][-1]
-        gap = float(seg.get("start") or 0) - float(prev.get("end") or 0)
-        if gap <= 0.35:
+        gap = seg_start - group_end
+        consecutive_sentence = (
+            group_last_index >= 0
+            and seg_index >= 0
+            and seg_index == group_last_index + 1
+        )
+        missing_index_fallback = (group_last_index < 0 or seg_index < 0) and gap <= 0.35
+        if consecutive_sentence or missing_index_fallback:
             groups[-1].append(seg)
+            group_end = max(group_end, seg_end)
+            group_last_index = seg_index
         else:
             groups.append([seg])
+            group_end = seg_end
+            group_last_index = seg_index
 
     base = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
     while len(base) < 8:
@@ -2640,6 +2823,63 @@ def _preview_selection_segment_count(selected_segments: dict[str, list[int]] | N
         if isinstance(values, list):
             total += len(values)
     return total
+
+
+def _path_identity(path: Path) -> str:
+    try:
+        return str(path.resolve()).lower()
+    except Exception:
+        return str(path).lower()
+
+
+def _append_unique_source_path(paths: list[Path], seen: set[str], value: Any) -> None:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        return
+    path = Path(raw)
+    key = _path_identity(path)
+    if key in seen:
+        return
+    paths.append(path)
+    seen.add(key)
+
+
+def _preview_mix_source_paths(
+    preview: dict[str, Any],
+    payload_paths: list[str],
+    selected_clips: list[tuple[Any, ...]],
+) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+
+    for value in list(preview.get("sources") or []):
+        _append_unique_source_path(paths, seen, value)
+
+    if not paths:
+        marker_sources: dict[int, str] = {}
+        for clip in list(preview.get("raw_clips") or []) + list(preview.get("clips") or []):
+            clip_info = _clip_public(0, clip)
+            marker = _preview_source_marker(clip_info.get("text") or "")
+            source = str(clip_info.get("source") or "").strip()
+            if not marker or not source:
+                continue
+            try:
+                marker_index = int(marker[1:])
+            except Exception:
+                continue
+            marker_sources.setdefault(marker_index, source)
+        for marker_index in sorted(marker_sources):
+            _append_unique_source_path(paths, seen, marker_sources[marker_index])
+
+    if not paths:
+        for value in payload_paths or []:
+            _append_unique_source_path(paths, seen, value)
+
+    for clip in selected_clips or []:
+        clip_info = _clip_public(0, clip)
+        _append_unique_source_path(paths, seen, clip_info.get("source"))
+
+    return paths
 
 
 def _clip_has_preview_exact_marker(clip: Any) -> bool:
@@ -2786,6 +3026,7 @@ def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
         "error": preview.get("error", ""),
         "video": preview.get("video", ""),
         "video_name": preview.get("video_name", ""),
+        "sources": preview.get("sources", []),
         "srt_path": preview.get("srt_path", ""),
         "target_duration": preview.get("target_duration", 0),
         "created_at": preview.get("created_at", 0),
@@ -3025,8 +3266,8 @@ def _product_scanner():
     settings = load_settings()
     return ProductScanner(
         api_key=settings.get("api_key", ""),
-        base_url=settings.get("base_url", "https://api.deepseek.com"),
-        model=settings.get("model", "deepseek-chat"),
+        base_url=settings.get("base_url", DEEPSEEK_DEFAULT_BASE_URL),
+        model=settings.get("model", DEEPSEEK_DEFAULT_MODEL),
     )
 
 
@@ -3149,6 +3390,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             message=f"混剪 AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(paths[0]),
             video_name=paths[0].name,
+            sources=[str(path) for path in paths],
             target_duration=payload.duration,
             srt_text=srt_text,
             raw_clips=raw_clips,
@@ -3394,6 +3636,126 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc), message="分割失败")
         emit_log("error", f"单品扫描失败：{exc}", scope)
+
+
+def _run_video_split(task_id: str, payload: VideoSplitPayload) -> None:
+    scope = "video-split"
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备视频分割")
+    try:
+        _ensure_feature_access("视频分割")
+        paths = _video_split_paths(payload)
+        out_dir = _default_output_dir(paths[0], payload.output_dir, "split_output")
+        preview = _video_split_preview(payload)
+        plans = list(preview.get("videos") or [])
+        total_segments = sum(len(plan.get("segments") or []) for plan in plans)
+        if total_segments <= 0:
+            raise RuntimeError("没有可导出的分割片段。")
+
+        _set_task_progress(task_id, 10, f"准备导出 {total_segments} 段")
+        emit_log("info", f"视频分割开始：{len(plans)} 个视频，预计导出 {total_segments} 段。输出目录：{out_dir}", scope)
+        outputs: list[str] = []
+        completed = 0
+        cancel_event = _task_cancel_event(task_id)
+
+        for video_index, plan in enumerate(plans, start=1):
+            video = Path(str(plan.get("path") or ""))
+            segments = list(plan.get("segments") or [])
+            if not segments:
+                continue
+            if _is_task_cancelled(task_id) or cancel_event.is_set():
+                emit_log("warning", "视频分割已停止。", scope)
+                return
+
+            stem = _safe_stem(video.stem)
+            segment_seconds = max(0.1, float(plan.get("segment_seconds") or segments[0].get("duration") or 60.0))
+            output_pattern = out_dir / f"{stem}_part_%03d.mp4"
+            started_at = time.time()
+            cmd = [
+                _ffmpeg_cmd(),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(video),
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-f",
+                "segment",
+                "-segment_time",
+                f"{segment_seconds:.6f}",
+                "-segment_start_number",
+                "1",
+                "-reset_timestamps",
+                "1",
+                "-avoid_negative_ts",
+                "make_zero",
+                str(output_pattern),
+            ]
+            _set_task_progress(task_id, 12 + ((video_index - 1) / max(1, len(plans))) * 82, f"快速分割 {video_index}/{len(plans)}: {video.name}")
+            emit_log(
+                "info",
+                f"[{video_index}/{len(plans)}] 快速分割 {video.name}，每段约 {_hms(segment_seconds)}，按关键帧近似切分。",
+                scope,
+            )
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            timeout = max(60, min(21600, int(float(plan.get("duration") or 0) * 4 + 60)))
+            while proc.poll() is None:
+                if _is_task_cancelled(task_id) or cancel_event.is_set():
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    emit_log("warning", "视频分割已停止。", scope)
+                    return
+                if time.time() - started_at > timeout:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    raise TimeoutError(f"{video.name} 导出超时。")
+                time.sleep(0.25)
+
+            if proc.returncode != 0:
+                raise RuntimeError(f"{video.name} 导出失败：返回码 {proc.returncode}")
+
+            created = [
+                path
+                for path in sorted(out_dir.glob(f"{stem}_part_*.mp4"))
+                if path.is_file() and path.stat().st_size > 1000 and path.stat().st_mtime >= started_at - 1
+            ]
+            if not created:
+                raise RuntimeError(f"{video.name} 没有导出任何视频。")
+
+            outputs.extend(str(path) for path in created)
+            completed += len(created)
+            _set_task_progress(task_id, 12 + (video_index / max(1, len(plans))) * 82, f"已导出 {completed} 段")
+            emit_log("success", f"{video.name} 已导出 {len(created)} 段。", scope)
+
+        if not outputs:
+            raise RuntimeError("没有导出任何视频。")
+        if _is_task_cancelled(task_id):
+            emit_log("warning", "视频分割已停止。", scope)
+            return
+        _consume_trial("视频分割", scope=scope)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            result_count=len(outputs),
+            message=f"分割完成：{len(outputs)} 段",
+            output_dir=str(out_dir),
+            outputs=outputs,
+        )
+        emit_log("success", f"视频分割完成：导出 {len(outputs)} 段。输出目录：{out_dir}", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc), message="分割失败")
+        emit_log("error", f"视频分割失败：{exc}", scope)
 
 
 def _bool(data: dict[str, Any], key: str) -> bool:
@@ -4220,18 +4582,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         _log_preview_selection(scope, "预览混剪子句选择", selected_indices, selected_segments, clips)
         _set_task_progress(task_id, 16, f"确认 {len(clips)} 个片段")
 
-        sources: list[Path] = []
-        seen_sources: set[str] = set()
-        for clip in clips:
-            clip_info = _clip_public(0, clip)
-            source = str(clip_info.get("source") or "").strip()
-            if not source:
-                continue
-            path = Path(source)
-            key = str(path.resolve()).lower() if path.exists() else str(path).lower()
-            if key not in seen_sources:
-                sources.append(path)
-                seen_sources.add(key)
+        sources = _preview_mix_source_paths(preview, payload.video_paths, clips)
         if not sources:
             sources = _existing_paths(payload.video_paths, "视频")
         missing_sources = [path for path in sources if not path.exists()]
@@ -4241,10 +4592,15 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         existing_sources = [path for path in sources if path.exists()]
         if not existing_sources:
             raise FileNotFoundError("预览片段对应的原视频不存在，请重新选择素材并生成预览。")
+        emit_log(
+            "info",
+            "预览混剪素材顺序: " + " → ".join(f"V{index + 1}={path.name}" for index, path in enumerate(existing_sources)),
+            scope,
+        )
         _set_task_progress(task_id, 26, f"校验 {len(existing_sources)} 个素材")
 
         source_index = {
-            str(path.resolve()).lower(): index
+            _path_identity(path): index
             for index, path in enumerate(existing_sources)
             if path.exists()
         }
@@ -4260,7 +4616,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         def _clip_tuple(clip: Any) -> tuple[Any, ...]:
             clip_info = _clip_public(0, clip)
             source = Path(str(clip_info.get("source") or existing_sources[0]))
-            key = str(source.resolve()).lower() if source.exists() else str(source).lower()
+            key = _path_identity(source)
             idx = source_index.get(key, 0)
             text = str(clip_info.get("text") or "")
             if "[V" not in text:
@@ -4268,6 +4624,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             start = _num(clip_info.get("start"), 0.0)
             end = _num(clip_info.get("end"), start)
             duration = _num(clip_info.get("duration"), max(0.0, end - start))
+            source_text = str(clip_info.get("source") or existing_sources[idx])
             values: list[Any] = [
                 clip_info.get("clip_type") or "product",
                 text,
@@ -4276,6 +4633,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 _num(clip_info.get("score"), 0.0),
                 duration,
                 str(clip_info.get("focus") or ""),
+                source_text,
             ]
             if isinstance(clip, (list, tuple)):
                 meta = next(
@@ -4769,10 +5127,10 @@ def unbind_license() -> dict[str, Any]:
 
 
 def _ai_provider_warning(base_url: str, model: str) -> str:
-    lower_url = (base_url or "").lower()
+    lower_url = normalize_ai_base_url(base_url).lower()
     lower_model = (model or "").lower()
     if "deepseek" in lower_url and lower_model and "deepseek" not in lower_model:
-        return "当前 Base URL 是 DeepSeek，但模型名不像 DeepSeek；建议模型填写 deepseek-chat。"
+        return "当前 Base URL 是 DeepSeek，但模型名不像 DeepSeek；建议模型填写 deepseek-v4-flash。"
     if ("volces" in lower_url or "ark.cn-" in lower_url) and "deepseek" in lower_model:
         return "当前 Base URL 是火山/豆包，但模型名是 DeepSeek；请把 Base URL 改为 https://api.deepseek.com。"
     return ""
@@ -4786,7 +5144,7 @@ def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
 
 
 def _ai_test_error_message(code: int, base_url: str, model: str, body: str = "") -> str:
-    lower_url = (base_url or "").lower()
+    lower_url = normalize_ai_base_url(base_url).lower()
     lower_model = (model or "").lower()
     is_deepseek = "deepseek" in lower_url or "deepseek" in lower_model
     if code in (401, 403):
@@ -4794,7 +5152,7 @@ def _ai_test_error_message(code: int, base_url: str, model: str, body: str = "")
             return (
                 "AI 连接失败：HTTP 401。DeepSeek API Key 无效、已失效，"
                 "或仍在使用豆包/火山的 Key。请确认 Base URL=https://api.deepseek.com，"
-                "模型=deepseek-chat，并重新填写 DeepSeek 控制台里的 API Key。"
+                "模型=deepseek-v4-flash，并重新填写 DeepSeek 控制台里的 API Key。"
             )
         return f"AI 连接失败：HTTP {code}。API Key 无效或没有权限，请重新填写对应平台的 Key。"
     if code == 404:
@@ -4814,12 +5172,12 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
         cfg.update(payload.model_dump(exclude_unset=True))
     cfg = _normalize_ai_model_defaults(cfg)
     api_key = (cfg.get("api_key") or "").strip()
-    base_url = (cfg.get("base_url") or "").strip().rstrip("/")
+    base_url = normalize_ai_base_url(cfg.get("base_url"))
     model = (cfg.get("model") or "").strip()
     if not api_key or not base_url:
         return {"ok": False, "message": "请先填写 AI API Key 和 Base URL。"}
 
-    url = base_url + "/models"
+    url = ai_models_url(base_url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
     try:
         ctx = ssl.create_default_context()
@@ -5250,6 +5608,24 @@ def start_product_scan(payload: ProductScanPayload) -> dict[str, Any]:
     _set_task(task_id, message="分割中")
     threading.Thread(target=_run_product_scan, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "分割中"}
+
+
+@app.post("/api/video-split/preview")
+def preview_video_split(payload: VideoSplitPayload) -> dict[str, Any]:
+    _raise_preflight_errors("video-split", payload)
+    try:
+        return _video_split_preview(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/video-split/start")
+def start_video_split(payload: VideoSplitPayload) -> dict[str, Any]:
+    _ensure_scope_idle("video-split", "视频分割")
+    _raise_preflight_errors("video-split", payload)
+    task_id = _new_task("video-split", "视频分割")
+    threading.Thread(target=_run_video_split, args=(task_id, payload), daemon=True).start()
+    return {"ok": True, "task_id": task_id, "message": "视频分割任务已启动。"}
 
 
 @app.post("/api/dedup/start")

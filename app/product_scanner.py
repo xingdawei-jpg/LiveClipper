@@ -15,6 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
 from config import FFMPEG_PATH, sanitize_forbidden_title
+from ai_model_config import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    DEEPSEEK_DEFAULT_MODEL,
+    normalize_ai_base_url,
+)
 
 
 # ---------- SRT 工具 ----------
@@ -156,7 +161,7 @@ def _call_ai_products(srt_text, api_key, base_url, model):
     user_prompt = "分析以下直播SRT字幕，识别所有单品及其时间范围：\n%s\n返回JSON数组" % srt_text
     payload = {"model": model, "messages": [{"role":"system","content":sys_prompt},{"role":"user","content":user_prompt}], "temperature":0.1, "max_tokens":8192}
     body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    if base_url.endswith("/"): base_url = base_url[:-1]
+    base_url = normalize_ai_base_url(base_url)
     parts = base_url.replace("https://","").replace("http://","").split("/")
     host = parts[0]; path_api = "/" + "/".join(parts[1:]) if len(parts)>1 else ""; path_api += "/chat/completions"
     try:
@@ -212,8 +217,7 @@ SRT:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     # 解析 base_url
-    if base_url.endswith("/"):
-        base_url = base_url[:-1]
+    base_url = normalize_ai_base_url(base_url)
     url_parts = base_url.replace("https://", "").replace("http://", "").split("/")
     host = url_parts[0]
     path = "/" + "/".join(url_parts[1:]) if len(url_parts) > 1 else ""
@@ -298,7 +302,7 @@ def _call_ai_segment(srt_text_segment, seg_start, api_key, base_url, model):
     user_ = "分析以下段（从%d秒开始），识别所有单品：\n%s\n返回JSON数组" % (seg_start, srt_text_segment)
     payload = {"model": model, "messages": [{"role":"system","content":sys_},{"role":"user","content":user_}], "temperature":0.1, "max_tokens":4096}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    if base_url.endswith("/"): base_url = base_url[:-1]
+    base_url = normalize_ai_base_url(base_url)
     parts = base_url.replace("https://","").replace("http://","").split("/")
     host = parts[0]; path = "/" + "/".join(parts[1:]) if len(parts)>1 else ""; path += "/chat/completions"
     try:
@@ -621,8 +625,8 @@ class ProductScanner:
 
     def __init__(self, api_key=None, base_url=None, model=None):
         self.api_key = api_key
-        self.base_url = base_url or "https://api.deepseek.com/v1"
-        self.model = model or "deepseek-chat"
+        self.base_url = normalize_ai_base_url(base_url or DEEPSEEK_DEFAULT_BASE_URL)
+        self.model = model or DEEPSEEK_DEFAULT_MODEL
 
     def scan(self, srt_path, log_fn=None):
         """Analyze SRT as a whole: AI reads all SRT, finds product switches, outputs segments."""

@@ -6,6 +6,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog
 import threading
+from ai_model_config import DEEPSEEK_DEFAULT_BASE_URL, DEEPSEEK_DEFAULT_MODEL
 
 # 样式常量（与 gui.py 保持一致）
 C = {
@@ -184,8 +185,8 @@ class ProductScanPage(tk.Frame):
         settings = load_settings()
         scanner = ProductScanner(
             api_key=settings.get("api_key", ""),
-            base_url=settings.get("base_url", "https://api.deepseek.com"),
-            model=settings.get("model", "deepseek-chat"),
+            base_url=settings.get("base_url", DEEPSEEK_DEFAULT_BASE_URL),
+            model=settings.get("model", DEEPSEEK_DEFAULT_MODEL),
         )
 
         self._export_btn.configure(state="disabled", text="导出中...")
@@ -422,8 +423,8 @@ class ProductScanPage(tk.Frame):
                     from product_scanner import ProductScanner
                     scanner = ProductScanner(
                         api_key=settings.get("api_key", ""),
-                        base_url=settings.get("base_url", "https://api.deepseek.com"),
-                        model=settings.get("model", "deepseek-chat"),
+                        base_url=settings.get("base_url", DEEPSEEK_DEFAULT_BASE_URL),
+                        model=settings.get("model", DEEPSEEK_DEFAULT_MODEL),
                     )
                     products = scanner.scan(srt_path, log_fn=lambda m: self._log(f"  {m}", "info"))
                     if products:

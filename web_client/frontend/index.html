@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260620-preview-script-list">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260620-video-picker-compact">
 </head>
 <body>
   <div class="app-shell">
@@ -23,6 +23,7 @@
         <button class="nav-item" data-page="mix"><span>混剪成片</span></button>
         <button class="nav-item" data-page="ai-scan"><span>AI扫描</span></button>
         <button class="nav-item" data-page="product-scan"><span>单品扫描</span></button>
+        <button class="nav-item" data-page="video-split"><span>视频分割</span></button>
         <button class="nav-item" data-page="dedup"><span>创作辅助</span></button>
         <button class="nav-item" data-page="live-rec"><span>直播录制</span></button>
         <button class="nav-item" data-page="settings"><span>设置</span></button>
@@ -74,12 +75,14 @@
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="video-paths">清空</button>
               </div>
             </div>
-            <div class="video-picker-card">
-              <strong>点击“添加视频”选择素材</strong>
-              <span>使用系统文件选择器读取原始路径，自动检测同名 SRT 字幕。</span>
+            <div class="video-picker-card video-picker-card-compact">
+              <div class="video-picker-empty">
+                <strong>点击“添加视频”选择素材</strong>
+                <span>自动检测同名 SRT 字幕。</span>
+              </div>
+              <div class="video-list video-list-compact" data-list-for="video-paths"></div>
             </div>
             <textarea id="video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
-            <div class="video-list" data-list-for="video-paths"></div>
             <input id="srt-path" type="hidden" value="">
             <div class="field-row">
               <label for="output-dir">输出目录</label>
@@ -404,12 +407,14 @@
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
               </div>
             </div>
-            <div class="video-picker-card">
-              <strong>点击“添加视频”选择素材</strong>
-              <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
+            <div class="video-picker-card video-picker-card-compact">
+              <div class="video-picker-empty">
+                <strong>点击“添加视频”选择素材</strong>
+                <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
+              </div>
+              <div class="video-list video-list-compact" data-list-for="mix-video-paths"></div>
             </div>
             <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
-            <div class="video-list" data-list-for="mix-video-paths"></div>
             <div class="field-row">
               <label for="mix-output-dir">输出目录</label>
               <div class="input-with-button">
@@ -854,6 +859,85 @@
               </div>
             </div>
             <div class="log-view" id="log-product-scan"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="page-video-split">
+        <header class="page-header">
+          <div>
+            <h1>视频分割</h1>
+            <p class="page-subtitle">批量按段数或固定时长拆分视频，适合先把长素材切成可整理的小段。</p>
+          </div>
+        </header>
+
+        <div class="content-grid two-column-grid video-split-grid">
+          <section class="panel panel-large">
+            <div class="panel-header">
+              <h2>视频文件</h2>
+              <button class="icon-button" title="选择视频" data-action="pick-videos" data-target="vs-video-paths">+</button>
+            </div>
+            <div class="path-entry">
+              <input id="vs-path-input" type="text" data-path-target="vs-video-paths" placeholder="粘贴视频完整路径后按 Enter">
+              <button class="button button-secondary" data-action="pick-videos" data-target="vs-video-paths">选择视频</button>
+              <button class="button button-muted" data-action="clear-video-list" data-target="vs-video-paths">清空</button>
+            </div>
+            <textarea id="vs-video-paths" class="path-box" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+            <div class="video-dropzone" data-drop-target="vs-video-paths">点击“选择视频”，或把视频拖到这里</div>
+            <div class="video-list" data-list-for="vs-video-paths"></div>
+
+            <div class="field-row">
+              <label for="vs-output-dir">导出目录</label>
+              <div class="input-with-button">
+                <input id="vs-output-dir" type="text" placeholder="留空则输出到首个视频旁的 split_output">
+                <button class="button button-secondary" data-action="pick-directory" data-target="vs-output-dir">浏览</button>
+                <button class="button button-muted" data-action="open-path" data-target="vs-output-dir">打开</button>
+              </div>
+            </div>
+
+            <div class="split-mode-grid">
+              <div class="field-row compact">
+                <label for="vs-split-mode">分割方式</label>
+                <select id="vs-split-mode">
+                  <option value="count">按数量分段</option>
+                  <option value="duration">按时长分段</option>
+                </select>
+              </div>
+              <div class="field-row compact" data-vs-mode-field="count">
+                <label for="vs-segment-count">分段数量</label>
+                <input id="vs-segment-count" type="number" value="2" min="1" max="500" step="1">
+              </div>
+              <div class="field-row compact" data-vs-mode-field="duration">
+                <label for="vs-segment-seconds">每段秒数</label>
+                <input id="vs-segment-seconds" type="number" value="60" min="0.1" max="86400" step="0.1">
+              </div>
+            </div>
+
+            <div class="panel-actions">
+              <button class="button button-secondary" data-action="preview-video-split">预览分割</button>
+              <button class="button button-danger" data-action="stop-scope" data-scope="video-split">停止</button>
+              <button class="button button-primary" data-action="feature-submit" data-feature="video-split">开始分割</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>分割预览</h2>
+            </div>
+            <div class="result-list empty split-preview" id="vs-preview">
+              <p>添加视频后点击“预览分割”，这里会显示每段的起止时间和输出文件名。</p>
+            </div>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-header">
+              <h2>运行日志</h2>
+              <div class="log-header-actions">
+                <span class="log-count" id="video-split-log-count">0</span>
+                <button class="button button-muted button-small" data-action="clear-log" data-log="video-split">清除日志</button>
+              </div>
+            </div>
+            <div class="log-view" id="log-video-split"></div>
           </section>
         </div>
       </section>
@@ -1461,6 +1545,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260619-sidebar-update-entry" defer></script>
+  <script src="/assets/app.js?v=20260620-video-picker-compact" defer></script>
 </body>
 </html>

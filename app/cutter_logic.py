@@ -33,6 +33,7 @@ _sw_encoder_checked = False
 _sw_encoder_args = None
 _ACTIVE_PROCS = {}
 _ACTIVE_PROCS_LOCK = threading.Lock()
+OUTPUT_CLIP_MIRROR_PROBABILITY = 0.25
 
 
 def _register_process(proc, cancel_event=None):
@@ -1438,7 +1439,8 @@ def _clip_log_fields(clip):
         start = clip[2] if len(clip) > 2 else 0
         end = clip[3] if len(clip) > 3 else start
         dur = clip[5] if len(clip) > 5 else None
-        source = clip[7] if len(clip) > 7 else ""
+        raw_source = clip[7] if len(clip) > 7 else ""
+        source = "" if isinstance(raw_source, dict) else raw_source
     else:
         c_type, text, start, end, dur, source = "product", "", 0, 0, None, ""
     try:
@@ -1622,8 +1624,9 @@ def process_video(video_path, srt_path=None, output_path=None,
         # 记录AI模型到运行日志
         try:
             from ai_clipper import load_settings as _ld_log
+            from ai_model_config import DEEPSEEK_DEFAULT_MODEL
             _s = _ld_log()
-            _run_log["参数"]["AI模型"] = _s.get("model", "deepseek-chat")
+            _run_log["参数"]["AI模型"] = _s.get("model", DEEPSEEK_DEFAULT_MODEL)
             _run_log["参数"]["云端ASR"] = _s.get("asr_enabled", False)
             _run_log["参数"]["ASR预设"] = _s.get("asr_preset", "自定义")
         except Exception:
@@ -1956,7 +1959,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     temp_dir = tempfile.mkdtemp(prefix="lc_temp_", dir="C:\\")
     will_subtitle = subtitle_overlay and SUBTITLE_OVERLAY.get("enabled")
     _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置Whisper+DeepSeek修复）' if will_subtitle else '关'}")
-    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}")
+    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}" + (f" (单片段概率 {OUTPUT_CLIP_MIRROR_PROBABILITY:.0%})" if _mirror_enabled else ""))
     if _is_ts_like_video(video_path):
         _log("TS normalize: using original TS fallback; cut stage will still use genpts.")
     # [v9.6] Parse SRT boundaries for hook tail buffer
@@ -2164,7 +2167,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _log(f"实际切割 [{clip_idx+1}/{total_clips}] {_orig_start:.1f}-{_orig_end:.1f}s -> {start:.1f}-{end:.1f}s | {_actual_clip_text[:120]}")
 
             mirror_vf = ""
-            if _mirror_enabled and random.random() < 0.5:
+            if _mirror_enabled and random.random() < OUTPUT_CLIP_MIRROR_PROBABILITY:
                 mirror_vf = "hflip"
             clip_duration = max(0.2, end - start)
 
@@ -2420,8 +2423,8 @@ def process_video(video_path, srt_path=None, output_path=None,
         # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
-        # 随机镜像（50%概率）
-        if _mirror_enabled and random.random() < 0.5:
+        # 随机镜像：整片兜底去重，概率低于旧版以减少方向变化。
+        if _mirror_enabled and random.random() < OUTPUT_CLIP_MIRROR_PROBABILITY:
             vf = "hflip," + vf
         # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
         af = "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.3"
@@ -3388,9 +3391,10 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _log("正在用DeepSeek修复字幕（错别字+繁简转换+断句）...")
         try:
             from ai_clipper import load_settings as _load_ai_settings
+            from ai_model_config import ai_chat_completions_url, normalize_ai_base_url
             settings = _load_ai_settings()
             api_key = settings.get("api_key", "").strip()
-            base_url = (settings.get("base_url", "") or "").rstrip("/")
+            base_url = normalize_ai_base_url(settings.get("base_url"))
             model = (settings.get("model", "") or "").strip()
         except Exception as e:
             _log(f"读取 AI 设置失败: {e}")
@@ -3436,7 +3440,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 }).encode("utf-8")
 
                 req = urllib.request.Request(
-                    f"{base_url}/chat/completions",
+                    ai_chat_completions_url(base_url),
                     data=req_body,
                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
                 )
@@ -4015,7 +4019,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     original_video_list = list(video_path)
     video_list = list(original_video_list)
     _log(f"\u5171 {len(video_list)} \u4e2a\u89c6\u9891")
-    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}")
+    _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}" + (f" (单片段概率 {OUTPUT_CLIP_MIRROR_PROBABILITY:.0%})" if _mirror_enabled else ""))
 
     if any(_is_ts_like_video(_vp) for _vp in video_list):
         _log("TS normalize: TS inputs will be transcoded before ASR/AI/cutting.")
@@ -4346,16 +4350,47 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 best_idx = int(entry.get("source_idx", -1))
         return best_idx if best_score >= 0.55 else -1
 
+    def _source_path_key(value):
+        raw = str(value or "").strip().strip('"')
+        if not raw:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(raw))
+        except Exception:
+            return os.path.normcase(raw)
+
+    _source_lookup = {}
+    for _vi_lookup, _vp_lookup in enumerate(video_list):
+        _source_lookup[_source_path_key(_vp_lookup)] = _vi_lookup
+        if _vi_lookup < len(original_video_list):
+            _source_lookup[_source_path_key(original_video_list[_vi_lookup])] = _vi_lookup
+
+    def _explicit_source_idx(clip):
+        source = ""
+        if isinstance(clip, dict):
+            source = clip.get("source") or clip.get("video") or ""
+        elif isinstance(clip, (list, tuple)) and len(clip) > 7:
+            raw_source = clip[7]
+            if not isinstance(raw_source, dict):
+                source = raw_source
+        key = _source_path_key(source)
+        return _source_lookup.get(key, -1) if key else -1
+
     all_clips_meta = []
     tc = 0
     for clip in ordered_clips:
         c_type, text, start, end, score, dur = clip[:6]
         preview_exact = _clip_preview_exact(clip)
-        _src_idx = -1
+        _src_idx = _explicit_source_idx(clip)
+        _marker_idx = -1
         for _vi2 in range(len(video_list)):
             if f"[V{_vi2+1}]" in text:
-                _src_idx = _vi2
+                _marker_idx = _vi2
                 break
+        if _src_idx >= 0 and _marker_idx >= 0 and _marker_idx != _src_idx:
+            _log(f"Source map: 使用片段源文件覆盖 V{_marker_idx+1} -> V{_src_idx+1} ({start:.1f}-{end:.1f}s)")
+        if _src_idx < 0:
+            _src_idx = _marker_idx
         if _src_idx < 0:
             _src_idx = _infer_source_idx_from_srt(text, start, end)
             if _src_idx >= 0:
@@ -4594,7 +4629,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _clip_ends.append(end)
 
         mirror_vf = ""
-        if _mirror_enabled and random.random() < 0.5:
+        if _mirror_enabled and random.random() < OUTPUT_CLIP_MIRROR_PROBABILITY:
             mirror_vf = "hflip"
 
         # Smart crop or default 9:16

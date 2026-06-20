@@ -35,6 +35,7 @@ import queue
 from config import FFMPEG_PATH, VIDEO_CONFIG, DEDUP_PRESET, DEDUP_CONFIG, SUBTITLE_OVERLAY
 from cutter_logic import process_video, process_video_multi, process_video_mix
 from config import USER_DATA_DIR, SETTINGS_PATH
+from ai_model_config import DEEPSEEK_DEFAULT_BASE_URL, DEEPSEEK_DEFAULT_MODEL, ai_models_url
 from license_client import check_activation, check_activation_cached, activate_with_code, check_trial, deactivate_device
 # 样式
 from config import C, FNT_S, FNT_B
@@ -73,7 +74,7 @@ DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BF
 # AI 预设
 AI_PRESETS = {
     "自定义":  {"base_url": "", "model": ""},
-    "DeepSeek V4": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
+    "DeepSeek V4": {"base_url": DEEPSEEK_DEFAULT_BASE_URL, "model": DEEPSEEK_DEFAULT_MODEL},
 }
 
 # 去重等级说明
@@ -1214,7 +1215,7 @@ class App:
             messagebox.showwarning("测试连接", "Base URL 为空，请先填写")
             return
         try:
-            url = base_url.rstrip("/") + "/models"
+            url = ai_models_url(base_url)
             result = subprocess.run(
                 ["curl", "-s", "-w", "\n%{http_code}", url,
                  "-H", f"Authorization: Bearer {api_key}"],
@@ -1923,8 +1924,8 @@ class App:
                 from product_scanner import ProductScanner
                 scanner = ProductScanner(
                     api_key=settings.get("api_key", ""),
-                    base_url=settings.get("base_url", "https://api.deepseek.com"),
-                    model=settings.get("model", "deepseek-chat"),
+                    base_url=settings.get("base_url", DEEPSEEK_DEFAULT_BASE_URL),
+                    model=settings.get("model", DEEPSEEK_DEFAULT_MODEL),
                 )
                 products = scanner.scan(srt_path)
                 if not products:

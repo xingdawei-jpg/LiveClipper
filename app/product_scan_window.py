@@ -12,20 +12,28 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from product_scanner import ProductScanner
+from ai_model_config import DEEPSEEK_DEFAULT_MODEL, normalize_ai_base_url
 
 
 def _get_ai_settings():
     """从 ai_settings.json 读取 AI 配置"""
-    settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
-    if not os.path.exists(settings_path):
-        return None, None, None
     try:
-        import json
-        with open(settings_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        from ai_clipper import load_settings
+        data = load_settings()
+    except Exception:
+        settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
+        if not os.path.exists(settings_path):
+            return None, None, None
+        try:
+            import json
+            with open(settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None, None, None
+    try:
         api_key = data.get("api_key", "")
-        base_url = data.get("base_url", "https://api.deepseek.com/v1")
-        model = data.get("model", "deepseek-chat")
+        base_url = normalize_ai_base_url(data.get("base_url"))
+        model = data.get("model") or DEEPSEEK_DEFAULT_MODEL
         return api_key, base_url, model
     except Exception:
         return None, None, None

@@ -30,6 +30,7 @@ const state = {
     mix: 0,
     "ai-scan": 0,
     "product-scan": 0,
+    "video-split": 0,
     dedup: 0,
     "live-rec": 0,
   },
@@ -39,6 +40,7 @@ const state = {
     mix: 0,
     "ai-scan": 0,
     "product-scan": 0,
+    "video-split": 0,
     dedup: 0,
     "live-rec": 0,
   },
@@ -75,8 +77,9 @@ const themeStorageKey = "lc:ui-theme";
 const uiFontSizeStorageKey = "lc:ui-font-size";
 const previewDraftStoragePrefix = "lc:preview-draft:";
 const validThemes = new Set(["system", "light", "dark"]);
+const compactVideoListTargetIds = new Set(["video-paths", "mix-video-paths"]);
 
-const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "dedup", "live-rec", "settings"];
+const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "video-split", "dedup", "live-rec", "settings"];
 
 const progressStageRules = [
   { label: "准备素材", percent: 12, tokens: ["任务已启动", "启动", "目标时长", "读取", "上传", "路径"] },
@@ -186,6 +189,15 @@ const featurePreferenceGroups = {
       "ps-advance",
       "ps-video-start-offset",
       "ps-live-start-time",
+    ],
+  },
+  video_split: {
+    prefixes: [],
+    ids: [
+      "vs-output-dir",
+      "vs-split-mode",
+      "vs-segment-count",
+      "vs-segment-seconds",
     ],
   },
 };
@@ -299,6 +311,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindNavigation();
   bindSettingsTabs();
   bindActions();
+  syncVideoSplitMode();
   bindAiPresetControls();
   bindPreviewControls();
   bindFeaturePreferenceAutoSave();
@@ -488,6 +501,7 @@ function bindActions() {
       if (action === "save-ai-preset") saveCurrentAiPreset(target.dataset.prefix);
       if (action === "delete-ai-preset") deleteCurrentAiPreset(target.dataset.prefix);
       if (action === "feature-start") await startFeature(target.dataset.feature);
+      if (action === "preview-video-split") await previewVideoSplit();
       if (action === "feature-submit") await submitFeature(target.dataset.feature);
       if (action === "reset-dedup") resetDedupDefaults();
       if (action === "add-live-room") addLiveRoom();
@@ -522,11 +536,12 @@ function bindActions() {
   $("s-ui-theme")?.addEventListener("change", (event) => {
     applyTheme(event.target.value);
   });
+  $("vs-split-mode")?.addEventListener("change", syncVideoSplitMode);
 
   bindVideoDropzones();
   bindFileDropTargets();
   injectDiagnosticButtons();
-  ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "dedup-video-paths"].forEach(renderVideoList);
+  ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "vs-video-paths", "dedup-video-paths"].forEach(renderVideoList);
   document.querySelectorAll(".path-box").forEach((box) => {
     box.addEventListener("input", () => renderVideoList(box.id));
   });
@@ -1846,6 +1861,7 @@ function defaultOutputPath(targetId) {
     "output-dir": ["video-paths", "output"],
     "mix-output-dir": ["mix-video-paths", "mix_output"],
     "scan-output-dir": ["scan-video-paths", "scan_output"],
+    "vs-output-dir": ["vs-video-paths", "split_output"],
     "dedup-output-dir": ["dedup-video-paths", "dedup_output"],
   };
   const item = defaults[targetId];
@@ -1936,10 +1952,21 @@ function videoMetaText(info) {
   return parts.join(" · ") || "可用";
 }
 
+function compactVideoMetaText(info) {
+  if (!info) return "检测中";
+  if (!info.exists || !info.valid) return videoMetaText(info);
+  const parts = [];
+  if (Number(info.duration) > 0) parts.push(formatSeconds(info.duration));
+  if (info.resolution) parts.push(info.resolution);
+  return parts.join(" · ") || "可用";
+}
+
 function renderVideoList(targetId) {
   const box = document.querySelector(`[data-list-for="${targetId}"]`);
   if (!box) return;
   const lines = getLines(targetId);
+  const isCompact = compactVideoListTargetIds.has(targetId);
+  box.closest(".video-picker-card")?.classList.toggle("has-videos", lines.length > 0);
   const infoMap = videoInfoMap(targetId);
   const duplicateMap = videoListDuplicateMap(lines);
   box.innerHTML = lines.map((path, index) => {
@@ -1951,11 +1978,22 @@ function renderVideoList(targetId) {
       (duplicateMap.pathCounts.get(normalizeVideoPath(path)) || 0) > 1 ||
       (duplicateMap.nameCounts.get(nameKey) || 0) > 1 ||
       Boolean(info?.duplicate);
-    const rowClass = ["video-row", isInvalid ? "is-invalid" : "", isDuplicate ? "is-duplicate" : ""].filter(Boolean).join(" ");
+    const rowClass = ["video-row", isCompact ? "video-row-compact" : "", isInvalid ? "is-invalid" : "", isDuplicate ? "is-duplicate" : ""].filter(Boolean).join(" ");
     const badges = [
       isInvalid ? `<span class="video-badge is-invalid">无效</span>` : "",
       isDuplicate ? `<span class="video-badge is-duplicate">重复</span>` : "",
     ].join("");
+    if (isCompact) {
+      return `
+        <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
+          <div class="video-drag" title="拖拽排序">≡</div>
+          <div class="video-main">
+            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}</div>
+            <span class="video-meta">${escapeHtml(compactVideoMetaText(info))}</span>
+          </div>
+          <button class="video-remove" type="button" title="删除" data-action="remove-video" data-target="${targetId}" data-index="${index}">×</button>
+        </div>`;
+    }
     return `
       <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
         <div class="video-drag" title="拖拽排序">≡</div>
@@ -2279,6 +2317,21 @@ function renderPreviewState(scope = "smart") {
   else renderSmartPreview(state.smartPreview);
 }
 
+function previewBox(scope = "smart") {
+  return scope === "mix" ? $("mix-preview") : $("smart-preview");
+}
+
+function previewStoryScrollTop(scope = "smart") {
+  return previewBox(scope)?.querySelector(".clip-story-list")?.scrollTop || 0;
+}
+
+function renderPreviewStateKeepStoryScroll(scope = "smart") {
+  const scrollTop = previewStoryScrollTop(scope);
+  renderPreviewState(scope);
+  const list = previewBox(scope)?.querySelector(".clip-story-list");
+  if (list) list.scrollTop = scrollTop;
+}
+
 function previewDraftKey(scope, previewId) {
   return `${scope}:${previewId || ""}`;
 }
@@ -2445,7 +2498,7 @@ function updatePreviewStickyOffset(scope = "smart") {
 }
 
 function refreshPreviewSelectionUi(scope = "smart") {
-  renderPreviewState(scope);
+  renderPreviewStateKeepStoryScroll(scope);
 }
 
 function syncPreviewClipSelections(scope = "smart") {
@@ -2517,7 +2570,7 @@ function togglePreviewSegments(index, scope = "smart") {
     item.segmentsExpanded = false;
   });
   clip.segmentsExpanded = nextExpanded;
-  renderPreviewState(scope);
+  renderPreviewStateKeepStoryScroll(scope);
 }
 
 function collectPreviewSelection(scope = "smart") {
@@ -2540,7 +2593,7 @@ function reorderPreviewClip(scope, fromIndex, toIndex) {
   const [clip] = clips.splice(from, 1);
   clips.splice(to, 0, clip);
   commitPreviewDraft(scope);
-  renderPreviewState(scope);
+  renderPreviewStateKeepStoryScroll(scope);
 }
 
 function bindPreviewRowDrag(box, scope = "smart") {
@@ -2718,10 +2771,111 @@ async function runPreflight(feature, payload, scope) {
   return result;
 }
 
+function syncVideoSplitMode() {
+  const mode = $("vs-split-mode")?.value || "count";
+  document.querySelectorAll("[data-vs-mode-field]").forEach((row) => {
+    row.hidden = row.dataset.vsModeField !== mode;
+  });
+}
+
+function collectVideoSplitOverrides() {
+  const overrides = {};
+  document.querySelectorAll("[data-vs-override]").forEach((input) => {
+    const key = input.dataset.vsOverride || "";
+    const value = Math.round(Number(input.value || 0));
+    if (key && Number.isFinite(value) && value > 0) {
+      overrides[key] = value;
+    }
+  });
+  return overrides;
+}
+
+async function previewVideoSplit() {
+  await saveFeaturePreferences();
+  const payload = collectFeaturePayload("video-split");
+  await runPreflight("video-split", payload, "video-split");
+  const preview = await api("/api/video-split/preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  renderVideoSplitPreview(preview);
+  toast(`已生成 ${preview.total_segments || 0} 段分割预览`, "success");
+}
+
+function renderVideoSplitPreview(preview) {
+  const box = $("vs-preview");
+  if (!box) return;
+  const videos = Array.isArray(preview?.videos) ? preview.videos : [];
+  if (!videos.length) {
+    box.classList.add("empty");
+    box.innerHTML = "<p>添加视频后点击“预览分割”，这里会显示每段的起止时间和输出文件名。</p>";
+    return;
+  }
+
+  const totalSegments = Number(preview.total_segments || videos.reduce((sum, item) => sum + (item.segments?.length || 0), 0));
+  const totalDuration = Number(preview.total_duration || videos.reduce((sum, item) => sum + Number(item.duration || 0), 0));
+  const mode = preview.mode || $("vs-split-mode")?.value || "count";
+  const modeText = mode === "duration" ? "按时长分段" : "按数量分段";
+  const summary = `
+    <div class="split-preview-summary">
+      <span>${escapeHtml(modeText)}</span>
+      <strong>${videos.length} 个视频</strong>
+      <strong>${totalSegments} 段</strong>
+      <strong>${formatSeconds(totalDuration)}</strong>
+    </div>
+  `;
+
+  const groups = videos.map((video, videoIndex) => {
+    const segments = Array.isArray(video.segments) ? video.segments : [];
+    const segmentCount = Number(video.segment_count || segments.length || 1);
+    const path = String(video.path || "");
+    const countControl = mode === "count" ? `
+      <label class="split-count-control">
+        <span>此文件段数</span>
+        <input class="split-count-input" type="number" min="1" max="500" step="1" value="${segmentCount}" data-vs-override="${escapeHtml(path)}">
+      </label>
+    ` : "";
+    const rows = segments.map((segment) => `
+      <div class="split-preview-row">
+        <span>#${Number(segment.index || 0)}</span>
+        <span>${formatSeconds(segment.start)}</span>
+        <span>${formatSeconds(segment.end)}</span>
+        <span>${formatSeconds(segment.duration)}</span>
+        <span title="${escapeHtml(segment.output_name || "")}">${escapeHtml(segment.output_name || "")}</span>
+      </div>
+    `).join("");
+    return `
+      <div class="split-preview-video">
+        <div class="split-preview-video-head">
+          <div>
+            <strong>${videoIndex + 1}. ${escapeHtml(video.name || path || "视频")}</strong>
+            <span>${escapeHtml(video.resolution || "未知分辨率")} · ${formatSeconds(video.duration)}</span>
+          </div>
+          ${countControl}
+        </div>
+        <div class="split-preview-table">
+          <div class="split-preview-row split-preview-head">
+            <span>序号</span>
+            <span>起始</span>
+            <span>结束</span>
+            <span>时长</span>
+            <span>输出文件</span>
+          </div>
+          ${rows}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  box.classList.remove("empty");
+  box.innerHTML = summary + groups;
+}
+
 function scopeForFeature(feature) {
   if (feature === "mix") return "mix";
   if (feature?.startsWith("ai-scan")) return "ai-scan";
   if (feature?.startsWith("product-scan")) return "product-scan";
+  if (feature === "video-split") return "video-split";
   if (feature === "dedup") return "dedup";
   if (feature?.startsWith("live-rec")) return "live-rec";
   return "settings";
@@ -2869,7 +3023,7 @@ function setPreviewDetailSelection(scope = "smart", index) {
   if (!preview?.clips?.some((clip) => Number(clip.index) === index)) return;
   syncPreviewClipSelections(scope);
   state.previewDetailSelection[scope] = index;
-  renderPreviewState(scope);
+  renderPreviewStateKeepStoryScroll(scope);
 }
 
 function renderClipStoryText(clip, repeatTags = "") {
@@ -3353,6 +3507,18 @@ function collectFeaturePayload(feature) {
       advance_seconds: Number($("ps-advance").value || 0),
       video_start_offset: $("ps-video-start-offset")?.value.trim() || "",
       live_start_time: $("ps-live-start-time")?.value.trim() || "",
+    };
+  }
+
+  if (feature === "video-split") {
+    syncVideoSplitMode();
+    return {
+      video_paths: getLines("vs-video-paths"),
+      output_dir: $("vs-output-dir").value.trim(),
+      mode: $("vs-split-mode")?.value || "count",
+      segment_count: Number($("vs-segment-count")?.value || 2),
+      segment_seconds: Number($("vs-segment-seconds")?.value || 60),
+      overrides: collectVideoSplitOverrides(),
     };
   }
 

@@ -18,6 +18,14 @@ import urllib.request
 import urllib.error
 import re
 
+from ai_model_config import (
+    DEEPSEEK_DEFAULT_BASE_URL,
+    DEEPSEEK_DEFAULT_MODEL,
+    ai_chat_completions_url,
+    normalize_ai_base_url,
+    normalize_ai_model_defaults as _normalize_ai_model_defaults,
+)
+
 try:
     from tighten import ensure_sentence_complete, trim_repetitive_filler, trim_tail_filler
 except Exception:
@@ -818,31 +826,6 @@ def _friendly_msg(err_str):
 # ============================================================
 # 设置管理
 # ============================================================
-DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
-LEGACY_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
-
-
-def _normalize_ai_model_defaults(settings):
-    data = dict(settings or {})
-    api_key = str(data.get("api_key") or "").strip()
-    base_url = str(data.get("base_url") or "").strip().rstrip("/")
-    model = str(data.get("model") or "").strip()
-
-    if not base_url:
-        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
-    if not model:
-        data["model"] = DEEPSEEK_DEFAULT_MODEL
-
-    if (
-        not api_key
-        and base_url == LEGACY_DOUBAO_BASE_URL
-        and model == LEGACY_DOUBAO_MODEL
-    ):
-        data["base_url"] = DEEPSEEK_DEFAULT_BASE_URL
-        data["model"] = DEEPSEEK_DEFAULT_MODEL
-    return data
 
 
 def _get_base_path():
@@ -2409,7 +2392,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         return []
 
     api_key = settings["api_key"]
-    base_url = settings["base_url"].rstrip("/")
+    base_url = normalize_ai_base_url(settings["base_url"])
     model = settings["model"]
     _ai_rules = _merge_ai_rules(ai_controls)
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
@@ -3411,7 +3394,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         except Exception:
             pass
 
-    url = f"{base_url}/chat/completions"
+    url = ai_chat_completions_url(base_url)
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
 
@@ -3790,7 +3773,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         return {"versions": []}
 
     api_key = settings["api_key"]
-    base_url = settings["base_url"].rstrip("/")
+    base_url = normalize_ai_base_url(settings["base_url"])
     model = settings["model"]
     _ai_rules = _merge_ai_rules(ai_controls)
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
@@ -4335,7 +4318,7 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
         except Exception:
             pass
 
-    url = f"{base_url}/chat/completions"
+    url = ai_chat_completions_url(base_url)
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
 
@@ -7398,8 +7381,8 @@ def ai_reorder_clips(all_clips, log_fn=None):
         return [c["idx"] for c in all_clips]
 
     api_key = settings["api_key"]
-    base_url = settings["base_url"].rstrip("/")
-    model = settings.get("model", "deepseek-chat")
+    base_url = normalize_ai_base_url(settings["base_url"])
+    model = settings.get("model", DEEPSEEK_DEFAULT_MODEL)
 
     lines = []
     for c in all_clips:
@@ -7435,7 +7418,7 @@ def ai_reorder_clips(all_clips, log_fn=None):
 
     try:
         req = urllib.request.Request(
-            f"{base_url}/v1/chat/completions",
+            ai_chat_completions_url(base_url),
             data=json.dumps(payload).encode("utf-8"),
             headers=headers,
         )
