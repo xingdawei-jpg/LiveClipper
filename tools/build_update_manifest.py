@@ -41,6 +41,7 @@ WEB_FILES = [
     WEB_DIR / "frontend" / "index.html",
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
+    WEB_DIR / "frontend" / "assets" / "liveclipper.ico",
 ]
 
 

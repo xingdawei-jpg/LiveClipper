@@ -2896,10 +2896,13 @@ function renderClipStoryCard(clip, position, scope, analysis, activeIndex) {
   const checked = clip.selected === false ? "" : "checked";
   const { risk, riskLabel, riskClass } = previewClipRisk(clip, analysis);
   const repeatTags = renderManualRepeatTags(clip);
-  const segmentCount = selectedSegmentCountText(clip) || "整段";
-  const source = scope === "mix"
-    ? `<span class="clip-story-source" title="${escapeHtml(clip.source_name || clip.source || "-")}">${escapeHtml(clip.source_name || "-")}</span>`
+  const sourceName = clip.source_name || clip.source || "";
+  const source = scope === "mix" && sourceName
+    ? `<span class="clip-story-source" title="${escapeHtml(sourceName)}"> · ${escapeHtml(sourceName.split(/[\\/]/).filter(Boolean).pop() || sourceName)}</span>`
     : "";
+  const riskBadge = riskClass === "ok" && riskLabel === "正常"
+    ? ""
+    : `<span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>`;
   return `
     <article class="clip-preview-row clip-story-card ${clip.selected === false ? "is-unselected" : ""} ${Number(clip.index) === activeIndex ? "is-active" : ""}" draggable="true" data-preview-row data-preview-scope="${scope}" data-preview-index="${clip.index}">
       <div class="clip-story-select">
@@ -2908,20 +2911,12 @@ function renderClipStoryCard(clip, position, scope, analysis, activeIndex) {
       </div>
       <div class="clip-story-main">
         <div class="clip-story-topline">
-          <span class="clip-story-order">#${position + 1}</span>
-          ${source}
-          <span class="clip-type clip-type-${escapeHtml(clip.clip_type || "product")}">${escapeHtml(typeLabel)}</span>
-          <span data-preview-time>${escapeHtml(time)}</span>
-          <span data-preview-duration>${escapeHtml(duration)}</span>
-          <span class="clip-segment-count" data-preview-segment-count>${escapeHtml(segmentCount)}</span>
-          <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
+          <span class="clip-story-meta">#${position + 1} · ${escapeHtml(typeLabel)} · ${escapeHtml(time)} · ${escapeHtml(duration)}${source}</span>
+          ${riskBadge}
         </div>
         <div class="clip-content">
           ${renderClipStoryText(clip, repeatTags)}
         </div>
-      </div>
-      <div class="clip-story-actions">
-        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">预览</button>
       </div>
     </article>
   `;
@@ -3120,7 +3115,7 @@ function renderManualRepeatTags(clip) {
 function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const clips = (preview?.clips || []).filter((clip) => clip.selected !== false);
   const dedupSummary = preview?.dedup_summary || {};
-  const target = Number($(targetId)?.value || preview?.target_duration || 60);
+  const target = Number(preview?.target_duration || $(targetId)?.value || 60);
   const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
   const riskByIndex = new Map();
   const warnings = [];

@@ -1849,15 +1849,17 @@ def process_video(video_path, srt_path=None, output_path=None,
             # 动态控制AI输出的片段数量
             if TARGET_DURATION <= 40:
                 _ai_mod._AI_CLIP_COUNT = "5-8"
+            elif TARGET_DURATION >= 100:
+                _ai_mod._AI_CLIP_COUNT = "22-30"
             elif TARGET_DURATION >= 80:
-                _ai_mod._AI_CLIP_COUNT = "15-20"
+                _ai_mod._AI_CLIP_COUNT = "18-24"
             else:
                 _ai_mod._AI_CLIP_COUNT = "10-15"
             ordered_clips = ai_analyze_clips(
                 srt_text,
                 log_fn=_log,
                 force_category=force_category,
-                multi_version=_clips_only,
+                multi_version=False,
                 focus_hint=_fh,
                 target_duration=TARGET_DURATION,
                 ai_controls=ai_controls,

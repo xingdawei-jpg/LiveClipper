@@ -2180,6 +2180,10 @@ def _normalize_preview_final_clips(
     try:
         import ai_clipper as ai_mod
 
+        if hasattr(ai_mod, "_filter_price_and_cta"):
+            _step("forbidden_price_filter", lambda items: ai_mod._filter_price_and_cta(items, None))
+        if hasattr(ai_mod, "_filter_hook_product_repeats"):
+            _step("hook_product_repeat_filter", lambda items: ai_mod._filter_hook_product_repeats(items, None))
         if hasattr(ai_mod, "_dedup_clip_text_overlap"):
             _step("time_text_dedup", lambda items: ai_mod._dedup_clip_text_overlap(items, None, merge_mode=merge_mode))
         if hasattr(ai_mod, "_filter_semantic_repeat"):
@@ -2365,6 +2369,40 @@ def _preview_is_pure_filler(text: Any) -> bool:
     return len(compact) <= 4 and set(compact) <= filler_chars
 
 
+def _preview_forbidden_words() -> list[str]:
+    try:
+        data = _load_effective_keyword_config()
+        words = data.get("forbidden_phrases", [])
+    except Exception:
+        words = []
+    result = []
+    for word in words:
+        value = str(word or "").strip()
+        if value:
+            result.append(value)
+    return result
+
+
+def _preview_has_forbidden_or_price(text: Any) -> bool:
+    clean = _strip_preview_source_marker(text)
+    compact = _preview_compact_text(clean)
+    if not compact:
+        return False
+    try:
+        for word in _preview_forbidden_words():
+            if word and word in clean:
+                return True
+    except Exception:
+        pass
+    price_patterns = [
+        r"\d{2,4}\s*[元块]",
+        r"[到拿]手价?\s*\d",
+        r"原价|现价|秒杀价|福利价|破价|到手价|特价|优惠|折扣|领券|优惠券|消费券|凑单",
+        r"正码正拍|正码|正拍|卡码|往大拍|小黄车|购物车|链接|上车|下单|去拍|赶紧拍",
+    ]
+    return any(re.search(pattern, clean) or re.search(pattern, compact) for pattern in price_patterns)
+
+
 def _clean_preview_filler_prefix(text: Any) -> str:
     marker, body = _preview_text_marker_and_body(text)
     prefixes = [
@@ -2435,7 +2473,7 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
                 "end": round(seg_end, 3),
                 "duration": round(max(0.0, seg_end - seg_start), 3),
                 "text": text,
-                "selected": overlap >= 0.04,
+                "selected": overlap >= 0.04 and not _preview_has_forbidden_or_price(text),
             })
     if pieces:
         return pieces
@@ -2449,8 +2487,49 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
         "end": round(end, 3),
         "duration": round(max(0.0, end - start), 3),
         "text": text,
-        "selected": not _preview_is_pure_filler(text),
+        "selected": not _preview_is_pure_filler(text) and not _preview_has_forbidden_or_price(text),
     }]
+
+
+def _preview_unselect_duplicate_segments(public_clips: list[dict[str, Any]]) -> dict[str, Any]:
+    seen: dict[tuple[str, float, float, str], int] = {}
+    removed_segments = 0
+    removed_clips = 0
+    for clip in public_clips:
+        segments = list(clip.get("segments") or [])
+        if not segments:
+            continue
+        source = str(clip.get("source") or clip.get("source_name") or "")
+        selected_before = [seg for seg in segments if seg.get("selected") is not False]
+        if not selected_before:
+            clip["selected"] = False
+            continue
+        removed_duration = 0.0
+        total_duration = sum(float(seg.get("duration") or 0) for seg in selected_before)
+        for seg in selected_before:
+            start = round(float(seg.get("start") or 0), 3)
+            end = round(float(seg.get("end") or start), 3)
+            text_key = _preview_compact_text(seg.get("text") or "")[:48]
+            key = (source, start, end, text_key)
+            if key in seen:
+                seg["selected"] = False
+                seg["duplicate_of"] = seen[key]
+                removed_segments += 1
+                removed_duration += float(seg.get("duration") or max(0.0, end - start))
+            else:
+                seen[key] = int(clip.get("index", -1))
+        selected_after = [seg for seg in segments if seg.get("selected") is not False]
+        if selected_after and total_duration > 0 and removed_duration / total_duration >= 0.65:
+            for seg in segments:
+                if seg.get("selected") is not False:
+                    seg["selected"] = False
+                    seg["duplicate_tail"] = True
+                    removed_segments += 1
+            selected_after = []
+        if not selected_after:
+            clip["selected"] = False
+            removed_clips += 1
+    return {"preview_duplicate_segments_removed": removed_segments, "preview_duplicate_clips_unselected": removed_clips}
 
 
 def _preview_public_clips(clips: list[Any], srt_text: str = "") -> list[dict[str, Any]]:
@@ -2465,6 +2544,7 @@ def _preview_public_clips(clips: list[Any], srt_text: str = "") -> list[dict[str
     public_clips = [_clip_public(index, clip) for index, clip in enumerate(clips)]
     for clip in public_clips:
         clip["segments"] = _preview_segments_for_clip(clip, srt_segments)
+    _preview_unselect_duplicate_segments(public_clips)
     return public_clips
 
 
@@ -2707,6 +2787,7 @@ def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
         "video": preview.get("video", ""),
         "video_name": preview.get("video_name", ""),
         "srt_path": preview.get("srt_path", ""),
+        "target_duration": preview.get("target_duration", 0),
         "created_at": preview.get("created_at", 0),
         "clips": preview.get("clips", []),
         "selection_draft": preview.get("selection_draft", {}),
@@ -3010,6 +3091,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         status="running",
         message="正在生成混剪 AI 选片预览。",
         created_at=time.time(),
+        target_duration=payload.duration,
         clips=[],
     )
     emit_log("info", "混剪 AI 选片预览任务已启动。", scope)
@@ -3067,6 +3149,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             message=f"混剪 AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(paths[0]),
             video_name=paths[0].name,
+            target_duration=payload.duration,
             srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
@@ -4273,6 +4356,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         status="running",
         message="正在生成 AI 选片预览。",
         created_at=time.time(),
+        target_duration=payload.target_duration,
         clips=[],
     )
     emit_log("info", "AI 选片预览任务已启动。", scope)
@@ -4333,6 +4417,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             message=f"AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(video),
             video_name=video.name,
+            target_duration=payload.target_duration,
             srt_path=resolved_srt,
             srt_text=srt_text,
             raw_clips=raw_clips,

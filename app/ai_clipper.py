@@ -18,6 +18,18 @@ import urllib.request
 import urllib.error
 import re
 
+try:
+    from tighten import ensure_sentence_complete, trim_repetitive_filler, trim_tail_filler
+except Exception:
+    def ensure_sentence_complete(clips, *_args, **_kwargs):
+        return clips
+
+    def trim_repetitive_filler(clips, *_args, **_kwargs):
+        return clips
+
+    def trim_tail_filler(clips, *_args, **_kwargs):
+        return clips
+
 
 # 多版本全量选片模式：设为True时跳过偏好限定
 _skip_focus = False
@@ -246,7 +258,195 @@ def _multi_version_target_bounds(target_duration):
     except Exception:
         target = 60
     tolerance = max(5, target // 6)
-    return max(25, target - tolerance), target + tolerance
+    lower_floor = 5 if target <= 20 else 12 if target <= 30 else 25
+    return max(lower_floor, target - tolerance), target + tolerance
+
+
+def _target_duration_rule_text(target_duration):
+    low, high = _multi_version_target_bounds(target_duration)
+    return (
+        f"总时长必须控制在{low:.0f}-{high:.0f}秒；"
+        f"目标是{int(target_duration or 60)}秒左右，超过{high:.0f}秒必须删除低信息/重复片段，"
+        "不要为了凑片段数牺牲时长。"
+    )
+
+
+def _target_supplement_cap(target_duration):
+    try:
+        target = int(target_duration or 60)
+    except Exception:
+        target = 60
+    if target >= 100:
+        return 12
+    if target >= 80:
+        return 10
+    if target >= 50:
+        return 6
+    return 4
+
+
+def _append_unique_supplement_clips(clips, supplement, target_duration, limit=None):
+    if not supplement:
+        return 0
+    try:
+        _, target_high = _multi_version_target_bounds(target_duration)
+    except Exception:
+        target_high = float(target_duration or 60) + 10
+
+    existing_ranges = []
+    existing_times = set()
+    for clip in clips:
+        try:
+            start = float(clip[2])
+            end = float(clip[3])
+        except Exception:
+            continue
+        existing_ranges.append((start, end))
+        existing_times.add((round(start, 2), round(end, 2)))
+
+    added = 0
+    limit = int(limit or len(supplement))
+    for sc in supplement:
+        if len(sc) < 4:
+            continue
+        try:
+            start = float(sc[2])
+            end = float(sc[3])
+        except Exception:
+            continue
+        if end <= start:
+            continue
+        key = (round(start, 2), round(end, 2))
+        if key in existing_times:
+            continue
+        if any(max(start, s) < min(end, e) - 0.12 for s, e in existing_ranges):
+            continue
+        next_total = sum(_clip_duration_value(c) for c in clips) + _clip_duration_value(sc)
+        if next_total > target_high + 0.1:
+            continue
+        clips.append(sc)
+        existing_ranges.append((start, end))
+        existing_times.add(key)
+        added += 1
+        if added >= limit:
+            break
+    return added
+
+
+def _enforce_target_duration_limit(clips, target_duration, log_fn=None, label="目标时长"):
+    """Trim whole low-value clips when the final AI list exceeds the requested duration."""
+    if not clips:
+        return clips
+
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    try:
+        target = int(target_duration or 60)
+        low, high = _multi_version_target_bounds(target)
+    except Exception:
+        return clips
+
+    kept = list(clips)
+
+    def _total(items):
+        return sum(_clip_duration_value(c) for c in items or [])
+
+    total = _total(kept)
+    if total <= high + 0.1:
+        return kept
+
+    min_keep = 3 if target <= 30 else 5 if target <= 60 else 6
+    removed = []
+
+    def _clean_text(value):
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(value or ""))
+
+    def _type_counts(items):
+        hooks = sum(1 for c in items if _is_hook_clip(c))
+        closes = sum(1 for c in items if _is_close_clip(c))
+        return hooks, closes
+
+    def _focus_counts(items):
+        counts = {}
+        for clip in items:
+            try:
+                block = _clip_focus_block(clip)
+            except Exception:
+                block = str(clip[6] if len(clip) > 6 else "")
+            counts[block] = counts.get(block, 0) + 1
+        return counts
+
+    while _total(kept) > high + 0.1 and len(kept) > min_keep:
+        current_total = _total(kept)
+        hooks, closes = _type_counts(kept)
+        focus_counts = _focus_counts(kept)
+        candidates = []
+        over_by = current_total - high
+        for idx, clip in enumerate(kept):
+            dur = _clip_duration_value(clip)
+            if dur <= 0:
+                continue
+            is_hook = _is_hook_clip(clip)
+            is_close = _is_close_clip(clip)
+            if is_hook and hooks <= 1:
+                continue
+            if is_close and closes <= 1 and len(kept) <= min_keep + 1:
+                continue
+            projected = current_total - dur
+            text = _clean_text(clip[1] if len(clip) > 1 else "")
+            try:
+                block = _clip_focus_block(clip)
+            except Exception:
+                block = str(clip[6] if len(clip) > 6 else "")
+            score = 0.0
+            reason = "低信息"
+            if not is_hook and not is_close:
+                score += 80
+                reason = "卖点冗余"
+            elif is_close and closes > 1:
+                score += 45
+                reason = "重复收尾"
+            elif is_hook and hooks > 1:
+                score += 30
+                reason = "重复Hook"
+            if focus_counts.get(block, 0) > 2:
+                score += 45
+                reason = f"重复{block or '卖点'}"
+            if dur >= over_by:
+                score += 20
+            if dur >= 8:
+                score += min(30, dur)
+                reason = f"长段{block or reason}"
+            weak_prefixes = ("是的", "好的", "嗯", "啊", "然后")
+            weak_exact = {"对", "是的", "好的", "嗯", "嗯嗯", "啊", "好"}
+            if text in weak_exact or text.startswith(weak_prefixes):
+                score += 25
+                reason = "短废话/承接句"
+            if projected < low:
+                score -= (low - projected) * 8
+            score -= abs(projected - target) * 0.25
+            candidates.append((score, dur, idx, reason))
+
+        candidates = [item for item in candidates if item[0] > 0]
+        if not candidates:
+            break
+        score, dur, idx, reason = max(candidates, key=lambda item: (item[0], item[1]))
+        clip = kept.pop(idx)
+        removed.append((clip, reason))
+
+    after = _total(kept)
+    if removed:
+        _log(f"{label}: 超出目标上限，删除 {len(removed)} 段整句片段，{total:.1f}s -> {after:.1f}s (目标{low:.0f}-{high:.0f}s)")
+        for clip, reason in removed[:5]:
+            try:
+                _log(f"  时长收口: {reason} [{float(clip[2]):.1f}-{float(clip[3]):.1f}] {str(clip[1])[:24]}")
+            except Exception:
+                pass
+    elif after > high + 0.1:
+        _log(f"{label}: {after:.1f}s 仍高于目标上限{high:.0f}s，因结构保护未继续删除")
+    return kept
 
 
 def _multi_version_type_counts(clips):
@@ -2295,27 +2495,16 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             continue
         # 检查AI选的片段数是否达标；若总时长已经接近目标，不再为了凑段数二次补选。
         _current_ai_dur = sum(float(c[5]) for c in clips if len(c) >= 6)
-        _target_floor_for_supplement = max(25, int(_AI_TARGET_DURATION * 0.82))
+        _target_floor_for_supplement = max(25, int(_AI_TARGET_DURATION * 0.95))
         if clips and len(clips) < _target_min_clips and attempt < 2 and _current_ai_dur < _target_floor_for_supplement:
             _need_supplement = max(0, _target_min_clips - len(clips))
-            _supplement_limit = min(3, _need_supplement)
+            _supplement_cap = _target_supplement_cap(_AI_TARGET_DURATION)
+            _supplement_limit = min(_supplement_cap, _need_supplement)
             log_fn(f"AI: 当前{len(clips)}段/{_current_ai_dur:.1f}s < 目标{_target_min_clips}段/{_target_floor_for_supplement}s，最多补选{_supplement_limit}段...")
-            _extra_hint = f"【注意：刚才你只选了{len(clips)}段，总时长约{_current_ai_dur:.1f}秒，低于目标下限。请再额外选最多{_supplement_limit}个高质量短片段，把总时长补到{_AI_TARGET_DURATION}秒左右；不要重复你刚选的。仅输出新增片段的JSON数组，不要包含任何推理过程。】"
-            _supplement = _call_ai(api_key, base_url, model, _extra_hint + "\n" + cleaned_srt, _log, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint)
+            _extra_hint = f"【注意：刚才你只选了{len(clips)}段，总时长约{_current_ai_dur:.1f}秒，低于目标下限。请再额外选{_supplement_limit}个以内高质量短片段，优先补足不同卖点，把总时长补到{_AI_TARGET_DURATION}秒左右；不要重复你刚选的。仅输出新增片段的JSON数组，不要包含任何推理过程。】"
+            _supplement = _call_ai(api_key, base_url, model, cleaned_srt, _log, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint, extra_instruction=_extra_hint)
             if _supplement:
-                _existing_times = {(c[2], c[3]) for c in clips if len(c) >= 4}
-                _added_supplement = 0
-                for sc in _supplement:
-                    if len(sc) >= 4 and (sc[2], sc[3]) not in _existing_times:
-                        _next_total = _current_ai_dur + float(sc[5] if len(sc) >= 6 else max(0.0, sc[3] - sc[2]))
-                        if _next_total > _AI_TARGET_DURATION + max(5, _AI_TARGET_DURATION // 6):
-                            continue
-                        clips.append(sc)
-                        _existing_times.add((sc[2], sc[3]))
-                        _current_ai_dur = _next_total
-                        _added_supplement += 1
-                        if _added_supplement >= _supplement_limit:
-                            break
+                _added_supplement = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _supplement_limit)
                 _log(f"AI: 补选{_added_supplement}段，补选后共{len(clips)}段")
         elif clips and len(clips) < _target_min_clips and attempt < 2:
             log_fn(f"AI: 当前{len(clips)}段但已有{_current_ai_dur:.1f}s，接近目标，跳过补选避免超时长")
@@ -2401,6 +2590,47 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 min_keep=_history_min_keep,
                 min_duration=_history_min_duration,
             )
+            try:
+                _target_low, _target_high = _multi_version_target_bounds(_AI_TARGET_DURATION)
+            except Exception:
+                _target_low, _target_high = max(25, _AI_TARGET_DURATION * 0.85), _AI_TARGET_DURATION + 10
+            _final_floor = max(float(_target_low), float(_AI_TARGET_DURATION) * 0.92)
+            _final_total = sum(_clip_duration_value(c) for c in clips)
+            if _final_total < _final_floor and attempt < 2:
+                _need_seconds = max(0.0, _final_floor - _final_total)
+                _need_count = max(
+                    1,
+                    min(
+                        _target_supplement_cap(_AI_TARGET_DURATION),
+                        max(0, _target_min_clips - len(clips)) + int((_need_seconds + 4.9) // 5),
+                    ),
+                )
+                _extra_hint = (
+                    f"【后处理后片单只剩{len(clips)}段/{_final_total:.1f}秒，仍低于目标。"
+                    f"请额外补选{_need_count}个以内不同卖点的完整短句，优先补到{_AI_TARGET_DURATION}秒附近；"
+                    "不要重复已有片段，不要选价格/券/违禁词/废话。仅输出新增片段JSON数组。】"
+                )
+                _supplement = _call_ai(
+                    api_key, base_url, model, cleaned_srt, _log,
+                    focus_hint=focus_hint,
+                    srt_entries=_indexed_srt_entries,
+                    hook_candidates_hint=hook_candidates_hint,
+                    ai_controls=ai_controls,
+                    recent_history_hint=_recent_history_hint,
+                    extra_instruction=_extra_hint,
+                )
+                _added_final = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _need_count)
+                if _added_final:
+                    _log(f"目标补选: 后处理后补入 {_added_final} 段，{_final_total:.1f}s -> {sum(_clip_duration_value(c) for c in clips):.1f}s")
+                    clips = _filter_price_and_cta(clips, log_fn)
+                    if not multi_version:
+                        clips = _filter_semantic_repeat(clips, log_fn)
+                    clips = _filter_hook_product_repeats(clips, log_fn)
+                    clips = _dedup_clip_text_overlap(clips, log_fn, merge_mode=merge_mode)
+                    clips = _cap_clip_duration(clips, log_fn, srt_text=srt_text)
+                    clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
+                    clips = _trim_filler_start(clips, cleaned_srt, log_fn)
+                    clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
             # [v9.3 - DISABLED] tighten_clip_boundaries + 延伸 - 引起片段间跳跃废话
             # 改用AI Prompt控制片段长度和边界，代码层只做 trim_filler
             _total_dur = sum(c[5] for c in clips)
@@ -2436,6 +2666,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _log(f"AI: 重试temperature={temperature}")
                 original_clips = list(clips)
                 continue
+            clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn)
             _record_history_if_needed(clips)
             return clips
         _log(f"AI: 第 {attempt + 1} 次校验未通过，重试...")
@@ -2508,27 +2739,29 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     else:
                         clips.append(rc)
                     _log(f"  回收(best): {rc[2]:.1f}-{rc[3]:.1f}s ({rc[5]:.1f}s)")
-        # 如果还是不够8段，用关键词补充
-        if len(clips) < 8:
-            clips = _supplement_clips(clips, cleaned_srt, log_fn, min_total=4)
+        # 如果还是不够目标段数，用关键词补充；不要退回老的4段兜底。
+        if len(clips) < _target_min_clips:
+            clips = _supplement_clips(clips, cleaned_srt, log_fn, min_total=_target_min_clips)
         clips = _filter_recent_similar_clips(
             clips, _recent_history, log_fn,
             min_keep=_history_min_keep,
             min_duration=_history_min_duration,
         )
+        clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn)
         _record_history_if_needed(clips)
         return clips
 
     # 宽松修复
     relaxed = _relax_clips(clips if clips else [], log_fn)
-    if relaxed and len(relaxed) < 8:
-        relaxed = _supplement_clips(relaxed, cleaned_srt, log_fn, min_total=4)
+    if relaxed and len(relaxed) < _target_min_clips:
+        relaxed = _supplement_clips(relaxed, cleaned_srt, log_fn, min_total=_target_min_clips)
     if relaxed:
         relaxed = _filter_recent_similar_clips(
             relaxed, _recent_history, log_fn,
             min_keep=_history_min_keep,
             min_duration=_history_min_duration,
         )
+        relaxed = _enforce_target_duration_limit(relaxed, _AI_TARGET_DURATION, log_fn)
         _record_history_if_needed(relaxed)
     return relaxed if relaxed else []
 
@@ -2793,7 +3026,7 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=None, focus_hin
     return clips
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None):
     def _log(msg):
         if log_fn: log_fn(msg)
     focus_hint = _normalize_focus_label(focus_hint)
@@ -2993,12 +3226,14 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _srt_max = max(_srt_times) if _srt_times else 60
     _srt_min = min(_srt_times) if _srt_times else 0
 
+    _target_rule = _target_duration_rule_text(_AI_TARGET_DURATION)
+
     # 多版本模式：选更多片段，允许同卖点不同角度
     if _skip_focus:
         _min_pieces = 12
         _clip_range = "25-35"
         _dedup_rule = "★同一卖点如果主播用了不同表达方式（如'面料好'和'这个面料摸着特别软'），可以分别选取，因为多版本需要差异化素材★"
-        _total_rule = f"总素材池25-35个，每个版本必须独立达到{_AI_TARGET_DURATION}秒左右。确保每个版本至少10-15个片段，宁可多选也不要少选★"
+        _total_rule = f"总素材池25-35个，每个版本必须独立满足：{_target_rule}"
         _hook_rule = "★多版本选片：必须找出3-5个不同类型的Hook候选★ 不要只选1个最强Hook，而是找出圈人群型、极端表态型、痛点型、爆料型、夸奖型各1个（有则选）。不同版本需要不同的Hook开场。"
         _product_rule = "★多版本选片：选择12-18个Product片段★ 覆盖不同卖点角度（版型/面料/功能/风格/品质/对比/上身效果/搭配建议/场景种草），每个角度至少2个片段，同一角度有不同表达也要选。素材越丰富，3个版本的内容越充实。"
         _close_rule = "★多版本选片：选择3-5个Close片段★ 不同促单方式（紧迫感/闭眼入/尺码引导/信任强化/场景收尾）各选1-2个。"
@@ -3008,19 +3243,19 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         if _AI_CLIP_COUNT and _AI_CLIP_COUNT != "10-15":
             _clip_range = _AI_CLIP_COUNT
             _min_pieces = int(_AI_CLIP_COUNT.split("-")[0])
-            _total_rule = f"★必须选{_AI_CLIP_COUNT}个以上片段(不能少于{_min_pieces}个)，总时长控制在{_AI_TARGET_DURATION}秒左右，宁可多选也不要少选★"
+            _total_rule = f"★精选{_AI_CLIP_COUNT}个片段(不能少于{_min_pieces}个)，{_target_rule}★"
         elif _AI_TARGET_DURATION <= 40:
             _clip_range = "5-8"
-            _total_rule = "总时长25-40秒（宁可选满8段）"
+            _total_rule = _target_rule
         elif _AI_TARGET_DURATION >= 100:
             _clip_range = "22-30"
-            _total_rule = "总时长80-120秒（不够时长就从全片中补选，不要回收废片）"
+            _total_rule = _target_rule
         elif _AI_TARGET_DURATION >= 80:
             _clip_range = "18-24"
-            _total_rule = "总时长60-90秒（宁可多选到24段，确保时长充足）"
+            _total_rule = _target_rule
         else:
             _clip_range = "10-15"
-            _total_rule = "总时长40-65秒（可根据时长适当增减）"
+            _total_rule = _target_rule
         # ★★★ 关键：同步 _AI_CLIP_COUNT，否则 prompt 替换的永远是默认值 ★★★
         _AI_CLIP_COUNT = _clip_range
         _dedup_rule = '★绝对禁止重复同一卖点★ 字幕中主播会重复讲同一个卖点(如"面料好"说了3遍)，你必须只选每个卖点的最佳版本，严禁选两段内容相似的片段'
@@ -3070,6 +3305,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     except Exception:
         pass
     _recent_history_prompt = f"\n{recent_history_hint}\n" if recent_history_hint else ""
+    _extra_instruction_prompt = f"\n{extra_instruction}\n" if extra_instruction else ""
 
     if _skip_focus:
         # 多版本模式：AI只做素材选取，不做编排
@@ -3087,6 +3323,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 6. {_product_rule}
 7. {_close_rule}
 
+{_extra_instruction_prompt}
 ★选片优先级★
 - 优先选主播语气最激动、情绪最饱满的片段
 - 优先选内容独立完整、有头有尾的片段
@@ -3130,6 +3367,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 11. {_close_rule}
 {_ai_rules_prompt}
 {_recent_history_prompt}
+{_extra_instruction_prompt}
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目（数组），不要填start/end时间戳。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
 [
@@ -3143,10 +3381,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 字幕条目:
 {indexed_transcript}"""
 
+    _system_low, _system_high = _multi_version_target_bounds(_AI_TARGET_DURATION)
     body = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT.replace("45-65", f"{max(25, _AI_TARGET_DURATION - _AI_TARGET_DURATION // 6)}-{_AI_TARGET_DURATION + _AI_TARGET_DURATION // 6}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")},
+            {"role": "system", "content": SYSTEM_PROMPT.replace("45-65", f"{_system_low:.0f}-{_system_high:.0f}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")},
             {"role": "user", "content": user_msg}
         ],
         "temperature": temperature,
@@ -4014,8 +4253,7 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
             _material_map[_idx] = _c
 
     _material_text = "\n".join(_material_lines)
-    _target_min = max(25, int(target_duration) - max(5, int(target_duration) // 6))
-    _target_max = int(target_duration) + max(5, int(target_duration) // 6)
+    _target_min, _target_max = _multi_version_target_bounds(target_duration)
 
     _hook_types_hint = (
         "Hook类型(用不同类型):\n"
@@ -6324,7 +6562,10 @@ def _filter_hook_product_repeats(clips, log_fn=None):
             overlap_ratio = overlap / max(0.1, min(hook_dur, _duration(clip)))
             text_score = _text_repeat_score(hook[1] if len(hook) > 1 else "", clip[1] if len(clip) > 1 else "")
 
-            repeated_time = overlap >= 0.25 and overlap_ratio >= 0.5
+            repeated_time = overlap >= 0.25 and (
+                overlap_ratio >= 0.5
+                or (overlap_ratio >= 0.35 and text_score >= 0.45)
+            )
             repeated_text = text_score >= 0.86
             if not repeated_time and not repeated_text:
                 continue
@@ -6978,37 +7219,31 @@ def _supplement_clips(existing_clips, cleaned_srt, log_fn, min_total=4):
     FILLER_WORDS = _kw_local["filler_words"]
     NEGATIVE_SIGNALS = _kw_local["negative_signals"]
 
-    # 解析清洗后的 SRT
-    entries = []
-    for line in cleaned_srt.strip().split("\n"):
-        m = re.match(r'(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})', line)
-        if m:
-            start_s = int(m.group(1))*3600 + int(m.group(2))*60 + int(m.group(3)) + int(m.group(4))/1000.0
-            end_s = int(m.group(5))*3600 + int(m.group(6))*60 + int(m.group(7)) + int(m.group(8))/1000.0
-            entries.append({"start": start_s, "end": end_s, "dur": end_s - start_s})
+    def _parse_time(value):
+        h, m, s = value.strip().replace(",", ".").split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
 
     # 收集已有片段的时间范围(避免重叠)
     used_ranges = [(c[2], c[3]) for c in existing_clips]
 
     # 关键词打分
     candidates = []
-    for i, line in enumerate(cleaned_srt.strip().split("\n")):
-        # 找时间戳行后的文本行
-        if not re.match(r'\d{2}:\d{2}', line):
+    for block in re.split(r"\n\s*\n", cleaned_srt.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        time_line = next((line for line in lines if "-->" in line), "")
+        if not time_line:
             continue
-        text = ""
-        lines_list = cleaned_srt.strip().split("\n")
-        j = lines_list.index(line)
-        if j + 1 < len(lines_list):
-            text = lines_list[j + 1].strip()
+        text = " ".join(line for line in lines if "-->" not in line and not line.isdigit()).strip()
         if not text or len(text) < 5:
             continue
 
-        # 获取对应时间
-        if i >= len(entries):
+        try:
+            start_raw, end_raw = time_line.split("-->", 1)
+            start = _parse_time(start_raw)
+            end = _parse_time(end_raw)
+        except Exception:
             continue
-        entry = entries[i]
-        start, end, dur = entry["start"], entry["end"], entry["dur"]
+        dur = end - start
         if dur < 1.5 or dur > 15:
             continue
 
