@@ -19,6 +19,7 @@ import sys
 import platform
 import uuid
 import subprocess
+import threading
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -50,6 +51,7 @@ _LEGACY_HMAC_KEY_ENV = "LIVECLIPPER_LEGACY_HMAC_KEY"
 CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
 TRIAL_USES = 10
+_CACHE_LOCK = threading.RLock()
 
 
 def _env_flag(name, default=False):
@@ -63,7 +65,7 @@ def _env_flag(name, default=False):
 # register/bind through the authorization API, then Feishu can be synced server-side.
 _FEISHU_WRITE_ENABLED = _env_flag("LIVECLIPPER_FEISHU_WRITE", False)
 _LEGACY_HMAC_ENABLED = _env_flag("LIVECLIPPER_ALLOW_LEGACY_HMAC", False)
-_TOKEN_REQUIRED = _env_flag("LIVECLIPPER_REQUIRE_LICENSE_TOKEN", False)
+_TOKEN_REQUIRED = _env_flag("LIVECLIPPER_REQUIRE_LICENSE_TOKEN", True)
 _LEGACY_CACHE_ENABLED = _env_flag("LIVECLIPPER_ALLOW_LEGACY_CACHE", True)
 
 
@@ -124,29 +126,48 @@ def _get_data_path():
 
 def _load_cache():
     path = os.path.join(_get_data_path(), CACHE_FILE)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    with _CACHE_LOCK:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            try:
+                bad_path = f"{path}.bad.{int(time.time())}.json"
+                os.replace(path, bad_path)
+            except Exception:
+                pass
+            return None
+        except Exception:
+            return None
 
 
 def _save_cache(data):
     path = os.path.join(_get_data_path(), CACHE_FILE)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    with _CACHE_LOCK:
+        try:
+            text = json.dumps(data or {}, ensure_ascii=False, indent=2) + "\n"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 def _save_activation_cache(data):
-    existing = _load_cache() or {}
-    merged = dict(data)
-    for key in ("license_token", "license_token_verified_at", "offline_until", "last_online_verify"):
-        if key in existing and key not in merged:
-            merged[key] = existing[key]
-    _save_cache(merged)
+    with _CACHE_LOCK:
+        existing = _load_cache() or {}
+        merged = dict(data)
+        for key in ("license_token", "license_token_verified_at", "offline_until", "last_online_verify"):
+            if key in existing and key not in merged:
+                merged[key] = existing[key]
+        _save_cache(merged)
 
 
 def _save_license_code(code):

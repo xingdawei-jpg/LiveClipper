@@ -40,7 +40,7 @@ def _configure_update_path() -> None:
         return
 
     bundled_web = Path(__file__).resolve().parent
-    if _version_key(_read_version(update_web.parent)) < _version_key(_read_version(bundled_web.parent)):
+    if _version_key(_read_version(update_web.parent)) <= _version_key(_read_version(bundled_web.parent)):
         return
     sys.path.insert(0, str(update_web))
 

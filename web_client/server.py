@@ -69,22 +69,34 @@ def _valid_web_dir(path: Path) -> bool:
     return path.is_dir() and (path / "frontend" / "index.html").exists() and (path / "frontend" / "assets").is_dir()
 
 
+def _read_web_version(path: Path) -> str:
+    return _read_app_version(path.parent / "app")
+
+
 def _select_web_dir(*candidates: Path) -> Path:
-    for path in candidates:
-        if _valid_web_dir(path):
-            return path
+    valid = [path for path in candidates if _valid_web_dir(path)]
+    if valid:
+        valid.sort(key=lambda path: _version_key(_read_web_version(path)), reverse=True)
+        return valid[0]
     return candidates[0]
 
 
 if getattr(sys, "frozen", False):
-    WEB_DIR = _select_web_dir(USER_UPDATE_ROOT / "web_client", BUNDLE_DIR / "web_client", MODULE_WEB_DIR)
+    WEB_DIR = _select_web_dir(BUNDLE_DIR / "web_client", MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
 else:
     WEB_DIR = _select_web_dir(MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
-APP_DIR = _select_app_dir(
-    USER_UPDATE_ROOT / "app",
-    REPO_ROOT / "app",
-    WEB_DIR.parent / "app",
-)
+if getattr(sys, "frozen", False):
+    APP_DIR = _select_app_dir(
+        REPO_ROOT / "app",
+        WEB_DIR.parent / "app",
+        USER_UPDATE_ROOT / "app",
+    )
+else:
+    APP_DIR = _select_app_dir(
+        USER_UPDATE_ROOT / "app",
+        REPO_ROOT / "app",
+        WEB_DIR.parent / "app",
+    )
 FRONTEND_DIR = WEB_DIR / "frontend"
 ASSETS_DIR = FRONTEND_DIR / "assets"
 
