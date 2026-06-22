@@ -5371,6 +5371,7 @@ def runtime() -> dict[str, Any]:
         "web_dir": str(WEB_DIR),
         "user_data_dir": str(_get_user_data_dir()),
         "license_public_key_suffix": public_key_suffix,
+        "supports_web_incremental_updates": _safe_web_incremental_supported(),
         "mode": "local-web-client",
     }
 
@@ -5409,6 +5410,10 @@ def _schedule_client_restart(delay: float = 1.5) -> bool:
     return True
 
 
+def _safe_web_incremental_supported() -> bool:
+    return True
+
+
 @app.get("/api/update/check")
 def check_update_api() -> dict[str, Any]:
     try:
@@ -5424,6 +5429,8 @@ def check_update_api() -> dict[str, Any]:
             "force_update": bool(info.get("force_update", False)),
             "file_count": len(info.get("files") or {}),
             "has_package": bool(info.get("update_url") or info.get("download_url")),
+            "requires_full_package_note": info.get("requires_full_package_note") or "",
+            "supports_web_incremental_updates": _safe_web_incremental_supported(),
         }
         return {"ok": True, "update_available": True, "update": public_info}
     except Exception as exc:

@@ -1,6 +1,6 @@
 {
-  "version": "2026.6.22.1",
-  "latest_version": "2026.6.22.1",
+  "version": "2026.6.22.2",
+  "latest_version": "2026.6.22.2",
   "files": {
     "app/ai_clipper.py": "34417e081cb0919a1cfb602638ed743338ca0df5cbc7311af90de89818a361d7",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -36,17 +36,18 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "e26112483c018bd8d9403835fa2f80323ffc645b447ebf518fe020be355c3f4c",
+    "app/updater.py": "7d38c2ff778d8829274fde2f93c87b20314c0167d67e1786a0b7c8e33334556b",
     "app/volcengine_asr.py": "9db4ac67cf9fcb2726ce0b747207544933f261d98d310dbc9502ae4afa6eaa23",
-    "web_client/server.py": "f574b259641e4e7dc6ca77faff8949d95230cddd53607f282a4681f7f93ef13a",
-    "web_client/frontend/index.html": "93e86163defb8d77c1c5aec0929bc04aab237dbdac87a22733c41c0a22a90825",
-    "web_client/frontend/assets/app.js": "96cd12043f09b805163b33cd6ea9c3953e81df615d816d09cdfb1931446f832b",
+    "web_client/server.py": "333f4c7feed37a28ce667e95b7a2e1a893aad7596b489e653465887ebf60ad8e",
+    "web_client/frontend/index.html": "1c71cb5ea92850434cbb2cb7226ea78762214703ea872eba92e2c7386a024b8e",
+    "web_client/frontend/assets/app.js": "a3972f03f4be2e0b4229b0695ceec58f992612a3fa43dabe5b8795b990c91092",
     "web_client/frontend/assets/styles.css": "32c2296082b779eed75cf84d28f84df5cbb195442ee66749b2395c41637662f5",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa"
   },
-  "release_notes": "用户喜好库与只读评分日志：支持查看/删除/清空/导入导出喜好样本，自动成片记录喜好评分日志但不改变片单；修复预览选择和桌面启动提示。",
+  "release_notes": "修复旧完整包在线增量升级误导：检测到旧启动器时禁止继续安装，明确提示下载新版完整包；用户喜好库刷新遇到旧后端时给出可理解提示；新版启动器后续会直接加载用户目录里的新版后端。",
   "update_url": "",
-  "update_message": "用户喜好库与只读评分日志：支持查看/删除/清空/导入导出喜好样本，自动成片记录喜好评分日志但不改变片单；修复预览选择和桌面启动提示。",
+  "update_message": "修复旧完整包在线增量升级误导：检测到旧启动器时禁止继续安装，明确提示下载新版完整包；用户喜好库刷新遇到旧后端时给出可理解提示；新版启动器后续会直接加载用户目录里的新版后端。",
+  "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-06-22 20:01:31"
+  "updated_at": "2026-06-22 21:58:57"
 }

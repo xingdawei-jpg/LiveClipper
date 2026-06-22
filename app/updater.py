@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.6.22.1"
+CURRENT_VERSION = "2026.6.22.2"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -349,6 +349,14 @@ def _write_update_file(relative_path, content):
 
 def apply_update_headless(version_info):
     """Apply an update without Tk dialogs. Used by the Web desktop client."""
+    if (version_info or {}).get("requires_full_package"):
+        return {
+            "ok": False,
+            "full_package_required": True,
+            "msg": (version_info or {}).get("requires_full_package_note") or "此版本需要下载新版完整包，不能通过在线增量更新安装。",
+            "updated": [],
+            "failed": [],
+        }
     files_info = (version_info or {}).get("files", {})
     if files_info:
         updated = []

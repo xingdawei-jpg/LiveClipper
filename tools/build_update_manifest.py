@@ -92,6 +92,7 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
         "release_notes": release_notes,
         "update_url": "",
         "update_message": release_notes,
+        "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
         "force_update": bool(force_update),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }

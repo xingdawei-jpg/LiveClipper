@@ -22,6 +22,7 @@ const state = {
     message: "\u672a\u68c0\u67e5",
     error: "",
   },
+  runtime: null,
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
   logs: {
@@ -1216,9 +1217,11 @@ async function inspectPipPool(prefix) {
 async function loadRuntime() {
   try {
     const data = await api("/api/runtime");
+    state.runtime = data;
     $("app-version").textContent = `v${data.version}`;
     $("runtime-user-data").value = data.user_data_dir || "";
     $("runtime-repo-root").value = data.repo_root || "";
+    renderUpdateState();
   } catch (error) {
     toast(`运行信息读取失败: ${error.message}`, "warning");
   }
@@ -1393,7 +1396,30 @@ function renderAiFeedbackSamples(result = {}) {
 }
 
 async function loadAiFeedbackSamples(showToast = false) {
-  const result = await api("/api/ai-feedback/samples");
+  let result;
+  try {
+    result = await api("/api/ai-feedback/samples");
+  } catch (error) {
+    const box = $("ai-feedback-samples");
+    const message = String(error?.message || "");
+    if (box && /not found|404/i.test(message)) {
+      let runtime = {};
+      try {
+        runtime = await api("/api/runtime");
+      } catch (_) {
+        runtime = {};
+      }
+      const runtimePath = runtime.repo_root || runtime.web_dir || "";
+      box.innerHTML = `
+        <p class="panel-note">
+          当前启动的完整包后端还没有用户喜好库接口，请关闭旧包，改用新版完整包后再刷新。
+          ${runtimePath ? `<br>当前运行位置：${escapeHtml(runtimePath)}` : ""}
+        </p>`;
+      if (showToast) toast("当前启动的是旧后端，请使用新版完整包。", "warning");
+      return;
+    }
+    throw error;
+  }
   renderAiFeedbackSamples(result);
   if (showToast) toast("用户喜好库已刷新", "success");
 }
@@ -1706,6 +1732,28 @@ async function applyUpdate() {
   }
 }
 
+async function getRuntimeInfo() {
+  if (state.runtime) return state.runtime;
+  try {
+    state.runtime = await api("/api/runtime");
+  } catch (_) {
+    state.runtime = {};
+  }
+  return state.runtime;
+}
+
+function needsFullPackageUpdate(runtime = state.runtime, info = state.update?.info) {
+  if (info?.requires_full_package) return true;
+  if (info?.supports_web_incremental_updates === false) return true;
+  if (!runtime) return false;
+  return !runtime.app_dir || !runtime.web_dir || runtime.supports_web_incremental_updates === false;
+}
+
+function fullPackageUpdateMessage(runtime = state.runtime) {
+  const path = runtime?.repo_root || runtime?.web_dir || "";
+  return `当前启动的是旧完整包，在线增量更新可能只更新界面，不能更新后端。请关闭旧包，改用新版完整包。${path ? `\n当前运行位置：${path}` : ""}`;
+}
+
 function setUpdateState(patch = {}) {
   state.update = { ...state.update, ...patch };
   renderUpdateState();
@@ -1718,6 +1766,7 @@ function renderUpdateState() {
   const hasUpdate = Boolean(update.available);
   const busy = Boolean(update.checking || update.installing);
   const message = update.message || "\u672a\u68c0\u67e5";
+  const fullPackageRequired = hasUpdate && needsFullPackageUpdate(state.runtime, info);
   const status = $("update-status");
   if (status) status.value = message;
 
@@ -1745,11 +1794,12 @@ function renderUpdateState() {
   if (notes) {
     const releaseNotes = info.release_notes || info.update_message || "";
     const fileCount = Number(info.file_count || 0);
-    const suffix = fileCount ? `\n${fileCount} \u4e2a\u6587\u4ef6\u5c06\u66f4\u65b0` : "";
-    notes.textContent = (releaseNotes || (hasUpdate ? "\u53d1\u73b0\u53ef\u5b89\u88c5\u66f4\u65b0\u3002" : "\u6ca1\u6709\u53ef\u7528\u66f4\u65b0\u3002")) + suffix;
+    const suffix = fileCount && !fullPackageRequired ? `\n${fileCount} \u4e2a\u6587\u4ef6\u5c06\u66f4\u65b0` : "";
+    const fullPackageNote = fullPackageRequired ? `\n\n${info.requires_full_package_note || fullPackageUpdateMessage(state.runtime)}` : "";
+    notes.textContent = (releaseNotes || (hasUpdate ? "\u53d1\u73b0\u53ef\u5b89\u88c5\u66f4\u65b0\u3002" : "\u6ca1\u6709\u53ef\u7528\u66f4\u65b0\u3002")) + suffix + fullPackageNote;
   }
   const applyButton = $("update-card-apply");
-  if (applyButton) applyButton.disabled = !hasUpdate || busy;
+  if (applyButton) applyButton.disabled = !hasUpdate || busy || fullPackageRequired;
 }
 
 function openUpdateCard() {
@@ -1798,14 +1848,29 @@ async function checkUpdate(options = {}) {
       return result;
     }
     const update = result.update || {};
+    const runtime = await getRuntimeInfo();
+    if (needsFullPackageUpdate(runtime, update)) {
+      update.requires_full_package = true;
+      update.requires_full_package_note = update.requires_full_package_note || fullPackageUpdateMessage(runtime);
+    }
     const version = update.version || "";
+    const fullPackageRequired = Boolean(update.requires_full_package);
     setUpdateState({
       checking: false,
       available: true,
       info: update,
-      message: version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c",
+      message: fullPackageRequired
+        ? (version ? `发现新版本 v${version}，需要完整包` : "发现新版本，需要完整包")
+        : (version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c"),
     });
-    if (!quiet) toast(version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c", "success");
+    if (!quiet) {
+      toast(
+        fullPackageRequired
+          ? "这次更新需要下载新版完整包，当前客户端已禁止在线增量安装。"
+          : (version ? `\u53d1\u73b0\u65b0\u7248\u672c v${version}` : "\u53d1\u73b0\u65b0\u7248\u672c"),
+        fullPackageRequired ? "warning" : "success",
+      );
+    }
     return result;
   } catch (error) {
     setUpdateState({
@@ -1826,6 +1891,18 @@ async function applyUpdate() {
       toast("\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c", "success");
       return;
     }
+  }
+  const runtime = await getRuntimeInfo();
+  if (needsFullPackageUpdate(runtime, state.update.info)) {
+    const message = fullPackageUpdateMessage(runtime);
+    setUpdateState({
+      installing: false,
+      error: message,
+      message: "需要新版完整包",
+    });
+    alert(message);
+    toast("当前客户端已禁止在线增量安装，请使用新版完整包。", "warning");
+    return { ok: false, full_package_required: true, msg: message };
   }
   if (!confirm("\u5b89\u88c5\u66f4\u65b0\u540e\u9700\u8981\u91cd\u542f\u5ba2\u6237\u7aef\u624d\u80fd\u751f\u6548\uff0c\u7ee7\u7eed\u5417\uff1f")) return;
   setUpdateState({

@@ -6,6 +6,7 @@ import time
 import webbrowser
 import os
 import sys
+import importlib.util
 from pathlib import Path
 
 import uvicorn
@@ -32,17 +33,35 @@ def _read_version(path: Path) -> str:
         return "0"
 
 
-def _configure_update_path() -> None:
+def _updated_server_path() -> Path | None:
     update_web = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "web_client"
     if not (update_web / "server.py").exists():
-        return
+        return None
     if not (update_web / "frontend" / "index.html").exists():
-        return
+        return None
 
     bundled_web = Path(__file__).resolve().parent
     if _version_key(_read_version(update_web.parent)) <= _version_key(_read_version(bundled_web.parent)):
-        return
-    sys.path.insert(0, str(update_web))
+        return None
+    return update_web / "server.py"
+
+
+def _load_server_app():
+    update_server = _updated_server_path()
+    if update_server:
+        update_web = update_server.parent
+        if str(update_web) not in sys.path:
+            sys.path.insert(0, str(update_web))
+        spec = importlib.util.spec_from_file_location("server", update_server)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["server"] = module
+            spec.loader.exec_module(module)
+            return module.app
+
+    from server import app
+
+    return app
 
 
 def _icon_path() -> str | None:
@@ -74,8 +93,7 @@ def _pick_port(preferred: int = 8765) -> int:
 
 
 def _start_server(port: int) -> uvicorn.Server:
-    _configure_update_path()
-    from server import app
+    app = _load_server_app()
 
     config = uvicorn.Config(
         app,
