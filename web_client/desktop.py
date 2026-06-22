@@ -91,6 +91,37 @@ def _start_server(port: int) -> uvicorn.Server:
     return server
 
 
+def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _show_startup_error(port: int) -> None:
+    message = (
+        "LiveClipper 本地服务没有启动成功。\n\n"
+        f"访问地址：http://127.0.0.1:{port}\n\n"
+        "请先关闭 LiveClipper，重新打开一次。\n"
+        "如果仍然失败，请右键 LiveClipperWeb.exe，选择“以管理员身份运行”，"
+        "并在 Windows 安全软件/防火墙提示时选择允许。"
+    )
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("LiveClipper 启动失败", message)
+        root.destroy()
+    except Exception:
+        print(message, file=sys.stderr)
+
+
 def main() -> None:
     port = _pick_port()
     server = _start_server(port)
@@ -99,7 +130,11 @@ def main() -> None:
     url = f"http://127.0.0.1:{port}"
     emit_log("info", f"桌面客户端已启动: {url}", "system")
 
-    time.sleep(0.8)
+    if not _wait_for_port(port):
+        server.should_exit = True
+        _show_startup_error(port)
+        return
+
     try:
         import webview
 

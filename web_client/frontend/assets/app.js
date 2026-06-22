@@ -490,6 +490,11 @@ function bindActions() {
       if (action === "reload-settings") await loadSettings(true);
       if (action === "save-settings") await saveSettings();
       if (action === "test-ai") await testAI();
+      if (action === "refresh-ai-feedback") await loadAiFeedbackSamples(true);
+      if (action === "export-ai-feedback") exportAiFeedback();
+      if (action === "import-ai-feedback") await importAiFeedback();
+      if (action === "delete-ai-feedback-sample") await deleteAiFeedbackSample(target);
+      if (action === "clear-ai-feedback") await clearAiFeedback();
       if (action === "diagnose-volc") await diagnoseVolcengine();
       if (action === "load-keywords") await loadKeywords(true);
       if (action === "open-keyword-editor") await openKeywordEditor();
@@ -1276,6 +1281,7 @@ async function loadSettings(showToast = false) {
   applyTheme(data.ui_theme || "system");
   applyPreferenceWeights(data.preference_weights || {});
   applyAiRules(data.ai_rules || {});
+  await loadAiFeedbackSamples(false);
   if (showToast) toast("设置已重新载入", "success");
 }
 
@@ -1323,6 +1329,117 @@ async function diagnoseVolcengine() {
     body: JSON.stringify(collectSettings()),
   });
   toast(result.message || "诊断完成", result.ok ? "success" : "error");
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)}MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)}KB`;
+  return `${value}B`;
+}
+
+async function loadAiFeedbackStats(showToast = false) {
+  const result = await api("/api/ai-feedback/stats");
+  renderAiFeedbackStats(result);
+  if (showToast) toast("用户喜好库统计已刷新", "success");
+}
+
+function renderAiFeedbackStats(result = {}) {
+  const count = $("ai-feedback-count");
+  const size = $("ai-feedback-size");
+  const path = $("ai-feedback-path");
+  if (count) count.textContent = String(result.record_count || 0);
+  if (size) size.textContent = formatFileSize(result.size || 0);
+  if (path) path.textContent = `保存位置：${result.path || "%APPDATA%\\LiveClipper\\ai_feedback"}`;
+}
+
+function renderAiFeedbackSamples(result = {}) {
+  renderAiFeedbackStats(result);
+  const box = $("ai-feedback-samples");
+  if (!box) return;
+  const samples = Array.isArray(result.samples) ? result.samples : [];
+  const roles = Array.isArray(result.roles) ? result.roles : [];
+  if (!samples.length) {
+    box.innerHTML = '<p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>';
+    return;
+  }
+  const byRole = new Map();
+  samples.forEach((sample) => {
+    const role = sample.role || "sentence_positive";
+    if (!byRole.has(role)) byRole.set(role, []);
+    byRole.get(role).push(sample);
+  });
+  const roleLabels = new Map(roles.map((item) => [item.role, item.label]));
+  box.innerHTML = roles
+    .filter((role) => byRole.has(role.role))
+    .map((role) => {
+      const rows = byRole.get(role.role).map((sample) => `
+        <div class="feedback-sample-row">
+          <div class="feedback-sample-main">
+            <strong>${escapeHtml(sample.text || "")}</strong>
+            <span>${Number(sample.count || 0)} 次${sample.scopes?.length ? ` · ${escapeHtml(sample.scopes.join("/"))}` : ""}</span>
+          </div>
+          <button class="button button-muted button-small" data-action="delete-ai-feedback-sample" data-role="${escapeHtml(sample.role || role.role)}" data-text="${escapeHtml(sample.text || "")}">删除</button>
+        </div>
+      `).join("");
+      return `
+        <section class="feedback-role-group">
+          <h3>${escapeHtml(roleLabels.get(role.role) || role.label || role.role)}</h3>
+          ${rows}
+        </section>
+      `;
+    })
+    .join("");
+}
+
+async function loadAiFeedbackSamples(showToast = false) {
+  const result = await api("/api/ai-feedback/samples");
+  renderAiFeedbackSamples(result);
+  if (showToast) toast("用户喜好库已刷新", "success");
+}
+
+function exportAiFeedback() {
+  window.location.href = `/api/ai-feedback/export?t=${Date.now()}`;
+  setTimeout(() => loadAiFeedbackSamples(false).catch(() => {}), 800);
+  toast("用户喜好库导出已开始", "success");
+}
+
+async function importAiFeedback() {
+  const picked = await api("/api/dialog/file", {
+    method: "POST",
+    body: JSON.stringify({ kind: "file" }),
+  });
+  if (!picked.path) return;
+  const result = await api("/api/ai-feedback/import", {
+    method: "POST",
+    body: JSON.stringify({ path: picked.path }),
+  });
+  const count = $("ai-feedback-count");
+  const size = $("ai-feedback-size");
+  if (count) count.textContent = String(result.record_count || 0);
+  if (size) size.textContent = formatFileSize(result.size || 0);
+  await loadAiFeedbackSamples(false);
+  toast(`导入完成：新增 ${result.added_count || 0} 条，跳过重复 ${result.skipped_count || 0} 条`, "success");
+}
+
+async function deleteAiFeedbackSample(button) {
+  const role = button?.dataset.role || "";
+  const text = button?.dataset.text || "";
+  if (!role || !text) return;
+  if (!confirm(`删除这条用户喜好样本吗？\n\n${text}`)) return;
+  const result = await api("/api/ai-feedback/sample/delete", {
+    method: "POST",
+    body: JSON.stringify({ role, text }),
+  });
+  renderAiFeedbackSamples(result);
+  toast(`已删除 ${result.removed_count || 0} 条匹配样本`, "success");
+}
+
+async function clearAiFeedback() {
+  if (!confirm("确定清空用户喜好库吗？清空前会自动备份当前文件。")) return;
+  const result = await api("/api/ai-feedback/clear", { method: "POST", body: "{}" });
+  renderAiFeedbackSamples(result);
+  toast("用户喜好库已清空，原文件已自动备份", "success");
 }
 
 function uniqueTexts(items) {
@@ -2269,6 +2386,7 @@ async function startSmartFromPreview() {
     ...collectSmartPayload({ requireVideos: false }),
     preview_id: state.smartPreview.id,
     selected_indices: selected,
+    order: selection.order,
     selected_segments: selection.selectedSegments,
   };
   await runPreflight("smart-from-preview", payload, "smart-cut");
@@ -2297,6 +2415,7 @@ async function startMixFromPreview() {
     ...collectFeaturePayload("mix"),
     preview_id: state.mixPreview.id,
     selected_indices: selected,
+    order: selection.order,
     selected_segments: selection.selectedSegments,
   };
   await runPreflight("mix", payload, "mix");
@@ -2578,6 +2697,7 @@ function collectPreviewSelection(scope = "smart") {
   const draft = commitPreviewDraft(scope, { remote: true });
   return {
     selectedIndices: draft.selected_indices || [],
+    order: draft.order || [],
     selectedSegments: draft.selected_segments || {},
   };
 }

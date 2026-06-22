@@ -129,6 +129,173 @@ def _format_recent_history_hint(recent_items, limit=10):
     )
 
 
+def _preview_feedback_log_path():
+    try:
+        from config import USER_DATA_DIR
+        base_dir = USER_DATA_DIR
+    except Exception:
+        base_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper")
+    return os.path.join(base_dir, "ai_feedback", "preview_selection_feedback.jsonl")
+
+
+def _load_preview_feedback_records(limit=80):
+    path = _preview_feedback_log_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+    records = []
+    for line in lines[-max(1, int(limit or 80)):]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
+def _feedback_text_value(item, limit=46):
+    if isinstance(item, dict):
+        text = str(item.get("text") or "")
+    else:
+        text = str(item or "")
+    text = re.sub(r"\[[vV]\d+\]\s*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _feedback_unique_texts(items, limit=8):
+    result = []
+    seen = set()
+    for item in items:
+        text = _feedback_text_value(item)
+        key = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", text)
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _build_preview_feedback_profile_from_records(records, scope=None, limit=12):
+    records = list(records or [])
+    if not records:
+        return {
+            "scope": scope,
+            "kept": [],
+            "rejected": [],
+            "hook_positive": [],
+            "hook_negative": [],
+            "close_positive": [],
+            "close_negative": [],
+            "move_to_front": [],
+            "move_to_end": [],
+        }
+    scoped_records = [item for item in records if not scope or item.get("scope") == scope]
+    if not scoped_records and scope:
+        scoped_records = records
+    kept_items = []
+    rejected_items = []
+    role_items = {
+        "hook_positive": [],
+        "hook_negative": [],
+        "close_positive": [],
+        "close_negative": [],
+        "move_to_front": [],
+        "move_to_end": [],
+    }
+    for record in reversed(scoped_records[-20:]):
+        roles = record.get("role_samples") if isinstance(record.get("role_samples"), dict) else {}
+        kept_items.extend(roles.get("sentence_positive") or record.get("kept_texts") or [])
+        rejected_items.extend(roles.get("sentence_negative") or record.get("rejected_segment_texts") or [])
+        for key in role_items:
+            role_items[key].extend(roles.get(key) or [])
+    return {
+        "scope": scope,
+        "kept": _feedback_unique_texts(kept_items, limit=limit),
+        "rejected": _feedback_unique_texts(rejected_items, limit=limit),
+        "hook_positive": _feedback_unique_texts(role_items["hook_positive"], limit=limit),
+        "hook_negative": _feedback_unique_texts(role_items["hook_negative"], limit=limit),
+        "close_positive": _feedback_unique_texts(role_items["close_positive"], limit=limit),
+        "close_negative": _feedback_unique_texts(role_items["close_negative"], limit=limit),
+        "move_to_front": _feedback_unique_texts(role_items["move_to_front"], limit=limit),
+        "move_to_end": _feedback_unique_texts(role_items["move_to_end"], limit=limit),
+    }
+
+
+def _build_preview_feedback_profile(scope=None, limit=12):
+    records = _load_preview_feedback_records(limit=80)
+    return _build_preview_feedback_profile_from_records(records, scope=scope, limit=limit)
+
+
+def _build_preview_feedback_hint_from_profile(profile, limit=8):
+    profile = profile if isinstance(profile, dict) else {}
+    kept = list(profile.get("kept") or [])[:limit]
+    rejected = list(profile.get("rejected") or [])[:limit]
+    hook_positive = list(profile.get("hook_positive") or [])[:4]
+    hook_negative = list(profile.get("hook_negative") or [])[:4]
+    close_positive = list(profile.get("close_positive") or [])[:4]
+    close_negative = list(profile.get("close_negative") or [])[:4]
+    move_to_front = list(profile.get("move_to_front") or [])[:4]
+    move_to_end = list(profile.get("move_to_end") or [])[:4]
+    if not any((kept, rejected, hook_positive, hook_negative, close_positive, close_negative, move_to_front, move_to_end)):
+        return ""
+
+    lines = ["★近期人工预览选择偏好（来自用户最终成片前的勾选）:"]
+    if hook_positive:
+        lines.append("- 用户常用开头：" + "；".join(hook_positive))
+    if hook_negative:
+        lines.append("- 用户不要的开头：" + "；".join(hook_negative))
+    if close_positive:
+        lines.append("- 用户常用结尾：" + "；".join(close_positive))
+    if close_negative:
+        lines.append("- 用户不要的结尾：" + "；".join(close_negative))
+    if move_to_front:
+        lines.append("- 用户常拖到前面：" + "；".join(move_to_front))
+    if move_to_end:
+        lines.append("- 用户常拖到最后：" + "；".join(move_to_end))
+    if kept:
+        lines.append("- 最近保留样本：" + "；".join(kept))
+    if rejected:
+        lines.append("- 最近删掉样本：" + "；".join(rejected))
+    lines.append("自动选片时开头优先贴近“常用开头/拖到前面”，结尾优先贴近“常用结尾/拖到最后”；遇到删掉样本、不要的开头/结尾类似的口令、纯过渡、碎句、跑题句，除非承接不可缺少，否则不要选。★")
+    return "\n".join(lines)
+
+
+def _build_preview_feedback_hint_from_records(records, scope=None, limit=8):
+    profile = _build_preview_feedback_profile_from_records(records, scope=scope, limit=max(limit, 12))
+    return _build_preview_feedback_hint_from_profile(profile, limit=limit)
+
+
+def _build_preview_feedback_hint(scope=None, limit=8):
+    profile = _build_preview_feedback_profile(scope=scope, limit=max(limit, 12))
+    return _build_preview_feedback_hint_from_profile(profile, limit=limit)
+
+
+def _feedback_similarity_value(left, right):
+    left_key = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(left or ""))
+    right_key = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(right or ""))
+    if not left_key or not right_key:
+        return 0.0
+    shorter, longer = sorted((left_key, right_key), key=len)
+    if len(shorter) >= 2 and shorter == longer:
+        return 1.0
+    if len(shorter) >= 4 and shorter in longer:
+        return 0.94
+    return _clip_text_similarity_value(left_key, right_key)
+
+
 def _clip_duration_value(clip):
     try:
         if len(clip) >= 6:
@@ -145,6 +312,106 @@ def _is_hook_clip(clip):
 def _is_close_clip(clip):
     ctype = str(clip[0] if len(clip) else "").lower()
     return "close" in ctype or ctype in ("cta", "call_to_action", "urgency")
+
+
+def _filter_preview_feedback_rejected_clips(
+    clips,
+    feedback_profile,
+    log_fn=None,
+    min_keep=4,
+    min_duration=None,
+    threshold=0.86,
+):
+    """Read-only user preference scoring.
+
+    This intentionally does not remove clips in the release path. It logs which
+    clips would be favored or risky according to the user's preference library,
+    so we can validate the scoring before letting it control final selection.
+    """
+    rejected_samples = (
+        list((feedback_profile or {}).get("rejected") or [])
+        + list((feedback_profile or {}).get("hook_negative") or [])
+        + list((feedback_profile or {}).get("close_negative") or [])
+    )
+    kept_samples = (
+        list((feedback_profile or {}).get("kept") or [])
+        + list((feedback_profile or {}).get("hook_positive") or [])
+        + list((feedback_profile or {}).get("close_positive") or [])
+        + list((feedback_profile or {}).get("move_to_front") or [])
+        + list((feedback_profile or {}).get("move_to_end") or [])
+    )
+    if not clips or not (rejected_samples or kept_samples):
+        return clips
+    kept = list(clips)
+    removed = []
+    guarded = []
+
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    def _best_score(text, samples):
+        best_score = 0.0
+        best_sample = ""
+        for sample in samples:
+            score = _feedback_similarity_value(text, sample)
+            if score > best_score:
+                best_score = score
+                best_sample = sample
+        return best_score, best_sample
+
+    try:
+        min_keep = max(1, int(min_keep or 1))
+    except Exception:
+        min_keep = 4
+    try:
+        min_duration = float(min_duration or 0)
+    except Exception:
+        min_duration = 0.0
+
+    positive_hits = []
+    for clip in clips:
+        text = str(clip[1] if len(clip) > 1 else "")
+        reject_score, reject_sample = _best_score(text, rejected_samples)
+        keep_score, _keep_sample = _best_score(text, kept_samples)
+        if keep_score >= 0.80:
+            positive_hits.append((clip, keep_score, _keep_sample))
+        if reject_score < threshold or keep_score >= reject_score:
+            continue
+
+        projected = [item for item in kept if item is not clip]
+        if len(projected) < min_keep:
+            guarded.append((clip, reject_score, "片段数保底"))
+            continue
+        if min_duration and sum(_clip_duration_value(item) for item in projected) < min_duration:
+            guarded.append((clip, reject_score, "时长保底"))
+            continue
+        if _is_hook_clip(clip) and not any(_is_hook_clip(item) for item in projected):
+            guarded.append((clip, reject_score, "Hook保底"))
+            continue
+        if _is_close_clip(clip) and not any(_is_close_clip(item) for item in projected):
+            guarded.append((clip, reject_score, "Close保底"))
+            continue
+
+        removed.append((clip, reject_score, reject_sample))
+
+    if positive_hits:
+        _log(f"人工偏好评分: {len(positive_hits)} 个片段命中用户保留/常用样本（只读，不改片单）")
+        for clip, score, sample in positive_hits[:3]:
+            try:
+                _log(f"  偏好加分: {float(clip[2]):.1f}-{float(clip[3]):.1f}s 相似{score:.0%} | {str(clip[1])[:28]} / 样本:{sample[:18]}")
+            except Exception:
+                continue
+    if removed:
+        _log(f"人工偏好评分: {len(removed)} 个片段接近用户删句/负样本（只读，不改片单）")
+        for clip, score, sample in removed[:3]:
+            try:
+                _log(f"  偏好扣分: {float(clip[2]):.1f}-{float(clip[3]):.1f}s 相似{score:.0%} | {str(clip[1])[:28]} / 样本:{sample[:18]}")
+            except Exception:
+                continue
+    if guarded:
+        _log(f"人工偏好评分: {len(guarded)} 个疑似删句片段会被结构/时长保底保护（只读）")
+    return clips
 
 
 def _recent_filter_floor(target_duration):
@@ -303,6 +570,7 @@ def _append_unique_supplement_clips(clips, supplement, target_duration, limit=No
 
     existing_ranges = []
     existing_times = set()
+    existing_texts = []
     for clip in clips:
         try:
             start = float(clip[2])
@@ -311,6 +579,9 @@ def _append_unique_supplement_clips(clips, supplement, target_duration, limit=No
             continue
         existing_ranges.append((start, end))
         existing_times.add((round(start, 2), round(end, 2)))
+        text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(clip[1] if len(clip) > 1 else ""))
+        if text:
+            existing_texts.append(text)
 
     added = 0
     limit = int(limit or len(supplement))
@@ -329,12 +600,27 @@ def _append_unique_supplement_clips(clips, supplement, target_duration, limit=No
             continue
         if any(max(start, s) < min(end, e) - 0.12 for s, e in existing_ranges):
             continue
+        cand_text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(sc[1] if len(sc) > 1 else ""))
+        duplicate_text = False
+        if len(cand_text) >= 8:
+            for old_text in existing_texts:
+                shorter, longer = sorted((cand_text, old_text), key=len)
+                if len(shorter) >= 10 and shorter in longer:
+                    duplicate_text = True
+                    break
+                if min(len(cand_text), len(old_text)) >= 12 and _clip_text_similarity_value(cand_text, old_text) >= 0.78:
+                    duplicate_text = True
+                    break
+        if duplicate_text:
+            continue
         next_total = sum(_clip_duration_value(c) for c in clips) + _clip_duration_value(sc)
         if next_total > target_high + 0.1:
             continue
         clips.append(sc)
         existing_ranges.append((start, end))
         existing_times.add(key)
+        if cand_text:
+            existing_texts.append(cand_text)
         added += 1
         if added >= limit:
             break
@@ -2428,6 +2714,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"差异化历史: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
+    _feedback_scope = "mix" if merge_mode else "smart"
+    _feedback_profile = _build_preview_feedback_profile(scope=_feedback_scope)
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    if _feedback_hint:
+        _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
+        _log(f"人工偏好反馈: 已载入最近{_feedback_scope}人工选择样本")
     _history_min_keep, _history_min_duration = _recent_filter_floor(_AI_TARGET_DURATION)
 
     def _record_history_if_needed(selected_clips):
@@ -2568,6 +2860,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # [v9.2] 裁掉片段开头的语气词(对/嗯/呃等)对应的画面和音频
             clips = _trim_filler_start(clips, cleaned_srt, log_fn)
             clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
+            clips = _filter_preview_feedback_rejected_clips(
+                clips, _feedback_profile, log_fn,
+                min_keep=_history_min_keep,
+                min_duration=_history_min_duration,
+            )
             clips = _filter_recent_similar_clips(
                 clips, _recent_history, log_fn,
                 min_keep=_history_min_keep,
@@ -2614,6 +2911,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
                     clips = _trim_filler_start(clips, cleaned_srt, log_fn)
                     clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
+                    clips = _filter_preview_feedback_rejected_clips(
+                        clips, _feedback_profile, log_fn,
+                        min_keep=_history_min_keep,
+                        min_duration=_history_min_duration,
+                    )
             # [v9.3 - DISABLED] tighten_clip_boundaries + 延伸 - 引起片段间跳跃废话
             # 改用AI Prompt控制片段长度和边界，代码层只做 trim_filler
             _total_dur = sum(c[5] for c in clips)
@@ -2694,6 +2996,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _remove_overlaps(clips, log_fn)
         clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
         clips = _filter_hook_product_repeats(clips, log_fn)
+        clips = _filter_preview_feedback_rejected_clips(
+            clips, _feedback_profile, log_fn,
+            min_keep=_history_min_keep,
+            min_duration=_history_min_duration,
+        )
         # [DISABLED] 延伸已禁用
         # clips = _extend_clips(clips, log_fn, target_min=55, target_max=75, max_end=srt_max_end)
         # 兜底回收：延伸后如果仍不到50s，从去重被砍的片段中回收
@@ -2739,6 +3046,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     if relaxed and len(relaxed) < _target_min_clips:
         relaxed = _supplement_clips(relaxed, cleaned_srt, log_fn, min_total=_target_min_clips)
     if relaxed:
+        relaxed = _filter_preview_feedback_rejected_clips(
+            relaxed, _feedback_profile, log_fn,
+            min_keep=_history_min_keep,
+            min_duration=_history_min_duration,
+        )
         relaxed = _filter_recent_similar_clips(
             relaxed, _recent_history, log_fn,
             min_keep=_history_min_keep,
@@ -3050,7 +3362,14 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         for i, (es, ee, et) in enumerate(srt_entries, 1):
             _srt_entry_map[i] = (es, ee, et)
             # 违禁词预扫描：标记含违禁词的条目
-            _matched_fw = [w for w in _fw_words if w in et] if _fw_words else []
+            _et_compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(et or ""))
+            _matched_fw = []
+            if _fw_words:
+                for w in _fw_words:
+                    _w = str(w or "").strip()
+                    _w_compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", _w)
+                    if _w and (_w in et or (_w_compact and _w_compact in _et_compact)):
+                        _matched_fw.append(_w)
             # 价格/CTA预扫描：标记含价格模式的条目（跟_filter_price_and_cta同规则）
             _matched_price = any(_p.search(et) for _p in _price_patterns) if _price_patterns else False
             if _matched_fw or _matched_price:
@@ -3803,6 +4122,11 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
+    _feedback_profile = _build_preview_feedback_profile(scope="smart")
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    if _feedback_hint:
+        _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
+        _log("多版本人工偏好反馈: 已载入最近人工选择样本")
 
     # ★构建SRT条目索引★
     _indexed_srt_entries = []
@@ -4063,6 +4387,11 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"降级多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段")
+    _feedback_profile = _build_preview_feedback_profile(scope="smart")
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    if _feedback_hint:
+        _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
+        _log("降级多版本人工偏好反馈: 已载入最近人工选择样本")
     all_angle_hints = [
         ("版型显瘦", "以版型显瘦开场（Hook+前1-2个Product讲显瘦/遮肉/修饰身材/收腰/遮副乳），后续Product必须覆盖颜色/穿搭/品质等其他卖点，同一角度最多2段，面料最多2段"),
         ("颜色氛围", "以颜色氛围开场（Hook+前1-2个Product讲颜色/显白/衬肤色/抬气色/温柔色），后续Product必须覆盖版型/显瘦/穿搭等其他卖点，同一角度最多2段，面料最多2段"),
@@ -4671,7 +5000,13 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
             _keep = []
             for _clip in clips:
                 _txt = _clip[1] if len(_clip) > 1 else ""
-                _matched = [w for w in _fb_list if w in _txt]
+                _txt_compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(_txt or ""))
+                _matched = []
+                for w in _fb_list:
+                    _w = str(w or "").strip()
+                    _w_compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", _w)
+                    if _w and (_w in _txt or (_w_compact and _w_compact in _txt_compact)):
+                        _matched.append(_w)
                 if _matched:
                     _log(f"  forbid: [{','.join(_matched[:3])}] CT={_clip[0]} [{_clip[2]:.0f}s-{_clip[3]:.0f}s]")
                 else:

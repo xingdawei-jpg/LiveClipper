@@ -2830,6 +2830,59 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.feedback-library-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.feedback-role-group {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.feedback-role-group h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.feedback-sample-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.feedback-sample-main {
+  min-width: 0;
+}
+
+.feedback-sample-main strong,
+.feedback-sample-main span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedback-sample-main strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.feedback-sample-main span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .system-actions {
   display: flex;
   gap: 8px;

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260620-video-picker-compact">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260622-user-feedback-manage">
 </head>
 <body>
   <div class="app-shell">
@@ -1312,6 +1312,33 @@
 
               <div class="panel">
                 <div class="panel-header">
+                  <h2>用户喜好库</h2>
+                  <button class="button button-secondary" data-action="refresh-ai-feedback">刷新</button>
+                </div>
+                <p class="panel-note">保存你在 AI 预览里保留、删除、拖到开头或结尾的选择，用来优化后续自动成片。</p>
+                <div class="metric-row">
+                  <div>
+                    <span class="metric-label">记录数</span>
+                    <strong id="ai-feedback-count">0</strong>
+                  </div>
+                  <div>
+                    <span class="metric-label">文件大小</span>
+                    <strong id="ai-feedback-size">0KB</strong>
+                  </div>
+                </div>
+                <p class="panel-note" id="ai-feedback-path">保存位置：%APPDATA%\LiveClipper\ai_feedback</p>
+                <div class="panel-actions">
+                  <button class="button button-secondary" data-action="export-ai-feedback">导出喜好库</button>
+                  <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
+                  <button class="button button-muted" data-action="clear-ai-feedback">清空喜好库</button>
+                </div>
+                <div class="feedback-library-list" id="ai-feedback-samples">
+                  <p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-header">
                   <h2>AI选片规则</h2>
                 </div>
                 <p class="panel-note">硬约束，直接控制 AI 选什么不选什么。</p>
@@ -1545,6 +1572,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260620-video-picker-compact" defer></script>
+  <script src="/assets/app.js?v=20260622-user-feedback-manage" defer></script>
 </body>
 </html>

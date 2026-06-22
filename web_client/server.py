@@ -46,8 +46,20 @@ def _valid_app_dir(path: Path) -> bool:
     return path.is_dir() and (path / "license_client.py").exists() and (path / "cutter_logic.py").exists()
 
 
+def _app_public_key(path: Path) -> str:
+    try:
+        return (path / "license_public_key.txt").read_text(encoding="utf-8-sig").strip()
+    except Exception:
+        return ""
+
+
 def _select_app_dir(*candidates: Path) -> Path:
+    expected_public_key = _app_public_key(candidates[0]) if candidates else ""
     valid = [path for path in candidates if _valid_app_dir(path)]
+    if expected_public_key:
+        matched = [path for path in valid if _app_public_key(path) == expected_public_key]
+        if matched:
+            valid = matched
     if not valid:
         return candidates[0]
     valid.sort(key=lambda path: _version_key(_read_app_version(path)), reverse=True)
@@ -1170,12 +1182,14 @@ class AiScanPayload(BaseModel):
 class SmartPreviewCutPayload(SmartCutPayload):
     preview_id: str = ""
     selected_indices: list[int] = Field(default_factory=list)
+    order: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
 
 
 class MixPreviewCutPayload(MixPayload):
     preview_id: str = ""
     selected_indices: list[int] = Field(default_factory=list)
+    order: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
 
 
@@ -1191,6 +1205,15 @@ class PreviewSelectionPayload(BaseModel):
 class SmartPreviewClipPayload(BaseModel):
     preview_id: str = ""
     clip_index: int = Field(default=0, ge=0)
+
+
+class AiFeedbackImportPayload(BaseModel):
+    path: str = ""
+
+
+class AiFeedbackDeletePayload(BaseModel):
+    role: str = ""
+    text: str = ""
 
 
 class ProductScanPayload(BaseModel):
@@ -2532,7 +2555,8 @@ def _preview_has_forbidden_or_price(text: Any) -> bool:
         return False
     try:
         for word in _preview_forbidden_words():
-            if word and word in clean:
+            word_compact = _preview_compact_text(word)
+            if word and (word in clean or (word_compact and word_compact in compact)):
                 return True
     except Exception:
         pass
@@ -2672,6 +2696,7 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
 
 def _preview_unselect_duplicate_segments(public_clips: list[dict[str, Any]]) -> dict[str, Any]:
     seen: dict[tuple[str, float, float, str], int] = {}
+    seen_fuzzy: list[dict[str, Any]] = []
     removed_segments = 0
     removed_clips = 0
     for clip in public_clips:
@@ -2688,15 +2713,40 @@ def _preview_unselect_duplicate_segments(public_clips: list[dict[str, Any]]) -> 
         for seg in selected_before:
             start = round(float(seg.get("start") or 0), 3)
             end = round(float(seg.get("end") or start), 3)
-            text_key = _preview_compact_text(seg.get("text") or "")[:48]
+            full_text_key = _preview_compact_text(seg.get("text") or "")
+            text_key = full_text_key[:48]
             key = (source, start, end, text_key)
-            if key in seen:
+            duplicate_of = seen.get(key)
+            if duplicate_of is None and len(full_text_key) >= 8:
+                for old in seen_fuzzy:
+                    if source and old.get("source") and source != old.get("source"):
+                        continue
+                    old_text = str(old.get("text") or "")
+                    if not old_text:
+                        continue
+                    overlap = max(0.0, min(end, float(old.get("end") or 0)) - max(start, float(old.get("start") or 0)))
+                    shorter, longer = sorted((full_text_key, old_text), key=len)
+                    score = _preview_similarity(full_text_key, old_text)
+                    same_sentence = len(shorter) >= 10 and shorter in longer
+                    same_time_repeat = overlap >= 0.2 and score >= 0.72
+                    strong_text_repeat = min(len(full_text_key), len(old_text)) >= 12 and score >= 0.92
+                    if same_sentence or same_time_repeat or strong_text_repeat:
+                        duplicate_of = int(old.get("clip_index", -1))
+                        break
+            if duplicate_of is not None:
                 seg["selected"] = False
-                seg["duplicate_of"] = seen[key]
+                seg["duplicate_of"] = duplicate_of
                 removed_segments += 1
                 removed_duration += float(seg.get("duration") or max(0.0, end - start))
             else:
                 seen[key] = int(clip.get("index", -1))
+                seen_fuzzy.append({
+                    "source": source,
+                    "start": start,
+                    "end": end,
+                    "text": full_text_key,
+                    "clip_index": int(clip.get("index", -1)),
+                })
         selected_after = [seg for seg in segments if seg.get("selected") is not False]
         if selected_after and total_duration > 0 and removed_duration / total_duration >= 0.65:
             for seg in segments:
@@ -2939,6 +2989,436 @@ def _log_preview_selection(
             emit_log("info", f"{label}片段[{idx}] {exact}{seg_note} {start:.3f}-{end:.3f}s | {text[:80]}", scope)
         except Exception:
             continue
+
+
+def _preview_feedback_log_path() -> Path:
+    return _safe_user_child("ai_feedback", "preview_selection_feedback.jsonl")
+
+
+def _preview_feedback_text(value: Any, limit: int = 140) -> str:
+    text = _strip_preview_source_marker(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        return text[:limit].rstrip() + "..."
+    return text
+
+
+def _preview_feedback_clip_entry(index: int, public_clip: dict[str, Any]) -> dict[str, Any]:
+    start = float(public_clip.get("start") or 0)
+    end = float(public_clip.get("end") or start)
+    return {
+        "clip_index": int(index),
+        "text": _preview_feedback_text(public_clip.get("text") or ""),
+        "start": round(start, 3),
+        "end": round(max(start, end), 3),
+        "duration": round(max(0.0, float(public_clip.get("duration") or (end - start))), 3),
+        "clip_type": str(public_clip.get("clip_type") or "product"),
+        "focus": str(public_clip.get("focus") or ""),
+        "focus_block": str(public_clip.get("focus_block") or ""),
+        "source_name": str(public_clip.get("source_name") or ""),
+    }
+
+
+def _preview_feedback_segment_entry(
+    clip_index: int,
+    public_clip: dict[str, Any],
+    segment: dict[str, Any],
+) -> dict[str, Any]:
+    start = _preview_segment_start(segment)
+    end = _preview_segment_end(segment)
+    return {
+        "clip_index": int(clip_index),
+        "segment_index": _preview_segment_index(segment),
+        "text": _preview_feedback_text(segment.get("text") or ""),
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration": round(max(0.0, end - start), 3),
+        "clip_type": str(public_clip.get("clip_type") or "product"),
+        "focus": str(public_clip.get("focus") or ""),
+        "focus_block": str(public_clip.get("focus_block") or ""),
+        "source_name": str(public_clip.get("source_name") or ""),
+    }
+
+
+def _build_preview_selection_feedback(
+    preview: dict[str, Any],
+    scope: str,
+    draft: dict[str, Any],
+    event: str,
+) -> dict[str, Any]:
+    raw_clips = list(preview.get("raw_clips") or [])
+    public_clips = {
+        int(clip.get("index")): clip
+        for clip in list(preview.get("clips") or [])
+        if str(clip.get("index", "")).lstrip("-").isdigit()
+    }
+    raw_count = max(len(raw_clips), max(public_clips.keys(), default=-1) + 1)
+    selected = _clean_preview_int_list(draft.get("selected_indices") or [], raw_count)
+    selected_set = set(selected)
+    selected_segments = draft.get("selected_segments") if isinstance(draft.get("selected_segments"), dict) else {}
+
+    kept_texts: list[dict[str, Any]] = []
+    rejected_segment_texts: list[dict[str, Any]] = []
+    rejected_clip_texts: list[dict[str, Any]] = []
+    clip_entries: dict[int, dict[str, Any]] = {}
+    kept_by_clip: dict[int, list[dict[str, Any]]] = {}
+    rejected_segments_by_clip: dict[int, list[dict[str, Any]]] = {}
+
+    for index in range(raw_count):
+        raw_clip = raw_clips[index] if index < len(raw_clips) else {}
+        public_clip = public_clips.get(index) or _clip_public(index, raw_clip)
+        clip_entry = _preview_feedback_clip_entry(index, public_clip)
+        if clip_entry["text"]:
+            clip_entries[index] = clip_entry
+        segments = list(public_clip.get("segments") or [])
+        if index in selected_set:
+            if segments:
+                raw_values = selected_segments.get(str(index))
+                if raw_values is None:
+                    raw_values = selected_segments.get(index) if isinstance(selected_segments, dict) else None
+                if isinstance(raw_values, list):
+                    wanted = set(_clean_preview_int_list(raw_values, len(segments)))
+                else:
+                    wanted = {
+                        _preview_segment_index(seg)
+                        for seg in segments
+                        if seg.get("selected") is not False
+                    }
+                for segment in segments:
+                    entry = _preview_feedback_segment_entry(index, public_clip, segment)
+                    if not entry["text"]:
+                        continue
+                    if _preview_segment_index(segment) in wanted:
+                        kept_texts.append(entry)
+                        kept_by_clip.setdefault(index, []).append(entry)
+                    else:
+                        rejected_segment_texts.append(entry)
+                        rejected_segments_by_clip.setdefault(index, []).append(entry)
+            else:
+                if clip_entry["text"]:
+                    kept_texts.append(clip_entry)
+                    kept_by_clip.setdefault(index, []).append(clip_entry)
+        else:
+            if clip_entry["text"]:
+                rejected_clip_texts.append(clip_entry)
+
+    draft_order = _clean_preview_int_list(draft.get("order") or [], raw_count)
+    selected_order = [index for index in draft_order if index in selected_set]
+    selected_order.extend(index for index in selected if index not in set(selected_order))
+    first_selected = selected_order[0] if selected_order else None
+    last_selected = selected_order[-1] if selected_order else None
+    hook_positive = list(kept_by_clip.get(first_selected, [])) if first_selected is not None else []
+    close_positive = list(kept_by_clip.get(last_selected, [])) if last_selected is not None else []
+    hook_negative = list(rejected_segments_by_clip.get(first_selected, [])) if first_selected is not None else []
+    close_negative = list(rejected_segments_by_clip.get(last_selected, [])) if last_selected is not None else []
+    if first_selected is not None and first_selected != 0 and 0 in clip_entries:
+        hook_negative.append(clip_entries[0])
+    if last_selected is not None and raw_count > 0 and last_selected != raw_count - 1 and raw_count - 1 in clip_entries:
+        close_negative.append(clip_entries[raw_count - 1])
+    moved_to_front = list(kept_by_clip.get(first_selected, [])) if first_selected is not None and selected and first_selected != min(selected) else []
+    moved_to_end = list(kept_by_clip.get(last_selected, [])) if last_selected is not None and selected and last_selected != max(selected) else []
+    role_samples = {
+        "hook_positive": hook_positive[:20],
+        "hook_negative": hook_negative[:20],
+        "close_positive": close_positive[:20],
+        "close_negative": close_negative[:20],
+        "sentence_positive": kept_texts[:80],
+        "sentence_negative": rejected_segment_texts[:80],
+        "move_to_front": moved_to_front[:20],
+        "move_to_end": moved_to_end[:20],
+    }
+
+    return {
+        "created_at": time.time(),
+        "created_at_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event,
+        "scope": scope,
+        "preview_id": str(preview.get("id") or draft.get("preview_id") or ""),
+        "target_duration": preview.get("target_duration"),
+        "selected_clip_count": len(selected),
+        "kept_segment_count": len(kept_texts),
+        "rejected_segment_count": len(rejected_segment_texts),
+        "rejected_clip_count": len(rejected_clip_texts),
+        "kept_texts": kept_texts[:80],
+        "rejected_segment_texts": rejected_segment_texts[:80],
+        "rejected_clip_texts": rejected_clip_texts[:40],
+        "role_samples": role_samples,
+    }
+
+
+def _append_preview_selection_feedback(record: dict[str, Any]) -> None:
+    path = _preview_feedback_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+        try:
+            lines = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
+            path.write_text("\n".join(lines[-600:]) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _preview_feedback_records_from_text(text: str) -> list[dict[str, Any]]:
+    text = str(text or "").strip()
+    if not text:
+        return []
+    records: list[dict[str, Any]] = []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = []
+        if isinstance(data, list):
+            records.extend(item for item in data if isinstance(item, dict))
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(item, dict):
+                records.append(item)
+    return records
+
+
+def _preview_feedback_record_key(record: dict[str, Any]) -> str:
+    try:
+        raw = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        raw = str(record)
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _preview_feedback_load_records() -> list[dict[str, Any]]:
+    path = _preview_feedback_log_path()
+    if not path.exists():
+        return []
+    try:
+        return _preview_feedback_records_from_text(path.read_text(encoding="utf-8-sig", errors="ignore"))
+    except Exception:
+        return []
+
+
+def _preview_feedback_stats() -> dict[str, Any]:
+    path = _preview_feedback_log_path()
+    records = _preview_feedback_load_records()
+    role_counts: dict[str, int] = {}
+    for record in records:
+        roles = record.get("role_samples") if isinstance(record.get("role_samples"), dict) else {}
+        for key, values in roles.items():
+            if isinstance(values, list):
+                role_counts[key] = role_counts.get(key, 0) + len(values)
+    return {
+        "exists": path.exists(),
+        "path": str(path),
+        "record_count": len(records),
+        "size": path.stat().st_size if path.exists() else 0,
+        "role_counts": role_counts,
+    }
+
+
+_PREVIEW_FEEDBACK_ROLE_LABELS = {
+    "hook_positive": "常用开头",
+    "hook_negative": "不要的开头",
+    "close_positive": "常用结尾",
+    "close_negative": "不要的结尾",
+    "move_to_front": "常拖到前面",
+    "move_to_end": "常拖到最后",
+    "sentence_positive": "保留句子",
+    "sentence_negative": "删除句子",
+}
+
+
+def _preview_feedback_sample_text(item: Any) -> str:
+    if isinstance(item, dict):
+        value = item.get("text") or ""
+    else:
+        value = item
+    text = _strip_preview_source_marker(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _preview_feedback_role_items(record: dict[str, Any], role: str) -> list[Any]:
+    roles = record.get("role_samples") if isinstance(record.get("role_samples"), dict) else {}
+    values = roles.get(role)
+    if isinstance(values, list):
+        return list(values)
+    if role == "sentence_positive":
+        values = record.get("kept_texts")
+        return list(values) if isinstance(values, list) else []
+    if role == "sentence_negative":
+        values = record.get("rejected_segment_texts")
+        return list(values) if isinstance(values, list) else []
+    return []
+
+
+def _preview_feedback_sample_id(role: str, text: str) -> str:
+    raw = f"{role}\0{_preview_compact_text(text)}\0{text}"
+    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _preview_feedback_samples(limit_per_role: int = 80) -> list[dict[str, Any]]:
+    records = _preview_feedback_load_records()
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        created_at = float(record.get("created_at") or 0)
+        scope = str(record.get("scope") or "")
+        for role in _PREVIEW_FEEDBACK_ROLE_LABELS:
+            for item in _preview_feedback_role_items(record, role):
+                text = _preview_feedback_sample_text(item)
+                if not text:
+                    continue
+                key = (role, text)
+                entry = grouped.setdefault(key, {
+                    "id": _preview_feedback_sample_id(role, text),
+                    "role": role,
+                    "label": _PREVIEW_FEEDBACK_ROLE_LABELS.get(role, role),
+                    "text": text,
+                    "count": 0,
+                    "latest_at": 0.0,
+                    "scopes": set(),
+                })
+                entry["count"] += 1
+                entry["latest_at"] = max(float(entry.get("latest_at") or 0), created_at)
+                if scope:
+                    entry["scopes"].add(scope)
+    result: list[dict[str, Any]] = []
+    for role in _PREVIEW_FEEDBACK_ROLE_LABELS:
+        items = [entry for entry in grouped.values() if entry.get("role") == role]
+        items.sort(key=lambda entry: (int(entry.get("count") or 0), float(entry.get("latest_at") or 0)), reverse=True)
+        for entry in items[:limit_per_role]:
+            scopes = sorted(entry.pop("scopes", set()))
+            entry["scopes"] = scopes
+            result.append(entry)
+    return result
+
+
+def _preview_feedback_write_records(records: list[dict[str, Any]]) -> None:
+    path = _preview_feedback_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _preview_feedback_backup_current(reason: str) -> str:
+    path = _preview_feedback_log_path()
+    if not path.exists():
+        return ""
+    backup = path.with_name(f"preview_selection_feedback_{reason}_{_stamp_name()}.jsonl")
+    shutil.copy2(path, backup)
+    return str(backup)
+
+
+def _preview_feedback_delete_sample(role: str, text: str) -> dict[str, Any]:
+    role = str(role or "").strip()
+    text = _preview_feedback_sample_text(text)
+    if role not in _PREVIEW_FEEDBACK_ROLE_LABELS or not text:
+        raise HTTPException(status_code=400, detail="请选择要删除的喜好样本。")
+    records = _preview_feedback_load_records()
+    backup = _preview_feedback_backup_current("before_delete")
+    removed = 0
+    for record in records:
+        roles = record.get("role_samples") if isinstance(record.get("role_samples"), dict) else {}
+        role_values = roles.get(role)
+        if isinstance(role_values, list):
+            kept_values = []
+            for item in role_values:
+                if _preview_feedback_sample_text(item) == text:
+                    removed += 1
+                else:
+                    kept_values.append(item)
+            roles[role] = kept_values
+            record["role_samples"] = roles
+        legacy_key = "kept_texts" if role == "sentence_positive" else "rejected_segment_texts" if role == "sentence_negative" else ""
+        if legacy_key and not isinstance(role_values, list) and isinstance(record.get(legacy_key), list):
+            kept_values = []
+            for item in record.get(legacy_key) or []:
+                if _preview_feedback_sample_text(item) == text:
+                    removed += 1
+                else:
+                    kept_values.append(item)
+            record[legacy_key] = kept_values
+    if removed:
+        _preview_feedback_write_records(records)
+    return {"removed_count": removed, "backup": backup}
+
+
+def _preview_feedback_clear() -> dict[str, Any]:
+    backup = _preview_feedback_backup_current("before_clear")
+    path = _preview_feedback_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return {"backup": backup}
+
+
+def _preview_feedback_merge_import(source_path: Path) -> dict[str, Any]:
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(status_code=404, detail="没有找到要导入的喜好库文件。")
+    if source_path.stat().st_size > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="喜好库文件过大，请确认选择正确文件。")
+    try:
+        imported = _preview_feedback_records_from_text(source_path.read_text(encoding="utf-8-sig", errors="ignore"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"读取喜好库失败：{exc}") from exc
+    if not imported:
+        raise HTTPException(status_code=400, detail="文件里没有可导入的喜好记录。")
+
+    target = _preview_feedback_log_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing = _preview_feedback_load_records()
+    if target.exists():
+        backup = target.with_name(f"preview_selection_feedback_backup_{_stamp_name()}.jsonl")
+        shutil.copy2(target, backup)
+    else:
+        backup = None
+
+    seen = {_preview_feedback_record_key(record) for record in existing}
+    added: list[dict[str, Any]] = []
+    for record in imported:
+        key = _preview_feedback_record_key(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        added.append(record)
+    if added:
+        with target.open("a", encoding="utf-8") as handle:
+            for record in added:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {
+        "imported_count": len(imported),
+        "added_count": len(added),
+        "skipped_count": len(imported) - len(added),
+        "backup": str(backup) if backup else "",
+        "path": str(target),
+    }
+
+
+def _record_preview_selection_feedback(
+    preview: dict[str, Any],
+    scope: str,
+    draft: dict[str, Any],
+    event: str,
+) -> None:
+    try:
+        record = _build_preview_selection_feedback(preview, scope, draft, event)
+        kept_count = int(record.get("kept_segment_count") or 0)
+        rejected_count = int(record.get("rejected_segment_count") or 0)
+        if kept_count <= 0 and rejected_count <= 0:
+            return
+        _append_preview_selection_feedback(record)
+        emit_log(
+            "info",
+            f"AI偏好反馈: 已记录本次人工选择，保留 {kept_count} 句、删除 {rejected_count} 句；后续自动选片会参考。",
+            scope,
+        )
+    except Exception as exc:
+        emit_log("warning", f"AI偏好反馈记录失败: {exc}", scope)
 
 
 def _clean_preview_int_list(values: Any, limit: int | None = None) -> list[int]:
@@ -4876,10 +5356,21 @@ def index() -> FileResponse:
 
 @app.get("/api/runtime")
 def runtime() -> dict[str, Any]:
+    public_key_suffix = ""
+    try:
+        import license_token
+
+        public_key = license_token.configured_public_key()
+        public_key_suffix = public_key[-8:] if public_key else ""
+    except Exception:
+        public_key_suffix = ""
     return {
         "version": _load_version(),
         "repo_root": str(REPO_ROOT),
+        "app_dir": str(APP_DIR),
+        "web_dir": str(WEB_DIR),
         "user_data_dir": str(_get_user_data_dir()),
+        "license_public_key_suffix": public_key_suffix,
         "mode": "local-web-client",
     }
 
@@ -4962,7 +5453,13 @@ def apply_update_api() -> dict[str, Any]:
                     result["msg"] = "更新已安装，客户端即将自动重启。" if result.get("auto_restart") else "更新已安装，请重启客户端后生效。"
                 emit_log("success", result.get("msg") or "更新已安装，重启客户端后生效。", "settings")
             else:
-                emit_log("error", f"更新安装失败：{result.get('failed') or result.get('msg')}", "settings")
+                details = result.get("failed_details") or {}
+                if details:
+                    first_items = list(details.items())[:3]
+                    detail_text = "; ".join(f"{name}: {reason}" for name, reason in first_items)
+                    emit_log("error", f"更新安装失败：{detail_text}", "settings")
+                else:
+                    emit_log("error", f"更新安装失败：{result.get('failed') or result.get('msg')}", "settings")
         with _UPDATE_LOCK:
             _UPDATE_STATE["last_result"] = result
         return result
@@ -5079,6 +5576,66 @@ def save_preferences(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid preferences")
     _save_preferences(payload)
     return {"ok": True}
+
+
+@app.get("/api/ai-feedback/stats")
+def get_ai_feedback_stats() -> dict[str, Any]:
+    return {"ok": True, **_preview_feedback_stats()}
+
+
+@app.get("/api/ai-feedback/samples")
+def get_ai_feedback_samples() -> dict[str, Any]:
+    return {
+        "ok": True,
+        **_preview_feedback_stats(),
+        "roles": [
+            {"role": role, "label": label}
+            for role, label in _PREVIEW_FEEDBACK_ROLE_LABELS.items()
+        ],
+        "samples": _preview_feedback_samples(),
+    }
+
+
+@app.get("/api/ai-feedback/export")
+def export_ai_feedback() -> FileResponse:
+    path = _preview_feedback_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+    filename = f"LiveClipper_ai_preferences_{_stamp_name()}.jsonl"
+    return FileResponse(str(path), media_type="application/jsonl", filename=filename)
+
+
+@app.post("/api/ai-feedback/import")
+def import_ai_feedback(payload: AiFeedbackImportPayload) -> dict[str, Any]:
+    source = Path(str(payload.path or "").strip().strip('"'))
+    if not str(source):
+        raise HTTPException(status_code=400, detail="请先选择要导入的喜好库文件。")
+    result = _preview_feedback_merge_import(source)
+    emit_log(
+        "success",
+        f"用户喜好库导入完成：新增 {result['added_count']} 条，跳过重复 {result['skipped_count']} 条。",
+        "settings",
+    )
+    return {"ok": True, **result, **_preview_feedback_stats()}
+
+
+@app.post("/api/ai-feedback/sample/delete")
+def delete_ai_feedback_sample(payload: AiFeedbackDeletePayload) -> dict[str, Any]:
+    result = _preview_feedback_delete_sample(payload.role, payload.text)
+    emit_log(
+        "success",
+        f"用户喜好库已删除样本：{result['removed_count']} 条匹配记录。",
+        "settings",
+    )
+    return {"ok": True, **result, **_preview_feedback_stats(), "samples": _preview_feedback_samples()}
+
+
+@app.post("/api/ai-feedback/clear")
+def clear_ai_feedback() -> dict[str, Any]:
+    result = _preview_feedback_clear()
+    emit_log("warning", "用户喜好库已清空。", "settings")
+    return {"ok": True, **result, **_preview_feedback_stats(), "samples": []}
 
 
 @app.get("/api/license")
@@ -5468,6 +6025,8 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
         payload.selected_indices = list(draft.get("selected_indices") or [])
     if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
         payload.selected_segments = dict(draft.get("selected_segments") or {})
+    if not payload.order and isinstance(draft.get("order"), list):
+        payload.order = list(draft.get("order") or [])
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再成片。")
     clip_count = len(preview.get("raw_clips") or [])
@@ -5475,7 +6034,8 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再成片。")
     payload.selected_indices = selected
-    _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments)
+    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments, order=payload.order)
+    _record_preview_selection_feedback(preview, "smart", draft, "smart_from_preview")
     task_id = _new_task("smart-cut", "预览成片")
     threading.Thread(target=_run_smart_cut_from_preview, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "预览成片任务已启动。"}
@@ -5548,6 +6108,8 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
         payload.selected_indices = list(draft.get("selected_indices") or [])
     if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
         payload.selected_segments = dict(draft.get("selected_segments") or {})
+    if not payload.order and isinstance(draft.get("order"), list):
+        payload.order = list(draft.get("order") or [])
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再混剪。")
     clip_count = len(preview.get("raw_clips") or [])
@@ -5555,7 +6117,8 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再混剪。")
     payload.selected_indices = selected
-    _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments)
+    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments, order=payload.order)
+    _record_preview_selection_feedback(preview, "mix", draft, "mix_from_preview")
     task_id = _new_task("mix", "预览混剪成片")
     threading.Thread(target=_run_mix_from_preview, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "预览混剪任务已启动。"}
