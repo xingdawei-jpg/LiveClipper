@@ -188,6 +188,145 @@ def _feedback_unique_texts(items, limit=8):
     return result
 
 
+_FEEDBACK_POSITIVE_ROLES = {"hook_positive", "close_positive", "move_to_front", "move_to_end", "sentence_positive"}
+_FEEDBACK_NEGATIVE_ROLES = {"hook_negative", "close_negative", "sentence_negative"}
+_FEEDBACK_STRUCTURAL_AVOID = {"host_chatter", "environment_noise", "inventory_pressure", "filler_or_fragment"}
+_FEEDBACK_SIGNAL_RULES = [
+    ("color_benefit", "颜色/显白卖点", ["显白", "显肤", "肤亮", "颜色", "黑色", "白色", "绿色", "亮色", "米白", "饱和度", "冷白"]),
+    ("fit_texture", "版型/质感卖点", ["显瘦", "质感", "面料", "版型", "细节", "袖子", "好穿", "舒服", "垂感", "高级"]),
+    ("scene_styling", "场景/搭配表达", ["日常", "生活", "运动", "骑行", "拍照", "场景", "搭配", "出片", "穿搭", "黑白灰"]),
+    ("objection_answer", "购买顾虑解释", ["不安心", "从来没有", "不敢", "不知道", "怕", "适合", "稳妥", "尝试", "口味", "惊喜"]),
+    ("emotional_hook", "情绪/记忆点", ["相信我", "惊喜", "记忆点", "风格", "气质", "性格", "值得", "好看", "宝宝"]),
+    ("host_chatter", "主播闲聊/自嗨", ["老粉", "拉黑", "划走", "催债", "催交", "不好意思", "听我讲话", "吹牛", "下次"]),
+    ("environment_noise", "环境/直播间干扰", ["直播间", "手机屏幕", "肉眼", "窗户", "光很亮", "帘子", "走远", "颜色比较对"]),
+    ("inventory_pressure", "库存/预售催促", ["首批", "拼手速", "没了", "预售", "库存", "加完", "备货", "一点都没有"]),
+    ("filler_or_fragment", "口头禅/断句", ["来好了", "对然后", "能理解吗", "为什么", "呀对不对", "白开水", "因为我知道", "然后整个", "你看啊"]),
+]
+
+
+def _feedback_compact_text(text):
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", str(text or ""))
+
+
+def _feedback_confidence(count):
+    try:
+        count = int(count or 0)
+    except Exception:
+        count = 0
+    if count >= 8:
+        return "较强"
+    if count >= 5:
+        return "明显"
+    if count >= 3:
+        return "轻微"
+    if count >= 1:
+        return "观察中"
+    return "无"
+
+
+def _feedback_signal_keys(text):
+    text = str(text or "")
+    compact = _feedback_compact_text(text)
+    keys = []
+    for key, _label, words in _FEEDBACK_SIGNAL_RULES:
+        for word in words:
+            if word in text or _feedback_compact_text(word) in compact:
+                keys.append(key)
+                break
+    if len(compact) <= 5 and compact in {"对然后", "为什么", "来好了", "白开水", "能理解吗", "呀对不对"}:
+        if "filler_or_fragment" not in keys:
+            keys.append("filler_or_fragment")
+    if re.search(r"(因为|然后|包括|或者|这个|整个|有一点|你看)$", text.strip()):
+        if "filler_or_fragment" not in keys:
+            keys.append("filler_or_fragment")
+    return keys
+
+
+def _build_feedback_signal_summary(scoped_records):
+    signal_map = {
+        key: {
+            "key": key,
+            "label": label,
+            "positive_count": 0,
+            "negative_count": 0,
+            "positive_examples": [],
+            "negative_examples": [],
+        }
+        for key, label, _words in _FEEDBACK_SIGNAL_RULES
+    }
+    text_roles = {}
+    total = 0
+    for record in scoped_records or []:
+        roles = record.get("role_samples") if isinstance(record.get("role_samples"), dict) else {}
+        role_values = {
+            "hook_positive": roles.get("hook_positive") or [],
+            "hook_negative": roles.get("hook_negative") or [],
+            "close_positive": roles.get("close_positive") or [],
+            "close_negative": roles.get("close_negative") or [],
+            "move_to_front": roles.get("move_to_front") or [],
+            "move_to_end": roles.get("move_to_end") or [],
+            "sentence_positive": roles.get("sentence_positive") or record.get("kept_texts") or [],
+            "sentence_negative": roles.get("sentence_negative") or record.get("rejected_segment_texts") or [],
+        }
+        for role, values in role_values.items():
+            polarity = "positive" if role in _FEEDBACK_POSITIVE_ROLES else "negative" if role in _FEEDBACK_NEGATIVE_ROLES else ""
+            if not polarity:
+                continue
+            for item in values or []:
+                text = _feedback_text_value(item, limit=120)
+                if not text:
+                    continue
+                total += 1
+                compact = _feedback_compact_text(text)
+                text_entry = text_roles.setdefault(compact, {"text": text, "positive": 0, "negative": 0})
+                text_entry[polarity] += 1
+                for key in _feedback_signal_keys(text):
+                    signal = signal_map.get(key)
+                    if not signal:
+                        continue
+                    count_key = "positive_count" if polarity == "positive" else "negative_count"
+                    example_key = "positive_examples" if polarity == "positive" else "negative_examples"
+                    signal[count_key] += 1
+                    if text not in signal[example_key] and len(signal[example_key]) < 2:
+                        signal[example_key].append(text)
+
+    positive = []
+    negative = []
+    for signal in signal_map.values():
+        pos = int(signal["positive_count"])
+        neg = int(signal["negative_count"])
+        if not pos and not neg:
+            continue
+        net = pos - neg
+        item = dict(signal)
+        item["net"] = net
+        item["confidence"] = _feedback_confidence(abs(net))
+        if signal["key"] in _FEEDBACK_STRUCTURAL_AVOID:
+            if neg > 0:
+                item["net"] = -neg
+                item["confidence"] = _feedback_confidence(neg)
+                negative.append(item)
+            continue
+        if net > 0:
+            positive.append(item)
+        elif net < 0:
+            negative.append(item)
+
+    positive.sort(key=lambda item: (int(item.get("net") or 0), int(item.get("positive_count") or 0)), reverse=True)
+    negative.sort(key=lambda item: (abs(int(item.get("net") or 0)), int(item.get("negative_count") or 0)), reverse=True)
+    conflicts = [
+        item for item in text_roles.values()
+        if int(item.get("positive") or 0) > 0 and int(item.get("negative") or 0) > 0
+    ]
+    conflicts.sort(key=lambda item: int(item.get("positive") or 0) + int(item.get("negative") or 0), reverse=True)
+    return {
+        "sample_count": total,
+        "positive": positive[:5],
+        "negative": negative[:5],
+        "conflicts": conflicts[:5],
+    }
+
+
 def _build_preview_feedback_profile_from_records(records, scope=None, limit=12):
     records = list(records or [])
     if not records:
@@ -201,6 +340,7 @@ def _build_preview_feedback_profile_from_records(records, scope=None, limit=12):
             "close_negative": [],
             "move_to_front": [],
             "move_to_end": [],
+            "summary": {"sample_count": 0, "positive": [], "negative": [], "conflicts": []},
         }
     scoped_records = [item for item in records if not scope or item.get("scope") == scope]
     if not scoped_records and scope:
@@ -231,6 +371,7 @@ def _build_preview_feedback_profile_from_records(records, scope=None, limit=12):
         "close_negative": _feedback_unique_texts(role_items["close_negative"], limit=limit),
         "move_to_front": _feedback_unique_texts(role_items["move_to_front"], limit=limit),
         "move_to_end": _feedback_unique_texts(role_items["move_to_end"], limit=limit),
+        "summary": _build_feedback_signal_summary(scoped_records[-20:]),
     }
 
 
@@ -249,27 +390,45 @@ def _build_preview_feedback_hint_from_profile(profile, limit=8):
     close_negative = list(profile.get("close_negative") or [])[:4]
     move_to_front = list(profile.get("move_to_front") or [])[:4]
     move_to_end = list(profile.get("move_to_end") or [])[:4]
-    if not any((kept, rejected, hook_positive, hook_negative, close_positive, close_negative, move_to_front, move_to_end)):
+    summary = profile.get("summary") if isinstance(profile.get("summary"), dict) else {}
+    positive_signals = list(summary.get("positive") or [])[:4]
+    negative_signals = list(summary.get("negative") or [])[:4]
+    conflicts = list(summary.get("conflicts") or [])[:3]
+    if not any((kept, rejected, hook_positive, hook_negative, close_positive, close_negative, move_to_front, move_to_end, positive_signals, negative_signals, conflicts)):
         return ""
 
-    lines = ["★近期人工预览选择偏好（来自用户最终成片前的勾选）:"]
+    lines = ["★用户喜好库软参考（来自用户最终成片前的勾选，不按原句硬匹配）:"]
+    if positive_signals:
+        parts = []
+        for item in positive_signals:
+            parts.append(f"{item.get('label')}({item.get('confidence', '观察中')}，保留{int(item.get('positive_count') or 0)}删{int(item.get('negative_count') or 0)})")
+        lines.append("- 倾向保留的内容类型：" + "；".join(parts))
+    if negative_signals:
+        parts = []
+        for item in negative_signals:
+            parts.append(f"{item.get('label')}({item.get('confidence', '观察中')}，保留{int(item.get('positive_count') or 0)}删{int(item.get('negative_count') or 0)})")
+        lines.append("- 谨慎避开的内容类型：" + "；".join(parts))
+    if conflicts:
+        examples = "；".join(str(item.get("text") or "")[:38] for item in conflicts if item.get("text"))
+        if examples:
+            lines.append("- 歧义样本：" + examples + "。这些正反都出现过，必须结合上下文，不要按原文硬判。")
     if hook_positive:
-        lines.append("- 用户常用开头：" + "；".join(hook_positive))
+        lines.append("- 开头参考例：" + "；".join(hook_positive[:2]))
     if hook_negative:
-        lines.append("- 用户不要的开头：" + "；".join(hook_negative))
+        lines.append("- 不要的开头例：" + "；".join(hook_negative[:2]))
     if close_positive:
-        lines.append("- 用户常用结尾：" + "；".join(close_positive))
+        lines.append("- 结尾参考例：" + "；".join(close_positive[:2]))
     if close_negative:
-        lines.append("- 用户不要的结尾：" + "；".join(close_negative))
+        lines.append("- 不要的结尾例：" + "；".join(close_negative[:2]))
     if move_to_front:
-        lines.append("- 用户常拖到前面：" + "；".join(move_to_front))
+        lines.append("- 用户常拖到前面的例子：" + "；".join(move_to_front[:2]))
     if move_to_end:
-        lines.append("- 用户常拖到最后：" + "；".join(move_to_end))
+        lines.append("- 用户常拖到最后的例子：" + "；".join(move_to_end[:2]))
     if kept:
-        lines.append("- 最近保留样本：" + "；".join(kept))
+        lines.append("- 最近保留例：" + "；".join(kept[:3]))
     if rejected:
-        lines.append("- 最近删掉样本：" + "；".join(rejected))
-    lines.append("自动选片时开头优先贴近“常用开头/拖到前面”，结尾优先贴近“常用结尾/拖到最后”；遇到删掉样本、不要的开头/结尾类似的口令、纯过渡、碎句、跑题句，除非承接不可缺少，否则不要选。★")
+        lines.append("- 最近删除例：" + "；".join(rejected[:3]))
+    lines.append("执行方式：同等质量时优先符合“倾向保留”的语义类型；遇到“谨慎避开”的闲聊、环境干扰、库存催促、碎句断句要降权。不要为了迎合偏好牺牲语义完整、主品类一致、目标时长和自然衔接。★")
     return "\n".join(lines)
 
 
@@ -320,14 +479,9 @@ def _filter_preview_feedback_rejected_clips(
     log_fn=None,
     min_keep=4,
     min_duration=None,
-    threshold=0.86,
+    threshold=0.90,
 ):
-    """Read-only user preference scoring.
-
-    This intentionally does not remove clips in the release path. It logs which
-    clips would be favored or risky according to the user's preference library,
-    so we can validate the scoring before letting it control final selection.
-    """
+    """Conservatively remove clips that strongly match user rejected samples."""
     rejected_samples = (
         list((feedback_profile or {}).get("rejected") or [])
         + list((feedback_profile or {}).get("hook_negative") or [])
@@ -376,7 +530,13 @@ def _filter_preview_feedback_rejected_clips(
         keep_score, _keep_sample = _best_score(text, kept_samples)
         if keep_score >= 0.80:
             positive_hits.append((clip, keep_score, _keep_sample))
-        if reject_score < threshold or keep_score >= reject_score:
+        reject_key = _feedback_compact_text(reject_sample)
+        if reject_score < threshold or len(reject_key) < 2:
+            continue
+        if keep_score >= 0.82 and keep_score >= reject_score - 0.04:
+            guarded.append((clip, reject_score, "正负样本接近"))
+            continue
+        if clip not in kept:
             continue
 
         projected = [item for item in kept if item is not clip]
@@ -393,6 +553,7 @@ def _filter_preview_feedback_rejected_clips(
             guarded.append((clip, reject_score, "Close保底"))
             continue
 
+        kept = projected
         removed.append((clip, reject_score, reject_sample))
 
     if positive_hits:
@@ -403,15 +564,15 @@ def _filter_preview_feedback_rejected_clips(
             except Exception:
                 continue
     if removed:
-        _log(f"人工偏好评分: {len(removed)} 个片段接近用户删句/负样本（只读，不改片单）")
+        _log(f"人工偏好兜底: 已剔除 {len(removed)} 个高度接近用户删句/负样本的片段")
         for clip, score, sample in removed[:3]:
             try:
-                _log(f"  偏好扣分: {float(clip[2]):.1f}-{float(clip[3]):.1f}s 相似{score:.0%} | {str(clip[1])[:28]} / 样本:{sample[:18]}")
+                _log(f"  喜好剔除: {float(clip[2]):.1f}-{float(clip[3]):.1f}s 相似{score:.0%} | {str(clip[1])[:28]} / 负样本:{sample[:18]}")
             except Exception:
                 continue
     if guarded:
-        _log(f"人工偏好评分: {len(guarded)} 个疑似删句片段会被结构/时长保底保护（只读）")
-    return clips
+        _log(f"人工偏好兜底: 因结构/时长/喜好冲突保留 {len(guarded)} 个疑似负样本片段")
+    return kept if kept else clips
 
 
 def _recent_filter_floor(target_duration):
@@ -2719,7 +2880,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log(f"人工偏好反馈: 已载入最近{_feedback_scope}人工选择样本")
+        _log(f"人工偏好反馈: 已载入{_feedback_scope}喜好摘要软参考，不做硬过滤")
     _history_min_keep, _history_min_duration = _recent_filter_floor(_AI_TARGET_DURATION)
 
     def _record_history_if_needed(selected_clips):
@@ -4126,7 +4287,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log("多版本人工偏好反馈: 已载入最近人工选择样本")
+        _log("多版本人工偏好反馈: 已载入喜好摘要软参考，不做硬过滤")
 
     # ★构建SRT条目索引★
     _indexed_srt_entries = []
@@ -4391,7 +4552,7 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
     _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log("降级多版本人工偏好反馈: 已载入最近人工选择样本")
+        _log("降级多版本人工偏好反馈: 已载入喜好摘要软参考，不做硬过滤")
     all_angle_hints = [
         ("版型显瘦", "以版型显瘦开场（Hook+前1-2个Product讲显瘦/遮肉/修饰身材/收腰/遮副乳），后续Product必须覆盖颜色/穿搭/品质等其他卖点，同一角度最多2段，面料最多2段"),
         ("颜色氛围", "以颜色氛围开场（Hook+前1-2个Product讲颜色/显白/衬肤色/抬气色/温柔色），后续Product必须覆盖版型/显瘦/穿搭等其他卖点，同一角度最多2段，面料最多2段"),

@@ -1136,6 +1136,9 @@ class SmartCutPayload(BaseModel):
     target_duration: int = Field(default=60, ge=10, le=600)
     versions: int = Field(default=1, ge=1, le=20)
     dedup_preset: str = "medium"
+    video: dict[str, Any] = Field(default_factory=dict)
+    audio: dict[str, Any] = Field(default_factory=dict)
+    transition: dict[str, Any] = Field(default_factory=dict)
     mirror_enabled: bool = True
     subtitle_overlay: bool = True
     smart_crop_enabled: bool = True
@@ -1159,6 +1162,9 @@ class MixPayload(BaseModel):
     focus_hint: str = "自动"
     ai_controls: dict[str, Any] = Field(default_factory=dict)
     dedup_preset: str = "medium"
+    video: dict[str, Any] = Field(default_factory=dict)
+    audio: dict[str, Any] = Field(default_factory=dict)
+    transition: dict[str, Any] = Field(default_factory=dict)
     mirror_enabled: bool = True
     subtitle_overlay: bool = True
     smart_crop_enabled: bool = True
@@ -3298,6 +3304,220 @@ def _preview_feedback_samples(limit_per_role: int = 80) -> list[dict[str, Any]]:
     return result
 
 
+_PREVIEW_FEEDBACK_POSITIVE_ROLES = {"hook_positive", "close_positive", "move_to_front", "move_to_end", "sentence_positive"}
+_PREVIEW_FEEDBACK_NEGATIVE_ROLES = {"hook_negative", "close_negative", "sentence_negative"}
+_PREVIEW_FEEDBACK_STRUCTURAL_AVOID_SIGNALS = {
+    "host_chatter",
+    "environment_noise",
+    "inventory_pressure",
+    "filler_or_fragment",
+}
+
+_PREVIEW_FEEDBACK_SIGNAL_RULES = [
+    {
+        "key": "color_benefit",
+        "label": "颜色/显白卖点",
+        "words": ["显白", "显肤", "肤亮", "颜色", "黑色", "白色", "绿色", "亮色", "米白", "饱和度", "冷白"],
+        "summary": "颜色效果、显白显气色、颜色选择建议",
+    },
+    {
+        "key": "fit_texture",
+        "label": "版型/质感卖点",
+        "words": ["显瘦", "质感", "面料", "版型", "细节", "袖子", "好穿", "舒服", "垂感", "高级"],
+        "summary": "版型、面料、质感、穿着效果等具体产品价值",
+    },
+    {
+        "key": "scene_styling",
+        "label": "场景/搭配表达",
+        "words": ["日常", "生活", "运动", "骑行", "拍照", "场景", "搭配", "出片", "穿搭", "黑白灰"],
+        "summary": "适合什么场景、怎么搭配、为什么值得穿出去",
+    },
+    {
+        "key": "objection_answer",
+        "label": "购买顾虑解释",
+        "words": ["不安心", "从来没有", "不敢", "不知道", "怕", "适合", "稳妥", "尝试", "口味", "惊喜"],
+        "summary": "解释用户担心点，让犹豫用户更容易理解",
+    },
+    {
+        "key": "emotional_hook",
+        "label": "情绪/记忆点",
+        "words": ["相信我", "惊喜", "记忆点", "风格", "气质", "性格", "值得", "好看", "宝宝"],
+        "summary": "有情绪、有画面感、能让人记住的表达",
+    },
+    {
+        "key": "host_chatter",
+        "label": "主播闲聊/自嗨",
+        "words": ["老粉", "拉黑", "划走", "催债", "催交", "不好意思", "听我讲话", "吹牛", "下次"],
+        "summary": "主播个人情绪、闲聊、自嘲或威胁式表达",
+    },
+    {
+        "key": "environment_noise",
+        "label": "环境/直播间干扰",
+        "words": ["直播间", "手机屏幕", "肉眼", "窗户", "光很亮", "帘子", "走远", "颜色比较对"],
+        "summary": "灯光、屏幕、直播环境说明，容易偏离产品价值",
+    },
+    {
+        "key": "inventory_pressure",
+        "label": "库存/预售催促",
+        "words": ["首批", "拼手速", "没了", "预售", "库存", "加完", "备货", "一点都没有"],
+        "summary": "库存、预售、抢购催促类表达",
+    },
+    {
+        "key": "filler_or_fragment",
+        "label": "口头禅/断句",
+        "words": ["来好了", "对然后", "能理解吗", "为什么", "呀对不对", "白开水", "因为我知道", "然后整个", "你看啊"],
+        "summary": "无独立意义、承接不完整或明显断掉的句子",
+    },
+]
+
+
+def _preview_feedback_confidence(count: int) -> str:
+    if count >= 8:
+        return "较强"
+    if count >= 5:
+        return "明显"
+    if count >= 3:
+        return "轻微"
+    if count >= 1:
+        return "观察中"
+    return "无"
+
+
+def _preview_feedback_signal_keys(text: str) -> list[str]:
+    compact = _preview_compact_text(text)
+    keys: list[str] = []
+    for rule in _PREVIEW_FEEDBACK_SIGNAL_RULES:
+        for word in rule["words"]:
+            if word in text or _preview_compact_text(word) in compact:
+                keys.append(str(rule["key"]))
+                break
+    if len(compact) <= 5 and compact in {"对然后", "为什么", "来好了", "白开水", "能理解吗", "呀对不对"}:
+        if "filler_or_fragment" not in keys:
+            keys.append("filler_or_fragment")
+    if re.search(r"(因为|然后|包括|或者|这个|整个|有一点|你看)$", text.strip()):
+        if "filler_or_fragment" not in keys:
+            keys.append("filler_or_fragment")
+    return keys
+
+
+def _preview_feedback_empty_summary() -> dict[str, Any]:
+    return {
+        "read_only": True,
+        "confidence": "无",
+        "positive": [],
+        "negative": [],
+        "conflicts": [],
+        "brief": [],
+        "notes": ["样本还不够，先继续通过 AI 预览人工调整积累数据。"],
+    }
+
+
+def _preview_feedback_preference_summary() -> dict[str, Any]:
+    records = _preview_feedback_load_records()
+    if not records:
+        return _preview_feedback_empty_summary()
+
+    signal_map = {
+        str(rule["key"]): {
+            "key": str(rule["key"]),
+            "label": str(rule["label"]),
+            "summary": str(rule["summary"]),
+            "positive_count": 0,
+            "negative_count": 0,
+            "positive_examples": [],
+            "negative_examples": [],
+        }
+        for rule in _PREVIEW_FEEDBACK_SIGNAL_RULES
+    }
+    text_roles: dict[str, dict[str, Any]] = {}
+    total_samples = 0
+
+    for record in records:
+        for role in _PREVIEW_FEEDBACK_ROLE_LABELS:
+            polarity = "positive" if role in _PREVIEW_FEEDBACK_POSITIVE_ROLES else "negative" if role in _PREVIEW_FEEDBACK_NEGATIVE_ROLES else ""
+            if not polarity:
+                continue
+            for item in _preview_feedback_role_items(record, role):
+                text = _preview_feedback_sample_text(item)
+                if not text:
+                    continue
+                total_samples += 1
+                compact = _preview_compact_text(text)
+                text_entry = text_roles.setdefault(compact, {"text": text, "positive": 0, "negative": 0})
+                text_entry[polarity] += 1
+                for key in _preview_feedback_signal_keys(text):
+                    signal = signal_map.get(key)
+                    if not signal:
+                        continue
+                    count_key = "positive_count" if polarity == "positive" else "negative_count"
+                    example_key = "positive_examples" if polarity == "positive" else "negative_examples"
+                    signal[count_key] = int(signal[count_key]) + 1
+                    examples = signal[example_key]
+                    if isinstance(examples, list) and text not in examples and len(examples) < 3:
+                        examples.append(text)
+
+    positive: list[dict[str, Any]] = []
+    negative: list[dict[str, Any]] = []
+    for signal in signal_map.values():
+        key = str(signal.get("key") or "")
+        pos = int(signal["positive_count"])
+        neg = int(signal["negative_count"])
+        if pos <= 0 and neg <= 0:
+            continue
+        net = pos - neg
+        item = {
+            **signal,
+            "net": net,
+            "confidence": _preview_feedback_confidence(abs(net)),
+        }
+        if key in _PREVIEW_FEEDBACK_STRUCTURAL_AVOID_SIGNALS:
+            if neg > 0:
+                item["net"] = -neg
+                item["confidence"] = _preview_feedback_confidence(neg)
+                negative.append(item)
+            continue
+        if net > 0:
+            positive.append(item)
+        elif net < 0:
+            negative.append(item)
+
+    positive.sort(key=lambda item: (int(item["net"]), int(item["positive_count"])), reverse=True)
+    negative.sort(key=lambda item: (abs(int(item["net"])), int(item["negative_count"])), reverse=True)
+
+    conflicts = []
+    for entry in text_roles.values():
+        if int(entry.get("positive") or 0) > 0 and int(entry.get("negative") or 0) > 0:
+            conflicts.append(entry)
+    conflicts.sort(key=lambda item: int(item.get("positive") or 0) + int(item.get("negative") or 0), reverse=True)
+
+    brief = []
+    if positive:
+        labels = "、".join(item["label"] for item in positive[:4])
+        brief.append(f"优先倾向：{labels}。")
+    if negative:
+        labels = "、".join(item["label"] for item in negative[:4])
+        brief.append(f"谨慎避开：{labels}。")
+    if conflicts:
+        brief.append("存在正反都出现过的句子，不能按原文硬匹配，需要结合上下文。")
+
+    confidence = _preview_feedback_confidence(total_samples)
+    notes = [
+        "这是只读摘要，当前不参与自动成片打分。",
+        "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
+        "断句、闲聊、环境干扰、库存催促属于结构性风险，偶尔被保留也不会直接变成喜欢规则。",
+    ]
+    return {
+        "read_only": True,
+        "confidence": confidence,
+        "sample_count": total_samples,
+        "positive": positive[:6],
+        "negative": negative[:6],
+        "conflicts": conflicts[:8],
+        "brief": brief,
+        "notes": notes,
+    }
+
+
 def _preview_feedback_write_records(records: list[dict[str, Any]]) -> None:
     path = _preview_feedback_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3781,6 +4001,9 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             [str(p) for p in paths],
             output_path=str(output_path),
             dedup_preset=payload.dedup_preset,
+            dedup_video_options=payload.video,
+            dedup_audio_options=payload.audio,
+            transition_options=payload.transition,
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=70),
             cancel_event=_task_cancel_event(task_id),
@@ -5002,6 +5225,9 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 srt_path=payload.srt_path.strip() or None,
                 output_path=out_path,
                 dedup_preset=payload.dedup_preset,
+                dedup_video_options=payload.video,
+                dedup_audio_options=payload.audio,
+                transition_options=payload.transition,
                 subtitle_overlay=payload.subtitle_overlay,
                 log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.78)),
                 cancel_event=_task_cancel_event(task_id),
@@ -5159,6 +5385,9 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 [str(path) for path in existing_sources],
                 output_path=str(output_path),
                 dedup_preset=payload.dedup_preset,
+                dedup_video_options=payload.video,
+                dedup_audio_options=payload.audio,
+                transition_options=payload.transition,
                 subtitle_overlay=payload.subtitle_overlay,
                 log_fn=_task_log_fn(task_id, scope, base=34, span=54),
                 cancel_event=_task_cancel_event(task_id),
@@ -5336,6 +5565,9 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
             mirror_enabled=payload.mirror_enabled,
             kb_intensity=payload.ken_burns_intensity,
             target_duration=payload.target_duration,
+            dedup_video_options=payload.video,
+            dedup_audio_options=payload.audio,
+            transition_options=payload.transition,
         )
         if not result:
             raise RuntimeError("预览成片失败。")
@@ -5600,6 +5832,7 @@ def get_ai_feedback_samples() -> dict[str, Any]:
             for role, label in _PREVIEW_FEEDBACK_ROLE_LABELS.items()
         ],
         "samples": _preview_feedback_samples(),
+        "preference_summary": _preview_feedback_preference_summary(),
     }
 
 

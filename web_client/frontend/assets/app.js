@@ -101,6 +101,22 @@ const featurePreferenceGroups = {
       "sc-duration",
       "sc-versions",
       "sc-dedup",
+      "sc-dedup-crop",
+      "sc-dedup-crop-value",
+      "sc-dedup-speed",
+      "sc-dedup-speed-value",
+      "sc-dedup-frame-structure",
+      "sc-dedup-frame-level",
+      "sc-dedup-blur",
+      "sc-dedup-blur-value",
+      "sc-dedup-sharpen",
+      "sc-dedup-sharpen-value",
+      "sc-dedup-color",
+      "sc-dedup-mask",
+      "sc-dedup-bg-fill",
+      "sc-dedup-audio-pitch",
+      "sc-dedup-audio-reverb",
+      "sc-dedup-noise-fusion",
       "sc-mirror",
       "sc-subtitle",
       "sc-crop",
@@ -130,6 +146,22 @@ const featurePreferenceGroups = {
       "mix-duration",
       "mix-versions",
       "mix-dedup",
+      "mix-dedup-crop",
+      "mix-dedup-crop-value",
+      "mix-dedup-speed",
+      "mix-dedup-speed-value",
+      "mix-dedup-frame-structure",
+      "mix-dedup-frame-level",
+      "mix-dedup-blur",
+      "mix-dedup-blur-value",
+      "mix-dedup-sharpen",
+      "mix-dedup-sharpen-value",
+      "mix-dedup-color",
+      "mix-dedup-mask",
+      "mix-dedup-bg-fill",
+      "mix-dedup-audio-pitch",
+      "mix-dedup-audio-reverb",
+      "mix-dedup-noise-fusion",
       "mix-mirror",
       "mix-subtitle",
       "mix-crop",
@@ -316,6 +348,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAiPresetControls();
   bindPreviewControls();
   bindFeaturePreferenceAutoSave();
+  bindDedupCustomControls();
   setupCollapsiblePanels();
   setupAdvancedParamToggles();
   setupLogProgressBars();
@@ -812,6 +845,7 @@ function applyControlGroup(group, saved) {
 function refreshFeaturePreferenceUi() {
   document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => updatePanelSummary(panel));
   ["sc", "mix", "dedup"].forEach((prefix) => refreshPipPool(prefix));
+  ["sc", "mix"].forEach((prefix) => refreshDedupCustomVisibility(prefix));
 }
 
 async function loadFeaturePreferences() {
@@ -1356,12 +1390,186 @@ function renderAiFeedbackStats(result = {}) {
   if (path) path.textContent = `保存位置：${result.path || "%APPDATA%\\LiveClipper\\ai_feedback"}`;
 }
 
+function renderPreferenceSignalList(items = [], kind = "positive") {
+  if (!items.length) return '<p class="panel-note">暂无稳定方向。</p>';
+  return items.map((item) => {
+    const count = kind === "positive" ? item.positive_count : item.negative_count;
+    const opposite = kind === "positive" ? item.negative_count : item.positive_count;
+    const examples = kind === "positive" ? item.positive_examples : item.negative_examples;
+    const exampleText = Array.isArray(examples) && examples.length
+      ? `<span>${escapeHtml(examples[0])}</span>`
+      : "";
+    return `
+      <div class="preference-signal ${kind}">
+        <strong>${escapeHtml(item.label || "")}</strong>
+        <em>${Number(count || 0)} 次 · ${escapeHtml(item.confidence || "观察中")}${Number(opposite || 0) ? ` · 反向 ${Number(opposite || 0)} 次` : ""}</em>
+        ${exampleText}
+      </div>
+    `;
+  }).join("");
+}
+
+const FEEDBACK_POSITIVE_ROLES = new Set(["hook_positive", "close_positive", "move_to_front", "move_to_end", "sentence_positive"]);
+const FEEDBACK_NEGATIVE_ROLES = new Set(["hook_negative", "close_negative", "sentence_negative"]);
+const FEEDBACK_STRUCTURAL_AVOID = new Set(["host_chatter", "environment_noise", "inventory_pressure", "filler_or_fragment"]);
+const FEEDBACK_SIGNAL_RULES = [
+  { key: "color_benefit", label: "颜色/显白卖点", words: ["显白", "显肤", "肤亮", "颜色", "黑色", "白色", "绿色", "亮色", "米白", "饱和度", "冷白"] },
+  { key: "fit_texture", label: "版型/质感卖点", words: ["显瘦", "质感", "面料", "版型", "细节", "袖子", "好穿", "舒服", "垂感", "高级"] },
+  { key: "scene_styling", label: "场景/搭配表达", words: ["日常", "生活", "运动", "骑行", "拍照", "场景", "搭配", "出片", "穿搭", "黑白灰"] },
+  { key: "objection_answer", label: "购买顾虑解释", words: ["不安心", "从来没有", "不敢", "不知道", "怕", "适合", "稳妥", "尝试", "口味", "惊喜"] },
+  { key: "emotional_hook", label: "情绪/记忆点", words: ["相信我", "惊喜", "记忆点", "风格", "气质", "性格", "值得", "好看", "宝宝"] },
+  { key: "host_chatter", label: "主播闲聊/自嗨", words: ["老粉", "拉黑", "划走", "催债", "催交", "不好意思", "听我讲话", "吹牛", "下次"] },
+  { key: "environment_noise", label: "环境/直播间干扰", words: ["直播间", "手机屏幕", "肉眼", "窗户", "光很亮", "帘子", "走远", "颜色比较对"] },
+  { key: "inventory_pressure", label: "库存/预售催促", words: ["首批", "拼手速", "没了", "预售", "库存", "加完", "备货", "一点都没有"] },
+  { key: "filler_or_fragment", label: "口头禅/断句", words: ["来好了", "对然后", "能理解吗", "为什么", "呀对不对", "白开水", "因为我知道", "然后整个", "你看啊"] },
+];
+
+function compactFeedbackText(text = "") {
+  return String(text || "").replace(/[^\u4e00-\u9fffA-Za-z0-9]+/g, "");
+}
+
+function feedbackConfidence(count = 0) {
+  if (count >= 8) return "较强";
+  if (count >= 5) return "明显";
+  if (count >= 3) return "轻微";
+  if (count >= 1) return "观察中";
+  return "无";
+}
+
+function feedbackSignalKeys(text = "") {
+  const value = String(text || "");
+  const compact = compactFeedbackText(value);
+  const keys = [];
+  FEEDBACK_SIGNAL_RULES.forEach((rule) => {
+    if (rule.words.some((word) => value.includes(word) || compact.includes(compactFeedbackText(word)))) {
+      keys.push(rule.key);
+    }
+  });
+  if (compact.length <= 5 && ["对然后", "为什么", "来好了", "白开水", "能理解吗", "呀对不对"].includes(compact)) {
+    if (!keys.includes("filler_or_fragment")) keys.push("filler_or_fragment");
+  }
+  if (/(因为|然后|包括|或者|这个|整个|有一点|你看)$/.test(value.trim())) {
+    if (!keys.includes("filler_or_fragment")) keys.push("filler_or_fragment");
+  }
+  return keys;
+}
+
+function buildPreferenceSummaryFromSamples(samples = []) {
+  const signalMap = new Map(FEEDBACK_SIGNAL_RULES.map((rule) => [rule.key, {
+    key: rule.key,
+    label: rule.label,
+    positive_count: 0,
+    negative_count: 0,
+    positive_examples: [],
+    negative_examples: [],
+  }]));
+  const textRoles = new Map();
+  let total = 0;
+  samples.forEach((sample) => {
+    const role = sample.role || "";
+    const polarity = FEEDBACK_POSITIVE_ROLES.has(role) ? "positive" : FEEDBACK_NEGATIVE_ROLES.has(role) ? "negative" : "";
+    if (!polarity) return;
+    const text = String(sample.text || "").trim();
+    const count = Math.max(1, Number(sample.count || 1));
+    if (!text) return;
+    total += count;
+    const compact = compactFeedbackText(text);
+    const textEntry = textRoles.get(compact) || { text, positive: 0, negative: 0 };
+    textEntry[polarity] += count;
+    textRoles.set(compact, textEntry);
+    feedbackSignalKeys(text).forEach((key) => {
+      const signal = signalMap.get(key);
+      if (!signal) return;
+      const countKey = polarity === "positive" ? "positive_count" : "negative_count";
+      const exampleKey = polarity === "positive" ? "positive_examples" : "negative_examples";
+      signal[countKey] += count;
+      if (!signal[exampleKey].includes(text) && signal[exampleKey].length < 3) signal[exampleKey].push(text);
+    });
+  });
+  const positive = [];
+  const negative = [];
+  signalMap.forEach((signal) => {
+    const pos = Number(signal.positive_count || 0);
+    const neg = Number(signal.negative_count || 0);
+    if (!pos && !neg) return;
+    const net = pos - neg;
+    const item = { ...signal, net, confidence: feedbackConfidence(Math.abs(net)) };
+    if (FEEDBACK_STRUCTURAL_AVOID.has(signal.key)) {
+      if (neg > 0) negative.push({ ...item, net: -neg, confidence: feedbackConfidence(neg) });
+    } else if (net > 0) {
+      positive.push(item);
+    } else if (net < 0) {
+      negative.push(item);
+    }
+  });
+  positive.sort((a, b) => (b.net - a.net) || (b.positive_count - a.positive_count));
+  negative.sort((a, b) => (Math.abs(b.net) - Math.abs(a.net)) || (b.negative_count - a.negative_count));
+  const conflicts = Array.from(textRoles.values())
+    .filter((item) => item.positive > 0 && item.negative > 0)
+    .sort((a, b) => (b.positive + b.negative) - (a.positive + a.negative))
+    .slice(0, 8);
+  const brief = [];
+  if (positive.length) brief.push(`优先倾向：${positive.slice(0, 4).map((item) => item.label).join("、")}。`);
+  if (negative.length) brief.push(`谨慎避开：${negative.slice(0, 4).map((item) => item.label).join("、")}。`);
+  if (conflicts.length) brief.push("存在正反都出现过的句子，不能按原文硬匹配，需要结合上下文。");
+  return {
+    read_only: true,
+    confidence: feedbackConfidence(total),
+    sample_count: total,
+    positive: positive.slice(0, 6),
+    negative: negative.slice(0, 6),
+    conflicts,
+    brief,
+    notes: [
+      "这是前端只读摘要，当前不参与自动成片打分。",
+      "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
+    ],
+  };
+}
+
+function renderAiFeedbackSummary(summary = {}) {
+  const box = $("ai-feedback-summary");
+  if (!box) return;
+  const positive = Array.isArray(summary.positive) ? summary.positive : [];
+  const negative = Array.isArray(summary.negative) ? summary.negative : [];
+  const conflicts = Array.isArray(summary.conflicts) ? summary.conflicts : [];
+  const brief = Array.isArray(summary.brief) ? summary.brief : [];
+  const notes = Array.isArray(summary.notes) ? summary.notes : [];
+  if (!positive.length && !negative.length && !conflicts.length) {
+    box.innerHTML = '<p class="panel-note">偏好摘要会在积累人工选择后自动生成，当前只读展示，不影响成片。</p>';
+    return;
+  }
+  const conflictRows = conflicts.slice(0, 4).map((item) => `
+    <span title="${escapeHtml(item.text || "")}">${escapeHtml(item.text || "")} · 保留 ${Number(item.positive || 0)} / 删除 ${Number(item.negative || 0)}</span>
+  `).join("");
+  box.innerHTML = `
+    <div class="feedback-summary-head">
+      <strong>AI 学到的取舍方向</strong>
+      <span>只读 · ${escapeHtml(summary.confidence || "观察中")} · ${Number(summary.sample_count || 0)} 条样本</span>
+    </div>
+    ${brief.length ? `<div class="preference-brief">${brief.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
+    <div class="preference-summary-grid">
+      <section>
+        <h3>倾向保留</h3>
+        ${renderPreferenceSignalList(positive, "positive")}
+      </section>
+      <section>
+        <h3>倾向删除</h3>
+        ${renderPreferenceSignalList(negative, "negative")}
+      </section>
+    </div>
+    ${conflictRows ? `<div class="preference-conflicts"><strong>歧义样本</strong>${conflictRows}</div>` : ""}
+    ${notes.length ? `<p class="panel-note">${notes.map(escapeHtml).join(" ")}</p>` : ""}
+  `;
+}
+
 function renderAiFeedbackSamples(result = {}) {
   renderAiFeedbackStats(result);
   const box = $("ai-feedback-samples");
   if (!box) return;
   const samples = Array.isArray(result.samples) ? result.samples : [];
   const roles = Array.isArray(result.roles) ? result.roles : [];
+  renderAiFeedbackSummary(result.preference_summary || buildPreferenceSummaryFromSamples(samples));
   if (!samples.length) {
     box.innerHTML = '<p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>';
     return;
@@ -1376,7 +1584,8 @@ function renderAiFeedbackSamples(result = {}) {
   box.innerHTML = roles
     .filter((role) => byRole.has(role.role))
     .map((role) => {
-      const rows = byRole.get(role.role).map((sample) => `
+      const roleSamples = byRole.get(role.role);
+      const rows = roleSamples.map((sample) => `
         <div class="feedback-sample-row">
           <div class="feedback-sample-main">
             <strong>${escapeHtml(sample.text || "")}</strong>
@@ -1385,11 +1594,18 @@ function renderAiFeedbackSamples(result = {}) {
           <button class="button button-muted button-small" data-action="delete-ai-feedback-sample" data-role="${escapeHtml(sample.role || role.role)}" data-text="${escapeHtml(sample.text || "")}">删除</button>
         </div>
       `).join("");
+      const preview = roleSamples.slice(0, 3).map((sample) => `
+        <span title="${escapeHtml(sample.text || "")}">${escapeHtml(sample.text || "")}</span>
+      `).join("");
       return `
-        <section class="feedback-role-group">
-          <h3>${escapeHtml(roleLabels.get(role.role) || role.label || role.role)}</h3>
-          ${rows}
-        </section>
+        <details class="feedback-role-group">
+          <summary>
+            <span>${escapeHtml(roleLabels.get(role.role) || role.label || role.role)}</span>
+            <strong>${roleSamples.length} 条</strong>
+          </summary>
+          ${preview ? `<div class="feedback-role-preview">${preview}</div>` : ""}
+          <div class="feedback-role-rows">${rows}</div>
+        </details>
       `;
     })
     .join("");
@@ -2367,6 +2583,62 @@ function collectPipPayload(prefix) {
   };
 }
 
+function normalizeDedupPresetValue(value) {
+  const preset = String(value || "medium").trim().toLowerCase();
+  return preset === "off" ? "none" : (preset || "medium");
+}
+
+function collectDedupCustomPayload(prefix) {
+  const checked = (id, fallback = false) => $(id)?.checked ?? fallback;
+  const number = (id, fallback = 0) => Number($(id)?.value || fallback);
+  return {
+    video: {
+      mirror: checked(`${prefix}-mirror`, true),
+      crop: checked(`${prefix}-dedup-crop`, false),
+      crop_value: number(`${prefix}-dedup-crop-value`, 0),
+      speed: checked(`${prefix}-dedup-speed`, false),
+      speed_value: number(`${prefix}-dedup-speed-value`, 100),
+      frame_structure: checked(`${prefix}-dedup-frame-structure`, false),
+      frame_structure_level: $(`${prefix}-dedup-frame-level`)?.value || "medium",
+      blur: checked(`${prefix}-dedup-blur`, false),
+      blur_value: number(`${prefix}-dedup-blur-value`, 0),
+      sharpen: checked(`${prefix}-dedup-sharpen`, false),
+      sharpen_value: number(`${prefix}-dedup-sharpen-value`, 0),
+      gamma_shift: checked(`${prefix}-dedup-color`, false),
+      corner_mask: checked(`${prefix}-dedup-mask`, false),
+      bg_fill: checked(`${prefix}-dedup-bg-fill`, false),
+    },
+    audio: {
+      pitch: checked(`${prefix}-dedup-audio-pitch`, false),
+      reverb: checked(`${prefix}-dedup-audio-reverb`, false),
+      noise_fusion: checked(`${prefix}-dedup-noise-fusion`, false),
+    },
+  };
+}
+
+function collectTransitionPayload(prefix) {
+  const mode = $(`${prefix}-transition`)?.value || "off";
+  return {
+    transition: {
+      mode: mode === "fade" ? "fade" : "off",
+      duration: mode === "fade" ? 0.12 : 0,
+    },
+  };
+}
+
+function refreshDedupCustomVisibility(prefix) {
+  const panel = document.querySelector(`[data-dedup-custom-panel="${prefix}"]`);
+  if (!panel) return;
+  panel.classList.toggle("is-hidden", normalizeDedupPresetValue($(`${prefix}-dedup`)?.value) !== "custom");
+}
+
+function bindDedupCustomControls() {
+  ["sc", "mix"].forEach((prefix) => {
+    $(`${prefix}-dedup`)?.addEventListener("change", () => refreshDedupCustomVisibility(prefix));
+    refreshDedupCustomVisibility(prefix);
+  });
+}
+
 function collectSmartPayload(options = {}) {
   const requireVideos = options.requireVideos !== false;
   const videoPaths = getVideoPaths();
@@ -2382,13 +2654,15 @@ function collectSmartPayload(options = {}) {
     ai_controls: collectAiControls("sc"),
     target_duration: Number($("sc-duration").value || 60),
     versions: Number($("sc-versions").value || 1),
-    dedup_preset: $("sc-dedup").value,
+    dedup_preset: normalizeDedupPresetValue($("sc-dedup").value),
     mirror_enabled: $("sc-mirror").checked,
     subtitle_overlay: $("sc-subtitle").checked,
     smart_crop_enabled: $("sc-crop").checked,
     crop_level: $("sc-crop-level").value,
     ken_burns_enabled: $("sc-kenburns").checked,
     ken_burns_intensity: $("sc-kb-intensity").value,
+    ...collectDedupCustomPayload("sc"),
+    ...collectTransitionPayload("sc"),
     ...collectPipPayload("sc"),
   };
 }
@@ -3677,13 +3951,15 @@ function collectFeaturePayload(feature) {
       duration: Number($("mix-duration").value || 60),
       focus_hint: $("mix-focus").value,
       ai_controls: collectAiControls("mix"),
-      dedup_preset: $("mix-dedup").value,
+      dedup_preset: normalizeDedupPresetValue($("mix-dedup").value),
       mirror_enabled: $("mix-mirror").checked,
       subtitle_overlay: $("mix-subtitle").checked,
       smart_crop_enabled: $("mix-crop").checked,
       crop_level: $("mix-crop-level").value,
       ken_burns_enabled: $("mix-kenburns").checked,
       ken_burns_intensity: $("mix-kb-intensity").value,
+      ...collectDedupCustomPayload("mix"),
+      ...collectTransitionPayload("mix"),
       ...collectPipPayload("mix"),
     };
   }
@@ -3725,7 +4001,7 @@ function collectFeaturePayload(feature) {
       video_path: videoPaths[0] || "",
       video_paths: videoPaths,
       output_dir: $("dedup-output-dir").value.trim(),
-      dedup_preset: $("dedup-preset").value,
+      dedup_preset: normalizeDedupPresetValue($("dedup-preset").value),
       ...collectPipPayload("dedup"),
       video: {
         mirror: $("dedup-mirror").checked,

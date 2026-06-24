@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260622-update-guard">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260625-feedback-collapse">
 </head>
 <body>
   <div class="app-shell">
@@ -132,7 +132,40 @@
                 <option value="light">轻度</option>
                 <option value="medium" selected>中度</option>
                 <option value="heavy">重度</option>
+                <option value="custom">自定义</option>
               </select>
+            </div>
+            <div class="field-row advanced-param">
+              <label for="sc-transition">片段转场</label>
+              <select id="sc-transition">
+                <option value="off" selected>关闭</option>
+                <option value="fade">轻叠化</option>
+              </select>
+            </div>
+            <div class="dedup-custom-panel advanced-param is-hidden" data-dedup-custom-panel="sc">
+              <div class="dedup-grid">
+                <label class="dedup-control"><input id="sc-dedup-crop" type="checkbox" checked> 微裁剪<input id="sc-dedup-crop-value" type="range" min="0" max="20" value="5"></label>
+                <label class="dedup-control"><input id="sc-dedup-speed" type="checkbox" checked> 变速<input id="sc-dedup-speed-value" type="range" min="90" max="130" value="115"></label>
+                <label class="dedup-control"><input id="sc-dedup-frame-structure" type="checkbox" checked> 帧结构扰动</label>
+                <label class="dedup-control"><input id="sc-dedup-blur" type="checkbox"> 模糊<input id="sc-dedup-blur-value" type="range" min="0" max="10" value="2"></label>
+                <label class="dedup-control"><input id="sc-dedup-sharpen" type="checkbox"> 锐化<input id="sc-dedup-sharpen-value" type="range" min="0" max="100" value="30"></label>
+                <label class="dedup-control"><input id="sc-dedup-color" type="checkbox" checked> 伽马微调</label>
+                <label class="dedup-control"><input id="sc-dedup-mask" type="checkbox" checked> 四角微遮罩</label>
+                <label class="dedup-control"><input id="sc-dedup-bg-fill" type="checkbox"> 背景填充</label>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-dedup-frame-level">扰动强度</label>
+                <select id="sc-dedup-frame-level">
+                  <option value="light">轻度</option>
+                  <option value="medium">标准</option>
+                  <option value="heavy" selected>强力</option>
+                </select>
+              </div>
+              <div class="rule-grid dedup-audio-grid">
+                <label class="check-item"><input id="sc-dedup-audio-pitch" type="checkbox" checked> 音高微调</label>
+                <label class="check-item"><input id="sc-dedup-audio-reverb" type="checkbox"> 轻混响</label>
+                <label class="check-item"><input id="sc-dedup-noise-fusion" type="checkbox" checked> 双音轨融合</label>
+              </div>
             </div>
             <div class="check-grid advanced-param">
               <label class="check-item"><input id="sc-mirror" type="checkbox" checked> 镜像翻转</label>
@@ -460,7 +493,40 @@
                 <option value="light">轻度</option>
                 <option value="medium" selected>中度</option>
                 <option value="heavy">重度</option>
+                <option value="custom">自定义</option>
               </select>
+            </div>
+            <div class="field-row advanced-param">
+              <label for="mix-transition">片段转场</label>
+              <select id="mix-transition">
+                <option value="off" selected>关闭</option>
+                <option value="fade">轻叠化</option>
+              </select>
+            </div>
+            <div class="dedup-custom-panel advanced-param is-hidden" data-dedup-custom-panel="mix">
+              <div class="dedup-grid">
+                <label class="dedup-control"><input id="mix-dedup-crop" type="checkbox" checked> 微裁剪<input id="mix-dedup-crop-value" type="range" min="0" max="20" value="5"></label>
+                <label class="dedup-control"><input id="mix-dedup-speed" type="checkbox" checked> 变速<input id="mix-dedup-speed-value" type="range" min="90" max="130" value="115"></label>
+                <label class="dedup-control"><input id="mix-dedup-frame-structure" type="checkbox" checked> 帧结构扰动</label>
+                <label class="dedup-control"><input id="mix-dedup-blur" type="checkbox"> 模糊<input id="mix-dedup-blur-value" type="range" min="0" max="10" value="2"></label>
+                <label class="dedup-control"><input id="mix-dedup-sharpen" type="checkbox"> 锐化<input id="mix-dedup-sharpen-value" type="range" min="0" max="100" value="30"></label>
+                <label class="dedup-control"><input id="mix-dedup-color" type="checkbox" checked> 伽马微调</label>
+                <label class="dedup-control"><input id="mix-dedup-mask" type="checkbox" checked> 四角微遮罩</label>
+                <label class="dedup-control"><input id="mix-dedup-bg-fill" type="checkbox"> 背景填充</label>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-dedup-frame-level">扰动强度</label>
+                <select id="mix-dedup-frame-level">
+                  <option value="light">轻度</option>
+                  <option value="medium">标准</option>
+                  <option value="heavy" selected>强力</option>
+                </select>
+              </div>
+              <div class="rule-grid dedup-audio-grid">
+                <label class="check-item"><input id="mix-dedup-audio-pitch" type="checkbox" checked> 音高微调</label>
+                <label class="check-item"><input id="mix-dedup-audio-reverb" type="checkbox"> 轻混响</label>
+                <label class="check-item"><input id="mix-dedup-noise-fusion" type="checkbox" checked> 双音轨融合</label>
+              </div>
             </div>
             <div class="check-grid advanced-param">
               <label class="check-item"><input id="mix-mirror" type="checkbox" checked> 镜像翻转</label>
@@ -1332,6 +1398,9 @@
                   <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
                   <button class="button button-muted" data-action="clear-ai-feedback">清空喜好库</button>
                 </div>
+                <div class="feedback-summary-box" id="ai-feedback-summary">
+                  <p class="panel-note">偏好摘要会在积累人工选择后自动生成，当前只读展示，不影响成片。</p>
+                </div>
                 <div class="feedback-library-list" id="ai-feedback-samples">
                   <p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>
                 </div>
@@ -1572,6 +1641,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260622-update-guard" defer></script>
+  <script src="/assets/app.js?v=20260625-feedback-collapse" defer></script>
 </body>
 </html>
