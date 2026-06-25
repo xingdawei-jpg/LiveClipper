@@ -2950,6 +2950,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # 从Product中提取Hook（如果AI没选Hook）
         clips = _extract_hook_from_products(clips, cleaned_srt, log_fn, focus_hint=focus_hint, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, log_fn, max_hook_sec=_hook_cap_sec, focus_hint=focus_hint, ai_controls=ai_controls)
+        clips = _refine_hook_by_dynamic_score(clips, cleaned_srt, log_fn, focus_hint=focus_hint, ai_controls=ai_controls)
         clips = _filter_hook_product_repeats(clips, log_fn)
         removed_from_dedup = [c for c in original_clips if c not in clips]
         # [v9.5] 多版本模式：去重后如果片段不足12个，回收被去除的片段
@@ -3295,6 +3296,233 @@ def _hook_matches_preference(text, focus_hint=None, ai_controls=None):
     focus = str(focus_hint or "")
     controls = _normalize_ai_controls(ai_controls)
     return hits >= 1
+
+
+def _parse_srt_entries_for_hook(srt_text):
+    entries = []
+    for block in str(srt_text or "").strip().split(chr(10) + chr(10)):
+        lines = block.strip().split(chr(10))
+        time_line_idx = 0 if len(lines) >= 1 and "-->" in lines[0] else (1 if len(lines) >= 2 and "-->" in lines[1] else -1)
+        if time_line_idx < 0:
+            continue
+        try:
+            parts = lines[time_line_idx].split("-->")
+            h1, m1, s1 = parts[0].strip().replace(",", ".").split(":")
+            h2, m2, s2 = parts[1].strip().replace(",", ".").split(":")
+            start = int(h1) * 3600 + int(m1) * 60 + float(s1)
+            end = int(h2) * 3600 + int(m2) * 60 + float(s2)
+            text = " ".join(lines[time_line_idx + 1:]).strip()
+            if text:
+                entries.append((start, end, text))
+        except Exception:
+            continue
+    return entries
+
+
+def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=None, ai_controls=None, next_clip=None):
+    txt = re.sub(r"\s+", "", str(text or ""))
+    if not txt or _is_bad_hook_candidate_text(txt):
+        return 0.0, []
+    try:
+        dur = float(duration)
+    except Exception:
+        dur = 0.0
+    if dur < 0.8 or dur > 8.5:
+        return 0.0, []
+
+    hard_reject = [
+        "价格", "多少钱", "链接", "小黄车", "购物车", "上车", "下单", "拍下",
+        "领券", "券后", "运费险", "包邮", "正码", "正拍", "卡码", "尺码",
+        "码数", "身高体重", "往大拍", "往小拍",
+    ]
+    if any(w in txt for w in hard_reject):
+        return 0.0, []
+
+    hook_keywords = hook_keywords or []
+    controls = _normalize_ai_controls(ai_controls)
+    hook_style = controls.get("hook_style")
+    crowd_words = ["姐妹", "女生", "女人", "女孩", "妈妈", "宝妈", "微胖", "小个子", "梨形", "苹果型", "胯宽", "腿粗", "大骨架", "肩宽", "腰粗", "肚子", "拜拜肉", "黄皮", "你们"]
+    pain_words = ["胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "壮", "肉", "遮", "藏", "不敢穿", "穿不进去", "卡", "勒", "副乳"]
+    effect_words = ["上身", "效果", "显瘦", "显高", "显白", "显腿长", "比例", "直角肩", "腰线", "拉长", "高级", "气质", "干净", "明亮", "薄", "遮肉", "藏肉"]
+    strong_words = ["绝了", "太漂亮", "不敢信", "天花板", "太惊艳", "太显瘦", "巨好看", "美爆", "封神", "神仙", "救命", "闭眼入", "好牛"]
+    contrast_words = ["不是", "但是", "反而", "一下子", "直接", "居然", "完全", "一点都不", "你看", "看到没有", "有没有发现"]
+    recommend_words = ["推荐", "闭眼入", "盲拍", "必须", "真的", "我跟你讲", "听我的", "放心"]
+
+    weights = {
+        "hook": 4.0, "strong": 5.0, "crowd": 12.0, "pain": 10.0,
+        "effect": 9.0, "contrast": 6.0, "recommend": 5.0,
+    }
+    if hook_style == "痛点开头":
+        weights.update({"crowd": 15.0, "pain": 15.0, "effect": 8.0, "strong": 4.0, "hook": 3.0})
+    elif hook_style == "上身效果开头":
+        weights.update({"effect": 16.0, "crowd": 8.0, "pain": 8.0, "strong": 4.0, "hook": 3.0})
+    elif hook_style == "爆点金句开头":
+        weights.update({"strong": 14.0, "contrast": 8.0, "hook": 8.0, "crowd": 6.0, "pain": 6.0, "effect": 6.0})
+    elif hook_style == "主播强推荐开头":
+        weights.update({"recommend": 14.0, "strong": 8.0, "effect": 6.0, "hook": 6.0, "crowd": 4.0})
+    elif hook_style == "不强制Hook":
+        weights.update({"hook": 2.0, "strong": 3.0, "crowd": 8.0, "pain": 7.0, "effect": 7.0, "recommend": 3.0})
+
+    score = 0.0
+    reasons = []
+
+    def add_if(label, words, weight):
+        nonlocal score
+        if any(w in txt for w in words):
+            score += weight
+            reasons.append(label)
+
+    if any(kw and kw in txt for kw in hook_keywords):
+        score += weights["hook"]
+        reasons.append("爆词")
+    add_if("强情绪", strong_words, weights["strong"])
+    add_if("人群", crowd_words, weights["crowd"])
+    add_if("痛点", pain_words, weights["pain"])
+    add_if("效果", effect_words, weights["effect"])
+    add_if("反差", contrast_words, weights["contrast"])
+    add_if("推荐", recommend_words, weights["recommend"])
+    if any(p in str(text or "") for p in ("?", "？", "吗")):
+        score += 5.0
+        reasons.append("问句")
+
+    pref_hits = _hook_pref_score(txt, focus_hint, ai_controls)
+    if pref_hits:
+        score += 8.0 + pref_hits * 4.0
+        reasons.append("偏好")
+
+    if next_clip:
+        try:
+            next_text = str(next_clip[1] if len(next_clip) > 1 else "")
+            sim = _clip_text_similarity_value(txt, next_text)
+            hook_block = _clip_focus_block(("hook", text, 0, dur, 0, dur, ""))
+            next_block = _clip_focus_block(next_clip)
+            if hook_block != "其他" and hook_block == next_block:
+                score += 8.0
+                reasons.append("衔接")
+            elif sim >= 0.18:
+                score += min(5.0, sim * 8.0)
+                reasons.append("相似")
+        except Exception:
+            pass
+
+    if dur <= 4.0:
+        score += 5.0
+    elif dur <= 6.0:
+        score += 3.0
+    else:
+        score -= 1.0
+
+    if len(txt) < 5:
+        score -= 3.0
+    if not any(r in reasons for r in ("强情绪", "人群", "痛点", "效果", "问句", "推荐", "偏好")):
+        return 0.0, []
+    return max(0.0, score), reasons
+
+
+def _refine_hook_by_dynamic_score(clips, srt_text, log_fn=None, focus_hint=None, ai_controls=None):
+    """Final Hook gate: score candidates against the chosen opening style before structure fixes."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips:
+        return clips
+
+    controls = _normalize_ai_controls(ai_controls)
+    hook_style = controls.get("hook_style")
+    hook_keywords = load_keywords().get("hook_keywords", [])
+    srt_entries = _parse_srt_entries_for_hook(srt_text)
+    product_indices = [i for i, c in enumerate(clips) if not _is_hook_clip(c) and not _is_close_clip(c)]
+    next_clip = clips[product_indices[0]] if product_indices else None
+    current_hook_idx = next((i for i, c in enumerate(clips) if _is_hook_clip(c)), None)
+
+    candidates = []
+    seen = set()
+
+    def add_candidate(start, end, text, kind, source_idx=None):
+        try:
+            start_f = float(start)
+            end_f = float(end)
+        except Exception:
+            return
+        text_s = str(text or "").strip()
+        if not text_s:
+            return
+        dur = max(0.0, end_f - start_f)
+        score, reasons = _final_hook_quality_score(text_s, dur, hook_keywords, focus_hint, ai_controls, next_clip=next_clip)
+        if score <= 0:
+            return
+        key = (re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", text_s), round(start_f, 1), round(end_f, 1))
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append((start_f, end_f, text_s, dur, score, {"kind": kind, "source_idx": source_idx, "reasons": reasons}))
+
+    for i, clip in enumerate(clips):
+        if _is_hook_clip(clip):
+            add_candidate(clip[2], clip[3], clip[1], "current", i)
+
+    selected_ranges = []
+    for i, clip in enumerate(clips):
+        if _is_close_clip(clip):
+            continue
+        try:
+            cs = float(clip[2])
+            ce = float(clip[3])
+        except Exception:
+            continue
+        selected_ranges.append((i, cs, ce))
+        if not _is_hook_clip(clip) and ce > cs:
+            add_candidate(cs, ce, clip[1], "clip", i)
+
+    for i, cs, ce in selected_ranges:
+        for es, ee, txt in srt_entries:
+            if es >= cs - 0.35 and ee <= ce + 0.35:
+                add_candidate(es, ee, txt, "srt", i)
+
+    if not candidates:
+        return clips
+
+    current_score = 0.0
+    current_reasons = []
+    if current_hook_idx is not None:
+        current = clips[current_hook_idx]
+        current_score, current_reasons = _final_hook_quality_score(
+            current[1], _clip_duration_value(current), hook_keywords, focus_hint, ai_controls, next_clip=next_clip
+        )
+
+    picked = _pick_diverse_hook_candidate(candidates, _log)
+    if not picked:
+        return clips
+    best_start, best_end, best_text, best_dur, best_score, meta = picked
+    best_reasons = meta.get("reasons", []) if isinstance(meta, dict) else []
+    min_score = 24.0 if hook_style == "不强制Hook" else 20.0
+    margin = 12.0 if hook_style == "不强制Hook" else 8.0
+    same_current = (
+        current_hook_idx is not None
+        and isinstance(meta, dict)
+        and meta.get("kind") == "current"
+        and meta.get("source_idx") == current_hook_idx
+    )
+
+    if same_current and current_score >= min_score:
+        return clips
+    if current_hook_idx is not None and current_score >= min_score and best_score < current_score + margin:
+        return clips
+    if best_score < min_score:
+        return clips
+
+    rebuilt = []
+    for clip in clips:
+        rebuilt.append(_retag_clip_type(clip, "product") if _is_hook_clip(clip) else clip)
+    new_hook = ("hook", best_text, best_start, best_end, 9.0, best_dur, "Hook评分")
+    rebuilt.insert(0, new_hook)
+    _log(
+        "Hook评分: "
+        f"当前{current_score:.1f}({','.join(current_reasons[:3]) or '无'}) → "
+        f"候选{best_score:.1f}({','.join(best_reasons[:3]) or '无'})，替换为 '{best_text[:22]}'"
+    )
+    return rebuilt
 
 
 def _pick_diverse_hook_candidate(candidates, log_fn=None):
@@ -4464,6 +4692,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         clips = _version_clips
         clips = _extract_hook_from_products(clips, cleaned_srt, _log, focus_hint=_angle, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, _log, max_hook_sec=_hook_cap_sec, focus_hint=_angle, ai_controls=ai_controls)
+        clips = _refine_hook_by_dynamic_score(clips, cleaned_srt, _log, focus_hint=_angle, ai_controls=ai_controls)
         clips = _repair_multi_version_structure(
             clips, _remaining_clips, _reserved_hook, _reserved_close,
             _used_version_clips, target_duration, _log, label=f"版本{vi+1}"
@@ -4627,6 +4856,7 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
         clips = _filter_recent_similar_clips(clips, _used_version_clips, _log, min_keep=4)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log, focus_hint=angle_name, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, _log, max_hook_sec=_hook_cap_sec, focus_hint=angle_name, ai_controls=ai_controls)
+        clips = _refine_hook_by_dynamic_score(clips, cleaned_srt, _log, focus_hint=angle_name, ai_controls=ai_controls)
         if _enforce_category_filter:
             clips = _post_filter_cross_category(clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
         if _enforce_time_coherence:
@@ -5479,6 +5709,81 @@ def _clip_focus_block(clip):
     return "其他"
 
 
+def _repair_hook_followup_coherence(clips, log_fn=None):
+    """Move the best related product clip directly after Hook when needed."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips or len(clips) < 3 or not _is_hook_clip(clips[0]):
+        return clips
+
+    product_indices = [
+        idx for idx, clip in enumerate(clips)
+        if not _is_hook_clip(clip) and not _is_close_clip(clip)
+    ]
+    if len(product_indices) < 2:
+        return clips
+
+    hook = clips[0]
+    first_idx = product_indices[0]
+    first = clips[first_idx]
+    hook_text = str(hook[1] if len(hook) > 1 else "")
+    hook_block = _clip_focus_block(hook)
+
+    def _time_gap_score(clip):
+        try:
+            gap = float(clip[2]) - float(hook[3])
+        except Exception:
+            return 0.0
+        if 0 <= gap <= 45:
+            return 4.0
+        if 45 < gap <= 150:
+            return 2.0
+        if -20 <= gap < 0:
+            return 1.0
+        return 0.0
+
+    def _score(clip):
+        text = str(clip[1] if len(clip) > 1 else "")
+        block = _clip_focus_block(clip)
+        score = _clip_text_similarity_value(hook_text, text) * 5.0
+        score += _time_gap_score(clip)
+        if hook_block != "其他" and block == hook_block:
+            score += 6.0
+        elif hook_block != "其他" and block != "其他":
+            score -= 1.5
+        try:
+            focus = str(clip[6] if len(clip) > 6 else "")
+            hook_focus = str(hook[6] if len(hook) > 6 else "")
+            if focus and hook_focus and (focus in hook_focus or hook_focus in focus):
+                score += 2.0
+        except Exception:
+            pass
+        return score
+
+    current_score = _score(first)
+    candidates = [(idx, _score(clips[idx])) for idx in product_indices]
+    best_idx, best_score = max(candidates, key=lambda item: item[1])
+    if best_idx == first_idx:
+        return clips
+    if current_score >= 6.0:
+        return clips
+    if best_score < 6.0 or best_score < current_score + 3.0:
+        return clips
+
+    reordered = list(clips)
+    chosen = reordered.pop(best_idx)
+    insert_at = 1 if first_idx != 0 else first_idx + 1
+    reordered.insert(insert_at, chosen)
+    _log(
+        "Hook衔接: 调整第二段 "
+        f"{first_idx + 1}→{best_idx + 1}，"
+        f"{_clip_focus_block(first)}({current_score:.1f}) → {_clip_focus_block(chosen)}({best_score:.1f})"
+    )
+    return reordered
+
+
 def _reorder_product_focus_blocks(clips, log_fn=None):
     """Adaptively group product clips by selling-point block.
 
@@ -5512,7 +5817,7 @@ def _reorder_product_focus_blocks(clips, log_fn=None):
             _log(f"卖点段落排序: 保持AI原序，仅修正hook/close位置 ({len(clips)}段)")
         else:
             _log(f"卖点段落排序: 保持AI原序 ({len(clips)}段)")
-        return base_reordered
+        return _repair_hook_followup_coherence(base_reordered, log_fn)
 
     # 检测主品类，使用该品类的卖点排序顺序
     cat_counts = {}
@@ -5559,7 +5864,7 @@ def _reorder_product_focus_blocks(clips, log_fn=None):
             _log(f"卖点段落排序: 保持AI原序，仅修正hook/close位置 ({len(clips)}段)")
         else:
             _log(f"卖点段落排序: 保持AI原序 ({len(clips)}段)")
-        return base_reordered
+        return _repair_hook_followup_coherence(base_reordered, log_fn)
 
     anchor = next((block for block in blocks if block != "其他"), blocks[0] if blocks else None)
     if anchor in block_order:
@@ -5597,7 +5902,7 @@ def _reorder_product_focus_blocks(clips, log_fn=None):
     _log(f"卖点段落排序: 自适应整理({main_cat or '通用'}，锚点={anchor}) {' → '.join(block_summary)}{detail}")
 
     reordered = (hooks[:1] if hooks else []) + ordered_products + closes
-    return reordered
+    return _repair_hook_followup_coherence(reordered, log_fn)
 
 
 # ============================================================
@@ -6231,6 +6536,7 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     others = [c for c in finalized if not _is_hook_clip(c) and not _is_close_clip(c)]
     if hooks or closes:
         finalized = (hooks[:1] if hooks else []) + others + closes
+        finalized = _repair_hook_followup_coherence(finalized, log_fn)
 
     total = sum(_clip_duration_value(c) for c in finalized)
     target_msg = ""
