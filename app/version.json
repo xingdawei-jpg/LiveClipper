@@ -1,8 +1,8 @@
 {
-  "version": "2026.6.25.2",
-  "latest_version": "2026.6.25.2",
+  "version": "2026.6.25.3",
+  "latest_version": "2026.6.25.3",
   "files": {
-    "app/ai_clipper.py": "3d51d33fa1b4a47adfd1f7de44f7f93bee83114affe284f226ae9f78c9ce07af",
+    "app/ai_clipper.py": "21731d9f1045d66d509fb8860d886283da3659d07adf98ac41e8f50e887678c2",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
     "app/aliyun_asr.py": "b64c6acba177e2fe395fd862afd6dfe3960740e16b0692dbb79dc316c8d647fb",
     "app/aliyun_asr_v2.py": "cabd5d62ec2405e6e199499f1c4c510ca9d08eb718ab0650055f59841e0f0bf8",
@@ -44,10 +44,10 @@
     "web_client/frontend/assets/styles.css": "a674a0f9b9ab5b4ddc135a6f295c2a395acdb456769a93d1b5de28926fd396a8",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa"
   },
-  "release_notes": "优化 AI 选片与成片链路：修复 TS 时间轴标准化后的音画同步风险；优化片段去重、目标时长控制、用户规则词库与喜好反馈；新增轻叠化转场与分阶段耗时日志；用户喜好库列表支持折叠，并新增高置信负样本兜底剔除，保留 Hook、Close、时长和片段数保护。",
+  "release_notes": "优化 AI 选片 Hook 质量：新增按开头方式动态评分的后处理闸门，让痛点开头、上身效果、爆点金句、主播强推荐和不强制 Hook 真正影响最终开场；减少通用爆词开头、Hook 与卖点重复、首句和第二句突兀的问题。",
   "update_url": "",
-  "update_message": "优化 AI 选片与成片链路：修复 TS 时间轴标准化后的音画同步风险；优化片段去重、目标时长控制、用户规则词库与喜好反馈；新增轻叠化转场与分阶段耗时日志；用户喜好库列表支持折叠，并新增高置信负样本兜底剔除，保留 Hook、Close、时长和片段数保护。",
+  "update_message": "优化 AI 选片 Hook 质量：新增按开头方式动态评分的后处理闸门，让痛点开头、上身效果、爆点金句、主播强推荐和不强制 Hook 真正影响最终开场；减少通用爆词开头、Hook 与卖点重复、首句和第二句突兀的问题。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-06-25 00:53:11"
+  "updated_at": "2026-06-25 11:09:06"
 }
