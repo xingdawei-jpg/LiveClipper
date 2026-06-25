@@ -2692,7 +2692,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     # 同段同时出现主品类和其他品类时可作为搭配说明保留；
     # 纯讲主品类以外的内容不能因为“套装/搭配场景”被整段放行。
     protected_cats = {main_cat}
-    _log(f"  主推严格过滤: 仅保护主品类 {main_cat}，跨品类搭配需同段出现主品类词")
+    _log(f"  主推严格过滤: 仅保护主品类 {main_cat}，跨品类搭配需主品类更强")
 
     # ============================================================
     # 5. SRT 过滤
@@ -2711,19 +2711,31 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
             should_remove = True
             preview_removed += 1
 
-        # 规则2:仅搭配提及的跨品类片段 → 删除
+        # 规则2:跨品类搭配说明必须明显以主品类为核心。
+        # 只要次品类权重不低于主品类，就按跨品类污染处理，避免“选上衣但讲裤子”。
         elif not should_remove and info["has_match"]:
             has_main = any(c in protected_cats for c in info["cats_found"])
             has_other = any(c not in protected_cats for c in info["cats_found"])
             if has_other and not has_main:
                 should_remove = True
                 match_removed += 1
+            elif has_other and has_main and main_cat != "套装":
+                main_weight = float(info.get("cat_weights", {}).get(main_cat, 0.0))
+                other_weight = max(
+                    [float(info.get("cat_weights", {}).get(c, 0.0)) for c in info["cats_found"] if c not in protected_cats] or [0.0]
+                )
+                if main_weight <= other_weight:
+                    should_remove = True
+                    match_removed += 1
 
         # 规则3:纯次品类片段(无主品类,无搭配,无预告)→ 也删除
         elif not should_remove:
             has_main = any(c in protected_cats for c in info["cats_found"])
             has_other = any(c not in protected_cats for c in info["cats_found"])
             if has_other and not has_main:
+                should_remove = True
+                match_removed += 1
+            elif has_other and has_main and main_cat != "套装":
                 should_remove = True
                 match_removed += 1
 
@@ -2757,8 +2769,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     for cat in protected_cats:
         for kw in PRODUCT_CATEGORIES.get(cat, []):
             main_keywords.add(kw)
-    # 扩展主品类词:包含"这件","这款","这个"等指代词(如果后面紧跟主品类相关描述)
-    main_keywords.update(["这件", "这款", "这个", "这条", "那个", "那种"])
+    # 不把“这件/这条/这款”等指代词当作主品类词，避免“这条裤子”被误判成上衣片段。
 
     match_trigger = {"搭", "配", "搭配", "配着穿", "搭什么", "配什么", "同款", "一套", "两件套"}
 
@@ -2786,17 +2797,10 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
             has_other = any(kw in text for kw in other_keywords)
 
             if has_other and not has_match:
-                # 有次品类但无搭配词 → 检查是否有主品类
-                if has_main:
-                    # 有主品类 + 次品类但无搭配 → 合法(主品类讲解中顺便提了下其他品)
-                    legal_lines.append(line)
-                    legal_lines.append(text)
-                    legal_lines.append("")
-                else:
-                    # 孤立次品类 → 强制删除
-                    orphan_removed += 1
-                    oi += 3
-                    continue
+                # 有次品类但无明确搭配词 → 强制删除，即使同句也提到主品类。
+                orphan_removed += 1
+                oi += 3
+                continue
             elif has_other and has_match and not has_main:
                 # 次品类+搭配 但无主品类 → 删除
                 orphan_removed += 1
@@ -2926,7 +2930,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         if attempt == 0:
             log_fn(f"AI: 构建SRT条目索引 {len(_indexed_srt_entries)} 条")
         
-        clips = _call_ai(api_key, base_url, model, cleaned_srt, log_fn, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint)
+        clips = _call_ai(api_key, base_url, model, cleaned_srt, log_fn, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint, main_category=_cross_cat_preferred)
         if not clips:
             continue
         # 检查AI选的片段数是否达标；若总时长已经接近目标，不再为了凑段数二次补选。
@@ -2938,7 +2942,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _supplement_limit = min(_supplement_cap, _need_supplement)
             log_fn(f"AI: 当前{len(clips)}段/{_current_ai_dur:.1f}s < 目标{_target_min_clips}段/{_target_floor_for_supplement}s，最多补选{_supplement_limit}段...")
             _extra_hint = f"【注意：刚才你只选了{len(clips)}段，总时长约{_current_ai_dur:.1f}秒，低于目标下限。请再额外选{_supplement_limit}个以内高质量短片段，优先补足不同卖点，把总时长补到{_AI_TARGET_DURATION}秒左右；不要重复你刚选的。仅输出新增片段的JSON数组，不要包含任何推理过程。】"
-            _supplement = _call_ai(api_key, base_url, model, cleaned_srt, _log, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint, extra_instruction=_extra_hint)
+            _supplement = _call_ai(api_key, base_url, model, cleaned_srt, _log, focus_hint=focus_hint, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint, extra_instruction=_extra_hint, main_category=_cross_cat_preferred)
             if _supplement:
                 _added_supplement = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _supplement_limit)
                 _log(f"AI: 补选{_added_supplement}段，补选后共{len(clips)}段")
@@ -3060,6 +3064,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     ai_controls=ai_controls,
                     recent_history_hint=_recent_history_hint,
                     extra_instruction=_extra_hint,
+                    main_category=_cross_cat_preferred,
                 )
                 _added_final = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _need_count)
                 if _added_final:
@@ -3710,7 +3715,7 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=None, focus_hin
     return clips
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None):
     def _log(msg):
         if log_fn: log_fn(msg)
     focus_hint = _normalize_focus_label(focus_hint)
@@ -3966,7 +3971,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
     ]
     _diff_vibe = random.choice(_diff_vibes)
-    _ai_rules_prompt = _build_ai_rules_prompt(ai_controls=ai_controls)
+    _ai_rules_prompt = _build_ai_rules_prompt(ai_controls=ai_controls, main_category=main_category)
 
     # 偏好权重直接进 prompt
     _pref_weights = {}
@@ -4565,7 +4570,8 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
                             return_raw=True,
                             num_versions=num_versions,
                             ai_controls=ai_controls,
-                            recent_history_hint=_recent_history_hint)
+                            recent_history_hint=_recent_history_hint,
+                            main_category=_detected_main_cat)
         if raw_clips and len(raw_clips) >= 10:
             break
         import time as _sleepmod
@@ -4576,10 +4582,10 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         # 降级策略：改走各自独立的单版本调用（带版本间去重）
         return _multi_version_fallback(srt_text, _log, force_category, focus_hint, num_versions,
                                        api_key, base_url, model, cleaned_srt, _indexed_srt_entries,
-                                       _hook_hint, ai_controls=ai_controls)
+                                       _hook_hint, ai_controls=ai_controls, main_category=_detected_main_cat)
         return _multi_version_fallback(srt_text, _log, force_category, focus_hint, num_versions,
                                        api_key, base_url, model, cleaned_srt, _indexed_srt_entries,
-                                       _hook_hint, ai_controls=ai_controls)
+                                       _hook_hint, ai_controls=ai_controls, main_category=_detected_main_cat)
 
     _log(f"AI: 素材选取成功，共{len(raw_clips)}个片段")
 
@@ -4603,7 +4609,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         _log(f"AI: 素材后处理不足(仅{len(raw_clips)}个)，降级到3次单版本调用...")
         return _multi_version_fallback(srt_text, _log, force_category, focus_hint, num_versions,
                                        api_key, base_url, model, cleaned_srt, _indexed_srt_entries,
-                                       _hook_hint, ai_controls=ai_controls)
+                                       _hook_hint, ai_controls=ai_controls, main_category=_detected_main_cat)
 
     # ★第二步：按类型分组，为编排做准备★
     hooks_pool = [c for c in raw_clips if _is_hook_clip(c)]
@@ -4727,7 +4733,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
         _log("所有版本编排失败，降级到3次单版本调用...")
         return _multi_version_fallback(srt_text, _log, force_category, focus_hint, num_versions,
                                        api_key, base_url, model, cleaned_srt, _indexed_srt_entries,
-                                       _hook_hint, ai_controls=ai_controls)
+                                       _hook_hint, ai_controls=ai_controls, main_category=_detected_main_cat)
 
     # ★版本级别软裁★
     _version_max = 150
@@ -4759,7 +4765,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
 
 def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_versions,
                             api_key, base_url, model, cleaned_srt, srt_entries, hook_hint,
-                            ai_controls=None):
+                            ai_controls=None, main_category=None):
     """降级方案：多版本1次调用失败时，回退到3次单版本调用
     带版本间去重：确保不同版本使用的Hook/Product/Close不重复
     """
@@ -4822,7 +4828,8 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
                          hook_candidates_hint=hook_hint if hook_hint else None,
                          multi_version=False,
                          ai_controls=ai_controls,
-                         recent_history_hint=_recent_history_hint)
+                         recent_history_hint=_recent_history_hint,
+                         main_category=main_category or _detected_main_cat)
         if not clips or len(clips) < 3:
             continue
 
@@ -7587,9 +7594,6 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
     def _log(msg):
         if log_fn: log_fn(msg)
 
-    if len(clips) < 3:
-        return clips
-
     # 构建品类词库
     ALL_CATEGORIES = {
         "上衣": ["上衣","T恤","衬衫","针织衫","卫衣","打底衫","小衫","衬衣","网纱罩衫","罩衫",
@@ -7617,9 +7621,15 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
     else:
         main_cat = max(cat_counts, key=cat_counts.get)
     main_kws = set(ALL_CATEGORIES.get(main_cat, []))
+    match_trigger = {"搭", "配", "搭配", "配着穿", "搭什么", "配什么"}
 
-    protected_cats = {main_cat}
-    _log(f"跨品类扫描: 主推严格模式，仅保留{main_cat}或同段包含{main_cat}的搭配说明")
+    def _hit_words(text_value, words):
+        return [kw for kw in words if kw and kw in text_value]
+
+    def _hit_strength(words):
+        return sum(max(1, len(str(kw))) for kw in words)
+
+    _log(f"跨品类扫描: 主推严格模式，仅保留{main_cat}，跨品类搭配需主品类更强")
 
     # 扫描每个片段
     kept = []
@@ -7642,15 +7652,23 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
                 break
         # 同时检查是否有主品类关键词(双重确认)
         if has_other:
-            has_main = any(kw in text for kw in main_kws)
-            if has_main:
-                # 同时有主品类和次品类 → 搭配说明，保留
+            main_hits = _hit_words(text, main_kws)
+            has_main = bool(main_hits)
+            has_match = any(kw in text for kw in match_trigger)
+            other_hits = []
+            if other_cat:
+                other_hits = _hit_words(text, ALL_CATEGORIES.get(other_cat, []))
+            main_strength = _hit_strength(main_hits)
+            other_strength = _hit_strength(other_hits)
+            if main_cat == "套装" and has_main:
+                kept.append((ct, text, s, e, sc, d, *_))
+            elif has_main and has_match and main_strength > other_strength:
+                # 明确搭配，且主品类表达强于次品类，才允许保留。
                 kept.append((ct, text, s, e, sc, d, *_))
             else:
-                # 只有次品类没有主品类 → 即使是关联品类也踢出
-                if other_cat in protected_cats:
-                    _log(f"跨品类踢出 [{ct}] {text[:30]}...(只含{other_cat}不含{main_cat})")
                 removed += 1
+                reason = "缺主品类" if not has_main else "主品类不占优" if has_match else "非搭配混品类"
+                _log(f"跨品类踢出 [{ct}] {text[:30]}...({reason}，含{other_cat})")
         else:
             kept.append((ct, text, s, e, sc, d, *_))
 

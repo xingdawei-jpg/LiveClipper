@@ -2326,6 +2326,7 @@ def _normalize_preview_final_clips(
     *,
     merge_mode: bool = False,
     default_source: str = "",
+    preferred_category: str = "",
 ) -> tuple[list[Any], dict[str, Any]]:
     """Apply the same final-retention cleanup before showing preview rows."""
     original_count = len(clips or [])
@@ -2388,6 +2389,10 @@ def _normalize_preview_final_clips(
                 normalized = refreshed
             except Exception as exc:
                 emit_log("warning", f"preview srt text refresh skipped: {exc}", "system")
+        if srt_text and hasattr(ai_mod, "_post_filter_cross_category"):
+            category = str(preferred_category or "").strip()
+            if category and category not in ("自动", "自动检测", "auto"):
+                _step("category_filter", lambda items: ai_mod._post_filter_cross_category(items, srt_text, None, preferred_cat=category))
     except Exception as exc:
         emit_log("warning", f"preview cleanup failed: {exc}", "system")
 
@@ -4091,8 +4096,14 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         raw_clips = list(cutter_mod._multi_result_cache.get("clips") or [])
         if not raw_clips:
             raise RuntimeError("AI 没有选到可预览片段。")
-        raw_clips, dedup_summary = _normalize_preview_final_clips(raw_clips, merge_mode=True)
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
+        preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
+        raw_clips, dedup_summary = _normalize_preview_final_clips(
+            raw_clips,
+            str(cutter_mod._multi_result_cache.get("srt_text") or ""),
+            merge_mode=True,
+            preferred_category=preferred_category,
+        )
         if category_summary:
             dedup_summary["category_summary"] = category_summary
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
@@ -5483,8 +5494,14 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             raise RuntimeError("AI 没有选到可预览片段。")
         resolved_srt = str(cutter_mod._multi_result_cache.get("srt_path") or srt_path or video.with_suffix(".srt"))
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
-        raw_clips, dedup_summary = _normalize_preview_final_clips(raw_clips, srt_text, default_source=str(video))
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
+        preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
+        raw_clips, dedup_summary = _normalize_preview_final_clips(
+            raw_clips,
+            srt_text,
+            default_source=str(video),
+            preferred_category=preferred_category,
+        )
         if category_summary:
             dedup_summary["category_summary"] = category_summary
         _set_task_progress(task_id, 94, "生成预览列表")
