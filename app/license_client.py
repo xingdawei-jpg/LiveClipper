@@ -197,7 +197,7 @@ def _token_activation_result(cache=None):
     try:
         from license_token import verify_license_token
 
-        verified = verify_license_token(token, machine_id=_get_machine_id())
+        verified = verify_license_token(token, machine_id=_license_machine_id(cache))
         if not verified.get("ok"):
             return None
         payload = verified.get("payload") or {}
@@ -231,7 +231,7 @@ def _store_license_token_from_response(result):
         from license_token import decode_license_token, verify_license_token
 
         decoded = decode_license_token(token).get("payload") or {}
-        verified = verify_license_token(token, machine_id=_get_machine_id())
+        verified = verify_license_token(token, machine_id=_license_machine_id(cache))
         if verified.get("ok"):
             decoded = verified.get("payload") or decoded
             cache["license_token_verified_at"] = int(time.time())
@@ -257,7 +257,7 @@ def _refresh_token_from_saved_code(cache=None):
         code = str(cache.get("code") or _load_license_code() or "").strip()
         if not code:
             return None
-        result = _verify_online(code, _get_machine_id())
+        result = _verify_online(code, _license_machine_id(cache))
         if result is None:
             return None
         if result.get("revoked"):
@@ -596,6 +596,22 @@ def _get_machine_id():
     
     raw = "|".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _license_machine_id(cache=None):
+    """Use the saved activation machine id as the stable license identity."""
+    try:
+        cache = cache or _load_cache() or {}
+        cached_mid = str(cache.get("machine_id") or "").strip()
+        if cached_mid:
+            return cached_mid
+    except Exception:
+        pass
+    return _get_machine_id()
+
+
+def _same_license_code(left, right):
+    return str(left or "").replace("-", "").strip().lower() == str(right or "").replace("-", "").strip().lower()
 
 
 def _get_device_info():
@@ -1235,16 +1251,23 @@ def activate_with_code(code):
         result = public_info
 
     current_mid = _get_machine_id()
+    cache_before_activate = _load_cache() or {}
+    cached_mid_for_code = ""
+    if _same_license_code(cache_before_activate.get("code") or _load_license_code(), code):
+        cached_mid_for_code = str(cache_before_activate.get("machine_id") or "").strip()
 
     # Step 2: 服务端设备绑定校验
     binding = _query_device_binding(code)
     if binding and binding.get("machine_id"):
         bound_mid = binding["machine_id"]
         if bound_mid and bound_mid != current_mid:
-            return {
-                "ok": False,
-                "msg": "该激活码已绑定其他设备，请先在原设备解绑，或联系管理员",
-            }
+            if cached_mid_for_code and bound_mid == cached_mid_for_code:
+                current_mid = cached_mid_for_code
+            else:
+                return {
+                    "ok": False,
+                    "msg": "该激活码已绑定其他设备，请先在原设备解绑，或联系管理员",
+                }
 
     # Step 3: 清除旧熔断标记
     _clear_revoked_marker()
