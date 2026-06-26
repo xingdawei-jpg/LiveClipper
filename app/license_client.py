@@ -250,6 +250,30 @@ def _store_license_token_from_response(result):
     return True
 
 
+def _refresh_token_from_saved_code(cache=None):
+    """Refresh a signed license token with the saved code before blocking access."""
+    try:
+        cache = cache or _load_cache() or {}
+        code = str(cache.get("code") or _load_license_code() or "").strip()
+        if not code:
+            return None
+        result = _verify_online(code, _get_machine_id())
+        if result is None:
+            return None
+        if result.get("revoked"):
+            return {"need_activate": True, "reason": result.get("msg") or "授权已被吊销，请联系管理员"}
+        if result.get("valid") is False or result.get("ok") is False:
+            return {"need_activate": True, "reason": result.get("msg") or "激活码在线验证失败"}
+        _update_online_verify_time()
+        if _store_license_token_from_response(result):
+            refreshed = _token_activation_result(_load_cache())
+            if refreshed:
+                return refreshed
+        return None
+    except Exception:
+        return None
+
+
 # ============================================================
 # 飞书 API 调用
 # ============================================================
@@ -721,6 +745,9 @@ def _check_activation_local_fast():
         if token_result:
             return token_result
         if _TOKEN_REQUIRED:
+            refreshed = _refresh_token_from_saved_code(cache)
+            if refreshed:
+                return refreshed
             return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
 
         code = cache.get("code") or _load_license_code()
@@ -1386,6 +1413,9 @@ def check_activation():
     if token_result:
         return token_result
     if _TOKEN_REQUIRED:
+        refreshed = _refresh_token_from_saved_code(cache)
+        if refreshed:
+            return refreshed
         return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
 
     if cache and cache.get("code"):

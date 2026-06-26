@@ -48,6 +48,8 @@ def get_feature_access(refresh=False):
         import license_client as lc
 
         status = lc.check_activation() if refresh else lc.check_activation_cached()
+        if status.get("need_activate") and "token" in str(status.get("reason") or "").lower():
+            status = lc.check_activation()
         try:
             lc._set_activation_cache(status)
         except Exception:
