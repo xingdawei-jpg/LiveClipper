@@ -14,6 +14,8 @@ block_cipher = None
 WEB_DIR = SPECPATH
 ROOT_DIR = os.path.dirname(WEB_DIR)
 APP_DIR = os.path.join(ROOT_DIR, "app")
+TOOLS_DIR = os.path.join(ROOT_DIR, "tools")
+WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
 FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
 ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
@@ -74,6 +76,21 @@ def _app_datas():
     return datas
 
 
+def _tool_datas():
+    names = [
+        "douyin_active_product_probe_poc.py",
+        "douyin_chrome_live_poc.py",
+    ]
+    datas = []
+    for name in names:
+        for base_dir in (WEB_TOOLS_DIR, TOOLS_DIR):
+            src = os.path.join(base_dir, name)
+            if os.path.exists(src):
+                datas.append((src, "tools"))
+                break
+    return datas
+
+
 cv2_data_dir = _module_file("cv2", "data")
 fw_assets_dir = _module_file("faster_whisper", "assets")
 certifi_pem = _module_file("certifi", "cacert.pem")
@@ -82,6 +99,7 @@ datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
 datas += _existing([(ICON_FILE, "assets")])
 datas += _app_datas()
+datas += _tool_datas()
 datas += _existing([
     (r"C:\Windows\Fonts\msyhbd.ttc", "fonts"),
     (r"C:\Windows\Fonts\msyh.ttc", "fonts"),

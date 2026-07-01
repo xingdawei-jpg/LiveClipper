@@ -6,6 +6,10 @@ import re
 import json
 import subprocess
 import os
+import shutil
+import sys
+import urllib.parse
+from pathlib import Path
 
 
 def extract_live_url(douyin_url, log_fn=None):
@@ -34,47 +38,151 @@ def _try_ytdlp(douyin_url, _log):
         _log("未找到 yt-dlp，跳过")
         return None
 
-    # 截断URL query参数并替换域名（yt-dlp不支持live.douyin.com）
-    clean_url = douyin_url.split('?')[0].replace('live.douyin.com', 'www.douyin.com')
+    version = _yt_dlp_version(yt_dlp)
+    _log(f"已找到 yt-dlp{(' ' + version) if version else ''}")
 
-    try:
-        _log("正在使用 yt-dlp 获取直播流...")
-        result = subprocess.run(
-            [yt_dlp, '-g', '--no-warnings', '--extractor-args', 'douyin:web_fmt=0', clean_url],
-            capture_output=True, timeout=30
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode('utf-8', errors='ignore')[:200]
-            _log(f"yt-dlp 失败: {stderr}")
-            return None
+    clean_url = douyin_url.split('?')[0]
+    candidates = []
+    for item in (clean_url, clean_url.replace('live.douyin.com', 'www.douyin.com')):
+        if item and item not in candidates:
+            candidates.append(item)
 
-        url = result.stdout.decode('utf-8', errors='ignore').strip().split('\n')[0]
-        if url and (url.startswith('http://') or url.startswith('https://')):
-            _log("解析成功 (yt-dlp)")
-            return url
-        return None
-    except subprocess.TimeoutExpired:
-        _log("yt-dlp 超时(30s)")
-        return None
-    except Exception as e:
-        _log(f"yt-dlp 异常: {e}")
-        return None
+    for index, candidate in enumerate(candidates, start=1):
+        try:
+            _log(f"正在使用 yt-dlp 获取直播流({index}/{len(candidates)})...")
+            result = subprocess.run(
+                [yt_dlp, '-g', '--no-warnings', '--extractor-args', 'douyin:web_fmt=0', candidate],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=45,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or b"").decode('utf-8', errors='ignore')[:300]
+                _log(f"yt-dlp 失败: {stderr}")
+                continue
+
+            urls = [
+                line.strip()
+                for line in (result.stdout or b"").decode('utf-8', errors='ignore').splitlines()
+                if line.strip().startswith(('http://', 'https://'))
+            ]
+            if urls:
+                _log("解析成功 (yt-dlp)")
+                return _pick_best_stream_url(urls)
+        except subprocess.TimeoutExpired:
+            _log("yt-dlp 超时(45s)")
+        except Exception as e:
+            _log(f"yt-dlp 异常: {e}")
+    return None
 
 
 def _find_ytdlp():
     """查找 yt-dlp 可执行文件"""
-    candidates = ['yt-dlp', 'yt-dlp.exe']
-    # PATH 中查找
+    candidates = []
+
+    env_path = os.environ.get("YT_DLP_PATH", "")
+    if env_path:
+        candidates.append(env_path)
+
+    for name in ("yt-dlp", "yt-dlp.exe"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+
+    try:
+        exe = Path(sys.executable)
+        candidates.append(str(exe.parent / "Scripts" / "yt-dlp.exe"))
+        candidates.append(str(exe.parent / "Scripts" / "yt-dlp"))
+    except Exception:
+        pass
+
+    local_programs = Path.home() / "AppData" / "Local" / "Programs" / "Python"
+    try:
+        for path in local_programs.glob("Python*/Scripts/yt-dlp.exe"):
+            candidates.append(str(path))
+    except Exception:
+        pass
+
     for cmd in ['where', 'where.exe']:
         try:
-            r = subprocess.run([cmd, 'yt-dlp'], capture_output=True, timeout=5)
+            r = subprocess.run([cmd, 'yt-dlp'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
             if r.returncode == 0:
-                path = r.stdout.decode('utf-8', errors='ignore').strip().split('\n')[0]
-                if path and os.path.exists(path):
-                    return path
+                for line in (r.stdout or b"").decode('utf-8', errors='ignore').splitlines():
+                    if line.strip():
+                        candidates.append(line.strip())
         except Exception:
             pass
+
+    seen = set()
+    for raw in candidates:
+        path = str(raw or "").strip().strip('"')
+        key = path.lower()
+        if not path or key in seen:
+            continue
+        seen.add(key)
+        if os.path.exists(path):
+            return path
     return None
+
+
+def _yt_dlp_version(path):
+    try:
+        result = subprocess.run(
+            [path, '--version'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        lines = (result.stdout or b"").decode("utf-8", errors="ignore").strip().splitlines()
+        return lines[0] if lines else ""
+    except Exception:
+        return ""
+
+
+def _pick_best_stream_url(urls):
+    quality_score = {
+        "origin": 0,
+        "source": 0,
+        "uhd": 5,
+        "4k": 5,
+        "full_hd1": 10,
+        "full_hd": 10,
+        "1080p": 10,
+        "1080": 10,
+        "hd1": 30,
+        "hd": 30,
+        "720p": 30,
+        "720": 30,
+        "sd1": 55,
+        "sd": 55,
+        "480p": 55,
+        "480": 55,
+        "ld": 80,
+        "360p": 80,
+        "360": 80,
+    }
+
+    def _quality(url):
+        lower = urllib.parse.unquote(str(url or "")).lower()
+        parsed = urllib.parse.urlparse(lower)
+        query = urllib.parse.parse_qs(parsed.query)
+        values = [parsed.path]
+        for key in ("biz_quality", "quality", "definition", "ratio", "unique_id"):
+            values.extend(query.get(key, []))
+        text = " ".join(str(value) for value in values)
+        for marker, score in quality_score.items():
+            if re.search(rf"(^|[^a-z0-9]){re.escape(marker)}([^a-z0-9]|$)", text):
+                return score
+        return 70
+
+    def _score_url(url):
+        lower = url.lower()
+        format_score = 0 if ".flv" in lower else 1 if ".m3u8" in lower else 2
+        return (_quality(url), format_score, len(url))
+
+    return sorted(urls, key=_score_url)[0]
 
 
 def _try_chrome(douyin_url, _log):
@@ -122,20 +230,10 @@ def _try_chrome(douyin_url, _log):
     m3u8_urls = re.findall(r'(https?://[^\s"\'<>]+?\.m3u8[^\s"\'<>]*)', html)
     flv_urls = re.findall(r'(https?://[^\s"\'<>]+?\.flv[^\s"\'<>]*)', html)
 
-    quality_order = {"uhd": 0, "origin": 1, "full_hd1": 2, "hd1": 3, "sd1": 4, "sd": 5}
-    def _score_url(url):
-        for qname, score in quality_order.items():
-            if qname in url.lower():
-                return score
-        return 99
-
-    if flv_urls:
-        best = sorted(flv_urls, key=_score_url)[0].replace("\\u0026", "&")
-        _log("解析成功 (Chrome flv)")
-        return best
-    if m3u8_urls:
-        best = sorted(m3u8_urls, key=_score_url)[0].replace("\\u0026", "&")
-        _log("解析成功 (Chrome m3u8)")
+    stream_urls = flv_urls + m3u8_urls
+    if stream_urls:
+        best = _pick_best_stream_url(stream_urls).replace("\\u0026", "&")
+        _log("解析成功 (Chrome best quality)")
         return best
 
     if "直播已结束" in html or "直播已经结束" in html or "暂无直播" in html:

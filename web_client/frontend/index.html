@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260625-feedback-collapse">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260628-live-min-quality">
 </head>
 <body>
   <div class="app-shell">
@@ -1187,84 +1187,176 @@
           </div>
         </header>
 
-        <div class="content-grid two-column-grid">
-          <section class="panel">
-            <div class="panel-header">
-              <h2>录制设置</h2>
-            </div>
-            <div class="field-row">
-              <label for="live-save-dir">保存目录</label>
-              <div class="input-with-button">
-                <input id="live-save-dir" type="text" placeholder="录制视频保存目录">
-                <button class="button button-secondary" data-action="pick-directory" data-target="live-save-dir">浏览</button>
-                <button class="button button-muted" data-action="open-path" data-target="live-save-dir">打开</button>
+        <div class="live-rec-workbench">
+          <div class="live-rec-tabs" role="tablist" aria-label="直播录制">
+            <button class="live-rec-tab is-active" type="button" data-live-rec-tab="rooms">主播列表</button>
+            <button class="live-rec-tab" type="button" data-live-rec-tab="add">添加直播间</button>
+            <button class="live-rec-tab" type="button" data-live-rec-tab="settings">录制设置</button>
+          </div>
+
+          <section class="live-rec-page is-active" id="live-rec-rooms">
+            <section class="panel panel-wide live-room-board">
+              <div class="live-board-toolbar">
+                <h2>录制列表</h2>
+                <div class="live-toolbar-actions">
+                  <div class="live-search">
+                    <span class="button-icon" aria-hidden="true">⌕</span>
+                    <input id="live-room-search" type="search" placeholder="搜索主播或直播地址">
+                  </div>
+                  <button class="button button-primary button-small" data-action="live-switch-tab" data-tab="add"><span class="button-icon" aria-hidden="true">+</span><span>新增录制</span></button>
+                  <button class="button button-secondary button-small" data-action="refresh-live-rooms"><span class="button-icon" aria-hidden="true">↻</span><span>刷新</span></button>
+                  <button class="button button-primary button-small" data-action="feature-submit" data-feature="live-rec-monitor"><span class="button-icon" aria-hidden="true">▶</span><span>批量开启监控</span></button>
+                  <button class="button button-muted button-small" data-action="feature-submit" data-feature="live-rec-delete-all"><span class="button-icon" aria-hidden="true">■</span><span>批量停止监控</span></button>
+                  <button class="button button-danger button-small" data-action="clear-live-rooms"><span class="button-icon" aria-hidden="true">⌫</span><span>批量删除</span></button>
+                </div>
               </div>
-            </div>
-            <div class="field-pair">
-              <div class="field-row compact">
-                <label for="live-segment">分段</label>
-                <select id="live-segment">
-                  <option selected>不限</option>
-                  <option>30分钟</option>
-                  <option>60分钟</option>
-                  <option>120分钟</option>
+
+              <div class="live-filter-bar">
+                <div class="live-filter-group" aria-label="状态筛选">
+                  <span>状态筛选：</span>
+                  <button class="live-filter-chip is-active" type="button" data-action="live-status-filter" data-status="all">全部</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="recording">录制中</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="live">直播中</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="not_started">未开播</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="error">录制错误</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="unmonitored">未监控</button>
+                </div>
+                <label class="live-platform-filter">平台筛选：
+                  <select id="live-platform-filter">
+                    <option value="all" selected>全部</option>
+                    <option value="抖音">抖音</option>
+                    <option value="快手">快手</option>
+                    <option value="B站">B站</option>
+                    <option value="自定义RTMP">自定义RTMP</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="live-room-grid" id="live-room-grid">
+                <div class="live-room-empty">暂无直播间</div>
+              </div>
+            </section>
+          </section>
+
+          <section class="live-rec-page" id="live-rec-add">
+            <section class="panel live-add-panel">
+              <div class="panel-header">
+                <h2>添加直播间</h2>
+              </div>
+              <div class="field-row">
+                <label for="live-room-name">名称</label>
+                <input id="live-room-name" type="text" placeholder="主播或直播间名称">
+              </div>
+              <div class="field-row">
+                <label for="live-room-url">地址</label>
+                <input id="live-room-url" type="text" placeholder="直播间链接或分享文案">
+              </div>
+              <div class="field-row">
+                <label for="live-platform">平台</label>
+                <select id="live-platform">
+                  <option selected>抖音</option>
+                  <option>快手</option>
+                  <option>B站</option>
+                  <option>自定义RTMP</option>
                 </select>
               </div>
+              <div class="system-actions">
+                <button class="button button-secondary" data-action="feature-submit" data-feature="live-rec-detect">检测流地址</button>
+                <button class="button button-primary" data-action="add-live-room">添加</button>
+              </div>
+            </section>
+          </section>
+
+          <section class="live-rec-page" id="live-rec-settings">
+            <section class="panel live-settings-panel">
+              <div class="panel-header">
+                <h2>基本设置</h2>
+              </div>
+              <div class="field-row">
+                <label for="live-save-dir">保存目录</label>
+                <div class="input-with-button">
+                  <input id="live-save-dir" type="text" placeholder="录制视频保存目录">
+                  <button class="button button-secondary" data-action="pick-directory" data-target="live-save-dir">浏览</button>
+                  <button class="button button-muted" data-action="open-path" data-target="live-save-dir">打开</button>
+                </div>
+              </div>
+              <div class="field-pair">
+                <div class="field-row compact">
+                  <label for="live-segment">分段</label>
+                  <select id="live-segment">
+                    <option selected>不限</option>
+                    <option>10分钟</option>
+                    <option>15分钟</option>
+                    <option>30分钟</option>
+                    <option>60分钟</option>
+                    <option>120分钟</option>
+                  </select>
+                </div>
+                <div class="field-row compact">
+                  <label for="live-check-interval">检测</label>
+                  <input id="live-check-interval" type="number" value="30" min="5" max="300">
+                </div>
+              </div>
               <div class="field-row compact">
-                <label for="live-check-interval">检测</label>
-                <input id="live-check-interval" type="number" value="30" min="5" max="300">
+                <label for="live-min-stream-quality">最低画质</label>
+                <select id="live-min-stream-quality">
+                  <option value="" selected>自动最高</option>
+                  <option value="1080p">至少1080p</option>
+                  <option value="720p">至少720p</option>
+                  <option value="480p">至少480p</option>
+                  <option value="low">允许低清</option>
+                </select>
               </div>
-            </div>
-            <div class="panel-actions">
-              <button class="button button-danger" data-action="stop-scope" data-scope="live-rec">停止</button>
-              <button class="button button-primary" data-action="feature-submit" data-feature="live-rec-monitor">开始监控</button>
-            </div>
+            </section>
+
+            <section class="panel live-settings-panel">
+              <div class="panel-header">
+                <h2>商品分段</h2>
+              </div>
+              <div class="field-row">
+                <label>识别</label>
+                <div class="rule-grid">
+                  <label class="check-item"><input id="live-product-split-enabled" type="checkbox" checked> 生成商品时间线</label>
+                  <label class="check-item"><input id="live-product-auto-cut" type="checkbox" checked> 录后自动切出候选段</label>
+                </div>
+              </div>
+              <div class="field-pair">
+                <div class="field-row compact">
+                  <label for="live-product-default-minutes">单品默认分钟</label>
+                  <select id="live-product-default-minutes">
+                    <option value="10" selected>10分钟</option>
+                    <option value="15">15分钟</option>
+                  </select>
+                </div>
+                <div class="field-row compact">
+                  <label for="live-product-switch-confirm">换品确认秒</label>
+                  <input id="live-product-switch-confirm" type="number" value="8" min="0" max="120" step="1">
+                </div>
+              </div>
+              <div class="field-pair">
+                <div class="field-row compact">
+                  <label for="live-product-min-minutes">最短分钟</label>
+                  <input id="live-product-min-minutes" type="number" value="3" min="0.5" max="15" step="0.5">
+                </div>
+                <div class="field-row compact">
+                  <label for="live-product-max-minutes">最长分钟</label>
+                  <input id="live-product-max-minutes" type="number" value="15" min="1" max="15" step="0.5">
+                </div>
+              </div>
+              <div class="field-pair">
+                <div class="field-row compact">
+                  <label for="live-product-head-seconds">片头保留秒</label>
+                  <input id="live-product-head-seconds" type="number" value="10" min="0" max="300" step="1">
+                </div>
+                <div class="field-row compact">
+                  <label for="live-product-tail-seconds">片尾保留秒</label>
+                  <input id="live-product-tail-seconds" type="number" value="20" min="0" max="300" step="1">
+                </div>
+              </div>
+            </section>
           </section>
 
-          <section class="panel">
-            <div class="panel-header">
-              <h2>添加直播间</h2>
-            </div>
-            <div class="field-row">
-              <label for="live-room-name">名称</label>
-              <input id="live-room-name" type="text" placeholder="主播或直播间名称">
-            </div>
-            <div class="field-row">
-              <label for="live-room-url">地址</label>
-              <input id="live-room-url" type="text" placeholder="直播间链接或 rtmp 地址">
-            </div>
-            <div class="field-row">
-              <label for="live-platform">平台</label>
-              <select id="live-platform">
-                <option>抖音</option>
-                <option>快手</option>
-                <option>B站</option>
-                <option selected>自定义RTMP</option>
-              </select>
-            </div>
-            <div class="system-actions">
-              <button class="button button-secondary" data-action="feature-submit" data-feature="live-rec-detect">检测流地址</button>
-              <button class="button button-primary" data-action="add-live-room">添加</button>
-            </div>
-          </section>
-
-          <section class="panel panel-wide">
-            <div class="panel-header">
-              <h2>录制管理</h2>
-              <button class="button button-muted" data-action="feature-submit" data-feature="live-rec-delete-all">删除全部</button>
-            </div>
-            <div class="table-like">
-              <div class="table-row table-head">
-                <span>名称</span><span>平台</span><span>地址</span><span>状态</span><span>时长</span><span>文件</span><span>操作</span>
-              </div>
-              <div class="table-row empty-row">
-                <span>暂无直播间</span><span></span><span></span><span></span><span></span><span></span><span></span>
-              </div>
-            </div>
-            <p class="panel-note">免责声明：本工具仅用于录制您拥有版权或已获授权的直播内容。</p>
-          </section>
-
-          <section class="panel log-panel">
+          <section class="panel log-panel live-log-panel">
             <div class="panel-header">
               <h2>运行日志</h2>
               <div class="log-header-actions">
@@ -1378,13 +1470,13 @@
 
               <div class="panel">
                 <div class="panel-header">
-                  <h2>用户喜好库</h2>
+                  <h2>剪辑风格画像</h2>
                   <button class="button button-secondary" data-action="refresh-ai-feedback">刷新</button>
                 </div>
-                <p class="panel-note">保存你在 AI 预览里保留、删除、拖到开头或结尾的选择，用来优化后续自动成片。</p>
+                <p class="panel-note">根据你在 AI 预览里保留、删除、拖到开头或结尾的选择，逐渐形成专属选片风格。当前先做可视化学习，后续逐步参与 AI 选片。</p>
                 <div class="metric-row">
                   <div>
-                    <span class="metric-label">记录数</span>
+                    <span class="metric-label">学习次数</span>
                     <strong id="ai-feedback-count">0</strong>
                   </div>
                   <div>
@@ -1394,12 +1486,23 @@
                 </div>
                 <p class="panel-note" id="ai-feedback-path">保存位置：%APPDATA%\LiveClipper\ai_feedback</p>
                 <div class="panel-actions">
-                  <button class="button button-secondary" data-action="export-ai-feedback">导出喜好库</button>
+                  <button class="button button-secondary" data-action="export-ai-feedback">导出画像数据</button>
                   <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
-                  <button class="button button-muted" data-action="clear-ai-feedback">清空喜好库</button>
+                  <button class="button button-muted" data-action="clear-ai-feedback">清空学习数据</button>
                 </div>
+                <div class="field-row compact">
+                  <label for="s-style-profile-strength">AI 学习强度</label>
+                  <select id="s-style-profile-strength">
+                    <option value="auto" selected>自动推荐</option>
+                    <option value="off">关闭</option>
+                    <option value="light">轻度</option>
+                    <option value="standard">标准</option>
+                    <option value="strong">强</option>
+                  </select>
+                </div>
+                <p class="panel-note">自动推荐会根据样本数量调节：样本少时只读，样本足够后再轻度或标准参与 AI 选片。</p>
                 <div class="feedback-summary-box" id="ai-feedback-summary">
-                  <p class="panel-note">偏好摘要会在积累人工选择后自动生成，当前只读展示，不影响成片。</p>
+                  <p class="panel-note">剪辑风格画像会在积累人工选择后自动生成。</p>
                 </div>
                 <div class="feedback-library-list" id="ai-feedback-samples">
                   <p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>
@@ -1641,6 +1744,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260625-feedback-collapse" defer></script>
+  <script src="/assets/app.js?v=20260630-live-candidate-ts-fix" defer></script>
 </body>
 </html>

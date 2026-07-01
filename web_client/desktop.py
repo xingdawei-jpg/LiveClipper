@@ -12,6 +12,39 @@ from pathlib import Path
 import uvicorn
 
 
+TOOL_RUN_FLAG = "--liveclipper-run-tool"
+
+
+def _repair_tool_stdio() -> None:
+    for name, fd, mode in (("stdin", 0, "r"), ("stdout", 1, "w"), ("stderr", 2, "w")):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            stream = os.fdopen(os.dup(fd), mode, encoding="utf-8", errors="replace", buffering=1)
+        except Exception:
+            fallback = "r" if mode == "r" else "w"
+            stream = open(os.devnull, fallback, encoding="utf-8", errors="replace")
+        setattr(sys, name, stream)
+
+
+def _run_tool_subprocess() -> bool:
+    if len(sys.argv) < 3 or sys.argv[1] != TOOL_RUN_FLAG:
+        return False
+    import runpy
+
+    _repair_tool_stdio()
+    script = Path(sys.argv[2]).resolve()
+    if not script.exists():
+        print(f"Tool script not found: {script}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+    sys.argv = [str(script), *sys.argv[3:]]
+    script_dir = str(script.parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    runpy.run_path(str(script), run_name="__main__")
+    return True
+
+
 def _version_key(version: str) -> tuple[int, int, int, int]:
     parts: list[int] = []
     for chunk in str(version or "").replace("-", ".").split("."):
@@ -181,4 +214,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if _run_tool_subprocess():
+        raise SystemExit(0)
     main()

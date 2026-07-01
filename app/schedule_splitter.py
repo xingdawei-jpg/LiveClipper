@@ -243,7 +243,19 @@ def group_by_product(schedule: List[dict]) -> List[dict]:
     return result
 
 
-
+def _safe_output_stem(name, fallback="未命名商品", max_chars=120):
+    text = sanitize_forbidden_title(name, fallback=fallback)
+    safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in text)
+    safe = re.sub(r"\s+", " ", safe).strip(" ._") or fallback
+    if len(safe) <= max_chars:
+        return safe
+    stamp_match = re.search(r"(_20\d{6}_\d{6}(?:_\d{2})?)$", safe)
+    if stamp_match:
+        stamp = stamp_match.group(1)
+        prefix_limit = max(1, max_chars - len(stamp))
+        prefix = safe[:prefix_limit].rstrip(" ._") or fallback
+        return (prefix + stamp)[:max_chars].rstrip(" ._")
+    return safe[:max_chars].rstrip(" ._") or fallback
 
 
 _video_durations_cache = {}
@@ -460,8 +472,11 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
         segs = g.get("segments", [])
         if not segs:
             continue
-        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)[:40] or "未命名商品"
-        out_dir = os.path.join(output_dir, safe_name)
+        flat_output = bool(g.get("flat_output"))
+        exact_name = bool(g.get("exact_name"))
+        safe_name = _safe_output_stem(name, max_chars=140 if exact_name else 80)
+        safe_dir_name = _safe_output_stem(name, max_chars=80)
+        out_dir = output_dir if flat_output else os.path.join(output_dir, safe_name)
         os.makedirs(out_dir, exist_ok=True)
         exported = 0
         for si, (st, et) in enumerate(segs):
@@ -476,7 +491,10 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
 
             for part_idx, (video, rel_st, part_dur, _, _) in enumerate(parts):
                 suffix = "%d" % (si + 1) if len(parts) == 1 else "%d_%d" % (si + 1, part_idx + 1)
-                out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_name[:30], suffix))
+                if exact_name and len(segs) == 1 and len(parts) == 1:
+                    out_path = os.path.join(out_dir, "%s.mp4" % safe_name)
+                else:
+                    out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_dir_name[:40], suffix))
                 last_error = ""
                 try:
                     # 快切 -c copy

@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.6.22.2"
+CURRENT_VERSION = "2026.7.1.1"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -41,9 +41,14 @@ def init_installed_version():
         if not os.path.exists(vf):
             # Read version from bundled version.json
             if getattr(sys, 'frozen', False):
-                vj = os.path.join(os.path.dirname(sys.executable), '_internal', 'version.json')
+                base_dir = os.path.dirname(sys.executable)
+                candidates = [
+                    os.path.join(base_dir, '_internal', 'version.json'),
+                    os.path.join(base_dir, '_internal', 'app', 'version.json'),
+                ]
             else:
-                vj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')
+                candidates = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')]
+            vj = next((item for item in candidates if os.path.exists(item)), "")
             if os.path.exists(vj):
                 with open(vj, 'r', encoding='utf-8-sig') as f:
                     vdata = json.load(f)
@@ -322,14 +327,14 @@ def _download_file_bytes(fname, expected_sha):
 
 def _manifest_source_path(fname):
     normalized = str(fname or "").replace("\\", "/").lstrip("/")
-    if normalized.startswith(("app/", "web_client/")):
+    if normalized.startswith(("app/", "web_client/", "tools/")):
         return normalized
     return "app/" + normalized
 
 
 def _manifest_target_path(fname):
     normalized = str(fname or "").replace("\\", "/").lstrip("/")
-    if normalized.startswith(("app/", "web_client/")):
+    if normalized.startswith(("app/", "web_client/", "tools/")):
         return normalized
     return "app/" + normalized
 

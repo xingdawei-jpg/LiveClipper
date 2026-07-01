@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections import deque
@@ -139,6 +140,7 @@ _SCAN_RESULTS: dict[str, Any] = {"products": [], "merged": []}
 _SCAN_LOCK = threading.Lock()
 _LIVE_PROCS: dict[str, dict[str, Any]] = {}
 _LIVE_LOCK = threading.Lock()
+LIVE_PROBE_STOP_NOTE = "__liveclipper_stop__"
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
 _AI_PREVIEW_CACHE_SCHEMA = "focus_blocks_v2"
@@ -805,6 +807,7 @@ def _load_settings() -> dict[str, Any]:
         "aliyun_bucket": "",
         "aliyun_region": "oss-cn-shanghai",
         "preference_weights": dict(DEFAULT_PREFERENCE_WEIGHTS),
+        "style_profile_strength": "auto",
         "ai_rules": dict(DEFAULT_AI_RULES),
         "ui_theme": "system",
         "hardware_encoder_enabled": False,
@@ -1093,6 +1096,7 @@ class SettingsPayload(BaseModel):
     aliyun_bucket: str = ""
     aliyun_region: str = ""
     preference_weights: dict[str, float] = Field(default_factory=dict)
+    style_profile_strength: str = "auto"
     ai_rules: dict[str, Any] = Field(default_factory=dict)
     ui_theme: str = "system"
     hardware_encoder_enabled: bool = False
@@ -1119,6 +1123,10 @@ class PathsPayload(BaseModel):
 
 class StopScopePayload(BaseModel):
     scope: str = ""
+
+
+class StopTaskPayload(BaseModel):
+    task_id: str = ""
 
 
 class PreflightPayload(BaseModel):
@@ -1211,6 +1219,11 @@ class PreviewSelectionPayload(BaseModel):
 class SmartPreviewClipPayload(BaseModel):
     preview_id: str = ""
     clip_index: int = Field(default=0, ge=0)
+    scope: str = "smart"
+    order: list[int] = Field(default_factory=list)
+    selected_indices: list[int] = Field(default_factory=list)
+    selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    updated_at: float = 0
 
 
 class AiFeedbackImportPayload(BaseModel):
@@ -1258,11 +1271,24 @@ class DedupPayload(BaseModel):
 
 class LiveRecPayload(BaseModel):
     save_dir: str = ""
-    segment: str = "涓嶉檺"
+    segment: str = "不限"
     check_interval: int = Field(default=30, ge=5, le=300)
+    min_stream_quality: str = ""
     room_name: str = ""
     room_url: str = ""
     platform: str = "自定义RTMP"
+    product_split_enabled: bool = False
+    product_auto_cut: bool = False
+    product_default_minutes: float = Field(default=10.0, ge=1.0, le=60.0)
+    product_min_minutes: float = Field(default=3.0, ge=0.5, le=60.0)
+    product_max_minutes: float = Field(default=15.0, ge=1.0, le=120.0)
+    product_naming_mode: str = "product_id"
+    product_switch_confirm_seconds: int = Field(default=8, ge=0, le=120)
+    product_head_seconds: int = Field(default=10, ge=0, le=300)
+    product_tail_seconds: int = Field(default=20, ge=0, le=300)
+
+
+TOOLS_DIR = REPO_ROOT / "tools"
 
 
 def _new_task(scope: str, title: str) -> str:
@@ -1371,6 +1397,33 @@ def _task_log_fn(task_id: str, scope: str, base: float = 10, span: float = 80):
 def _is_task_cancelled(task_id: str) -> bool:
     with _TASK_LOCK:
         return task_id in _CANCELLED_TASKS or _TASKS.get(task_id, {}).get("status") == "cancelled"
+
+
+def _cancel_task(task_id: str) -> int:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return 0
+    scope = ""
+    with _TASK_LOCK:
+        task = _TASKS.get(task_id)
+        if not task or task.get("status") not in {"queued", "running"}:
+            return 0
+        scope = str(task.get("scope") or "")
+        _CANCELLED_TASKS.add(task_id)
+        event = _TASK_CANCEL_EVENTS.get(task_id)
+        if event:
+            event.set()
+        task.update(
+            status="cancelled",
+            progress=100,
+            message="已停止",
+            finished_at=time.time(),
+            error="用户已停止",
+        )
+    if scope == "live-rec":
+        _stop_live_task_process(task_id)
+    emit_log("warning", "已停止当前任务。", scope or "system")
+    return 1
 
 
 def _cancel_scope(scope: str) -> int:
@@ -2074,6 +2127,17 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             if not str(data.get("room_url") or "").strip():
                 errors.append("请填写直播间地址。")
             _preflight_output_dir(data.get("save_dir"), warnings, errors)
+            if data.get("product_split_enabled"):
+                try:
+                    min_minutes = min(15.0, float(data.get("product_min_minutes") or 3))
+                    max_minutes = min(15.0, float(data.get("product_max_minutes") or 15))
+                    default_minutes = float(data.get("product_default_minutes") or 10)
+                    if min_minutes > max_minutes:
+                        errors.append("商品分段的最短分钟不能大于最长分钟。")
+                    if default_minutes <= 0:
+                        errors.append("单品默认分钟必须大于 0。")
+                except Exception:
+                    errors.append("商品分段时长参数不正确。")
         elif feature == "live-rec-detect" and not str(data.get("room_url") or "").strip():
             errors.append("请填写直播间地址。")
 
@@ -2359,13 +2423,13 @@ def _normalize_preview_final_clips(
             _step("time_text_dedup", lambda items: ai_mod._dedup_clip_text_overlap(items, None, merge_mode=merge_mode))
         if hasattr(ai_mod, "_filter_semantic_repeat"):
             _step("semantic_dedup", lambda items: ai_mod._filter_semantic_repeat(items, None))
-        if srt_text and hasattr(ai_mod, "_fix_clip_boundaries"):
+        if srt_text and not merge_mode and hasattr(ai_mod, "_fix_clip_boundaries"):
             _step("boundary_fix", lambda items: ai_mod._fix_clip_boundaries(items, srt_text, None))
         if hasattr(ai_mod, "_remove_expanded_overlap_clips"):
             _step("expanded_overlap_dedup", lambda items: ai_mod._remove_expanded_overlap_clips(items, None))
         if hasattr(ai_mod, "_reorder_product_focus_blocks"):
             normalized = list(ai_mod._reorder_product_focus_blocks(normalized, None) or normalized)
-        if srt_text:
+        if srt_text and not merge_mode:
             try:
                 from cutter_logic import _apply_srt_cut_alignment, _parse_srt_to_segments, _srt_text_for_range
 
@@ -2506,6 +2570,26 @@ def _strip_preview_source_marker(text: Any) -> str:
     return re.sub(r"\[[vV]\d+\]\s*", "", _repair_mojibake_text(text)).strip()
 
 
+def _preview_text_for_marker(text: Any, marker: str) -> str:
+    value = _repair_mojibake_text(text).strip()
+    marker = str(marker or "").strip().upper()
+    if not value or not marker:
+        return _strip_preview_source_marker(value)
+    matches = list(re.finditer(r"\[([vV]\d+)\]\s*", value))
+    if not matches:
+        return _strip_preview_source_marker(value)
+    pieces: list[str] = []
+    for index, match in enumerate(matches):
+        current = str(match.group(1) or "").upper()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+        if current == marker:
+            piece = value[start:end].strip()
+            if piece:
+                pieces.append(piece)
+    return " ".join(pieces).strip() or _strip_preview_source_marker(value)
+
+
 def _preview_text_marker_and_body(text: Any) -> tuple[str, str]:
     value = _repair_mojibake_text(text).strip()
     match = re.match(r"^(\[[vV]\d+\]\s*)(.*)$", value)
@@ -2610,6 +2694,85 @@ def _preview_source_marker(text: Any) -> str:
     return match.group(1).upper() if match else ""
 
 
+def _preview_marker_source(sources: list[Any], text: Any) -> str:
+    marker = _preview_source_marker(text)
+    if not marker:
+        return ""
+    try:
+        index = int(marker[1:]) - 1
+    except Exception:
+        return ""
+    if index < 0 or index >= len(sources or []):
+        return ""
+    return str((sources or [])[index] or "").strip()
+
+
+def _preview_source_path_key(value: Any) -> str:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).resolve()).lower()
+    except Exception:
+        return str(Path(raw)).lower()
+
+
+def _preview_source_marker_from_source(sources: list[Any], source: Any) -> str:
+    source_key = _preview_source_path_key(source)
+    if not source_key:
+        return ""
+    for index, candidate in enumerate(sources or []):
+        if _preview_source_path_key(candidate) == source_key:
+            return f"V{index + 1}"
+    return ""
+
+
+def _preview_expected_source_marker(public_clip: dict[str, Any], sources: list[Any] | None = None) -> str:
+    marker = _preview_source_marker_from_source(list(sources or []), public_clip.get("source") or "")
+    if marker:
+        return marker
+    marker = str(public_clip.get("source_marker") or "").strip().upper()
+    if marker:
+        return marker
+    return _preview_source_marker(public_clip.get("text") or "")
+
+
+def _preview_clip_with_source(clip: Any, source: str) -> Any:
+    source = str(source or "").strip()
+    if not source:
+        return clip
+    if isinstance(clip, dict):
+        if str(clip.get("source") or "").strip():
+            return clip
+        next_clip = dict(clip)
+        next_clip["source"] = source
+        return next_clip
+    if isinstance(clip, (list, tuple)):
+        values = list(clip)
+        if len(values) <= 7:
+            values.append(source)
+        elif isinstance(values[7], dict):
+            values.insert(7, source)
+        elif not str(values[7] or "").strip():
+            values[7] = source
+        else:
+            return clip
+        return tuple(values)
+    return clip
+
+
+def _attach_mix_sources_to_preview_clips(clips: list[Any], sources: list[Any]) -> list[Any]:
+    result: list[Any] = []
+    for clip in clips or []:
+        info = _clip_public(0, clip)
+        if info.get("source"):
+            result.append(clip)
+            continue
+        marker_source = _preview_marker_source(sources, info.get("text") or "")
+        result.append(_preview_clip_with_source(clip, marker_source) if marker_source else clip)
+    return result
+
+
 def _preview_segment_start(segment: dict[str, Any]) -> float:
     try:
         return float(segment.get("start") or 0)
@@ -2647,13 +2810,17 @@ def _sort_and_reindex_preview_segments(segments: list[dict[str, Any]]) -> list[d
     return ordered
 
 
-def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _preview_segments_for_clip(
+    public_clip: dict[str, Any],
+    srt_segments: list[dict[str, Any]],
+    expected_marker: str = "",
+) -> list[dict[str, Any]]:
     try:
         start = float(public_clip.get("start") or 0)
         end = float(public_clip.get("end") or start)
     except Exception:
         start, end = 0.0, 0.0
-    marker = _preview_source_marker(public_clip.get("text") or "")
+    marker = str(expected_marker or _preview_expected_source_marker(public_clip)).strip().upper()
     pieces: list[dict[str, Any]] = []
     if end > start:
         boundary_slack = 0.65
@@ -2671,7 +2838,8 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
             if overlap < 0.04 and not touches_start and not touches_end:
                 continue
             seg_text = _repair_mojibake_text(seg.get("text") or "")
-            if marker and marker not in _preview_source_marker(seg_text):
+            seg_marker = _preview_source_marker(seg_text)
+            if marker and seg_marker != marker:
                 continue
             text = _strip_preview_source_marker(seg_text)
             if not text:
@@ -2691,7 +2859,7 @@ def _preview_segments_for_clip(public_clip: dict[str, Any], srt_segments: list[d
             })
     if pieces:
         return _sort_and_reindex_preview_segments(pieces)
-    text = _strip_preview_source_marker(public_clip.get("text") or "")
+    text = _preview_text_for_marker(public_clip.get("text") or "", marker)
     if not text:
         text = str(public_clip.get("text") or "")
     text = _clean_preview_filler_prefix(text)
@@ -2772,7 +2940,13 @@ def _preview_unselect_duplicate_segments(public_clips: list[dict[str, Any]]) -> 
     return {"preview_duplicate_segments_removed": removed_segments, "preview_duplicate_clips_unselected": removed_clips}
 
 
-def _preview_public_clips(clips: list[Any], srt_text: str = "") -> list[dict[str, Any]]:
+def _preview_public_clips(
+    clips: list[Any],
+    srt_text: str = "",
+    *,
+    sources: list[Any] | None = None,
+    merge_mode: bool = False,
+) -> list[dict[str, Any]]:
     srt_segments: list[dict[str, Any]] = []
     if srt_text:
         try:
@@ -2781,9 +2955,13 @@ def _preview_public_clips(clips: list[Any], srt_text: str = "") -> list[dict[str
             srt_segments = list(_parse_srt_to_segments(srt_text) or [])
         except Exception as exc:
             emit_log("warning", f"preview segment split skipped: {exc}", "system")
+    source_list = list(sources or [])
     public_clips = [_clip_public(index, clip) for index, clip in enumerate(clips)]
     for clip in public_clips:
-        clip["segments"] = _preview_segments_for_clip(clip, srt_segments)
+        expected_marker = _preview_expected_source_marker(clip, source_list) if merge_mode else ""
+        if expected_marker:
+            clip["source_marker"] = expected_marker
+        clip["segments"] = _preview_segments_for_clip(clip, srt_segments, expected_marker)
     _preview_unselect_duplicate_segments(public_clips)
     return public_clips
 
@@ -2835,12 +3013,13 @@ def _merge_selected_segments(
     while len(base) < 8:
         base.append("")
     result: list[tuple[Any, ...]] = []
+    source_marker = _preview_expected_source_marker(public_clip)
     for group_index, group in enumerate(groups):
         start = min(float(seg.get("start") or 0) for seg in group)
         end = max(float(seg.get("end") or start) for seg in group)
         text = "".join(_strip_preview_source_marker(seg.get("text") or "") for seg in group).strip()
-        if _preview_source_marker(public_clip.get("text") or ""):
-            text = f"[{_preview_source_marker(public_clip.get('text') or '')}] {text}"
+        if source_marker:
+            text = f"[{source_marker}] {text}"
         values = list(base)
         values[1] = text or str(public_clip.get("text") or "")
         values[2] = start
@@ -3388,6 +3567,193 @@ def _preview_feedback_confidence(count: int) -> str:
     return "无"
 
 
+def _preview_feedback_normalize_strength(value: Any) -> str:
+    text = str(value or "auto").strip().lower()
+    aliases = {
+        "自动": "auto",
+        "auto": "auto",
+        "关闭": "off",
+        "关": "off",
+        "off": "off",
+        "false": "off",
+        "轻度": "light",
+        "light": "light",
+        "标准": "standard",
+        "standard": "standard",
+        "强": "strong",
+        "强力": "strong",
+        "strong": "strong",
+    }
+    return aliases.get(text, "auto")
+
+
+def _preview_feedback_configured_strength() -> str:
+    try:
+        settings = _load_settings()
+        return _preview_feedback_normalize_strength(settings.get("style_profile_strength"))
+    except Exception:
+        return "auto"
+
+
+def _preview_feedback_learning_status(sample_count: int, configured_strength: str = "auto") -> tuple[str, str]:
+    configured_strength = _preview_feedback_normalize_strength(configured_strength)
+    if sample_count <= 0:
+        return "未开始", "关闭" if configured_strength == "off" else "只读"
+    if sample_count <= 2:
+        return "观察中", "关闭" if configured_strength == "off" else "只读"
+    if sample_count <= 9:
+        status = "初步成型"
+    else:
+        status = "稳定画像"
+    if configured_strength == "off":
+        return status, "关闭"
+    if configured_strength == "light":
+        return status, "轻度"
+    if configured_strength == "standard":
+        return status, "标准"
+    if configured_strength == "strong":
+        return status, "强"
+    return status, "轻度" if sample_count <= 9 else "标准"
+
+
+def _preview_feedback_latest_at(records: list[dict[str, Any]]) -> float:
+    latest = 0.0
+    for record in records:
+        try:
+            latest = max(latest, float(record.get("created_at") or 0))
+        except Exception:
+            pass
+    return latest
+
+
+def _preview_feedback_top_labels(items: list[dict[str, Any]], count_key: str, limit: int = 5) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        examples = item.get("positive_examples") or item.get("negative_examples") or []
+        result.append({
+            "key": item.get("key") or "",
+            "label": item.get("label") or "",
+            "count": int(item.get(count_key) or 0),
+            "confidence": item.get("confidence") or "观察中",
+            "examples": examples[:2] if isinstance(examples, list) else [],
+        })
+    return result
+
+
+def _preview_feedback_role_signal_counts(records: list[dict[str, Any]], roles: set[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        for role in roles:
+            for item in _preview_feedback_role_items(record, role):
+                text = _preview_feedback_sample_text(item)
+                if not text:
+                    continue
+                for key in _preview_feedback_signal_keys(text):
+                    counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _preview_feedback_style_metrics(records: list[dict[str, Any]]) -> dict[str, str]:
+    kept_texts: list[str] = []
+    rejected_texts: list[str] = []
+    cta_positive = 0
+    cta_negative = 0
+    for record in records:
+        for role in _PREVIEW_FEEDBACK_POSITIVE_ROLES:
+            for item in _preview_feedback_role_items(record, role):
+                text = _preview_feedback_sample_text(item)
+                if text:
+                    kept_texts.append(text)
+                    if re.search(r"(拍|下单|入|闭眼|冲|链接|加购|买|拍下)", text):
+                        cta_positive += 1
+        for role in _PREVIEW_FEEDBACK_NEGATIVE_ROLES:
+            for item in _preview_feedback_role_items(record, role):
+                text = _preview_feedback_sample_text(item)
+                if text:
+                    rejected_texts.append(text)
+                    if re.search(r"(拍|下单|入|闭眼|冲|链接|加购|买|拼手速|没了)", text):
+                        cta_negative += 1
+
+    avg_len = sum(len(_preview_compact_text(text)) for text in kept_texts) / max(1, len(kept_texts))
+    short_ratio = sum(1 for text in kept_texts if len(_preview_compact_text(text)) <= 18) / max(1, len(kept_texts))
+    explain_hits = sum(1 for text in kept_texts if any(word in text for word in ("因为", "所以", "适合", "如果", "你会发现", "原因")))
+    emotion_hits = sum(1 for text in kept_texts if any(word in text for word in ("巨", "真的", "相信我", "惊喜", "好看", "宝宝")))
+
+    return {
+        "selling_density": "高" if short_ratio >= 0.45 else "中" if avg_len <= 38 else "低",
+        "rhythm": "快" if short_ratio >= 0.45 else "中" if avg_len <= 45 else "慢",
+        "context_length": "短" if explain_hits <= max(1, len(kept_texts) * 0.18) else "中" if explain_hits <= max(2, len(kept_texts) * 0.36) else "长",
+        "emotion_strength": "高" if emotion_hits >= max(2, len(kept_texts) * 0.28) else "中" if emotion_hits else "低",
+        "cta_strength": "弱" if cta_negative >= cta_positive else "中" if cta_positive else "弱",
+    }
+
+
+def _preview_feedback_style_profile(
+    records: list[dict[str, Any]],
+    positive: list[dict[str, Any]],
+    negative: list[dict[str, Any]],
+    total_samples: int,
+) -> dict[str, Any]:
+    record_count = len(records)
+    configured_strength = _preview_feedback_configured_strength()
+    status, impact = _preview_feedback_learning_status(total_samples, configured_strength)
+    latest_at = _preview_feedback_latest_at(records)
+    hook_counts = _preview_feedback_role_signal_counts(records, {"hook_positive", "move_to_front"})
+    ending_counts = _preview_feedback_role_signal_counts(records, {"close_positive", "move_to_end"})
+    signal_labels = {str(rule["key"]): str(rule["label"]) for rule in _PREVIEW_FEEDBACK_SIGNAL_RULES}
+
+    def _role_preferences(counts: dict[str, int], fallback: str) -> list[dict[str, Any]]:
+        ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+        if not ranked:
+            return [{"label": fallback, "count": 0, "confidence": "观察中"}]
+        return [
+            {"label": signal_labels.get(key, key), "count": count, "confidence": _preview_feedback_confidence(count)}
+            for key, count in ranked[:4]
+        ]
+
+    selling_preferences = _preview_feedback_top_labels(positive, "positive_count", 5)
+    avoid_preferences = _preview_feedback_top_labels(negative, "negative_count", 5)
+    metrics = _preview_feedback_style_metrics(records)
+
+    summary: list[str] = []
+    if selling_preferences:
+        summary.append("中段优先：" + "、".join(item["label"] for item in selling_preferences[:4]) + "。")
+    if avoid_preferences:
+        summary.append("常避开：" + "、".join(item["label"] for item in avoid_preferences[:4]) + "。")
+    hook_labels = [item["label"] for item in _role_preferences(hook_counts, "直接利益点开头") if item.get("count", 0)]
+    if hook_labels:
+        summary.append("开头偏好：" + "、".join(hook_labels[:3]) + "。")
+    ending_labels = [item["label"] for item in _role_preferences(ending_counts, "自然总结") if item.get("count", 0)]
+    if ending_labels:
+        summary.append("结尾偏好：" + "、".join(ending_labels[:3]) + "。")
+    if metrics:
+        summary.append(f"节奏画像：卖点密度{metrics['selling_density']}，节奏{metrics['rhythm']}，上下文{metrics['context_length']}。")
+
+    ai_hint_parts = []
+    if selling_preferences:
+        ai_hint_parts.append("优先选择" + "、".join(item["label"] for item in selling_preferences[:4]))
+    if avoid_preferences:
+        ai_hint_parts.append("避免" + "、".join(item["label"] for item in avoid_preferences[:4]))
+    ai_hint_parts.append(f"剪辑节奏偏{metrics['rhythm']}，上下文长度偏{metrics['context_length']}，CTA强度偏{metrics['cta_strength']}")
+
+    return {
+        "name": "剪辑风格画像",
+        "status": status,
+        "impact": impact,
+        "configured_strength": configured_strength,
+        "learned_records": record_count,
+        "sample_count": total_samples,
+        "latest_at": latest_at,
+        "selling_preferences": selling_preferences,
+        "avoid_preferences": avoid_preferences,
+        "hook_preferences": _role_preferences(hook_counts, "直接利益点开头"),
+        "ending_preferences": _role_preferences(ending_counts, "自然总结"),
+        "metrics": metrics,
+        "summary": summary,
+        "ai_hint": "；".join(ai_hint_parts),
+    }
+
+
 def _preview_feedback_signal_keys(text: str) -> list[str]:
     compact = _preview_compact_text(text)
     keys: list[str] = []
@@ -3409,6 +3775,7 @@ def _preview_feedback_empty_summary() -> dict[str, Any]:
     return {
         "read_only": True,
         "confidence": "无",
+        "style_profile": _preview_feedback_style_profile([], [], [], 0),
         "positive": [],
         "negative": [],
         "conflicts": [],
@@ -3515,6 +3882,7 @@ def _preview_feedback_preference_summary() -> dict[str, Any]:
         "read_only": True,
         "confidence": confidence,
         "sample_count": total_samples,
+        "style_profile": _preview_feedback_style_profile(records, positive, negative, total_samples),
         "positive": positive[:6],
         "negative": negative[:6],
         "conflicts": conflicts[:8],
@@ -3584,13 +3952,13 @@ def _preview_feedback_clear() -> dict[str, Any]:
 
 def _preview_feedback_merge_import(source_path: Path) -> dict[str, Any]:
     if not source_path.exists() or not source_path.is_file():
-        raise HTTPException(status_code=404, detail="没有找到要导入的喜好库文件。")
+        raise HTTPException(status_code=404, detail="没有找到要导入的剪辑风格画像数据文件。")
     if source_path.stat().st_size > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="喜好库文件过大，请确认选择正确文件。")
+        raise HTTPException(status_code=400, detail="剪辑风格画像数据文件过大，请确认选择正确文件。")
     try:
         imported = _preview_feedback_records_from_text(source_path.read_text(encoding="utf-8-sig", errors="ignore"))
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"读取喜好库失败：{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"读取剪辑风格画像数据失败：{exc}") from exc
     if not imported:
         raise HTTPException(status_code=400, detail="文件里没有可导入的喜好记录。")
 
@@ -3776,19 +4144,13 @@ def _latest_preview(scope: str) -> dict[str, Any] | None:
         return dict(max(previews, key=lambda item: item.get("created_at", 0)))
 
 
-def _preview_clip_video(preview_id: str, clip_index: int) -> Path:
-    preview = _get_preview(preview_id)
-    if not preview or preview.get("status") != "ready":
-        raise HTTPException(status_code=404, detail="AI 选片预览不存在或尚未完成。")
-    raw_clips = list(preview.get("raw_clips") or [])
-    if clip_index < 0 or clip_index >= len(raw_clips):
-        raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
-    clip_info = _clip_public(clip_index, raw_clips[clip_index])
+def _preview_clip_source(preview: dict[str, Any], clip_info: dict[str, Any]) -> Path:
     clip_source = str(clip_info.get("source") or "").strip()
+    if not clip_source and preview.get("scope") == "mix":
+        clip_source = _preview_marker_source(list(preview.get("sources") or []), clip_info.get("text") or "")
     video = Path(clip_source) if clip_source else Path(str(preview.get("video", "")))
     if not video.exists():
         raise HTTPException(status_code=404, detail="源视频不存在，请重新选择视频。")
-    cut_video = video
     try:
         from cutter_logic import _remux_ts_for_editing
 
@@ -3797,27 +4159,55 @@ def _preview_clip_video(preview_id: str, clip_index: int) -> Path:
         cut_video = video
     if not cut_video.exists():
         raise HTTPException(status_code=404, detail="片段预览源视频不存在，请重新生成预览。")
+    return cut_video
 
-    start = max(0.0, float(clip_info.get("start") or 0.0))
-    end = max(start + 0.2, float(clip_info.get("end") or start + 0.2))
-    duration = max(0.2, end - start)
-    if duration > 90:
-        raise HTTPException(status_code=400, detail="片段过长，暂不支持在线预览。")
 
-    preview_dir = _safe_user_child("clip_previews", preview_id)
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        cut_stat = cut_video.stat()
-        source_sig = hashlib.md5(
-            f"{cut_video.resolve()}|{cut_stat.st_size}|{int(cut_stat.st_mtime)}".encode("utf-8", errors="ignore")
-        ).hexdigest()[:8]
-    except Exception:
-        source_sig = "source"
-    stamp = f"{clip_index}_{int(start * 1000)}_{int(end * 1000)}"
-    target = preview_dir / f"clip_{stamp}_{source_sig}.mp4"
-    if target.exists() and target.stat().st_size > 1000:
-        return target
+def _preview_clip_parts_for_video(
+    preview: dict[str, Any],
+    clip_index: int,
+    draft: dict[str, Any] | None,
+) -> list[Any]:
+    raw_clips = list(preview.get("raw_clips") or [])
+    if clip_index < 0 or clip_index >= len(raw_clips):
+        raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
 
+    public_clips = {
+        int(clip.get("index")): clip
+        for clip in list(preview.get("clips") or [])
+        if str(clip.get("index", "")).lstrip("-").isdigit()
+    }
+    public_clip = public_clips.get(clip_index) or _clip_public(clip_index, raw_clips[clip_index])
+    has_segments = bool(public_clip.get("segments"))
+    draft = draft if isinstance(draft, dict) else {}
+    has_draft_selection = isinstance(draft.get("selected_indices"), list) and bool(draft.get("selected_indices"))
+    if has_draft_selection:
+        selected = _clean_preview_int_list(draft.get("selected_indices") or [], len(raw_clips))
+        if clip_index not in selected:
+            raise HTTPException(status_code=400, detail="这个片段当前未选中，勾选后再预览。")
+        if has_segments:
+            parts = _clips_from_preview_selection(
+                preview,
+                [clip_index],
+                draft.get("selected_segments") if isinstance(draft.get("selected_segments"), dict) else {},
+            )
+            if not parts:
+                raise HTTPException(status_code=400, detail="这个片段没有选中的句子，勾选后再预览。")
+            return parts
+    return [raw_clips[clip_index]]
+
+
+def _preview_clip_cache_signature(preview_parts: list[Any], source_sig: str) -> str:
+    pieces = [source_sig]
+    for part in preview_parts:
+        info = _clip_public(0, part)
+        pieces.append(
+            f"{info.get('source') or ''}|{float(info.get('start') or 0):.3f}|"
+            f"{float(info.get('end') or 0):.3f}|{info.get('text') or ''}"
+        )
+    return hashlib.md5("||".join(pieces).encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _render_preview_clip_range(cut_video: Path, start: float, duration: float, target: Path) -> None:
     input_seek = max(0.0, start - 2.0)
     output_seek = max(0.0, start - input_seek)
     cmd = [
@@ -3870,6 +4260,115 @@ def _preview_clip_video(preview_id: str, clip_index: int) -> Path:
         err = (proc.stderr or "").strip().splitlines()[-3:]
         detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
         raise HTTPException(status_code=500, detail=f"生成片段预览失败：{detail}")
+
+
+def _concat_preview_clip_parts(part_paths: list[Path], target: Path) -> None:
+    list_path = target.with_suffix(".concat.txt")
+
+    def _entry(path: Path) -> str:
+        text = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+        return f"file '{text}'"
+
+    list_path.write_text("\n".join(_entry(path) for path in part_paths) + "\n", encoding="utf-8")
+    cmd = [
+        _ffmpeg_cmd(),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=120, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=500, detail="合并片段预览超时，请稍后重试。") from exc
+    if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
+        err = (proc.stderr or "").strip().splitlines()[-3:]
+        detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
+        raise HTTPException(status_code=500, detail=f"合并片段预览失败：{detail}")
+
+
+def _preview_clip_video(
+    preview_id: str,
+    clip_index: int,
+    selected_indices: list[int] | None = None,
+    selected_segments: dict[str, list[int]] | None = None,
+    order: list[int] | None = None,
+    scope: str = "smart",
+    updated_at: float | None = None,
+) -> Path:
+    preview = _get_preview(preview_id)
+    if not preview or preview.get("status") != "ready":
+        raise HTTPException(status_code=404, detail="AI 选片预览不存在或尚未完成。")
+    raw_clips = list(preview.get("raw_clips") or [])
+    if clip_index < 0 or clip_index >= len(raw_clips):
+        raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
+
+    has_payload_draft = bool(selected_indices or selected_segments or order)
+    if has_payload_draft:
+        draft = _normalize_preview_selection_draft(
+            preview,
+            "mix" if scope == "mix" or preview.get("scope") == "mix" else "smart",
+            selected_indices or [],
+            selected_segments or {},
+            order=order or [],
+            updated_at=updated_at,
+        )
+        _store_preview(preview_id, selection_draft=draft)
+        if clip_index not in _clean_preview_int_list(draft.get("selected_indices") or [], len(raw_clips)):
+            raise HTTPException(status_code=400, detail="这个片段当前未选中，勾选后再预览。")
+    else:
+        draft = _preview_selection_draft(preview)
+
+    preview_parts = _preview_clip_parts_for_video(preview, clip_index, draft)
+    clip_infos = [_clip_public(clip_index, part) for part in preview_parts]
+    ranges: list[tuple[Path, float, float]] = []
+    total_duration = 0.0
+    source_sig_parts: list[str] = []
+    for info in clip_infos:
+        cut_video = _preview_clip_source(preview, info)
+        start = max(0.0, float(info.get("start") or 0.0))
+        end = max(start + 0.2, float(info.get("end") or start + 0.2))
+        duration = max(0.2, end - start)
+        ranges.append((cut_video, start, duration))
+        total_duration += duration
+        try:
+            cut_stat = cut_video.stat()
+            source_sig_parts.append(f"{cut_video.resolve()}|{cut_stat.st_size}|{int(cut_stat.st_mtime)}")
+        except Exception:
+            source_sig_parts.append(str(cut_video))
+    if total_duration > 90:
+        raise HTTPException(status_code=400, detail="片段过长，暂不支持在线预览。")
+
+    preview_dir = _safe_user_child("clip_previews", preview_id)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    source_sig = hashlib.md5("||".join(source_sig_parts).encode("utf-8", errors="ignore")).hexdigest()[:8]
+    selection_sig = _preview_clip_cache_signature(preview_parts, source_sig)
+    stamp = f"{clip_index}_{selection_sig}"
+    target = preview_dir / f"clip_{stamp}_{source_sig}.mp4"
+    if target.exists() and target.stat().st_size > 1000:
+        return target
+
+    if len(ranges) == 1:
+        cut_video, start, duration = ranges[0]
+        _render_preview_clip_range(cut_video, start, duration, target)
+        return target
+
+    part_paths: list[Path] = []
+    for part_index, (cut_video, start, duration) in enumerate(ranges):
+        part_target = preview_dir / f"clip_{stamp}_{source_sig}_part{part_index}.mp4"
+        if not part_target.exists() or part_target.stat().st_size <= 1000:
+            _render_preview_clip_range(cut_video, start, duration, part_target)
+        part_paths.append(part_target)
+    _concat_preview_clip_parts(part_paths, target)
     return target
 
 
@@ -3992,7 +4491,7 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
     scope = "mix"
     _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备混剪")
     try:
-        _ensure_feature_access("娣峰壀鎴愮墖")
+        _ensure_feature_access("混剪成片")
         from cutter_logic import process_video_mix
 
         paths = _existing_paths(payload.video_paths, "视频")
@@ -4034,7 +4533,7 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             emit_log("warning", "任务已停止。", scope)
             return
         _archive_used_pip(used_pip_file, scope)
-        _consume_trial("娣峰壀鎴愮墖", scope=scope)
+        _consume_trial("混剪成片", scope=scope)
         _set_task(task_id, status="completed", finished_at=time.time())
         emit_log("success", "混剪成片完成。", scope)
     except Exception as exc:
@@ -4057,7 +4556,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
     )
     emit_log("info", "混剪 AI 选片预览任务已启动。", scope)
     try:
-        _ensure_feature_access("娣峰壀鎴愮墖")
+        _ensure_feature_access("混剪成片")
         import cutter_logic as cutter_mod
         from cutter_logic import process_video_mix
 
@@ -4096,6 +4595,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         raw_clips = list(cutter_mod._multi_result_cache.get("clips") or [])
         if not raw_clips:
             raise RuntimeError("AI 没有选到可预览片段。")
+        mix_sources = [str(source) for source in list(cutter_mod._multi_result_cache.get("sources") or []) if str(source or "").strip()]
+        if not mix_sources:
+            mix_sources = [str(path) for path in paths]
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
@@ -4104,10 +4606,11 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             merge_mode=True,
             preferred_category=preferred_category,
         )
+        raw_clips = _attach_mix_sources_to_preview_clips(raw_clips, mix_sources)
         if category_summary:
             dedup_summary["category_summary"] = category_summary
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
-        public_clips = _preview_public_clips(raw_clips, srt_text)
+        public_clips = _preview_public_clips(raw_clips, srt_text, sources=mix_sources, merge_mode=True)
         _set_task_progress(task_id, 94, "生成预览列表")
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
@@ -4116,7 +4619,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             message=f"混剪 AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(paths[0]),
             video_name=paths[0].name,
-            sources=[str(path) for path in paths],
+            sources=mix_sources,
             target_duration=payload.duration,
             srt_text=srt_text,
             raw_clips=raw_clips,
@@ -4882,7 +5385,7 @@ def _manual_dedup_filters(video_options: dict[str, Any], audio_options: dict[str
         vf.append("pad=iw+40:ih+40:20:20:color=black")
         applied.append("bg_fill")
     if _bool(audio_options, "pitch"):
-        af.append("asetrate=44100*1.015,aresample=44100")
+        af.append("asetrate=44100*1.015,aresample=44100,atempo=0.985222")
         applied.append("audio_pitch")
     if _bool(audio_options, "reverb"):
         af.append("aecho=0.8:0.7:60:0.25")
@@ -5106,17 +5609,866 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
 
 
 def _live_segment_seconds(label: str) -> int:
-    return {"不限": 36000, "30分钟": 1800, "60分钟": 3600, "1小时": 3600, "120分钟": 7200, "2小时": 7200}.get(label, 36000)
+    text = str(label or "").strip()
+    aliases = {
+        "不限": 36000,
+        "10分钟": 600,
+        "15分钟": 900,
+        "30分钟": 1800,
+        "60分钟": 3600,
+        "1小时": 3600,
+        "120分钟": 7200,
+        "2小时": 7200,
+    }
+    if text in aliases:
+        return aliases[text]
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if match:
+        value = float(match.group(1))
+        if "小时" in text or "hour" in text.lower():
+            return max(1, int(value * 3600))
+        return max(1, int(value * 60))
+    return 36000
+
+
+def _bounded_seconds_from_minutes(value: Any, default_minutes: float, min_seconds: float, max_seconds: float) -> float:
+    try:
+        seconds = float(value) * 60
+    except Exception:
+        seconds = default_minutes * 60
+    return max(min_seconds, min(max_seconds, seconds))
+
+
+def _live_product_split_settings(payload: LiveRecPayload) -> dict[str, Any]:
+    product_hard_max_seconds = 15 * 60
+    min_seconds = _bounded_seconds_from_minutes(payload.product_min_minutes, 3.0, 30, product_hard_max_seconds)
+    max_seconds = _bounded_seconds_from_minutes(payload.product_max_minutes, 15.0, 60, product_hard_max_seconds)
+    if max_seconds < min_seconds:
+        max_seconds = min_seconds
+    default_seconds = _bounded_seconds_from_minutes(payload.product_default_minutes, 10.0, min_seconds, max_seconds)
+    return {
+        "default_seconds": default_seconds,
+        "min_seconds": min_seconds,
+        "max_seconds": max_seconds,
+        "switch_confirm_seconds": int(payload.product_switch_confirm_seconds or 0),
+        "head_seconds": int(payload.product_head_seconds or 0),
+        "tail_seconds": int(payload.product_tail_seconds or 0),
+    }
+
+
+def _fallback_live_product_segments(duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
+    duration = max(0.0, float(duration or 0))
+    if duration <= 0:
+        return []
+    segment_seconds = max(float(settings["min_seconds"]), min(float(settings["default_seconds"]), float(settings["max_seconds"])))
+    min_seconds = float(settings["min_seconds"])
+    head_seconds = float(settings["head_seconds"])
+    tail_seconds = float(settings["tail_seconds"])
+    segments: list[dict[str, Any]] = []
+    start = 0.0
+    while start < duration - 0.5:
+        end = min(duration, start + segment_seconds)
+        remainder = duration - end
+        if 0 < remainder < min_seconds:
+            end = duration
+        if end - start < min_seconds and segments:
+            segments[-1]["end"] = round(duration, 3)
+            segments[-1]["cut_end"] = round(duration, 3)
+            segments[-1]["duration"] = round(max(0.0, duration - float(segments[-1]["start"])), 3)
+            break
+        index = len(segments) + 1
+        cut_start = max(0.0, start - head_seconds)
+        cut_end = min(duration, end + tail_seconds)
+        segments.append(
+            {
+                "index": index,
+                "source": "duration_fallback",
+                "confidence": "fallback",
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "cut_start": round(cut_start, 3),
+                "cut_end": round(cut_end, 3),
+                "duration": round(max(0.0, end - start), 3),
+                "title": f"单品候选_{index:02d}",
+                "product_id": "",
+                "promotion_id": "",
+                "detail_url": "",
+            }
+        )
+        start = end
+    return segments
+
+
+def _live_product_segment_index(segment: dict[str, Any]) -> int:
+    try:
+        return max(1, int(segment.get("index") or 1))
+    except Exception:
+        return 1
+
+
+def _live_product_id_token(value: Any, max_chars: int = 32) -> str:
+    text = re.sub(r"\s+", "", str(value or "").strip())
+    text = re.sub(r"[^0-9A-Za-z_-]", "", text)
+    return text[:max_chars]
+
+
+def _live_product_naming_mode(payload: LiveRecPayload | None = None, mode: Any = "") -> str:
+    raw = str(mode or getattr(payload, "product_naming_mode", "") or "product_id").strip().lower()
+    if raw in {"product_name", "name", "title", "商品名称", "商品名"}:
+        return "product_name"
+    return "product_id"
+
+
+def _live_product_recording_stamp(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"(\d{8}_\d{6})", text)
+    if match:
+        return match.group(1)
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _live_product_segment_filename(
+    segment: dict[str, Any],
+    payload: LiveRecPayload | None = None,
+    recording_stamp: str = "",
+) -> str:
+    product_id = _live_product_id_token(segment.get("product_id"))
+    promotion_id = _live_product_id_token(segment.get("promotion_id"))
+    mode = _live_product_naming_mode(payload, segment.get("naming_mode"))
+    if segment.get("review_status") == "pending_user_confirm":
+        index = _live_product_segment_index(segment)
+        stamp = _live_product_recording_stamp(recording_stamp or segment.get("recording_stamp") or "")
+        return f"待确认_{stamp}_{index:02d}"
+    if mode == "product_id":
+        if product_id:
+            return product_id
+        if promotion_id:
+            return promotion_id
+    else:
+        stamp = _live_product_recording_stamp(recording_stamp or segment.get("recording_stamp") or "")
+        title = str(segment.get("title") or segment.get("product_title") or "").strip()
+        if not title or title in {product_id, promotion_id} or re.fullmatch(r"\d{8,}", title):
+            title = "未命名商品"
+        return f"{title}_{stamp}"
+    index = _live_product_segment_index(segment)
+    title = str(segment.get("title") or "单品候选").strip() or "单品候选"
+    return f"{_live_product_recording_stamp(recording_stamp or segment.get('recording_stamp') or '')}_{title}_{index:02d}"
+
+
+def _live_product_segment_naming_source(segment: dict[str, Any], payload: LiveRecPayload | None = None) -> str:
+    mode = _live_product_naming_mode(payload, segment.get("naming_mode"))
+    if mode == "product_name":
+        if segment.get("review_status") == "pending_user_confirm":
+            return "pending_user_confirm"
+        return "product_name_timestamp"
+    if _live_product_id_token(segment.get("product_id")):
+        return "auto_product_id"
+    if _live_product_id_token(segment.get("promotion_id")):
+        return "auto_promotion_id"
+    if segment.get("review_status") == "pending_user_confirm":
+        return "pending_user_confirm"
+    return "title"
+
+
+def _apply_live_product_segment_names(
+    segments: list[dict[str, Any]],
+    payload: LiveRecPayload | None = None,
+    recording_stamp: str = "",
+) -> None:
+    used: dict[str, int] = {}
+    mode = _live_product_naming_mode(payload)
+    stamp = _live_product_recording_stamp(recording_stamp)
+    for segment in segments:
+        segment["naming_mode"] = mode
+        segment["recording_stamp"] = stamp
+        stem = _clean_forbidden_title_text(_live_product_segment_filename(segment, payload, stamp), fallback="单品候选")
+        if stem in used:
+            used[stem] += 1
+            if mode != "product_id":
+                stem = f"{stem}_{used[stem]:02d}"
+        else:
+            used[stem] = 1
+        segment["filename_stem"] = stem
+        segment["naming_source"] = _live_product_segment_naming_source(segment, payload)
+
+
+def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
+    if not queue:
+        return {}
+    segments = list(queue.get("segments") or [])
+    bound = 0
+    pending = 0
+    for segment in segments:
+        has_bound_id = bool(segment.get("product_id") or segment.get("promotion_id"))
+        if segment.get("review_status") == "auto_bound" and has_bound_id:
+            bound += 1
+        elif segment.get("naming_source") in {"auto_product_id", "auto_promotion_id"} and has_bound_id:
+            bound += 1
+        if segment.get("review_status") == "pending_user_confirm" or segment.get("naming_source") == "pending_user_confirm":
+            pending += 1
+    return {
+        "active_product_changed": bool(queue.get("active_product_changed")),
+        "product_bound_segments": bound,
+        "product_pending_segments": pending,
+        "strong_signal_count": int(queue.get("strong_signal_count") or 0),
+        "candidate_signal_count": int(queue.get("candidate_signal_count") or 0),
+        "active_product_candidate_count": int(queue.get("active_product_candidate_count") or 0),
+        "status_2_candidate_count": int(queue.get("status_2_candidate_count") or 0),
+        "active_product_confirmed_count": int(queue.get("active_product_confirmed_count") or 0),
+        "active_product_rule_review_count": int(queue.get("active_product_rule_review_count") or 0),
+        "unresolved_reason": str(queue.get("unresolved_reason") or ""),
+        "recording_returncode": queue.get("recording_returncode"),
+    }
+
+
+def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveRecPayload) -> dict[str, Any]:
+    settings = _live_product_split_settings(payload)
+    info = _probe_video_info(str(output))
+    duration = float(info.get("duration") or 0)
+    if duration <= 0:
+        duration = min(float(_live_segment_seconds(payload.segment)), float(settings["default_seconds"]))
+    segments = _fallback_live_product_segments(duration, settings)
+    _apply_live_product_segment_names(segments, payload, output.stem)
+    created_at = datetime.now().isoformat(timespec="seconds")
+    queue = {
+        "version": 1,
+        "created_at": created_at,
+        "recording": str(output),
+        "recording_duration": round(duration, 3),
+        "mode": "duration_fallback",
+        "room_name": payload.room_name,
+        "room_url": payload.room_url,
+        "settings": settings,
+        "naming_mode": _live_product_naming_mode(payload),
+        "catalog": [],
+        "segments": segments,
+        "recording_log": str(output.with_suffix(".ffmpeg.log")),
+    }
+    timeline_path = output.with_suffix(".timeline.jsonl")
+    queue_path = output.with_suffix(".split_queue.json")
+    queue["timeline_path"] = str(timeline_path)
+    queue["queue_path"] = str(queue_path)
+    queue["clips_dir"] = str(room_dir)
+    with timeline_path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "recording", "created_at": created_at, "path": str(output), "duration": round(duration, 3)}, ensure_ascii=False) + "\n")
+        for segment in segments:
+            fh.write(json.dumps({"type": "segment", **segment}, ensure_ascii=False) + "\n")
+    queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+    return queue
+
+
+def _douyin_active_probe_script() -> Path:
+    candidates = [
+        TOOLS_DIR / "douyin_active_product_probe_poc.py",
+        WEB_DIR / "tools" / "douyin_active_product_probe_poc.py",
+        BUNDLE_DIR / "tools" / "douyin_active_product_probe_poc.py",
+        WEB_DIR.parent / "tools" / "douyin_active_product_probe_poc.py",
+        USER_UPDATE_ROOT / "tools" / "douyin_active_product_probe_poc.py",
+        Path(sys.executable).resolve().parent / "_internal" / "tools" / "douyin_active_product_probe_poc.py",
+        Path(sys.executable).resolve().parent / "tools" / "douyin_active_product_probe_poc.py",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("未找到抖音商品时间线探针脚本。请确认 tools/douyin_active_product_probe_poc.py 存在。")
+
+
+def _python_tool_command(script: Path) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--liveclipper-run-tool", str(script)]
+    return [sys.executable or "python", str(script)]
+
+
+def _normalize_live_stream_quality(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    for encoding in ("latin1", "cp1252"):
+        try:
+            repaired = text.encode(encoding).decode("utf-8")
+            if repaired and repaired != text:
+                text = repaired.strip()
+                break
+        except Exception:
+            pass
+    compact = re.sub(r"\s+", "", text).lower()
+    if not compact:
+        return fallback
+    if re.search(r"(2160|1440|4k|uhd)", compact):
+        return "原画"
+    if re.search(r"(1080|full[_-]?hd|fhd|蓝光|藍光|超清)", compact):
+        return "1080p"
+    if re.search(r"(720|hd|高清)", compact):
+        return "720p"
+    if re.search(r"(540|480|sd|标清|標清)", compact):
+        return "480p"
+    if re.search(r"(360|ld|low|低清)", compact):
+        return "低清"
+    if "原画" in text or "原畫" in text or "origin" in compact or "source" in compact:
+        return "原画"
+    if "未知" in text or "unknown" in compact:
+        return "未知清晰度"
+    if "自动" in text or "auto" in compact:
+        return "自动最高"
+    # Never surface mojibake in the quality chip; it is better to be explicit
+    # that the stream quality could not be named than to show broken Chinese.
+    if re.search(r"[\ufffd?]|锛|銆|鐨|璇|绋|鏅|浜|妫|棰|[ÃÂÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîï]", text):
+        return fallback or "未知清晰度"
+    return text
+
+
+def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    if timeline_path.exists():
+        with timeline_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if item.get("type") == "active_product_change":
+                    changes.append(item)
+    if not changes:
+        segments = _fallback_live_product_segments(duration, settings)
+        for segment in segments:
+            segment["source"] = "pending_user_confirm"
+            segment["confidence"] = "unresolved"
+            segment["reason"] = "active_product_unresolved"
+            segment["review_status"] = "pending_user_confirm"
+        return segments
+
+    head_seconds = float(settings["head_seconds"])
+    tail_seconds = float(settings["tail_seconds"])
+    min_seconds = float(settings["min_seconds"])
+    segment_seconds = max(min_seconds, min(float(settings["default_seconds"]), float(settings["max_seconds"])))
+    segments: list[dict[str, Any]] = []
+    sorted_changes = sorted(changes, key=lambda item: float(item.get("elapsed") or 0))
+    for index, change in enumerate(sorted_changes, start=1):
+        start = max(0.0, float(change.get("elapsed") or 0))
+        next_start = float(sorted_changes[index].get("elapsed") or duration) if index < len(sorted_changes) else duration
+        end = max(start, min(duration, next_start))
+        if end - start < min_seconds:
+            end = min(duration, start + min(float(settings["default_seconds"]), float(settings["max_seconds"])))
+        if end - start < 1:
+            continue
+        product = change.get("product") if isinstance(change.get("product"), dict) else {}
+        product_title = str(product.get("title") or product.get("name") or product.get("product_name") or "").strip()
+        bound_id = str(product.get("product_id") or product.get("promotion_id") or "").strip()
+        title = str(product_title or bound_id or f"单品候选_{index:02d}").strip() or f"单品候选_{index:02d}"
+        chunk_start = start
+        while chunk_start < end - 0.5:
+            chunk_end = min(end, chunk_start + segment_seconds)
+            remainder = end - chunk_end
+            if (
+                0 < remainder < min_seconds
+                and chunk_start > start
+                and segments
+                and segments[-1].get("source") == "active_product_change"
+                and abs(float(segments[-1].get("active_product_start") or -1) - start) < 0.01
+            ):
+                segments[-1]["end"] = round(end, 3)
+                segments[-1]["cut_end"] = round(min(duration, end + tail_seconds), 3)
+                segments[-1]["duration"] = round(max(0.0, end - float(segments[-1]["start"])), 3)
+                break
+            if 0 < remainder < min_seconds:
+                chunk_end = end
+            if chunk_end - chunk_start < 1:
+                break
+            segments.append(
+                {
+                    "index": len(segments) + 1,
+                    "source": "active_product_change",
+                    "confidence": change.get("confidence") or "",
+                    "reason": change.get("reason") or "",
+                    "review_status": "auto_bound",
+                    "start": round(chunk_start, 3),
+                    "end": round(chunk_end, 3),
+                    "cut_start": round(max(0.0, chunk_start - head_seconds), 3),
+                    "cut_end": round(min(duration, chunk_end + tail_seconds), 3),
+                    "duration": round(max(0.0, chunk_end - chunk_start), 3),
+                    "title": title[:80],
+                    "product_id": str(product.get("product_id") or ""),
+                    "promotion_id": str(product.get("promotion_id") or ""),
+                    "detail_url": str(product.get("detail_url") or ""),
+                    "evidence_source": change.get("source") or "",
+                    "active_product_start": round(start, 3),
+                    "active_product_end": round(end, 3),
+                    "chunked_by_duration": end - start > segment_seconds + 0.5,
+                }
+            )
+            chunk_start = chunk_end
+    return segments
+
+
+def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload: LiveRecPayload) -> dict[str, Any]:
+    summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+    output = Path(str(summary.get("recording_output") or ""))
+    if not output.exists() or output.stat().st_size < 1000:
+        raise RuntimeError("active_product_probe 未生成有效录制文件。")
+    settings = _live_product_split_settings(payload)
+    info = _probe_video_info(str(output))
+    duration = float(info.get("duration") or 0)
+    if duration <= 0:
+        duration = float(summary.get("duration_sec") or _live_segment_seconds(payload.segment))
+    timeline_path = Path(str(summary.get("timeline_path") or output.with_suffix(".timeline.jsonl")))
+    segments = _active_probe_segments_from_timeline(timeline_path, duration, settings)
+    _apply_live_product_segment_names(segments, payload, output.stem)
+    created_at = datetime.now().isoformat(timespec="seconds")
+    queue = {
+        "version": 2,
+        "created_at": created_at,
+        "recording": str(output),
+        "recording_duration": round(duration, 3),
+        "mode": "active_product_probe" if summary.get("active_product_changed") else "active_product_unresolved_fallback",
+        "room_name": payload.room_name,
+        "room_url": payload.room_url,
+        "settings": settings,
+        "naming_mode": _live_product_naming_mode(payload),
+        "catalog": [],
+        "segments": segments,
+        "probe_summary": str(summary_path),
+        "probe_report": str(summary.get("report_path") or ""),
+        "probe_events": str(summary.get("probe_path") or ""),
+        "probe_timeline": str(timeline_path),
+        "probe_review_segments": str(summary.get("review_segments_path") or ""),
+        "probe_catalog": str(summary.get("catalog_path") or ""),
+        "recording_log": str(summary.get("recording_log") or output.with_suffix(".ffmpeg.log")),
+        "stream_quality": _normalize_live_stream_quality(summary.get("stream_quality")),
+        "active_product_changed": bool(summary.get("active_product_changed")),
+        "strong_signal_count": int(summary.get("strong_signal_count") or 0),
+        "candidate_signal_count": int(summary.get("candidate_signal_count") or 0),
+        "active_product_candidate_count": int(summary.get("active_product_candidate_count") or 0),
+        "status_2_candidate_count": int(summary.get("status_2_candidate_count") or 0),
+        "active_product_confirmed_count": int(summary.get("active_product_confirmed_count") or 0),
+        "active_product_rule_review_count": int(summary.get("active_product_rule_review_count") or 0),
+        "unresolved_reason": summary.get("unresolved_reason") or "",
+        "recording_returncode": summary.get("recording_returncode"),
+    }
+    queue_path = output.with_suffix(".split_queue.json")
+    queue["timeline_path"] = str(timeline_path)
+    queue["queue_path"] = str(queue_path)
+    queue["clips_dir"] = str(room_dir)
+    queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+    return queue
+
+
+def _newest_active_probe_summary(room_dir: Path, since: float) -> Path | None:
+    summaries = [
+        path for path in room_dir.glob("*.probe_summary.json")
+        if path.stat().st_mtime >= since - 2
+    ]
+    if not summaries:
+        return None
+    summaries.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return summaries[0]
+
+
+def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return
+        except Exception:
+            pass
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _request_live_probe_stop(info: dict[str, Any]) -> bool:
+    proc = info.get("process")
+    stdin = info.get("stdin")
+    if not proc or proc.poll() is not None or not stdin:
+        return False
+    try:
+        stdin.write(LIVE_PROBE_STOP_NOTE + "\n")
+        stdin.flush()
+        return True
+    except Exception:
+        return False
+
+
+def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_dir: Path, name: str, scope: str) -> tuple[Path, dict[str, Any] | None, list[str]]:
+    script = _douyin_active_probe_script()
+    seconds = _live_segment_seconds(payload.segment)
+    started = time.time()
+    cmd = [
+        *_python_tool_command(script),
+        "--url",
+        payload.room_url.strip(),
+        "--seconds",
+        str(seconds),
+        "--stream-wait-seconds",
+        "60",
+        "--probe-interval",
+        "1",
+        "--output-dir",
+        str(room_dir),
+        "--room-name",
+        f"{name}_active_probe",
+        "--manual-markers",
+    ]
+    min_stream_quality = str(payload.min_stream_quality or "").strip()
+    if min_stream_quality:
+        cmd += ["--min-stream-quality", min_stream_quality]
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    _set_task_progress(task_id, 24, "启动抖音商品时间线探针")
+    emit_log("info", "使用 active_product_probe 录制：只接受当前讲解商品强信号，货架列表仅用于补全。", scope)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stdin=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    with _LIVE_LOCK:
+        _LIVE_PROCS[task_id] = {"process": proc, "output": "", "name": name, "stderr": "", "kind": "active_product_probe", "stdin": proc.stdin}
+    stop_requested = False
+    try:
+        if proc.stdout:
+            for line in proc.stdout:
+                text = line.strip()
+                if not text:
+                    continue
+                if "Starting ffmpeg recording" in text or "开始" in text:
+                    _set_task(task_id, recording_started_at=time.time())
+                    _set_task_progress(task_id, 35, "录制中，持续监控当前讲解商品")
+                elif "Selected stream quality:" in text:
+                    _set_task(task_id, stream_quality=_normalize_live_stream_quality(text.split("Selected stream quality:", 1)[-1].strip()))
+                elif "Probe summary" in text:
+                    _set_task_progress(task_id, 86, "整理商品时间线")
+                emit_log("info", f"{name}: {text}", scope)
+                if _is_task_cancelled(task_id):
+                    with _LIVE_LOCK:
+                        live_info = _LIVE_PROCS.get(task_id) or {}
+                    _request_live_probe_stop(live_info or {"process": proc, "stdin": proc.stdin})
+                    stop_requested = True
+                    _set_task(task_id, message="正在停止并整理已录内容", error="")
+                    break
+        if _is_task_cancelled(task_id) and stop_requested:
+            try:
+                rc = proc.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                emit_log("warning", f"{name}: 等待探针收尾超时，强制结束录制进程。", scope)
+                _terminate_process_tree(proc)
+                rc = proc.wait()
+        else:
+            rc = proc.wait()
+    finally:
+        with _LIVE_LOCK:
+            info = _LIVE_PROCS.get(task_id)
+            if info and info.get("process") is proc:
+                _LIVE_PROCS.pop(task_id, None)
+    was_cancelled = _is_task_cancelled(task_id)
+    summary_path = _newest_active_probe_summary(room_dir, started)
+    if was_cancelled and summary_path:
+        emit_log("info", f"{name}: 停止请求已收尾，继续保存已录内容并生成单品队列。", scope)
+    if rc != 0:
+        if summary_path:
+            emit_log("warning", f"{name}: active_product_probe 已写出报告但退出码异常 {rc}，将按已生成结果继续处理。", scope)
+        elif was_cancelled:
+            raise RuntimeError("录制已停止，未生成可回收的录制摘要。")
+        else:
+            raise RuntimeError(f"active_product_probe 录制失败，退出码 {rc}。")
+    if not summary_path:
+        if was_cancelled:
+            raise RuntimeError("录制已停止，未生成可回收的录制摘要。")
+        raise RuntimeError("active_product_probe 未生成 probe_summary.json。")
+    summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+    recording_rc = summary.get("recording_returncode")
+    if recording_rc not in (None, 0):
+        emit_log("warning", f"{name}: 录制进程异常结束，退出码 {recording_rc}，将尽量保留已写入内容。", scope)
+    if summary.get("stream_quality"):
+        _set_task(task_id, stream_quality=_normalize_live_stream_quality(summary.get("stream_quality")))
+    if not summary.get("stream_found") or not summary.get("recording_output"):
+        if summary.get("recording_blocked_reason") == "stream_quality_below_minimum":
+            selected_quality = _normalize_live_stream_quality(summary.get("stream_quality"), "未知清晰度")
+            min_quality = _normalize_live_stream_quality(summary.get("min_stream_quality") or payload.min_stream_quality, "自动最高")
+            raise RuntimeError(f"直播流清晰度未达到要求：当前捕获 {selected_quality}，最低要求 {min_quality}，未启动录制。")
+        raise RuntimeError("直播间未直播或未拿到直播流，未启动录制。")
+    queue = _write_active_probe_split_queue(summary_path, room_dir, payload)
+    output = Path(str(queue.get("recording") or ""))
+    report = queue.get("probe_report") or ""
+    if queue.get("active_product_changed"):
+        emit_log("success", f"{name}: 已捕获当前讲解商品强信号：{queue.get('strong_signal_count')} 条。", scope)
+    elif queue.get("active_product_candidate_count"):
+        emit_log("warning", f"{name}: 已捕获 {queue.get('active_product_candidate_count')} 个商品候选，但缺少二次佐证，已进入待确认。", scope)
+    else:
+        emit_log("warning", f"{name}: 未捕获当前讲解商品强信号，已生成待确认单品候选段，不绑定商品ID。", scope)
+    emit_log("success", f"{name}: 商品探针报告：{Path(report).name if report else summary_path.name}", scope)
+    return output, queue, []
+
+
+def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope: str) -> list[dict[str, Any]]:
+    segments = list(queue.get("segments") or [])
+    if not segments:
+        return []
+    from schedule_splitter import extract_by_schedule
+
+    clips_dir = Path(str(queue.get("clips_dir") or ""))
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    groups_by_name: dict[str, dict[str, Any]] = {}
+    for segment in segments:
+        title = _clean_forbidden_title_text(str(segment.get("filename_stem") or _live_product_segment_filename(segment)), fallback="单品候选")
+        segment["filename_stem"] = title
+        segment["naming_source"] = segment.get("naming_source") or _live_product_segment_naming_source(segment)
+        start = float(segment.get("cut_start") or segment.get("start") or 0)
+        end = float(segment.get("cut_end") or segment.get("end") or start)
+        if end - start < 1:
+            continue
+        group = groups_by_name.get(title)
+        if not group:
+            group = {
+                "name": title,
+                "product_id": segment.get("product_id") or "",
+                "promotion_id": segment.get("promotion_id") or "",
+                "detail_url": segment.get("detail_url") or "",
+                "naming_source": segment.get("naming_source") or "",
+                "exact_name": (
+                    segment.get("naming_mode") == "product_id"
+                    and segment.get("naming_source") in {"auto_product_id", "auto_promotion_id"}
+                ) or segment.get("naming_source") == "product_name_timestamp",
+                "flat_output": True,
+                "segments": [],
+                "total_duration": 0.0,
+            }
+            groups_by_name[title] = group
+        group["segments"].append((start, end))
+        group["total_duration"] = float(group.get("total_duration") or 0) + max(0.0, end - start)
+    groups = list(groups_by_name.values())
+    if not groups:
+        return []
+    _set_task_progress(task_id, 92, f"切出 {len(groups)} 个单品候选段")
+    return extract_by_schedule(
+        groups,
+        [str(queue.get("recording") or "")],
+        str(clips_dir),
+        ffmpeg=_ffmpeg_cmd(),
+        log_fn=_task_log_fn(task_id, scope, base=92, span=6),
+    )
+
+
+def _is_within_directory(path: Path, directory: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        base = directory.resolve()
+        return resolved == base or str(resolved).lower().startswith(str(base).lower() + os.sep)
+    except Exception:
+        return False
+
+
+def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]:
+    if not queue:
+        return []
+    paths: list[Path] = []
+    for key in (
+        "recording",
+        "timeline_path",
+        "queue_path",
+        "probe_summary",
+        "probe_report",
+        "probe_events",
+        "probe_timeline",
+        "probe_review_segments",
+        "probe_catalog",
+        "recording_log",
+    ):
+        raw = str(queue.get(key) or "").strip()
+        if raw:
+            paths.append(Path(raw))
+    recording = Path(str(queue.get("recording") or ""))
+    if str(recording):
+        for suffix in (
+            ".timeline.jsonl",
+            ".split_queue.json",
+            ".active_product_probe.jsonl",
+            ".probe_summary.json",
+            ".review_segments.json",
+            ".catalog.jsonl",
+            ".active_product_probe_report.md",
+            ".ffmpeg.log",
+        ):
+            paths.append(recording.with_suffix(suffix))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in paths:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _cleanup_live_product_intermediates(
+    queue: dict[str, Any] | None,
+    product_outputs: list[str],
+    room_dir: Path,
+    scope: str,
+    name: str,
+) -> list[str]:
+    if not queue or not product_outputs:
+        return []
+    keep = {
+        str(Path(path).resolve()).lower()
+        for path in product_outputs
+        if str(path or "").strip()
+    }
+    removed: list[str] = []
+    keep_debug = str(os.environ.get("LIVECLIPPER_KEEP_LIVE_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+    debug_dir = room_dir / ".liveclipper_debug"
+    for path in _live_product_intermediate_paths(queue):
+        try:
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if str(resolved).lower() in keep:
+                continue
+            if not _is_within_directory(resolved, room_dir):
+                continue
+            if keep_debug:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                target = debug_dir / resolved.name
+                if target.exists():
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    target = debug_dir / f"{resolved.stem}_{stamp}{resolved.suffix}"
+                shutil.move(str(resolved), str(target))
+                removed.append(str(target))
+            else:
+                resolved.unlink()
+                removed.append(str(resolved))
+        except Exception as exc:
+            emit_log("warning", f"{name}: 清理中间文件失败：{path.name}，{exc}", scope)
+    if removed:
+        action = "归档" if keep_debug else "删除"
+        emit_log("info", f"{name}: 已{action} {len(removed)} 个录制中间文件，直播间目录只保留单品视频。", scope)
+    return removed
+
+
+def _live_record_error_text(stderr_path: Path) -> str:
+    try:
+        if stderr_path.exists():
+            return stderr_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return ""
 
 
 def _resolve_live_url(url: str, scope: str) -> str:
-    if "douyin.com" in url and not url.endswith(".flv") and not url.endswith(".m3u8"):
+    url = _extract_url_from_text(url)
+    lower = url.lower()
+    is_douyin_page = "douyin.com" in lower or "webcast.amemv.com/douyin/webcast/reflow" in lower
+    if is_douyin_page and not lower.endswith(".flv") and not lower.endswith(".m3u8"):
         from douyin_stream import extract_live_url
 
         resolved = extract_live_url(url, log_fn=lambda msg: emit_log("info", msg, scope))
         if resolved:
             return resolved
+        raise RuntimeError("未解析到可用直播流。请确认直播间正在开播，或先点击“检测流地址”查看原因。")
     return url
+
+
+def _extract_url_from_text(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"https?://[^\s\"'<>，。；、]+", text)
+    if match:
+        return match.group(0).rstrip(".,;:，。；：")
+    match = re.search(r"(?:live|v)\.douyin\.com/[^\s\"'<>，。；、]+", text, re.I)
+    if match:
+        return "https://" + match.group(0).rstrip(".,;:，。；：")
+    return text
+
+
+def _live_room_task_key(value: Any) -> str:
+    text = _extract_url_from_text(value).strip()
+    if not text:
+        return ""
+    decoded = urllib.parse.unquote(text)
+    patterns = [
+        r"live\.douyin\.com/(\d+)",
+        r"webcast\.amemv\.com/douyin/webcast/reflow/(\d+)",
+        r"[?&]room_id=(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, decoded, re.I)
+        if match:
+            return f"douyin:{match.group(1)}"
+    parsed = urllib.parse.urlparse(decoded if re.match(r"https?://", decoded, re.I) else f"https://{decoded}")
+    host = (parsed.netloc or "").lower()
+    path = re.sub(r"/+$", "", parsed.path or "")
+    if host and path:
+        return f"{host}{path}".lower()
+    return re.sub(r"[?#].*$", "", decoded).rstrip("/").lower()
+
+
+def _find_running_live_record_task(room_url: Any) -> dict[str, Any] | None:
+    key = _live_room_task_key(room_url)
+    if not key:
+        return None
+    with _TASK_LOCK:
+        tasks = list(_TASKS.values())
+    for task in reversed(tasks):
+        if task.get("scope") != "live-rec" or task.get("title") != "直播录制":
+            continue
+        if task.get("status") not in {"queued", "running"}:
+            continue
+        if _live_room_task_key(task.get("live_room_url")) == key:
+            return dict(task)
+    return None
+
+
+def _resolve_douyin_short_page_url(url: str, scope: str = "live-rec") -> str:
+    text = str(url or "").strip()
+    if not re.search(r"https?://v\.douyin\.com/", text, re.I):
+        return text
+    request = urllib.request.Request(
+        text,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            resolved = str(response.geturl() or "").strip()
+    except Exception as exc:
+        emit_log("warning", f"抖音短链解析失败，将交给 Chrome 自动跳转：{exc}", scope)
+        return text
+    if resolved and resolved != text:
+        emit_log("info", f"已解析抖音短链：{resolved}", scope)
+        return resolved
+    return text
+
+
+def _should_use_douyin_active_probe(payload: LiveRecPayload, url: str) -> bool:
+    url = _extract_url_from_text(url)
+    lower = str(url or "").lower()
+    is_douyin_page = "douyin.com" in lower or "webcast.amemv.com/douyin/webcast/reflow" in lower
+    if not is_douyin_page:
+        return False
+    if lower.endswith((".flv", ".m3u8")) or ".flv?" in lower or ".m3u8?" in lower:
+        return False
+    return True
 
 
 def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
@@ -5126,7 +6478,9 @@ def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
         url = (payload.room_url or "").strip()
         if not url:
             raise ValueError("请填写直播间地址。")
-        resolved = _resolve_live_url(url, scope)
+        payload.room_url = _resolve_douyin_short_page_url(_extract_url_from_text(url), scope)
+        _set_task(task_id, live_room_url=payload.room_url)
+        resolved = _resolve_live_url(payload.room_url, scope)
         _set_task_progress(task_id, 65, "验证直播流")
         proc = subprocess.run([_ffprobe_cmd(), "-v", "quiet", "-show_streams", "-of", "json", resolved], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         if proc.returncode != 0:
@@ -5142,36 +6496,218 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
     scope = "live-rec"
     _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备直播录制")
     try:
-        _ensure_feature_access("鐩存挱褰曞埗")
+        _ensure_feature_access("直播录制")
         url = (payload.room_url or "").strip()
         if not url:
             raise ValueError("请填写直播间地址。")
-        stream_url = _resolve_live_url(url, scope)
-        _set_task_progress(task_id, 24, "解析直播流")
-        save_dir = _clean_path(payload.save_dir) if payload.save_dir.strip() else Path.home() / "Videos" / "鐩存挱褰曞埗"
+        payload.room_url = _resolve_douyin_short_page_url(_extract_url_from_text(url), scope)
+        _set_task(task_id, live_room_url=payload.room_url)
+        url = payload.room_url
+        save_dir = _clean_path(payload.save_dir) if payload.save_dir.strip() else Path.home() / "Videos" / "直播录制"
         name = _safe_stem(payload.room_name or "live")
         room_dir = save_dir / name
         room_dir.mkdir(parents=True, exist_ok=True)
-        output = room_dir / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.flv"
-        cmd = [_ffmpeg_cmd(), "-y", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "30", "-i", stream_url, "-c", "copy", "-t", str(_live_segment_seconds(payload.segment)), str(output)]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with _LIVE_LOCK:
-            _LIVE_PROCS[task_id] = {"process": proc, "output": str(output), "name": name}
-        _set_task_progress(task_id, 35, "录制中")
-        emit_log("success", f"开始录制：{name}", scope)
-        rc = proc.wait()
-        size = output.stat().st_size if output.exists() else 0
-        if rc != 0 or size < 1000:
-            raise RuntimeError("录制进程结束但未生成有效文件。")
-        if _is_task_cancelled(task_id):
-            emit_log("warning", "任务已停止。", scope)
+        if _should_use_douyin_active_probe(payload, url):
+            rolling_seconds = _live_segment_seconds(payload.segment)
+            rolling_enabled = rolling_seconds < _live_segment_seconds("不限")
+            cycle_index = 0
+            completed_cycles = 0
+            consumed_trial = False
+            recording_outputs: list[str] = []
+            product_outputs: list[str] = []
+            last_output: Path | None = None
+            last_queue: dict[str, Any] | None = None
+            while not _is_task_cancelled(task_id):
+                cycle_index += 1
+                _set_task(task_id, status="running", progress=18, message=f"准备第 {cycle_index} 段直播录制")
+                emit_log("info", f"{name}: 开始第 {cycle_index} 段录制。", scope)
+                try:
+                    output, product_queue, _ = _run_douyin_active_probe_record(task_id, payload, room_dir, name, scope)
+                except Exception as cycle_exc:
+                    if _is_task_cancelled(task_id):
+                        break
+                    if recording_outputs and re.search(r"未直播|未拿到直播流|未生成 probe_summary|no_stream", str(cycle_exc), re.I):
+                        emit_log("warning", f"{name}: 继续录制时直播已不可用，已保留前 {len(recording_outputs)} 段。", scope)
+                        break
+                    raise
+                last_output = output
+                last_queue = product_queue
+                recording_outputs.append(str(output))
+                completed_cycles += 1
+                size = output.stat().st_size if output.exists() else 0
+                cycle_product_outputs: list[str] = []
+                if payload.product_auto_cut and product_queue:
+                    split_results = _export_live_product_split_queue(task_id, product_queue, scope)
+                    cycle_product_outputs = [
+                        str(item.get("output_path") or "")
+                        for item in split_results
+                        if item.get("output_path") and Path(str(item.get("output_path"))).is_file()
+                    ]
+                    product_outputs.extend(cycle_product_outputs)
+                    if cycle_product_outputs:
+                        emit_log("success", f"{name}: 第 {cycle_index} 段自动分割完成：导出 {len(cycle_product_outputs)} 个单品候选段。", scope)
+                        _cleanup_live_product_intermediates(product_queue, cycle_product_outputs, room_dir, scope, name)
+                    else:
+                        emit_log("warning", f"{name}: 第 {cycle_index} 段未导出有效片段，请检查队列时长和源视频。", scope)
+                if not consumed_trial:
+                    _consume_trial("直播录制", scope=scope)
+                    consumed_trial = True
+                product_stats = _live_product_queue_stats(product_queue)
+                partial_payload: dict[str, Any] = {
+                    "output": str(output),
+                    "recording_outputs": recording_outputs,
+                    "rolling_cycle_count": completed_cycles,
+                    "product_timeline": product_queue.get("timeline_path") if product_queue else "",
+                    "product_split_queue": product_queue.get("queue_path") if product_queue else "",
+                    "product_segments": len(product_queue.get("segments") or []) if product_queue else 0,
+                    "product_clips_dir": product_queue.get("clips_dir") if product_queue else "",
+                    "probe_summary": product_queue.get("probe_summary") if product_queue else "",
+                    "probe_report": product_queue.get("probe_report") if product_queue else "",
+                    "stream_quality": _normalize_live_stream_quality(product_queue.get("stream_quality")) if product_queue else "",
+                    **product_stats,
+                }
+                if product_outputs:
+                    partial_payload["outputs"] = product_outputs
+                    partial_payload["result_count"] = len(product_outputs)
+                _set_task(task_id, **partial_payload)
+                emit_log("success", f"{name}: 第 {cycle_index} 段录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
+                if not rolling_enabled:
+                    break
+                if _is_task_cancelled(task_id):
+                    break
+                _set_task(task_id, status="running", progress=35, message=f"第 {cycle_index} 段完成，继续录制下一段")
+                emit_log("info", f"{name}: 第 {cycle_index} 段已处理完成，继续录制下一段。", scope)
+                with _LIVE_LOCK:
+                    _LIVE_PROCS[task_id] = {"process": None, "output": str(output), "name": name, "stderr": "", "kind": "active_product_probe_rolling"}
+                time.sleep(1.0)
+            if _is_task_cancelled(task_id):
+                message = f"录制已停止，已保留 {len(recording_outputs)} 段录制文件。"
+                result_payload = {
+                    "status": "cancelled",
+                    "finished_at": time.time(),
+                    "message": message,
+                    "output": str(last_output) if last_output else "",
+                    "recording_outputs": recording_outputs,
+                    "rolling_cycle_count": completed_cycles,
+                }
+                if product_outputs:
+                    result_payload["outputs"] = product_outputs
+                    result_payload["result_count"] = len(product_outputs)
+                _set_task(task_id, **result_payload)
+                emit_log("warning", message, scope)
+                return
+            if not last_output:
+                raise RuntimeError("直播录制未生成有效文件。")
+            final_payload: dict[str, Any] = {
+                "status": "completed",
+                "finished_at": time.time(),
+                "output": str(last_output),
+                "recording_outputs": recording_outputs,
+                "rolling_cycle_count": completed_cycles,
+            }
+            if last_queue:
+                final_payload.update(
+                    {
+                        "product_timeline": last_queue.get("timeline_path"),
+                        "product_split_queue": last_queue.get("queue_path"),
+                        "product_segments": len(last_queue.get("segments") or []),
+                        "product_clips_dir": last_queue.get("clips_dir"),
+                        "probe_summary": last_queue.get("probe_summary"),
+                        "probe_report": last_queue.get("probe_report"),
+                        "stream_quality": _normalize_live_stream_quality(last_queue.get("stream_quality")),
+                        **_live_product_queue_stats(last_queue),
+                    }
+                )
+            if product_outputs:
+                final_payload["outputs"] = product_outputs
+                final_payload["result_count"] = len(product_outputs)
+            _set_task(task_id, **final_payload)
+            emit_log("success", f"{name}: 录制完成：共 {len(recording_outputs)} 段录制文件。", scope)
             return
-        _consume_trial("鐩存挱褰曞埗", scope=scope)
-        _set_task(task_id, status="completed", finished_at=time.time(), output=str(output))
-        emit_log("success", f"录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
+        stream_url = _resolve_live_url(url, scope)
+        _set_task_progress(task_id, 24, "解析直播流")
+        output = room_dir / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.flv"
+        stderr_path = output.with_suffix(".ffmpeg.log")
+        cmd = [_ffmpeg_cmd(), "-y"]
+        if str(stream_url).lower().startswith(("http://", "https://")):
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "30"]
+        cmd += ["-i", stream_url, "-c", "copy", "-t", str(_live_segment_seconds(payload.segment)), str(output)]
+        stderr_file = stderr_path.open("wb")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        with _LIVE_LOCK:
+            _LIVE_PROCS[task_id] = {"process": proc, "output": str(output), "name": name, "stderr": str(stderr_path)}
+        _set_task_progress(task_id, 35, "录制中")
+        emit_log("success", f"{name}: 开始录制", scope)
+        try:
+            rc = proc.wait()
+        finally:
+            try:
+                stderr_file.close()
+            except Exception:
+                pass
+        size = output.stat().st_size if output.exists() else 0
+        if _is_task_cancelled(task_id):
+            message = f"录制已停止，已保留文件：{output.name} ({size / 1024 / 1024:.1f}MB)" if size >= 1000 else "录制已停止，未生成有效文件。"
+            _set_task(task_id, status="cancelled", finished_at=time.time(), output=str(output) if size >= 1000 else "", message=message)
+            emit_log("warning", message, scope)
+            return
+        if rc != 0 or size < 1000:
+            stderr_text = _live_record_error_text(stderr_path)
+            detail = _short_error(stderr_text)
+            hint = _solution_for_error(stderr_text)
+            raise RuntimeError(f"录制进程结束但未生成有效文件：{detail}。解决办法：{hint}。日志：{stderr_path}")
+        product_queue: dict[str, Any] | None = None
+        product_outputs: list[str] = []
+        if payload.product_split_enabled:
+            try:
+                _set_task_progress(task_id, 88, "生成单品分段队列")
+                product_queue = _write_live_product_split_queue(output, room_dir, payload)
+                emit_log("success", f"{name}: 已生成单品时间线：{Path(product_queue['timeline_path']).name}", scope)
+                emit_log("success", f"{name}: 已生成待切割队列：{Path(product_queue['queue_path']).name}", scope)
+                if payload.product_auto_cut:
+                    split_results = _export_live_product_split_queue(task_id, product_queue, scope)
+                    product_outputs = [
+                        str(item.get("output_path") or "")
+                        for item in split_results
+                        if item.get("output_path") and Path(str(item.get("output_path"))).is_file()
+                    ]
+                    if product_outputs:
+                        emit_log("success", f"{name}: 录后自动分割完成：导出 {len(product_outputs)} 个单品候选段。", scope)
+                        _cleanup_live_product_intermediates(product_queue, product_outputs, room_dir, scope, name)
+                    else:
+                        emit_log("warning", f"{name}: 录后自动分割未导出有效片段，请检查队列时长和源视频。", scope)
+            except Exception as split_exc:
+                emit_log("warning", f"{name}: 录制完成，但单品分段队列生成失败：{split_exc}", scope)
+        _consume_trial("直播录制", scope=scope)
+        result_payload: dict[str, Any] = {"status": "completed", "finished_at": time.time(), "output": str(output)}
+        if product_queue:
+            result_payload.update(
+                {
+                    "product_timeline": product_queue.get("timeline_path"),
+                    "product_split_queue": product_queue.get("queue_path"),
+                    "product_segments": len(product_queue.get("segments") or []),
+                    "product_clips_dir": product_queue.get("clips_dir"),
+                    "stream_quality": _normalize_live_stream_quality(product_queue.get("stream_quality")),
+                    **_live_product_queue_stats(product_queue),
+                }
+            )
+        if product_outputs:
+            result_payload["outputs"] = product_outputs
+            result_payload["result_count"] = len(product_outputs)
+        _set_task(task_id, **result_payload)
+        emit_log("success", f"{name}: 录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
     except Exception as exc:
-        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
-        emit_log("error", f"直播录制失败：{exc}", scope)
+        if _is_task_cancelled(task_id):
+            _set_task(task_id, status="cancelled", finished_at=time.time(), error="", message="直播录制已停止。")
+            emit_log("warning", "直播录制已停止。", scope)
+        else:
+            _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+            emit_log("error", f"直播录制失败：{exc}", scope)
     finally:
         with _LIVE_LOCK:
             _LIVE_PROCS.pop(task_id, None)
@@ -5179,23 +6715,89 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
 
 def _stop_live_all() -> int:
     stopped = 0
+    graceful_probe_stops = 0
     with _LIVE_LOCK:
         items = list(_LIVE_PROCS.items())
     for task_id, info in items:
+        with _TASK_LOCK:
+            _CANCELLED_TASKS.add(task_id)
+            event = _TASK_CANCEL_EVENTS.get(task_id)
+            if event:
+                event.set()
         proc = info.get("process")
+        if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
+            graceful_probe_stops += 1
+            stopped += 1
+            continue
         if proc and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _terminate_process_tree(proc)
             stopped += 1
         with _LIVE_LOCK:
             _LIVE_PROCS.pop(task_id, None)
+    if graceful_probe_stops == 0:
+        stopped += _stop_orphan_active_probe_processes()
     return stopped
+
+
+def _stop_live_task_process(task_id: str) -> int:
+    stopped = 0
+    with _LIVE_LOCK:
+        info = _LIVE_PROCS.get(task_id)
+    if not info:
+        return 0
+    proc = info.get("process")
+    if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
+        return 1
+    if proc and proc.poll() is None:
+        _terminate_process_tree(proc)
+        stopped += 1
+    with _LIVE_LOCK:
+        _LIVE_PROCS.pop(task_id, None)
+    return stopped
+
+
+def _stop_orphan_active_probe_processes() -> int:
+    if os.name != "nt":
+        return 0
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match 'python|ffmpeg' -and "
+        "($_.CommandLine -match 'douyin_active_product_probe_poc.py' -or $_.CommandLine -match '_active_probe_') } | "
+        "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; 1 } catch {} }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return sum(1 for line in result.stdout.splitlines() if line.strip() == "1")
+    except Exception:
+        return 0
+
+
+def _mark_live_product_switch(note: str = "") -> int:
+    marked = 0
+    marker_note = note.strip() or f"manual marker from LiveClipper UI {datetime.now().isoformat(timespec='seconds')}"
+    with _LIVE_LOCK:
+        items = list(_LIVE_PROCS.items())
+    for _task_id, info in items:
+        if info.get("kind") != "active_product_probe":
+            continue
+        proc = info.get("process")
+        stdin = info.get("stdin")
+        if not proc or proc.poll() is not None or not stdin:
+            continue
+        try:
+            stdin.write(marker_note + "\n")
+            stdin.flush()
+            marked += 1
+        except Exception:
+            continue
+    return marked
 
 
 def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
@@ -5293,7 +6895,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取混剪预览片段")
     emit_log("info", "使用混剪 AI 选片预览开始成片。", scope)
     try:
-        _ensure_feature_access("娣峰壀鎴愮墖")
+        _ensure_feature_access("混剪成片")
         preview = _get_preview(payload.preview_id)
         if not preview or preview.get("status") != "ready":
             raise RuntimeError("混剪选片预览不存在或尚未完成。")
@@ -5428,7 +7030,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             emit_log("warning", "任务已停止。", scope)
             return
         _archive_used_pip(used_pip_file, scope)
-        _consume_trial("娣峰壀鎴愮墖", scope=scope)
+        _consume_trial("混剪成片", scope=scope)
         _set_task(task_id, status="completed", finished_at=time.time(), output=str(output_path))
         emit_log("success", f"预览混剪完成：{output_path}", scope)
     except Exception as exc:
@@ -5867,11 +7469,11 @@ def export_ai_feedback() -> FileResponse:
 def import_ai_feedback(payload: AiFeedbackImportPayload) -> dict[str, Any]:
     source = Path(str(payload.path or "").strip().strip('"'))
     if not str(source):
-        raise HTTPException(status_code=400, detail="请先选择要导入的喜好库文件。")
+        raise HTTPException(status_code=400, detail="请先选择要导入的剪辑风格画像数据文件。")
     result = _preview_feedback_merge_import(source)
     emit_log(
         "success",
-        f"用户喜好库导入完成：新增 {result['added_count']} 条，跳过重复 {result['skipped_count']} 条。",
+        f"剪辑风格画像数据导入完成：新增 {result['added_count']} 条，跳过重复 {result['skipped_count']} 条。",
         "settings",
     )
     return {"ok": True, **result, **_preview_feedback_stats()}
@@ -5882,7 +7484,7 @@ def delete_ai_feedback_sample(payload: AiFeedbackDeletePayload) -> dict[str, Any
     result = _preview_feedback_delete_sample(payload.role, payload.text)
     emit_log(
         "success",
-        f"用户喜好库已删除样本：{result['removed_count']} 条匹配记录。",
+        f"剪辑风格画像已删除样本：{result['removed_count']} 条匹配记录。",
         "settings",
     )
     return {"ok": True, **result, **_preview_feedback_stats(), "samples": _preview_feedback_samples()}
@@ -5891,7 +7493,7 @@ def delete_ai_feedback_sample(payload: AiFeedbackDeletePayload) -> dict[str, Any
 @app.post("/api/ai-feedback/clear")
 def clear_ai_feedback() -> dict[str, Any]:
     result = _preview_feedback_clear()
-    emit_log("warning", "用户喜好库已清空。", "settings")
+    emit_log("warning", "剪辑风格画像学习数据已清空。", "settings")
     return {"ok": True, **result, **_preview_feedback_stats(), "samples": []}
 
 
@@ -6160,6 +7762,12 @@ def stop_scope(payload: StopScopePayload) -> dict[str, Any]:
     return {"ok": True, "message": f"已停止（{stopped} 个任务）", "stopped": stopped}
 
 
+@app.post("/api/tasks/stop")
+def stop_task(payload: StopTaskPayload) -> dict[str, Any]:
+    stopped = _cancel_task(payload.task_id)
+    return {"ok": True, "message": "已停止当前任务" if stopped else "当前没有正在运行的任务", "stopped": stopped}
+
+
 @app.get("/api/scan-results")
 def scan_results() -> dict[str, Any]:
     with _SCAN_LOCK:
@@ -6302,7 +7910,15 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
 def smart_preview_clip_video(payload: SmartPreviewClipPayload) -> dict[str, Any]:
     if not payload.preview_id.strip():
         raise HTTPException(status_code=400, detail="请先生成 AI 选片预览。")
-    path = _preview_clip_video(payload.preview_id.strip(), payload.clip_index)
+    path = _preview_clip_video(
+        payload.preview_id.strip(),
+        payload.clip_index,
+        selected_indices=payload.selected_indices,
+        selected_segments=payload.selected_segments,
+        order=payload.order,
+        scope="smart",
+        updated_at=payload.updated_at,
+    )
     return {
         "ok": True,
         "url": f"/api/smart-cut/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?t={int(path.stat().st_mtime)}",
@@ -6317,11 +7933,11 @@ def get_smart_preview_clip_video(preview_id: str, clip_index: int) -> FileRespon
 
 @app.post("/api/mix/start")
 def start_mix(payload: MixPayload) -> dict[str, Any]:
-    _ensure_scope_idle("mix", "娣峰壀鎴愮墖")
+    _ensure_scope_idle("mix", "混剪成片")
     _raise_preflight_errors("mix", payload)
     if not [path.strip() for path in payload.video_paths if path.strip()]:
         raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
-    task_id = _new_task("mix", "娣峰壀鎴愮墖")
+    task_id = _new_task("mix", "混剪成片")
     threading.Thread(target=_run_mix, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "混剪任务已启动。"}
 
@@ -6385,11 +8001,25 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
 def mix_preview_clip_video(payload: SmartPreviewClipPayload) -> dict[str, Any]:
     if not payload.preview_id.strip():
         raise HTTPException(status_code=400, detail="请先生成混剪 AI 选片预览。")
-    path = _preview_clip_video(payload.preview_id.strip(), payload.clip_index)
+    path = _preview_clip_video(
+        payload.preview_id.strip(),
+        payload.clip_index,
+        selected_indices=payload.selected_indices,
+        selected_segments=payload.selected_segments,
+        order=payload.order,
+        scope="mix",
+        updated_at=payload.updated_at,
+    )
     return {
         "ok": True,
-        "url": f"/api/smart-cut/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?t={int(path.stat().st_mtime)}",
+        "url": f"/api/mix/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?t={int(path.stat().st_mtime)}",
     }
+
+
+@app.get("/api/mix/preview/clip-video/{preview_id}/{clip_index}")
+def get_mix_preview_clip_video(preview_id: str, clip_index: int) -> FileResponse:
+    path = _preview_clip_video(preview_id, clip_index, scope="mix")
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 
 @app.post("/api/ai-scan/start")
@@ -6498,7 +8128,8 @@ def check_dedup(payload: DedupPayload) -> dict[str, Any]:
 @app.post("/api/live-rec-detect/start")
 def start_live_detect(payload: LiveRecPayload) -> dict[str, Any]:
     _raise_preflight_errors("live-rec-detect", payload)
-    task_id = _new_task("live-rec", "棢测直播流")
+    task_id = _new_task("live-rec", "检测直播流")
+    _set_task(task_id, live_room_name=payload.room_name, live_room_url=_extract_url_from_text(payload.room_url), live_platform=payload.platform)
     threading.Thread(target=_run_live_detect, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "直播流检测已启动"}
 
@@ -6506,9 +8137,31 @@ def start_live_detect(payload: LiveRecPayload) -> dict[str, Any]:
 @app.post("/api/live-rec-monitor/start")
 def start_live_monitor(payload: LiveRecPayload) -> dict[str, Any]:
     _raise_preflight_errors("live-rec-monitor", payload)
-    task_id = _new_task("live-rec", "鐩存挱褰曞埗")
+    scope = "live-rec"
+    resolved_url = _resolve_douyin_short_page_url(_extract_url_from_text(payload.room_url), scope)
+    payload.room_url = resolved_url
+    existing = _find_running_live_record_task(resolved_url)
+    if existing:
+        room_name = payload.room_name or existing.get("live_room_name") or "直播间"
+        emit_log("warning", f"{room_name}: 已有录制任务正在运行，已复用当前任务，未重复打开浏览器。", scope)
+        return {
+            "ok": True,
+            "task_id": existing.get("id") or "",
+            "room_name": existing.get("live_room_name") or payload.room_name,
+            "room_url": existing.get("live_room_url") or resolved_url,
+            "reused": True,
+            "message": "这个直播间已经在录制中，已复用现有任务。",
+        }
+    task_id = _new_task("live-rec", "直播录制")
+    _set_task(task_id, live_room_name=payload.room_name, live_room_url=resolved_url, live_platform=payload.platform)
     threading.Thread(target=_run_live_record, args=(task_id, payload), daemon=True).start()
-    return {"ok": True, "task_id": task_id, "message": "直播录制任务已启动。"}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "room_name": payload.room_name,
+        "room_url": resolved_url,
+        "message": "直播录制任务已启动。",
+    }
 
 
 @app.post("/api/live-rec-delete-all/start")
@@ -6518,10 +8171,20 @@ def live_stop_all(payload: LiveRecPayload | None = None) -> dict[str, Any]:
     return {"ok": True, "message": f"已停止 {stopped} 个录制进程。"}
 
 
+@app.post("/api/live-rec-marker/start")
+def live_mark_product_switch(payload: LiveRecPayload | None = None) -> dict[str, Any]:
+    marked = _mark_live_product_switch()
+    if marked:
+        emit_log("success", f"已标记 {marked} 个录制任务的换品观察点。", "live-rec")
+        return {"ok": True, "message": f"已标记 {marked} 个换品观察点。"}
+    emit_log("warning", "当前没有可标记的 active_product_probe 录制任务。", "live-rec")
+    return {"ok": False, "message": "当前没有可标记的商品探针录制任务。"}
+
+
 @app.post("/api/{feature}/start")
 def start_placeholder(feature: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     names = {
-        "mix": "娣峰壀鎴愮墖",
+        "mix": "混剪成片",
         "ai-scan-merge": "AI 扫描跨文件合并",
         "ai-scan-export": "AI扫描导出选中单品",
         "ai-scan-export-merge": "AI扫描导出合并结果",
@@ -6530,10 +8193,11 @@ def start_placeholder(feature: str, payload: dict[str, Any] | None = None) -> di
         "product-scan": "单品扫描",
         "dedup": "创作辅助",
         "dedup-check": "创作辅助查重",
-        "live-rec-monitor": "鐩存挱褰曞埗鐩戞帶",
+        "live-rec-monitor": "直播录制",
         "live-rec-detect": "直播录制检测流地址",
         "live-rec-delete-all": "直播录制删除全部",
-        "live-rec": "鐩存挱褰曞埗",
+        "live-rec-marker": "直播录制换品标记",
+        "live-rec": "直播录制",
     }
     label = names.get(feature, feature)
     scope = feature

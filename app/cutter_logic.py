@@ -433,11 +433,16 @@ def _is_ts_like_video(video_path):
 
 
 def _append_seek_input_args(cmd, video_path, start, accurate=False):
+    try:
+        start_value = max(0.0, float(start))
+    except Exception:
+        start_value = 0.0
     if _is_ts_like_video(video_path):
         cmd += ["-fflags", "+genpts"]
-    # Keep seek before input. Output-side -ss runs after filters such as setpts/atrim;
-    # with reset timestamps it can discard the whole clip and produce an empty MP4.
-    cmd += ["-ss", f"{float(start):.3f}", "-i", video_path]
+    # Keep final exports on the stable 2026.6.26.2 seek path. The small online
+    # preview has its own precise renderer; using output-side -ss here can trim
+    # preview-selected sub-sentences after filters and cause tail words to drop.
+    cmd += ["-ss", f"{start_value:.3f}", "-i", video_path]
     return cmd
 
 
@@ -796,7 +801,7 @@ def _manual_dedup_filters(video_options=None, audio_options=None):
         vf_list.append("pad=iw+40:ih+40:20:20:color=black")
         applied.append("bg_fill")
     if _bool_option(audio_options, "pitch"):
-        af_list.append("asetrate=44100*1.015,aresample=44100")
+        af_list.append("asetrate=44100*1.015,aresample=44100,atempo=0.985222")
         applied.append("audio_pitch")
     if _bool_option(audio_options, "reverb"):
         af_list.append("aecho=0.8:0.7:60:0.25")
@@ -2508,10 +2513,14 @@ def process_video(video_path, srt_path=None, output_path=None,
             _clip_audio_fade = min(CLIP_AUDIO_FADE_SECONDS, max(0.0, clip_duration / 3))
             _fade_out_start = max(0.0, clip_duration - _clip_audio_fade)
             _audio_filter = (
-                f"atrim=0:{clip_duration:.3f},asetpts=PTS-STARTPTS,"
-                "aresample=async=1:first_pts=0,"
-                f"afade=t=in:st=0:d={_clip_audio_fade:.3f},"
-                f"afade=t=out:st={_fade_out_start:.3f}:d={_clip_audio_fade:.3f}"
+                "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0"
+                if _preview_exact
+                else (
+                    f"atrim=0:{clip_duration:.3f},asetpts=PTS-STARTPTS,"
+                    "aresample=async=1:first_pts=0,"
+                    f"afade=t=in:st=0:d={_clip_audio_fade:.3f},"
+                    f"afade=t=out:st={_fade_out_start:.3f}:d={_clip_audio_fade:.3f}"
+                )
             )
             _log("[T] VF: " + combined_vf[:200])
 
@@ -5076,10 +5085,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _mix_audio_fade = min(CLIP_AUDIO_FADE_SECONDS, max(0.0, duration / 3))
         _mix_fade_out_start = max(0.0, duration - _mix_audio_fade)
         _mix_audio_filter = (
-            f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS,"
-            "aresample=async=1:first_pts=0,"
-            f"afade=t=in:st=0:d={_mix_audio_fade:.3f},"
-            f"afade=t=out:st={_mix_fade_out_start:.3f}:d={_mix_audio_fade:.3f}"
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0"
+            if preview_exact
+            else (
+                f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS,"
+                "aresample=async=1:first_pts=0,"
+                f"afade=t=in:st=0:d={_mix_audio_fade:.3f},"
+                f"afade=t=out:st={_mix_fade_out_start:.3f}:d={_mix_audio_fade:.3f}"
+            )
         )
 
         cmd = [ffmpeg, "-y"]

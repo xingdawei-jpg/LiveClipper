@@ -1,6 +1,7 @@
 const state = {
   page: "smart-cut",
   settingsTab: "ai",
+  liveRecTab: "rooms",
   smartPreview: null,
   mixPreview: null,
   diagnosticsVisible: false,
@@ -13,6 +14,10 @@ const state = {
   previewDrafts: {},
   previewDraftSaveTimers: {},
   previewDetailSelection: { smart: null, mix: null },
+  liveRooms: [],
+  liveRoomFilter: "all",
+  liveRoomSearch: "",
+  liveRoomPlatform: "all",
   update: {
     checked: false,
     checking: false,
@@ -23,6 +28,7 @@ const state = {
     error: "",
   },
   runtime: null,
+  liveRoomActivity: {},
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
   logs: {
@@ -64,6 +70,7 @@ const settingFields = {
   hardware_encoder_enabled: "s-hardware-encoder",
   subtitle_font_size: "s-subtitle-font-size",
   ui_font_size: "s-ui-font-size",
+  style_profile_strength: "s-style-profile-strength",
 };
 
 const keywordFields = {
@@ -74,6 +81,7 @@ const keywordFields = {
 };
 
 const customAiPresetsKey = "lc:custom-ai-presets";
+const liveRoomsStorageKey = "lc:live-rooms";
 const themeStorageKey = "lc:ui-theme";
 const uiFontSizeStorageKey = "lc:ui-font-size";
 const previewDraftStoragePrefix = "lc:preview-draft:";
@@ -233,6 +241,24 @@ const featurePreferenceGroups = {
       "vs-segment-seconds",
     ],
   },
+  live_rec: {
+    prefixes: [],
+    ids: [
+      "live-save-dir",
+      "live-segment",
+      "live-check-interval",
+      "live-min-stream-quality",
+      "live-platform",
+      "live-product-split-enabled",
+      "live-product-auto-cut",
+      "live-product-default-minutes",
+      "live-product-min-minutes",
+      "live-product-max-minutes",
+      "live-product-switch-confirm",
+      "live-product-head-seconds",
+      "live-product-tail-seconds",
+    ],
+  },
 };
 const featurePreferenceControlIds = new Set(
   Object.values(featurePreferenceGroups).flatMap((group) => group.ids)
@@ -343,6 +369,8 @@ const aiPresets = {
 document.addEventListener("DOMContentLoaded", () => {
   bindNavigation();
   bindSettingsTabs();
+  bindLiveRecTabs();
+  bindLiveRoomFilters();
   bindActions();
   syncVideoSplitMode();
   bindAiPresetControls();
@@ -353,6 +381,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupAdvancedParamToggles();
   setupLogProgressBars();
   bindPreviewModalShortcuts();
+  loadLiveRooms();
   loadRuntime();
   loadSettings();
   loadFeaturePreferences();
@@ -497,6 +526,34 @@ function bindSettingsTabs() {
   });
 }
 
+function setLiveRecTab(tab) {
+  const targetTab = tab || "rooms";
+  state.liveRecTab = targetTab;
+  document.querySelectorAll(".live-rec-tab").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.liveRecTab === targetTab);
+  });
+  document.querySelectorAll(".live-rec-page").forEach((page) => {
+    page.classList.toggle("is-active", page.id === `live-rec-${targetTab}`);
+  });
+}
+
+function bindLiveRecTabs() {
+  document.querySelectorAll(".live-rec-tab").forEach((button) => {
+    button.addEventListener("click", () => setLiveRecTab(button.dataset.liveRecTab));
+  });
+}
+
+function bindLiveRoomFilters() {
+  $("live-room-search")?.addEventListener("input", (event) => {
+    state.liveRoomSearch = event.target.value || "";
+    renderLiveRooms();
+  });
+  $("live-platform-filter")?.addEventListener("change", (event) => {
+    state.liveRoomPlatform = event.target.value || "all";
+    renderLiveRooms();
+  });
+}
+
 function bindActions() {
   document.body.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
@@ -544,6 +601,22 @@ function bindActions() {
       if (action === "feature-submit") await submitFeature(target.dataset.feature);
       if (action === "reset-dedup") resetDedupDefaults();
       if (action === "add-live-room") addLiveRoom();
+      if (action === "live-switch-tab") setLiveRecTab(target.dataset.tab || "rooms");
+      if (action === "live-status-filter") setLiveRoomFilter(target.dataset.status || "all");
+      if (action === "refresh-live-rooms") {
+        renderLiveRooms();
+        await refreshTasks();
+      }
+      if (action === "clear-live-rooms") clearLiveRooms();
+      if (action === "record-live-room") await startLiveRoom(Number(target.dataset.index));
+      if (action === "live-open-room-dir") await openLiveRoomDirectory(Number(target.dataset.index));
+      if (action === "live-open-product-dir") await openLiveProductDirectory(Number(target.dataset.index));
+      if (action === "live-stop-room") await stopLiveRoom(Number(target.dataset.index));
+      if (action === "live-preview-room") await previewLiveRoom(Number(target.dataset.index));
+      if (action === "live-detail-room") showLiveRoomDetail(Number(target.dataset.index));
+      if (action === "close-live-detail") closeLiveDetailModal();
+      if (action === "remove-live-room") removeLiveRoom(Number(target.dataset.index));
+      if (action === "fill-live-room") fillLiveRoom(Number(target.dataset.index));
       if (action === "toggle-secret") toggleSecret(target);
       if (action === "activate-license") await activateLicense();
       if (action === "unbind-device") await unbindDevice();
@@ -555,6 +628,11 @@ function bindActions() {
     } catch (error) {
       toast(error.message || String(error), "error");
     }
+  });
+
+  document.body.addEventListener("change", (event) => {
+    const target = event.target.closest("[data-live-naming-mode]");
+    if (target) updateLiveRoomNamingMode(Number(target.dataset.index), target.value);
   });
 
   document.querySelectorAll(".path-entry input").forEach((input) => {
@@ -953,6 +1031,7 @@ function bindPreviewModalShortcuts() {
     if (event.key !== "Escape") return;
     closeKeywordEditor();
     closePreviewVideo();
+    closeLiveDetailModal();
     closeUpdateCard();
   });
 }
@@ -1336,6 +1415,7 @@ function collectSettings() {
   data.volc_access_token = "";
   data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
   data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
+  data.style_profile_strength = normalizeStyleProfileStrength(data.style_profile_strength);
   data.preference_weights = collectPreferenceWeights();
   data.ai_rules = collectAiRules();
   return data;
@@ -1378,7 +1458,7 @@ function formatFileSize(bytes) {
 async function loadAiFeedbackStats(showToast = false) {
   const result = await api("/api/ai-feedback/stats");
   renderAiFeedbackStats(result);
-  if (showToast) toast("用户喜好库统计已刷新", "success");
+  if (showToast) toast("剪辑风格画像统计已刷新", "success");
 }
 
 function renderAiFeedbackStats(result = {}) {
@@ -1407,6 +1487,122 @@ function renderPreferenceSignalList(items = [], kind = "positive") {
       </div>
     `;
   }).join("");
+}
+
+function styleProfileStatusFromSamples(sampleCount = 0) {
+  const count = Number(sampleCount || 0);
+  if (count <= 0) return { status: "未开始", impact: "只读" };
+  if (count <= 2) return { status: "观察中", impact: "只读" };
+  if (count <= 9) return { status: "初步成型", impact: "轻度" };
+  return { status: "稳定画像", impact: "标准" };
+}
+
+function normalizeStyleProfileStrength(value = "auto") {
+  const text = String(value || "auto").trim().toLowerCase();
+  if (["off", "关闭", "关", "false"].includes(text)) return "off";
+  if (["light", "轻度"].includes(text)) return "light";
+  if (["standard", "标准"].includes(text)) return "standard";
+  if (["strong", "强", "强力"].includes(text)) return "strong";
+  return "auto";
+}
+
+function buildStyleProfileFromSummary(summary = {}) {
+  const positive = Array.isArray(summary.positive) ? summary.positive : [];
+  const negative = Array.isArray(summary.negative) ? summary.negative : [];
+  const sampleCount = Number(summary.sample_count || 0);
+  const state = styleProfileStatusFromSamples(sampleCount);
+  const selling = positive.slice(0, 5).map((item) => ({
+    label: item.label || "",
+    count: Number(item.positive_count || 0),
+    confidence: item.confidence || "观察中",
+    examples: item.positive_examples || [],
+  }));
+  const avoid = negative.slice(0, 5).map((item) => ({
+    label: item.label || "",
+    count: Number(item.negative_count || 0),
+    confidence: item.confidence || "观察中",
+    examples: item.negative_examples || [],
+  }));
+  return {
+    name: "剪辑风格画像",
+    status: state.status,
+    impact: state.impact,
+    configured_strength: "auto",
+    learned_records: 0,
+    sample_count: sampleCount,
+    selling_preferences: selling,
+    avoid_preferences: avoid,
+    hook_preferences: selling.length ? selling.slice(0, 3) : [{ label: "直接利益点开头", count: 0, confidence: "观察中" }],
+    ending_preferences: [{ label: "自然总结", count: 0, confidence: "观察中" }],
+    metrics: {
+      selling_density: selling.length ? "中" : "观察中",
+      rhythm: "观察中",
+      context_length: "观察中",
+      emotion_strength: "观察中",
+      cta_strength: "观察中",
+    },
+    summary: Array.isArray(summary.brief) ? summary.brief : [],
+    ai_hint: "",
+  };
+}
+
+function renderStyleProfilePills(items = [], emptyText = "继续积累样本") {
+  const values = Array.isArray(items) ? items.filter((item) => item && item.label) : [];
+  if (!values.length) return `<span class="style-profile-empty">${escapeHtml(emptyText)}</span>`;
+  return values.slice(0, 5).map((item) => `
+    <span class="style-profile-pill" title="${escapeHtml((item.examples || [])[0] || item.label || "")}">
+      ${escapeHtml(item.label || "")}
+      ${Number(item.count || 0) ? `<em>${Number(item.count || 0)}</em>` : ""}
+    </span>
+  `).join("");
+}
+
+function renderStyleProfile(profile = {}) {
+  const metrics = profile.metrics || {};
+  const summary = Array.isArray(profile.summary) ? profile.summary : [];
+  const latest = Number(profile.latest_at || 0);
+  const latestText = latest ? new Date(latest * 1000).toLocaleDateString() : "暂无";
+  return `
+    <div class="style-profile-card">
+      <div class="style-profile-head">
+        <div>
+          <strong>${escapeHtml(profile.name || "剪辑风格画像")}</strong>
+          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
+        </div>
+        <div class="style-profile-stats">
+          <span>成片调整 ${Number(profile.learned_records || 0)}</span>
+          <span>样本 ${Number(profile.sample_count || 0)}</span>
+          <span>更新 ${escapeHtml(latestText)}</span>
+        </div>
+      </div>
+      ${summary.length ? `<div class="style-profile-summary">${summary.slice(0, 4).map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
+      <div class="style-profile-grid">
+        <section>
+          <h3>常保留卖点</h3>
+          <div>${renderStyleProfilePills(profile.selling_preferences, "暂无稳定卖点")}</div>
+        </section>
+        <section>
+          <h3>常删除内容</h3>
+          <div>${renderStyleProfilePills(profile.avoid_preferences, "暂无稳定删除方向")}</div>
+        </section>
+        <section>
+          <h3>开头偏好</h3>
+          <div>${renderStyleProfilePills(profile.hook_preferences, "继续观察开头选择")}</div>
+        </section>
+        <section>
+          <h3>结尾偏好</h3>
+          <div>${renderStyleProfilePills(profile.ending_preferences, "继续观察结尾选择")}</div>
+        </section>
+      </div>
+      <div class="style-profile-metrics">
+        <span>卖点密度 <strong>${escapeHtml(metrics.selling_density || "观察中")}</strong></span>
+        <span>剪辑节奏 <strong>${escapeHtml(metrics.rhythm || "观察中")}</strong></span>
+        <span>上下文 <strong>${escapeHtml(metrics.context_length || "观察中")}</strong></span>
+        <span>情绪强度 <strong>${escapeHtml(metrics.emotion_strength || "观察中")}</strong></span>
+        <span>CTA <strong>${escapeHtml(metrics.cta_strength || "观察中")}</strong></span>
+      </div>
+    </div>
+  `;
 }
 
 const FEEDBACK_POSITIVE_ROLES = new Set(["hook_positive", "close_positive", "move_to_front", "move_to_end", "sentence_positive"]);
@@ -1512,7 +1708,7 @@ function buildPreferenceSummaryFromSamples(samples = []) {
   if (positive.length) brief.push(`优先倾向：${positive.slice(0, 4).map((item) => item.label).join("、")}。`);
   if (negative.length) brief.push(`谨慎避开：${negative.slice(0, 4).map((item) => item.label).join("、")}。`);
   if (conflicts.length) brief.push("存在正反都出现过的句子，不能按原文硬匹配，需要结合上下文。");
-  return {
+  const summary = {
     read_only: true,
     confidence: feedbackConfidence(total),
     sample_count: total,
@@ -1525,26 +1721,33 @@ function buildPreferenceSummaryFromSamples(samples = []) {
       "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
     ],
   };
+  summary.style_profile = buildStyleProfileFromSummary(summary);
+  return summary;
 }
 
 function renderAiFeedbackSummary(summary = {}) {
   const box = $("ai-feedback-summary");
   if (!box) return;
+  const profile = summary.style_profile || buildStyleProfileFromSummary(summary);
   const positive = Array.isArray(summary.positive) ? summary.positive : [];
   const negative = Array.isArray(summary.negative) ? summary.negative : [];
   const conflicts = Array.isArray(summary.conflicts) ? summary.conflicts : [];
   const brief = Array.isArray(summary.brief) ? summary.brief : [];
   const notes = Array.isArray(summary.notes) ? summary.notes : [];
   if (!positive.length && !negative.length && !conflicts.length) {
-    box.innerHTML = '<p class="panel-note">偏好摘要会在积累人工选择后自动生成，当前只读展示，不影响成片。</p>';
+    box.innerHTML = `
+      ${renderStyleProfile(profile)}
+      <p class="panel-note">完成一次 AI 预览人工调整并成片后，剪辑风格画像会开始学习。</p>
+    `;
     return;
   }
   const conflictRows = conflicts.slice(0, 4).map((item) => `
     <span title="${escapeHtml(item.text || "")}">${escapeHtml(item.text || "")} · 保留 ${Number(item.positive || 0)} / 删除 ${Number(item.negative || 0)}</span>
   `).join("");
   box.innerHTML = `
+    ${renderStyleProfile(profile)}
     <div class="feedback-summary-head">
-      <strong>AI 学到的取舍方向</strong>
+      <strong>取舍依据</strong>
       <span>只读 · ${escapeHtml(summary.confidence || "观察中")} · ${Number(summary.sample_count || 0)} 条样本</span>
     </div>
     ${brief.length ? `<div class="preference-brief">${brief.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
@@ -1571,7 +1774,7 @@ function renderAiFeedbackSamples(result = {}) {
   const roles = Array.isArray(result.roles) ? result.roles : [];
   renderAiFeedbackSummary(result.preference_summary || buildPreferenceSummaryFromSamples(samples));
   if (!samples.length) {
-    box.innerHTML = '<p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>';
+    box.innerHTML = '<p class="panel-note">暂无学习样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>';
     return;
   }
   const byRole = new Map();
@@ -1628,7 +1831,7 @@ async function loadAiFeedbackSamples(showToast = false) {
       const runtimePath = runtime.repo_root || runtime.web_dir || "";
       box.innerHTML = `
         <p class="panel-note">
-          当前启动的完整包后端还没有用户喜好库接口，请关闭旧包，改用新版完整包后再刷新。
+          当前启动的完整包后端还没有剪辑风格画像接口，请关闭旧包，改用新版完整包后再刷新。
           ${runtimePath ? `<br>当前运行位置：${escapeHtml(runtimePath)}` : ""}
         </p>`;
       if (showToast) toast("当前启动的是旧后端，请使用新版完整包。", "warning");
@@ -1637,13 +1840,13 @@ async function loadAiFeedbackSamples(showToast = false) {
     throw error;
   }
   renderAiFeedbackSamples(result);
-  if (showToast) toast("用户喜好库已刷新", "success");
+  if (showToast) toast("剪辑风格画像已刷新", "success");
 }
 
 function exportAiFeedback() {
   window.location.href = `/api/ai-feedback/export?t=${Date.now()}`;
   setTimeout(() => loadAiFeedbackSamples(false).catch(() => {}), 800);
-  toast("用户喜好库导出已开始", "success");
+  toast("剪辑风格画像数据导出已开始", "success");
 }
 
 async function importAiFeedback() {
@@ -1668,7 +1871,7 @@ async function deleteAiFeedbackSample(button) {
   const role = button?.dataset.role || "";
   const text = button?.dataset.text || "";
   if (!role || !text) return;
-  if (!confirm(`删除这条用户喜好样本吗？\n\n${text}`)) return;
+  if (!confirm(`删除这条学习样本吗？\n\n${text}`)) return;
   const result = await api("/api/ai-feedback/sample/delete", {
     method: "POST",
     body: JSON.stringify({ role, text }),
@@ -1678,10 +1881,10 @@ async function deleteAiFeedbackSample(button) {
 }
 
 async function clearAiFeedback() {
-  if (!confirm("确定清空用户喜好库吗？清空前会自动备份当前文件。")) return;
+  if (!confirm("确定清空剪辑风格画像学习数据吗？清空前会自动备份当前文件。")) return;
   const result = await api("/api/ai-feedback/clear", { method: "POST", body: "{}" });
   renderAiFeedbackSamples(result);
-  toast("用户喜好库已清空，原文件已自动备份", "success");
+  toast("剪辑风格画像学习数据已清空，原文件已自动备份", "success");
 }
 
 function uniqueTexts(items) {
@@ -2262,6 +2465,19 @@ async function openPath(targetId) {
   const result = await api("/api/path/open", {
     method: "POST",
     body: JSON.stringify({ path }),
+  });
+  toast(result.message || "已打开目录", "success");
+}
+
+async function openPathValue(path) {
+  const targetPath = String(path || "").trim();
+  if (!targetPath) {
+    toast("没有可打开的路径", "warning");
+    return;
+  }
+  const result = await api("/api/path/open", {
+    method: "POST",
+    body: JSON.stringify({ path: targetPath }),
   });
   toast(result.message || "已打开目录", "success");
 }
@@ -3110,12 +3326,23 @@ async function previewClipVideo(index, scope = "smart") {
   }
   syncPreviewClipSelections(scope);
   const clip = preview.clips?.find((item) => Number(item.index) === index);
+  if (!clip) {
+    toast("片段不存在，请重新生成预览", "warning");
+    return;
+  }
+  const segments = previewSegments(clip);
+  if (clip.selected === false || (segments.length && !selectedPreviewSegments(clip).length)) {
+    toast("这个片段没有选中的句子，勾选后再预览", "warning");
+    return;
+  }
+  const draft = commitPreviewDraft(scope, { remote: true });
+  const bounds = effectiveClipBounds(clip);
   const modal = ensurePreviewModal();
   const video = modal.querySelector("#preview-modal-video");
   const title = modal.querySelector("#preview-modal-title");
   const status = modal.querySelector("#preview-modal-status");
   if (!video) return;
-  if (title) title.textContent = `片段预览 ${clip ? formatSeconds(clip.start) + "-" + formatSeconds(clip.end) : ""}`;
+  if (title) title.textContent = `片段预览 ${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)} · ${bounds.duration.toFixed(1)}s`;
   if (status) {
     status.textContent = "正在生成片段预览...";
     status.classList.remove("is-hidden", "is-error");
@@ -3129,7 +3356,15 @@ async function previewClipVideo(index, scope = "smart") {
   try {
     const result = await api(endpoint, {
       method: "POST",
-      body: JSON.stringify({ preview_id: preview.id, clip_index: index }),
+      body: JSON.stringify({
+        preview_id: preview.id,
+        clip_index: index,
+        scope,
+        selected_indices: draft.selected_indices || [],
+        order: draft.order || [],
+        selected_segments: draft.selected_segments || {},
+        updated_at: draft.updated_at || Date.now(),
+      }),
     });
     video.src = result.url;
     video.load();
@@ -3204,6 +3439,10 @@ async function startFeature(feature) {
 
 async function submitFeature(feature) {
   if (!feature) return;
+  if (feature === "live-rec-monitor") {
+    await submitLiveRecord();
+    return;
+  }
   await saveFeaturePreferences();
   const payload = collectFeaturePayload(feature);
   await runPreflight(feature, payload, scopeForFeature(feature));
@@ -3357,11 +3596,162 @@ async function refreshTasks() {
     const data = await api("/api/tasks");
     const tasks = data.tasks || [];
     const latest = tasks.slice(-8).reverse();
+    syncLiveRoomActivityFromTasks(tasks);
     renderTaskBadges(latest);
     updateLogProgressFromTasks(tasks);
   } catch (error) {
     // The log websocket already reports connection state; keep this quiet.
   }
+}
+
+function syncLiveRoomActivityFromTasks(tasks) {
+  const liveTasks = (tasks || []).filter((task) => task.scope === "live-rec");
+  if (!state.liveRooms.length) return;
+  const taskById = new Map(liveTasks.map((task) => [task.id, task]));
+  let changed = false;
+  for (const room of state.liveRooms) {
+    const key = liveRoomKey(room);
+    const current = state.liveRoomActivity[key] || {};
+    const roomUrl = normalizeLiveRoomUrl(room.url);
+    const roomTasks = liveTasks.filter((item) => {
+      const taskUrl = normalizeLiveRoomUrl(item.live_room_url);
+      if (taskUrl && roomUrl && taskUrl === roomUrl) return true;
+      const output = String(item.outputs?.[0] || item.output || "");
+      return output && room.name && output.includes(room.name);
+    });
+    const currentTask = taskById.get(current.taskId);
+    const task = (currentTask && ["queued", "running"].includes(currentTask.status))
+      ? currentTask
+      : (roomTasks.slice().reverse().find((item) => ["queued", "running"].includes(item.status)) || roomTasks[roomTasks.length - 1]);
+    if (!task) {
+      const staleStatus = `${current.liveStatus || ""} ${current.recordStatus || ""}`;
+      if (current.taskId && /(启动中|检测中|录制中|排队中)/.test(staleStatus)) {
+        state.liveRoomActivity[key] = {
+          ...current,
+          liveStatus: "未检测",
+          recordStatus: "未监控",
+          productStatus: isDouyinLiveRoom(room) ? "待监控" : "未启用",
+          duration: "0:00",
+          taskId: "",
+        };
+        changed = true;
+      }
+      continue;
+    }
+    const output = String(task.outputs?.[0] || task.output || "");
+    const updates = { taskId: task.id };
+    Object.assign(updates, liveProductResultFromTask(task));
+    if (task.status === "queued") {
+      updates.liveStatus = "排队中";
+      updates.recordStatus = "待启动";
+      updates.productStatus = isDouyinLiveRoom(room) ? "待监控" : "未启用";
+      updates.duration = "0:00";
+    } else if (task.status === "running") {
+      const isRecording = String(task.message || "").includes("录制中") || Number(task.progress || 0) >= 35;
+      updates.liveStatus = isRecording ? "直播中" : "检测中";
+      updates.recordStatus = isRecording ? "录制中" : "检测中";
+      updates.productStatus = isRecording && isDouyinLiveRoom(room) ? "监控中" : (isDouyinLiveRoom(room) ? "待监控" : "未启用");
+      if (isRecording && (task.recording_started_at || task.started_at)) {
+        updates.duration = formatSeconds(Math.max(0, Date.now() / 1000 - (task.recording_started_at || task.started_at)));
+      } else {
+        updates.duration = "0:00";
+      }
+      if (task.stream_quality) updates.streamQuality = normalizeLiveStreamQuality(task.stream_quality);
+    } else if (task.status === "completed") {
+      updates.liveStatus = "已完成";
+      updates.recordStatus = "录制完成";
+      const boundSegments = Number(task.product_bound_segments || 0);
+      const pendingSegments = Number(task.product_pending_segments || 0);
+      const candidateSignals = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
+      if (boundSegments > 0 || task.active_product_changed) {
+        updates.productStatus = "已识别";
+      } else if (candidateSignals > 0) {
+        updates.productStatus = "候选待确认";
+      } else if (pendingSegments > 0 || task.product_segments) {
+        updates.productStatus = "待确认";
+      } else {
+        updates.productStatus = task.probe_summary || task.product_split_queue ? "未捕获" : "未启用";
+      }
+      updates.taskId = "";
+      if (output) updates.file = output;
+      if (task.stream_quality) updates.streamQuality = normalizeLiveStreamQuality(task.stream_quality);
+    } else if (task.status === "failed") {
+      const text = `${task.error || ""} ${task.message || ""}`;
+      const noLive = /未直播|未开播|停播|直播已结束|no_stream|No matching|Target room mismatch/i.test(text);
+      const qualityIssue = /清晰度|画质|stream_quality_below_minimum|quality/i.test(text);
+      updates.liveStatus = noLive ? "未直播" : (qualityIssue ? "直播中" : "检测失败");
+      updates.recordStatus = noLive ? "未录制" : (qualityIssue ? "清晰度不足" : "录制失败");
+      updates.productStatus = noLive || qualityIssue ? "未监控" : (Number(task.active_product_candidate_count || task.status_2_candidate_count || 0) > 0 ? "候选待确认" : "待确认");
+      updates.duration = "0:00";
+      updates.taskId = "";
+      if (task.stream_quality) updates.streamQuality = normalizeLiveStreamQuality(task.stream_quality);
+    } else if (task.status === "cancelled") {
+      updates.liveStatus = "已停止";
+      updates.recordStatus = "已停止";
+      const boundSegments = Number(task.product_bound_segments || 0);
+      const pendingSegments = Number(task.product_pending_segments || 0);
+      const candidateSignals = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
+      if (boundSegments > 0 || task.active_product_changed) {
+        updates.productStatus = "已识别";
+      } else if (candidateSignals > 0) {
+        updates.productStatus = "候选待确认";
+      } else if (pendingSegments > 0 || task.product_segments) {
+        updates.productStatus = "待确认";
+      } else {
+        updates.productStatus = isDouyinLiveRoom(room) ? "未捕获" : "未启用";
+      }
+      updates.duration = "0:00";
+      updates.taskId = "";
+      if (output) updates.file = output;
+      if (task.stream_quality) updates.streamQuality = normalizeLiveStreamQuality(task.stream_quality);
+    }
+    if ((task.recording_started_at || task.started_at) && task.status === "completed") {
+      const end = task.finished_at || Date.now() / 1000;
+      updates.duration = formatSeconds(Math.max(0, end - (task.recording_started_at || task.started_at)));
+    }
+    state.liveRoomActivity[key] = { ...current, ...updates };
+    changed = true;
+  }
+  if (changed) renderLiveRooms();
+}
+
+function liveProductResultFromTask(task = {}) {
+  const outputs = Array.isArray(task.outputs) ? task.outputs.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const productOutputs = outputs.filter((path) => /\.(mp4|mov|m4v|flv|ts)$/i.test(path));
+  const resultCount = Number(task.result_count || productOutputs.length || 0);
+  const boundSegments = Number(task.product_bound_segments || 0);
+  const pendingSegments = Number(task.product_pending_segments || 0);
+  const productSegments = Number(task.product_segments || 0);
+  const candidateSignals = Number(task.candidate_signal_count || 0);
+  const activeCandidateCount = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
+  const ruleReviewCount = Number(task.active_product_rule_review_count || 0);
+  const strongSignalCount = Number(task.strong_signal_count || 0);
+  return {
+    productOutputs,
+    productOutputCount: resultCount,
+    productClipsDir: String(task.product_clips_dir || "").trim(),
+    productSplitQueue: String(task.product_split_queue || "").trim(),
+    productTimeline: String(task.product_timeline || "").trim(),
+    productBoundSegments: boundSegments,
+    productPendingSegments: pendingSegments,
+    productSegments,
+    productCandidateSignals: candidateSignals,
+    productActiveCandidateCount: activeCandidateCount,
+    productRuleReviewCount: ruleReviewCount,
+    productStrongSignalCount: strongSignalCount,
+    productUnresolvedReason: String(task.unresolved_reason || "").trim(),
+    recordingReturncode: task.recording_returncode,
+    activeProductChanged: Boolean(task.active_product_changed || boundSegments > 0),
+    rollingCycleCount: Number(task.rolling_cycle_count || 0),
+  };
+}
+
+function livePathName(path) {
+  return String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
+}
+
+function normalizeLiveRoomUrl(url) {
+  return String(url || "").trim().replace(/[?#].*$/, "").replace(/\/$/, "");
 }
 
 async function loadLatestSmartPreview() {
@@ -4033,9 +4423,19 @@ function collectFeaturePayload(feature) {
       save_dir: $("live-save-dir").value.trim(),
       segment: $("live-segment").value,
       check_interval: Number($("live-check-interval").value || 30),
+      min_stream_quality: $("live-min-stream-quality")?.value || "",
       room_name: $("live-room-name").value.trim(),
       room_url: $("live-room-url").value.trim(),
       platform: $("live-platform").value,
+      product_split_enabled: $("live-product-split-enabled")?.checked || false,
+      product_auto_cut: $("live-product-auto-cut")?.checked || false,
+      product_naming_mode: "product_id",
+      product_default_minutes: Math.min(15, Number($("live-product-default-minutes")?.value || 10)),
+      product_min_minutes: Math.min(15, Number($("live-product-min-minutes")?.value || 3)),
+      product_max_minutes: Math.min(15, Number($("live-product-max-minutes")?.value || 15)),
+      product_switch_confirm_seconds: Number($("live-product-switch-confirm")?.value || 8),
+      product_head_seconds: Number($("live-product-head-seconds")?.value || 10),
+      product_tail_seconds: Number($("live-product-tail-seconds")?.value || 20),
     };
   }
 
@@ -4072,6 +4472,271 @@ function resetDedupDefaults() {
   toast("去重参数已恢复默认", "success");
 }
 
+function normalizeLiveRoom(room = {}) {
+  const name = String(room.name || "").trim();
+  const url = String(room.url || "").trim();
+  const platform = String(room.platform || "抖音").trim() || "抖音";
+  const product_naming_mode = liveNormalizeNamingMode(room.product_naming_mode || room.productNamingMode || room.naming_mode);
+  if (!name || !url) return null;
+  return { name, url, platform, product_naming_mode };
+}
+
+function liveNormalizeNamingMode(value) {
+  return String(value || "").trim() === "product_name" ? "product_name" : "product_id";
+}
+
+function liveNamingModeLabel(value) {
+  return liveNormalizeNamingMode(value) === "product_name" ? "商品名称命名" : "商品ID命名";
+}
+
+function loadLiveRooms() {
+  try {
+    const raw = localStorage.getItem(liveRoomsStorageKey);
+    const rooms = JSON.parse(raw || "[]");
+    state.liveRooms = Array.isArray(rooms) ? rooms.map(normalizeLiveRoom).filter(Boolean) : [];
+  } catch {
+    state.liveRooms = [];
+  }
+  renderLiveRooms();
+}
+
+function saveLiveRooms() {
+  try {
+    localStorage.setItem(liveRoomsStorageKey, JSON.stringify(state.liveRooms || []));
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+function liveRoomsFromTable() {
+  const cards = Array.from(document.querySelectorAll("#page-live-rec .live-room-card"));
+  return cards.map((card) => {
+    return normalizeLiveRoom({
+      name: card.dataset.name || "",
+      platform: card.dataset.platform || "",
+      url: card.dataset.url || "",
+      product_naming_mode: card.querySelector("[data-live-naming-mode]")?.value || card.dataset.productNamingMode || "product_id",
+    });
+  }).filter(Boolean);
+}
+
+function liveRoomKey(room) {
+  return `${room?.platform || ""}|${room?.url || ""}`;
+}
+
+function liveStatusBadge(label, tone = "") {
+  return `<span class="live-status ${tone ? `is-${tone}` : ""}">${escapeHtml(label)}</span>`;
+}
+
+function renderLiveProductResult(index, activity = {}) {
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const outputCount = Number(activity.productOutputCount || outputs.length || 0);
+  const segmentCount = Number(activity.productSegments || 0);
+  const boundCount = Number(activity.productBoundSegments || 0);
+  const pendingCount = Number(activity.productPendingSegments || 0);
+  const activeCandidateCount = Number(activity.productActiveCandidateCount || 0);
+  const candidateSignals = Number(activity.productCandidateSignals || 0);
+  const ruleReviewCount = Number(activity.productRuleReviewCount || 0);
+  const strongSignalCount = Number(activity.productStrongSignalCount || 0);
+  const recordingReturncode = activity.recordingReturncode;
+  const clipsDir = String(activity.productClipsDir || "").trim();
+  if (!outputCount && !segmentCount && !clipsDir && !activity.productSplitQueue && !candidateSignals && !activeCandidateCount) return "";
+  const title = outputCount > 0 ? `已提取 ${outputCount} 个单品` : `已生成 ${segmentCount || pendingCount || 0} 个候选段`;
+  const fileRows = outputs.slice(0, 3).map((path) => `
+    <span class="live-product-file" title="${escapeHtml(path)}">${escapeHtml(livePathName(path))}</span>
+  `).join("");
+  const moreText = outputs.length > 3 ? `<span class="live-product-more">还有 ${outputs.length - 3} 个</span>` : "";
+  const reviewText = pendingCount > 0 ? `<span class="live-product-chip is-warn">待确认 ${pendingCount}</span>` : "";
+  const boundText = boundCount > 0 ? `<span class="live-product-chip is-ok">已绑定 ${boundCount}</span>` : "";
+  const candidateText = activeCandidateCount > 0 ? `<span class="live-product-chip is-warn">商品候选 ${activeCandidateCount}</span>` : "";
+  const signalText = candidateSignals > 0 ? `<span class="live-product-chip">候选信号 ${candidateSignals}</span>` : "";
+  const strongText = strongSignalCount > 0 ? `<span class="live-product-chip is-ok">强信号 ${strongSignalCount}</span>` : "";
+  const reviewRuleText = ruleReviewCount > 0 ? `<span class="live-product-chip is-warn">需复核 ${ruleReviewCount}</span>` : "";
+  const recordingIssueText = recordingReturncode !== undefined && recordingReturncode !== null && Number(recordingReturncode) !== 0
+    ? `<span class="live-product-chip is-warn">录制异常 ${escapeHtml(recordingReturncode)}</span>`
+    : "";
+  return `
+    <div class="live-product-result">
+      <div class="live-product-result-head">
+        <strong>${escapeHtml(title)}</strong>
+        <button class="button button-muted button-small" data-action="live-open-product-dir" data-index="${index}" ${clipsDir ? "" : "disabled"}>
+          <span class="button-icon" aria-hidden="true">■</span><span>单品目录</span>
+        </button>
+      </div>
+      <div class="live-product-chips">
+        ${boundText}
+        ${reviewText}
+        ${candidateText}
+        ${signalText}
+        ${strongText}
+        ${reviewRuleText}
+        ${recordingIssueText}
+        ${segmentCount ? `<span class="live-product-chip">时间线 ${segmentCount}</span>` : ""}
+        ${activity.rollingCycleCount ? `<span class="live-product-chip">录制段 ${Number(activity.rollingCycleCount)}</span>` : ""}
+      </div>
+      ${fileRows ? `<div class="live-product-files">${fileRows}${moreText}</div>` : ""}
+      ${clipsDir ? `<div class="live-product-dir" title="${escapeHtml(clipsDir)}">${escapeHtml(clipsDir)}</div>` : ""}
+    </div>
+  `;
+}
+
+function liveRoomActivity(room) {
+  return state.liveRoomActivity[liveRoomKey(room)] || {};
+}
+
+function isDouyinLiveRoom(room) {
+  return String(room?.platform || "").includes("抖音") || String(room?.url || "").toLowerCase().includes("douyin.com");
+}
+
+function liveMinStreamQualityLabel() {
+  const select = $("live-min-stream-quality");
+  return select?.selectedOptions?.[0]?.textContent?.trim() || "自动最高";
+}
+
+function normalizeLiveStreamQuality(value, fallback = "") {
+  let text = repairMojibakeText(String(value || "").trim());
+  if (!text) return fallback;
+  const compact = text.replace(/\s+/g, "").toLowerCase();
+  if (/(2160|1440|4k|uhd|原画|原畫|origin|source)/.test(compact)) return "原画";
+  if (/(1080|full[_-]?hd|fhd|蓝光|藍光|超清)/.test(compact)) return "1080p";
+  if (/(720|hd|高清)/.test(compact)) return "720p";
+  if (/(540|480|sd|标清|標清)/.test(compact)) return "480p";
+  if (/(360|ld|low|低清)/.test(compact)) return "低清";
+  if (/(未知|unknown)/.test(compact)) return "未知清晰度";
+  if (/(自动|auto)/.test(compact)) return "自动最高";
+  if (looksGarbledText(text) || /\?{2,}/.test(text)) return fallback || "未知清晰度";
+  return text;
+}
+
+function setLiveRoomActivity(room, updates = {}) {
+  const key = liveRoomKey(room);
+  state.liveRoomActivity[key] = { ...(state.liveRoomActivity[key] || {}), ...updates };
+  renderLiveRooms();
+}
+
+function setLiveRoomFilter(status) {
+  state.liveRoomFilter = status || "all";
+  document.querySelectorAll(".live-filter-chip").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.status === state.liveRoomFilter);
+  });
+  renderLiveRooms();
+}
+
+function liveRoomDirectory(room) {
+  const saveDir = $("live-save-dir")?.value.trim();
+  if (!saveDir || !room?.name) return saveDir || "";
+  return `${saveDir.replace(/[\\\/]+$/, "")}\\${room.name}`;
+}
+
+function liveRoomMatchesFilter(room, activity) {
+  const search = String(state.liveRoomSearch || "").trim().toLowerCase();
+  if (search) {
+    const haystack = `${room.name} ${room.platform} ${room.url}`.toLowerCase();
+    if (!haystack.includes(search)) return false;
+  }
+  const platform = state.liveRoomPlatform || "all";
+  if (platform !== "all" && room.platform !== platform) return false;
+
+  const filter = state.liveRoomFilter || "all";
+  const liveStatus = activity.liveStatus || "未检测";
+  const recordStatus = activity.recordStatus || "待录制";
+  const productStatus = activity.productStatus || "";
+  if (filter === "recording") return recordStatus.includes("录制中");
+  if (filter === "live") return liveStatus.includes("直播中");
+  if (filter === "not_started") return liveStatus.includes("未") || liveStatus.includes("待");
+  if (filter === "error") return recordStatus.includes("失败") || productStatus.includes("错误");
+  if (filter === "unmonitored") return recordStatus.includes("待录制") || productStatus.includes("未启用");
+  return true;
+}
+
+function liveRoomStatusClass(activity) {
+  const recordStatus = activity.recordStatus || "待录制";
+  if (recordStatus.includes("录制中")) return "is-recording";
+  if (recordStatus.includes("失败")) return "is-error";
+  return "";
+}
+
+function renderLiveRooms() {
+  const grid = document.querySelector("#live-room-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  const rooms = state.liveRooms || [];
+  const visibleRooms = rooms
+    .map((room, index) => ({ room, index, activity: liveRoomActivity(room) }))
+    .filter((item) => liveRoomMatchesFilter(item.room, item.activity));
+  if (!rooms.length || !visibleRooms.length) {
+    const empty = document.createElement("div");
+    empty.className = "live-room-empty";
+    empty.textContent = rooms.length ? "没有符合筛选条件的直播间" : "暂无直播间";
+    grid.appendChild(empty);
+    return;
+  }
+  visibleRooms.forEach(({ room, index, activity }) => {
+    const productEnabled = $("live-product-split-enabled")?.checked !== false && isDouyinLiveRoom(room);
+    const liveStatus = activity.liveStatus || "未检测";
+    const recordStatus = activity.recordStatus || "待录制";
+    const productStatus = activity.productStatus || (productEnabled ? "待监控" : "未启用");
+    const qualityLabel = normalizeLiveStreamQuality(activity.streamQuality, liveMinStreamQualityLabel());
+    const liveTone = liveStatus.includes("中") || liveStatus.includes("已") ? "ok" : "";
+    const recordTone = recordStatus.includes("录制中") ? "run" : recordStatus.includes("失败") ? "danger" : recordStatus.includes("完成") ? "ok" : "";
+    const productTone = productStatus.includes("监控") ? "run" : productStatus.includes("已识别") || productStatus.includes("捕获") ? "ok" : productStatus.includes("候选") || productStatus.includes("待确认") || productStatus.includes("未捕获") ? "warn" : "";
+    const card = document.createElement("article");
+    card.className = `live-room-card ${liveRoomStatusClass(activity)}`;
+    card.dataset.name = room.name;
+    card.dataset.platform = room.platform;
+    card.dataset.url = room.url;
+    card.dataset.productNamingMode = liveNormalizeNamingMode(room.product_naming_mode);
+    const namingMode = liveNormalizeNamingMode(room.product_naming_mode);
+    card.innerHTML = `
+      <div class="live-card-top">
+        <div class="live-card-title">
+          <span class="live-platform-mark">${escapeHtml(room.platform.slice(0, 2) || "直")}</span>
+          <strong>${escapeHtml(room.name)}</strong>
+        </div>
+        ${liveStatusBadge(recordStatus, recordTone)}
+      </div>
+      <div class="live-card-meta">
+        <div>
+          <span>直播状态</span>
+          <strong>${liveStatusBadge(liveStatus, liveTone)}</strong>
+        </div>
+        <div>
+          <span>商品识别</span>
+          <strong>${liveStatusBadge(productStatus, productTone)}</strong>
+        </div>
+        <div>
+          <span>录制画质</span>
+          <strong>${escapeHtml(qualityLabel)}</strong>
+        </div>
+        <div>
+          <span>录制时长</span>
+          <strong>${escapeHtml(activity.duration || "0:00:00")}</strong>
+        </div>
+      </div>
+      <div class="live-card-url" title="${escapeHtml(room.url)}">${escapeHtml(room.url)}</div>
+      ${renderLiveProductResult(index, activity)}
+      <div class="live-card-control-row">
+        <div class="live-card-config">
+          <label>
+            <span>命名方式</span>
+            <select data-live-naming-mode data-index="${index}">
+              <option value="product_id" ${namingMode === "product_id" ? "selected" : ""}>商品ID命名</option>
+              <option value="product_name" ${namingMode === "product_name" ? "selected" : ""}>商品名称命名</option>
+            </select>
+          </label>
+        </div>
+        <div class="live-card-actions">
+          <button class="button button-secondary button-small" data-action="record-live-room" data-index="${index}"><span class="button-icon" aria-hidden="true">◎</span><span>监控</span></button>
+          <button class="button button-muted button-small" data-action="live-open-room-dir" data-index="${index}"><span class="button-icon" aria-hidden="true">■</span><span>目录</span></button>
+          <button class="button button-danger button-small" data-action="live-stop-room" data-index="${index}"><span class="button-icon" aria-hidden="true">■</span><span>停止</span></button>
+          <button class="button button-muted button-small" data-action="live-detail-room" data-index="${index}"><span class="button-icon" aria-hidden="true">i</span><span>详情</span></button>
+          <button class="button button-muted button-small" data-action="remove-live-room" data-index="${index}"><span class="button-icon" aria-hidden="true">⌫</span><span>删除</span></button>
+        </div>
+      </div>`;
+    grid.appendChild(card);
+  });
+}
+
 function addLiveRoom() {
   const name = $("live-room-name").value.trim();
   const url = $("live-room-url").value.trim();
@@ -4080,16 +4745,354 @@ function addLiveRoom() {
     toast("请先填写直播间名称和地址", "warning");
     return;
   }
-  const table = document.querySelector("#page-live-rec .table-like");
-  const empty = table?.querySelector(".empty-row");
-  if (empty) empty.remove();
-  const row = document.createElement("div");
-  row.className = "table-row";
-  row.innerHTML = `<span>${escapeHtml(name)}</span><span>${escapeHtml(platform)}</span><span>${escapeHtml(url)}</span><span>未开播</span><span>-</span><span>-</span><span>待接入</span>`;
-  table?.appendChild(row);
-  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `已添加直播间: ${name}` });
-  $("live-room-name").value = "";
-  $("live-room-url").value = "";
+  const room = normalizeLiveRoom({ name, url, platform, product_naming_mode: "product_id" });
+  const exists = state.liveRooms.some((item) => item.url === room.url);
+  if (exists) {
+    toast("这个直播间已经在列表里", "warning");
+    return;
+  }
+  state.liveRooms.push(room);
+  saveLiveRooms();
+  renderLiveRooms();
+  setLiveRecTab("rooms");
+  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `已添加直播间: ${name}。点击开始录制会按列表逐个启动。` });
+}
+
+function removeLiveRoom(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  const [room] = state.liveRooms.splice(index, 1);
+  if (room) delete state.liveRoomActivity[liveRoomKey(room)];
+  saveLiveRooms();
+  renderLiveRooms();
+  if (room) appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `已移除直播间: ${room.name}` });
+}
+
+function clearLiveRooms() {
+  if (!state.liveRooms.length) {
+    toast("当前没有直播间", "warning");
+    return;
+  }
+  if (!window.confirm("确定删除当前列表里的所有直播间？正在运行的录制请先停止。")) return;
+  state.liveRooms = [];
+  state.liveRoomActivity = {};
+  saveLiveRooms();
+  renderLiveRooms();
+  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: "已清空直播间列表。" });
+}
+
+function updateLiveRoomNamingMode(index, value) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  state.liveRooms[index] = normalizeLiveRoom({
+    ...state.liveRooms[index],
+    product_naming_mode: liveNormalizeNamingMode(value),
+  }) || state.liveRooms[index];
+  saveLiveRooms();
+  renderLiveRooms();
+}
+
+function fillLiveRoom(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  $("live-room-name").value = room.name;
+  $("live-room-url").value = room.url;
+  $("live-platform").value = room.platform;
+  setLiveRecTab("add");
+}
+
+async function openLiveRoomDirectory(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  await openPathValue(activity.file || liveRoomDirectory(room));
+}
+
+async function openLiveProductDirectory(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  await openPathValue(activity.productClipsDir || liveRoomDirectory(room));
+}
+
+async function stopLiveRoom(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  const taskId = String(activity.taskId || "").trim();
+  if (!taskId) {
+    toast("当前直播间没有正在运行的录制任务", "warning");
+    return;
+  }
+  const result = await api("/api/tasks/stop", {
+    method: "POST",
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  setLiveRoomActivity(room, {
+    liveStatus: "已停止",
+    recordStatus: "已停止",
+    productStatus: isDouyinLiveRoom(room) ? "待监控" : "未启用",
+    duration: activity.duration || "0:00",
+    taskId: "",
+  });
+  toast(result.message || "已停止当前直播间", result.ok ? "warning" : "error");
+  await refreshTasks();
+}
+
+async function previewLiveRoom(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  if (!activity.file) {
+    toast("录制完成后可预览输出文件", "warning");
+    await openLiveRoomDirectory(index);
+    return;
+  }
+  await openPathValue(activity.file);
+}
+
+function showLiveRoomDetail(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  const modal = ensureLiveDetailModal();
+  const body = modal.querySelector("#live-detail-body");
+  const title = modal.querySelector("#live-detail-title");
+  if (title) title.textContent = "详情";
+  const savePath = activity.productClipsDir || activity.file || liveRoomDirectory(room) || "-";
+  const segment = $("live-segment")?.value || "不限";
+  const productSplitEnabled = $("live-product-split-enabled")?.checked !== false;
+  const productAutoCut = $("live-product-auto-cut")?.checked !== false;
+  const namingMode = liveNamingModeLabel(activity.productNamingMode || room.product_naming_mode);
+  const defaultMinutes = $("live-product-default-minutes")?.value || "10";
+  const checkInterval = $("live-check-interval")?.value || "30";
+  const qualityRequirement = liveMinStreamQualityLabel();
+  const actualQuality = normalizeLiveStreamQuality(activity.streamQuality);
+  const productOutputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const sourceExt = String(activity.file || "").split(".").pop()?.toUpperCase() || "TS";
+  const rows = [
+    ["主播名称", escapeHtml(room.name)],
+    ["平台名称", escapeHtml(room.platform)],
+    ["直播链接", `<a href="${escapeHtml(room.url)}" target="_blank" rel="noreferrer">${escapeHtml(room.url)}</a>`],
+    ["直播标题", escapeHtml(activity.title || room.name || "-")],
+    ["录制格式", escapeHtml(sourceExt)],
+    ["录制画质", escapeHtml(actualQuality || qualityRequirement)],
+    ["最低画质要求", escapeHtml(qualityRequirement)],
+    ["分段录制", segment === "不限" ? "未开启" : "已开启"],
+    ["分段时长", escapeHtml(segment === "不限" ? "不分段" : segment)],
+    ["商品时间线", productSplitEnabled ? "已开启" : "未开启"],
+    ["录后自动切段", productAutoCut ? "已开启" : "未开启"],
+    ["命名方式", escapeHtml(namingMode)],
+    ["单品默认时长", `${escapeHtml(defaultMinutes)}分钟`],
+    ["监控状态", escapeHtml(activity.productStatus || (isDouyinLiveRoom(room) ? "待监控" : "未启用"))],
+    ["已提取单品", `${Number(activity.productOutputCount || productOutputs.length || 0)} 个`],
+    ["已绑定商品", `${Number(activity.productBoundSegments || 0)} 段`],
+    ["待确认单品", `${Number(activity.productPendingSegments || 0)} 段`],
+    ["商品候选", `${Number(activity.productActiveCandidateCount || 0)} 个`],
+    ["候选信号", `${Number(activity.productCandidateSignals || 0)} 条`],
+    ["强信号", `${Number(activity.productStrongSignalCount || 0)} 条`],
+    ["需复核候选", `${Number(activity.productRuleReviewCount || 0)} 个`],
+    ["未确认原因", escapeHtml(activity.productUnresolvedReason || "-")],
+    ["录制退出码", activity.recordingReturncode === undefined || activity.recordingReturncode === null ? "-" : escapeHtml(activity.recordingReturncode)],
+    ["单品目录", escapeHtml(activity.productClipsDir || "-")],
+    ["检测间隔", `${escapeHtml(checkInterval)}秒`],
+    ["录制状态", escapeHtml(activity.recordStatus || "未监控")],
+    ["直播状态", escapeHtml(activity.liveStatus || "未检测")],
+    ["保存路径", escapeHtml(savePath)],
+  ];
+  if (body) {
+    body.innerHTML = rows.map(([label, value]) => `
+      <div class="live-detail-row">
+        <strong>${escapeHtml(label)}：</strong>
+        <span>${value || "-"}</span>
+      </div>
+    `).join("") + (productOutputs.length ? `
+      <div class="live-detail-products">
+        <strong>单品文件：</strong>
+        <div>
+          ${productOutputs.map((path) => `<span title="${escapeHtml(path)}">${escapeHtml(livePathName(path))}</span>`).join("")}
+        </div>
+      </div>
+    ` : "");
+  }
+  modal.classList.remove("is-hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("live-detail-modal-open");
+}
+
+function closeLiveDetailModal() {
+  const modal = $("live-detail-modal");
+  if (!modal) return;
+  modal.classList.add("is-hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("live-detail-modal-open");
+}
+
+function ensureLiveDetailModal() {
+  let modal = $("live-detail-modal");
+  if (modal) return modal;
+  modal = document.createElement("div");
+  modal.id = "live-detail-modal";
+  modal.className = "live-detail-modal is-hidden";
+  modal.setAttribute("aria-hidden", "true");
+  modal.innerHTML = `
+    <div class="live-detail-backdrop" data-action="close-live-detail"></div>
+    <div class="live-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="live-detail-title">
+      <div class="live-detail-head">
+        <strong id="live-detail-title">详情</strong>
+      </div>
+      <div class="live-detail-body" id="live-detail-body"></div>
+      <div class="live-detail-actions">
+        <button class="button button-muted button-small" data-action="close-live-detail">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function livePayloadForRoom(room) {
+  const basePayload = collectFeaturePayload("live-rec-monitor");
+  return {
+    ...basePayload,
+    room_name: room.name,
+    room_url: room.url,
+    platform: room.platform,
+    product_naming_mode: liveNormalizeNamingMode(room.product_naming_mode || basePayload.product_naming_mode),
+  };
+}
+
+function liveRoomHasActiveLocalTask(room) {
+  const activity = state.liveRoomActivity[liveRoomKey(room)] || {};
+  const text = `${activity.liveStatus || ""} ${activity.recordStatus || ""} ${activity.productStatus || ""}`;
+  return /(启动中|检测中|录制中|排队中|监控中)/.test(text) && !/(已停止|失败|完成|未直播|未录制)/.test(text);
+}
+
+async function startLiveRoom(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  await saveFeaturePreferences();
+  const room = state.liveRooms[index];
+  if (liveRoomHasActiveLocalTask(room)) {
+    toast(`${room.name} 已在录制或检测中`, "warning");
+    appendLog("live-rec", {
+      time: new Date().toLocaleTimeString(),
+      level: "warning",
+      message: `${room.name}: 已在录制或检测中，未重复启动。`,
+    });
+    return;
+  }
+  const payload = livePayloadForRoom(room);
+  setLiveRoomActivity(room, {
+    liveStatus: "检测中",
+    recordStatus: "启动中",
+    productStatus: isDouyinLiveRoom(room) ? "监控中" : "未启用",
+  });
+  try {
+    await runPreflight("live-rec-monitor", payload, "live-rec");
+    const result = await api("/api/live-rec-monitor/start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    setLiveRoomActivity(room, {
+      liveStatus: "检测中",
+      recordStatus: result.ok ? "检测中" : "待录制",
+      productStatus: isDouyinLiveRoom(room) ? "待监控" : "未启用",
+      duration: "0:00",
+      taskId: result.task_id || "",
+    });
+    appendLog("live-rec", {
+      time: new Date().toLocaleTimeString(),
+      level: result.reused ? "warning" : (result.ok ? "success" : "warning"),
+      message: `${room.name}: ${result.message || "任务已提交"}`,
+    });
+    toast(result.message || "直播录制任务已启动", result.reused ? "warning" : (result.ok ? "success" : "warning"));
+  } catch (error) {
+    setLiveRoomActivity(room, {
+      recordStatus: "启动失败",
+      productStatus: "待确认",
+    });
+    appendLog("live-rec", {
+      time: new Date().toLocaleTimeString(),
+      level: "error",
+      message: `${room.name}: ${error.message || error}`,
+    });
+    throw error;
+  } finally {
+    refreshTasks();
+  }
+}
+
+function liveRecordRoomsForSubmit() {
+  const tableRooms = liveRoomsFromTable();
+  if (tableRooms.length && !state.liveRooms.length) {
+    state.liveRooms = tableRooms;
+    saveLiveRooms();
+  }
+  if (state.liveRooms.length) return state.liveRooms;
+  const payload = collectFeaturePayload("live-rec-monitor");
+  const room = normalizeLiveRoom({ name: payload.room_name, url: payload.room_url, platform: payload.platform });
+  return room ? [room] : [];
+}
+
+async function submitLiveRecord() {
+  await saveFeaturePreferences();
+  const rooms = liveRecordRoomsForSubmit();
+  if (!rooms.length) {
+    toast("请先填写或添加直播间", "warning");
+    appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: "请先填写或添加直播间。" });
+    return;
+  }
+  let started = 0;
+  let reused = 0;
+  const failed = [];
+  for (const room of rooms) {
+    if (liveRoomHasActiveLocalTask(room)) {
+      reused += 1;
+      appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: `${room.name}: 已在录制或检测中，跳过重复启动。` });
+      continue;
+    }
+    const payload = livePayloadForRoom(room);
+    try {
+      setLiveRoomActivity(room, {
+        liveStatus: "检测中",
+        recordStatus: "启动中",
+        productStatus: isDouyinLiveRoom(room) ? "监控中" : "未启用",
+      });
+      await runPreflight("live-rec-monitor", payload, "live-rec");
+      const result = await api("/api/live-rec-monitor/start", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      if (result.reused) reused += 1;
+      else started += result.ok ? 1 : 0;
+      setLiveRoomActivity(room, {
+        liveStatus: "检测中",
+        recordStatus: result.ok ? "检测中" : "待录制",
+        productStatus: isDouyinLiveRoom(room) ? "待监控" : "未启用",
+        duration: "0:00",
+        taskId: result.task_id || "",
+      });
+      appendLog("live-rec", {
+        time: new Date().toLocaleTimeString(),
+        level: result.reused ? "warning" : (result.ok ? "success" : "warning"),
+        message: `${room.name}: ${result.message || "任务已提交"}`,
+      });
+    } catch (error) {
+      failed.push(room.name);
+      setLiveRoomActivity(room, {
+        recordStatus: "启动失败",
+        productStatus: "待确认",
+      });
+      appendLog("live-rec", {
+        time: new Date().toLocaleTimeString(),
+        level: "error",
+        message: `${room.name}: ${error.message || error}`,
+      });
+    }
+  }
+  if (started) toast(`已启动 ${started} 个直播录制任务`, "success");
+  if (!started && reused) toast("选中的直播间已经在录制中", "warning");
+  if (!started && failed.length) toast("直播录制启动失败，请看运行日志", "error");
+  else if (failed.length) toast(`${failed.length} 个直播间启动失败，请看运行日志`, "warning");
+  refreshTasks();
 }
 
 function connectLogSocket() {

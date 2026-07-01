@@ -42,6 +42,8 @@ WEB_FILES = [
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
     WEB_DIR / "frontend" / "assets" / "liveclipper.ico",
+    WEB_DIR / "tools" / "douyin_active_product_probe_poc.py",
+    WEB_DIR / "tools" / "douyin_chrome_live_poc.py",
 ]
 
 

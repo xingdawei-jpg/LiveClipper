@@ -380,6 +380,59 @@ def _build_preview_feedback_profile(scope=None, limit=12):
     return _build_preview_feedback_profile_from_records(records, scope=scope, limit=limit)
 
 
+def _normalize_style_profile_strength(value):
+    text = str(value or "auto").strip().lower()
+    aliases = {
+        "自动": "auto",
+        "auto": "auto",
+        "关闭": "off",
+        "关": "off",
+        "off": "off",
+        "false": "off",
+        "轻度": "light",
+        "light": "light",
+        "标准": "standard",
+        "standard": "standard",
+        "强": "strong",
+        "强力": "strong",
+        "strong": "strong",
+    }
+    return aliases.get(text, "auto")
+
+
+def _feedback_sample_count(profile):
+    try:
+        summary = profile.get("summary") if isinstance(profile, dict) else {}
+        return int((summary or {}).get("sample_count") or 0)
+    except Exception:
+        return 0
+
+
+def _feedback_effective_strength(settings, profile):
+    configured = _normalize_style_profile_strength((settings or {}).get("style_profile_strength"))
+    count = _feedback_sample_count(profile)
+    if configured == "off":
+        return "off", configured, count
+    if count < 3:
+        return "readonly", configured, count
+    if configured in {"light", "standard", "strong"}:
+        return configured, configured, count
+    if count < 10:
+        return "light", configured, count
+    return "standard", configured, count
+
+
+def _feedback_strength_label(value):
+    return {
+        "off": "关闭",
+        "readonly": "只读",
+        "light": "轻度",
+        "standard": "标准",
+        "strong": "强",
+        "auto": "自动",
+    }.get(value, str(value or "自动"))
+
+
 def _build_preview_feedback_hint_from_profile(profile, limit=8):
     profile = profile if isinstance(profile, dict) else {}
     kept = list(profile.get("kept") or [])[:limit]
@@ -397,7 +450,7 @@ def _build_preview_feedback_hint_from_profile(profile, limit=8):
     if not any((kept, rejected, hook_positive, hook_negative, close_positive, close_negative, move_to_front, move_to_end, positive_signals, negative_signals, conflicts)):
         return ""
 
-    lines = ["★用户喜好库软参考（来自用户最终成片前的勾选，不按原句硬匹配）:"]
+    lines = ["★剪辑风格画像软参考（来自用户最终成片前的勾选，不按原句硬匹配）:"]
     if positive_signals:
         parts = []
         for item in positive_signals:
@@ -1539,6 +1592,7 @@ def _default_settings():
     return {
         "api_key": "", "base_url": DEEPSEEK_DEFAULT_BASE_URL,
         "model": DEEPSEEK_DEFAULT_MODEL, "enabled": False,
+        "style_profile_strength": "auto",
     }
 
 
@@ -2881,10 +2935,19 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         _log(f"差异化历史: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
     _feedback_scope = "mix" if merge_mode else "smart"
     _feedback_profile = _build_preview_feedback_profile(scope=_feedback_scope)
-    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(settings, _feedback_profile)
+    _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
+    _feedback_filter_enabled = _feedback_mode in {"light", "standard", "strong"}
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile) if _feedback_prompt_enabled else ""
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log(f"人工偏好反馈: 已载入{_feedback_scope}喜好摘要软参考，不做硬过滤")
+        _log(f"剪辑风格画像: {_feedback_scope} 已按{_feedback_strength_label(_feedback_mode)}模式进入AI软参考（样本{_feedback_count}）")
+    elif _feedback_mode == "light":
+        _log(f"剪辑风格画像: {_feedback_scope} 轻度模式，仅本地保守避开常删内容（样本{_feedback_count}）")
+    elif _feedback_mode == "readonly":
+        _log(f"剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
+    elif _feedback_mode == "off":
+        _log("剪辑风格画像: 已关闭，不参与本次选片")
     _history_min_keep, _history_min_duration = _recent_filter_floor(_AI_TARGET_DURATION)
 
     def _record_history_if_needed(selected_clips):
@@ -3026,11 +3089,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # [v9.2] 裁掉片段开头的语气词(对/嗯/呃等)对应的画面和音频
             clips = _trim_filler_start(clips, cleaned_srt, log_fn)
             clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
-            clips = _filter_preview_feedback_rejected_clips(
-                clips, _feedback_profile, log_fn,
-                min_keep=_history_min_keep,
-                min_duration=_history_min_duration,
-            )
+            if _feedback_filter_enabled:
+                clips = _filter_preview_feedback_rejected_clips(
+                    clips, _feedback_profile, log_fn,
+                    min_keep=_history_min_keep,
+                    min_duration=_history_min_duration,
+                )
             clips = _filter_recent_similar_clips(
                 clips, _recent_history, log_fn,
                 min_keep=_history_min_keep,
@@ -3078,11 +3142,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
                     clips = _trim_filler_start(clips, cleaned_srt, log_fn)
                     clips = _trim_filler_middle(clips, cleaned_srt, log_fn)
-                    clips = _filter_preview_feedback_rejected_clips(
-                        clips, _feedback_profile, log_fn,
-                        min_keep=_history_min_keep,
-                        min_duration=_history_min_duration,
-                    )
+                    if _feedback_filter_enabled:
+                        clips = _filter_preview_feedback_rejected_clips(
+                            clips, _feedback_profile, log_fn,
+                            min_keep=_history_min_keep,
+                            min_duration=_history_min_duration,
+                        )
             # [v9.3 - DISABLED] tighten_clip_boundaries + 延伸 - 引起片段间跳跃废话
             # 改用AI Prompt控制片段长度和边界，代码层只做 trim_filler
             _total_dur = sum(c[5] for c in clips)
@@ -3163,11 +3228,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _remove_overlaps(clips, log_fn)
         clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
         clips = _filter_hook_product_repeats(clips, log_fn)
-        clips = _filter_preview_feedback_rejected_clips(
-            clips, _feedback_profile, log_fn,
-            min_keep=_history_min_keep,
-            min_duration=_history_min_duration,
-        )
+        if _feedback_filter_enabled:
+            clips = _filter_preview_feedback_rejected_clips(
+                clips, _feedback_profile, log_fn,
+                min_keep=_history_min_keep,
+                min_duration=_history_min_duration,
+            )
         # [DISABLED] 延伸已禁用
         # clips = _extend_clips(clips, log_fn, target_min=55, target_max=75, max_end=srt_max_end)
         # 兜底回收：延伸后如果仍不到50s，从去重被砍的片段中回收
@@ -3213,11 +3279,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     if relaxed and len(relaxed) < _target_min_clips:
         relaxed = _supplement_clips(relaxed, cleaned_srt, log_fn, min_total=_target_min_clips)
     if relaxed:
-        relaxed = _filter_preview_feedback_rejected_clips(
-            relaxed, _feedback_profile, log_fn,
-            min_keep=_history_min_keep,
-            min_duration=_history_min_duration,
-        )
+        if _feedback_filter_enabled:
+            relaxed = _filter_preview_feedback_rejected_clips(
+                relaxed, _feedback_profile, log_fn,
+                min_keep=_history_min_keep,
+                min_duration=_history_min_duration,
+            )
         relaxed = _filter_recent_similar_clips(
             relaxed, _recent_history, log_fn,
             min_keep=_history_min_keep,
@@ -4517,10 +4584,16 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     if _recent_history:
         _log(f"多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
     _feedback_profile = _build_preview_feedback_profile(scope="smart")
-    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(settings, _feedback_profile)
+    _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile) if _feedback_prompt_enabled else ""
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log("多版本人工偏好反馈: 已载入喜好摘要软参考，不做硬过滤")
+        _log(f"多版本剪辑风格画像: 已按{_feedback_strength_label(_feedback_mode)}模式进入AI软参考（样本{_feedback_count}）")
+    elif _feedback_mode == "readonly":
+        _log(f"多版本剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
+    elif _feedback_mode == "off":
+        _log("多版本剪辑风格画像: 已关闭，不参与本次选片")
 
     # ★构建SRT条目索引★
     _indexed_srt_entries = []
@@ -4784,10 +4857,17 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
     if _recent_history:
         _log(f"降级多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段")
     _feedback_profile = _build_preview_feedback_profile(scope="smart")
-    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile)
+    _settings = load_settings()
+    _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(_settings, _feedback_profile)
+    _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
+    _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile) if _feedback_prompt_enabled else ""
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
-        _log("降级多版本人工偏好反馈: 已载入喜好摘要软参考，不做硬过滤")
+        _log(f"降级多版本剪辑风格画像: 已按{_feedback_strength_label(_feedback_mode)}模式进入AI软参考（样本{_feedback_count}）")
+    elif _feedback_mode == "readonly":
+        _log(f"降级多版本剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
+    elif _feedback_mode == "off":
+        _log("降级多版本剪辑风格画像: 已关闭，不参与本次选片")
     all_angle_hints = [
         ("版型显瘦", "以版型显瘦开场（Hook+前1-2个Product讲显瘦/遮肉/修饰身材/收腰/遮副乳），后续Product必须覆盖颜色/穿搭/品质等其他卖点，同一角度最多2段，面料最多2段"),
         ("颜色氛围", "以颜色氛围开场（Hook+前1-2个Product讲颜色/显白/衬肤色/抬气色/温柔色），后续Product必须覆盖版型/显瘦/穿搭等其他卖点，同一角度最多2段，面料最多2段"),
