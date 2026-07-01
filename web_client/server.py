@@ -5825,9 +5825,92 @@ def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
         "status_2_candidate_count": int(queue.get("status_2_candidate_count") or 0),
         "active_product_confirmed_count": int(queue.get("active_product_confirmed_count") or 0),
         "active_product_rule_review_count": int(queue.get("active_product_rule_review_count") or 0),
+        "product_evidence_count": int(queue.get("product_evidence_count") or 0),
         "unresolved_reason": str(queue.get("unresolved_reason") or ""),
         "recording_returncode": queue.get("recording_returncode"),
     }
+
+
+def _live_product_recognition_status(queue: dict[str, Any] | None) -> str:
+    stats = _live_product_queue_stats(queue)
+    segment_count = len((queue or {}).get("segments") or [])
+    if int(stats.get("product_bound_segments") or 0) > 0 or bool(stats.get("active_product_changed")):
+        return "identified"
+    if int(stats.get("active_product_candidate_count") or 0) > 0 or int(stats.get("active_product_rule_review_count") or 0) > 0:
+        return "needs_review"
+    if int(stats.get("product_pending_segments") or 0) > 0 or segment_count > 0:
+        return "unresolved"
+    return "none"
+
+
+def _write_live_record_user_artifacts(queue: dict[str, Any], summary: dict[str, Any] | None = None) -> None:
+    output = Path(str(queue.get("recording") or ""))
+    if not str(output):
+        return
+    stats = _live_product_queue_stats(queue)
+    status = _live_product_recognition_status(queue)
+    product_timeline_path = output.with_suffix(".product_timeline.json")
+    recording_summary_path = output.with_suffix(".recording_summary.json")
+    segments = []
+    for segment in list(queue.get("segments") or []):
+        segments.append(
+            {
+                "index": segment.get("index"),
+                "status": segment.get("review_status") or ("auto_bound" if segment.get("product_id") or segment.get("promotion_id") else "pending_user_confirm"),
+                "start": segment.get("start"),
+                "end": segment.get("end"),
+                "cut_start": segment.get("cut_start"),
+                "cut_end": segment.get("cut_end"),
+                "duration": segment.get("duration"),
+                "title": segment.get("title") or "",
+                "product_id": segment.get("product_id") or "",
+                "promotion_id": segment.get("promotion_id") or "",
+                "filename_stem": segment.get("filename_stem") or "",
+                "naming_source": segment.get("naming_source") or "",
+                "source": segment.get("source") or "",
+                "confidence": segment.get("confidence") or "",
+                "reason": segment.get("reason") or "",
+            }
+        )
+    product_timeline = {
+        "version": 1,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "recording": str(output),
+        "recording_duration": queue.get("recording_duration"),
+        "recognition_status": status,
+        "room_name": queue.get("room_name") or "",
+        "room_url": queue.get("room_url") or "",
+        "naming_mode": queue.get("naming_mode") or "",
+        "stats": stats,
+        "segments": segments,
+    }
+    recording_summary = {
+        "version": 1,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "recording": str(output),
+        "recording_duration": queue.get("recording_duration"),
+        "stream_quality": queue.get("stream_quality") or "",
+        "recognition_status": status,
+        "confirmed_product_segments": stats.get("product_bound_segments", 0),
+        "pending_review_segments": stats.get("product_pending_segments", 0),
+        "candidate_signal_count": stats.get("candidate_signal_count", 0),
+        "strong_signal_count": stats.get("strong_signal_count", 0),
+        "active_product_candidate_count": stats.get("active_product_candidate_count", 0),
+        "active_product_rule_review_count": stats.get("active_product_rule_review_count", 0),
+        "unresolved_reason": stats.get("unresolved_reason", ""),
+        "product_evidence_log": queue.get("product_evidence_log") or "",
+        "product_timeline": str(product_timeline_path),
+        "split_queue": queue.get("queue_path") or "",
+        "probe_summary": queue.get("probe_summary") or "",
+        "probe_report": queue.get("probe_report") or "",
+        "probe_version": (summary or {}).get("probe_version") or "",
+        "probe_build": (summary or {}).get("probe_build") or "",
+        "probe_script_hash": queue.get("probe_script_hash") or "",
+    }
+    _write_json_file(product_timeline_path, product_timeline)
+    _write_json_file(recording_summary_path, recording_summary)
+    queue["product_timeline_json"] = str(product_timeline_path)
+    queue["recording_summary"] = str(recording_summary_path)
 
 
 def _stable_active_product_changes(changes: list[dict[str, Any]], duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5920,6 +6003,7 @@ def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveR
         fh.write(json.dumps({"type": "recording", "created_at": created_at, "path": str(output), "duration": round(duration, 3)}, ensure_ascii=False) + "\n")
         for segment in segments:
             fh.write(json.dumps({"type": "segment", **segment}, ensure_ascii=False) + "\n")
+    _write_live_record_user_artifacts(queue)
     queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
     return queue
 
@@ -5953,6 +6037,28 @@ def _short_file_hash(path: Path, length: int = 12) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:length]
     except Exception:
         return "unknown"
+
+
+def _manifest_expected_hash(relative_path: str) -> str:
+    try:
+        data = json.loads((APP_DIR / "version.json").read_text(encoding="utf-8-sig"))
+        files = data.get("files") if isinstance(data.get("files"), dict) else {}
+        return str(files.get(relative_path.replace("\\", "/")) or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _validate_active_probe_script(script: Path) -> None:
+    expected = _manifest_expected_hash("web_client/tools/douyin_active_product_probe_poc.py")
+    if not expected:
+        return
+    actual = _short_file_hash(script, 64)
+    if actual and actual != "unknown" and actual.lower() != expected.lower():
+        raise RuntimeError(
+            "当前直播商品探针版本不一致，已停止录制以避免误识别。"
+            f"当前脚本：{script}，当前哈希：{actual[:12]}，期望哈希：{expected[:12]}。"
+            "请更新后完全退出 LiveClipperWeb.exe 再重新打开。"
+        )
 
 
 def _python_tool_command(script: Path) -> list[str]:
@@ -6108,14 +6214,19 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
         "probe_summary": str(summary_path),
         "probe_report": str(summary.get("report_path") or ""),
         "probe_events": str(summary.get("probe_path") or ""),
+        "product_evidence_log": str(summary.get("product_evidence_log_path") or ""),
         "probe_timeline": str(timeline_path),
         "probe_review_segments": str(summary.get("review_segments_path") or ""),
         "probe_catalog": str(summary.get("catalog_path") or ""),
         "recording_log": str(summary.get("recording_log") or output.with_suffix(".ffmpeg.log")),
         "stream_quality": _normalize_live_stream_quality(summary.get("stream_quality")),
+        "probe_version": summary.get("probe_version") or "",
+        "probe_build": summary.get("probe_build") or "",
+        "probe_script_hash": _short_file_hash(_douyin_active_probe_script()),
         "active_product_changed": bool(summary.get("active_product_changed")),
         "strong_signal_count": int(summary.get("strong_signal_count") or 0),
         "candidate_signal_count": int(summary.get("candidate_signal_count") or 0),
+        "product_evidence_count": int(summary.get("product_evidence_count") or 0),
         "active_product_candidate_count": int(summary.get("active_product_candidate_count") or 0),
         "status_2_candidate_count": int(summary.get("status_2_candidate_count") or 0),
         "active_product_confirmed_count": int(summary.get("active_product_confirmed_count") or 0),
@@ -6127,6 +6238,7 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
     queue["timeline_path"] = str(timeline_path)
     queue["queue_path"] = str(queue_path)
     queue["clips_dir"] = str(room_dir)
+    _write_live_record_user_artifacts(queue, summary)
     queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
     return queue
 
@@ -6182,6 +6294,7 @@ def _request_live_probe_stop(info: dict[str, Any]) -> bool:
 
 def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_dir: Path, name: str, scope: str) -> tuple[Path, dict[str, Any] | None, list[str]]:
     script = _douyin_active_probe_script()
+    _validate_active_probe_script(script)
     seconds = _live_segment_seconds(payload.segment)
     started = time.time()
     cmd = [
@@ -6397,16 +6510,18 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
         return []
     paths: list[Path] = []
     for key in (
-        "recording",
         "timeline_path",
         "queue_path",
         "probe_summary",
         "probe_report",
         "probe_events",
+        "product_evidence_log",
         "probe_timeline",
         "probe_review_segments",
         "probe_catalog",
         "recording_log",
+        "product_timeline_json",
+        "recording_summary",
     ):
         raw = str(queue.get(key) or "").strip()
         if raw:
@@ -6417,6 +6532,9 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
             ".timeline.jsonl",
             ".split_queue.json",
             ".active_product_probe.jsonl",
+            ".product_evidence_log.jsonl",
+            ".product_timeline.json",
+            ".recording_summary.json",
             ".probe_summary.json",
             ".review_segments.json",
             ".catalog.jsonl",
@@ -6433,6 +6551,37 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
         seen.add(key)
         unique.append(path)
     return unique
+
+
+def _archive_live_product_diagnostics(queue: dict[str, Any] | None, room_dir: Path, name: str) -> Path | None:
+    if not queue:
+        return None
+    recording = Path(str(queue.get("recording") or ""))
+    stamp = _live_product_recording_stamp(recording.stem if str(recording) else "")
+    try:
+        archive_dir = _safe_user_child("live_rec_diagnostics", _safe_stem(name), stamp)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    copied = 0
+    recording_key = str(recording.resolve()).lower() if recording.exists() else ""
+    for path in _live_product_intermediate_paths(queue):
+        try:
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if recording_key and str(resolved).lower() == recording_key:
+                continue
+            if not _is_within_directory(resolved, room_dir):
+                continue
+            target = archive_dir / resolved.name
+            if target.exists():
+                target = archive_dir / f"{resolved.stem}_{int(time.time())}{resolved.suffix}"
+            shutil.copy2(str(resolved), str(target))
+            copied += 1
+        except Exception:
+            continue
+    return archive_dir if copied else None
 
 
 def _cleanup_live_product_intermediates(
@@ -6452,6 +6601,7 @@ def _cleanup_live_product_intermediates(
     removed: list[str] = []
     keep_debug = str(os.environ.get("LIVECLIPPER_KEEP_LIVE_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
     debug_dir = room_dir / ".liveclipper_debug"
+    archived_dir = _archive_live_product_diagnostics(queue, room_dir, name)
     for path in _live_product_intermediate_paths(queue):
         try:
             if not path.is_file():
@@ -6476,7 +6626,9 @@ def _cleanup_live_product_intermediates(
             emit_log("warning", f"{name}: 清理中间文件失败：{path.name}，{exc}", scope)
     if removed:
         action = "归档" if keep_debug else "删除"
-        emit_log("info", f"{name}: 已{action} {len(removed)} 个录制中间文件，直播间目录只保留单品视频。", scope)
+        emit_log("info", f"{name}: 已{action} {len(removed)} 个录制中间文件，直播间目录保留母带和单品视频。", scope)
+    if archived_dir:
+        emit_log("info", f"{name}: 诊断文件已保存到：{archived_dir}", scope)
     return removed
 
 
@@ -6676,7 +6828,10 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                     "recording_outputs": recording_outputs,
                     "rolling_cycle_count": completed_cycles,
                     "product_timeline": product_queue.get("timeline_path") if product_queue else "",
+                    "product_timeline_json": product_queue.get("product_timeline_json") if product_queue else "",
                     "product_split_queue": product_queue.get("queue_path") if product_queue else "",
+                    "recording_summary": product_queue.get("recording_summary") if product_queue else "",
+                    "product_evidence_log": product_queue.get("product_evidence_log") if product_queue else "",
                     "product_segments": len(product_queue.get("segments") or []) if product_queue else 0,
                     "product_clips_dir": product_queue.get("clips_dir") if product_queue else "",
                     "probe_summary": product_queue.get("probe_summary") if product_queue else "",
@@ -6727,7 +6882,10 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                 final_payload.update(
                     {
                         "product_timeline": last_queue.get("timeline_path"),
+                        "product_timeline_json": last_queue.get("product_timeline_json"),
                         "product_split_queue": last_queue.get("queue_path"),
+                        "recording_summary": last_queue.get("recording_summary"),
+                        "product_evidence_log": last_queue.get("product_evidence_log"),
                         "product_segments": len(last_queue.get("segments") or []),
                         "product_clips_dir": last_queue.get("clips_dir"),
                         "probe_summary": last_queue.get("probe_summary"),
@@ -6807,7 +6965,10 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
             result_payload.update(
                 {
                     "product_timeline": product_queue.get("timeline_path"),
+                    "product_timeline_json": product_queue.get("product_timeline_json"),
                     "product_split_queue": product_queue.get("queue_path"),
+                    "recording_summary": product_queue.get("recording_summary"),
+                    "product_evidence_log": product_queue.get("product_evidence_log"),
                     "product_segments": len(product_queue.get("segments") or []),
                     "product_clips_dir": product_queue.get("clips_dir"),
                     "stream_quality": _normalize_live_stream_quality(product_queue.get("stream_quality")),

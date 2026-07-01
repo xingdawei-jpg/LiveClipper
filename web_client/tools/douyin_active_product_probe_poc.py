@@ -29,6 +29,8 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
+PROBE_VERSION = "active_product_probe_v1.1"
+PROBE_BUILD = "2026-07-01"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -612,6 +614,13 @@ def jsonl_write(path: Path, event: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def evidence_excerpt(value: Any, limit: int = 360) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 def normalize_min_stream_quality(value: str) -> str:
@@ -1271,11 +1280,15 @@ def process_network_event(
 
 
 class ProbeRecorder:
-    def __init__(self, probe_path: Path, timeline_path: Path) -> None:
+    def __init__(self, probe_path: Path, timeline_path: Path, evidence_path: Path, page_url: str = "", live_room_id: str = "") -> None:
         self.probe_path = probe_path
         self.timeline_path = timeline_path
+        self.evidence_path = evidence_path
+        self.page_url = page_url
+        self.live_room_id = live_room_id
         self.seen: set[str] = set()
         self.event_seq = 0
+        self.evidence_count = 0
         self.signal_count = 0
         self.strong_signal_count = 0
         self.active_change_count = 0
@@ -1315,6 +1328,7 @@ class ProbeRecorder:
         signal_types = {"candidate_signal", "active_product_candidate", "active_product_manual_or_detail_candidate"}
         if event_type not in signal_types:
             jsonl_write(self.probe_path, event)
+            self.write_product_evidence(event)
             return event
         self.remember_product(event)
         identity = event_identity(event)
@@ -1342,7 +1356,44 @@ class ProbeRecorder:
             if any(token in evidence_path for token in ("catalog", "promotions", "products", "list", "items")):
                 self.catalog_only_count += 1
         jsonl_write(self.probe_path, event)
+        self.write_product_evidence(event)
         return event
+
+    def write_product_evidence(self, event: dict[str, Any], product_override: dict[str, Any] | None = None) -> None:
+        product = product_override if isinstance(product_override, dict) else event.get("product")
+        product = product if isinstance(product, dict) else {}
+        evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+        product_id = str(product.get("product_id") or event.get("product_id") or "").strip()
+        promotion_id = str(product.get("promotion_id") or event.get("promotion_id") or "").strip()
+        product_name = str(product.get("title") or product.get("name") or event.get("title") or "").strip()
+        if not (product_id or promotion_id or product_name):
+            return
+        raw_excerpt = evidence.get("raw_excerpt")
+        if raw_excerpt is None:
+            raw_excerpt = evidence.get("snippet") or evidence.get("text") or evidence.get("dom_text") or evidence.get("url_masked") or evidence.get("path") or ""
+        elapsed = event.get("elapsed")
+        try:
+            ts_ms = int(float(elapsed or 0) * 1000)
+        except Exception:
+            ts_ms = 0
+        row = {
+            "timestamp": event.get("ts") or now_iso(),
+            "ts_ms": ts_ms,
+            "event_id": event.get("event_id") or "",
+            "event_type": event.get("type") or "",
+            "source": event.get("source") or "",
+            "reason": event.get("reason") or event.get("confirm_reason") or "",
+            "product_id": product_id,
+            "promotion_id": promotion_id,
+            "product_name": product_name,
+            "confidence_hint": event.get("confidence") or "",
+            "raw_path": evidence.get("path") or evidence.get("current_source") or "",
+            "raw_excerpt": evidence_excerpt(raw_excerpt),
+            "page_url": event.get("page_url") or self.page_url,
+            "live_room_id": event.get("live_room_id") or self.live_room_id,
+        }
+        jsonl_write(self.evidence_path, row)
+        self.evidence_count += 1
 
     def remember_product(self, event: dict[str, Any]) -> None:
         product = event.get("product") if isinstance(event.get("product"), dict) else {}
@@ -1406,6 +1457,7 @@ class ProbeRecorder:
         }
         self.active_change_events.append(change_event)
         jsonl_write(self.timeline_path, change_event)
+        self.write_product_evidence(change_event, product)
 
     def maybe_complete_partial_active(self, event: dict[str, Any], elapsed: float) -> bool:
         event_product = event.get("product") if isinstance(event.get("product"), dict) else {}
@@ -1677,6 +1729,7 @@ class ProbeRecorder:
         }
         self.active_change_events.append(change_event)
         jsonl_write(self.timeline_path, change_event)
+        self.write_product_evidence(change_event, product)
 
     def expire_candidates(self, elapsed: float, force: bool = False) -> None:
         for key, candidate in list(self.pending_candidates.items()):
@@ -1715,6 +1768,7 @@ class ProbeRecorder:
         self.rule_review_events.append(review_event)
         jsonl_write(self.probe_path, review_event)
         jsonl_write(self.timeline_path, review_event)
+        self.write_product_evidence(review_event, product)
 
     def write_manual_marker(self, elapsed: float, note: str) -> None:
         wall_time = now_iso()
@@ -2235,6 +2289,7 @@ def write_probe_report(
             "## Output Files",
             "",
             f"- Probe JSONL: {probe_path}",
+            f"- Product evidence JSONL: {summary.get('product_evidence_log_path')}",
             f"- Timeline JSONL: {timeline_path}",
             f"- Summary JSON: {summary.get('summary_path')}",
             f"- Review segments: {review_segments_path}",
@@ -2268,6 +2323,7 @@ def run() -> int:
     base = out_dir / f"{room_name}_{stamp}"
     timeline_path = base.with_suffix(".timeline.jsonl")
     probe_path = base.with_suffix(".active_product_probe.jsonl")
+    evidence_path = base.with_suffix(".product_evidence_log.jsonl")
     summary_path = base.with_suffix(".probe_summary.json")
     review_segments_path = base.with_suffix(".review_segments.json")
     catalog_path = base.with_suffix(".catalog.jsonl")
@@ -2275,6 +2331,8 @@ def run() -> int:
 
     version = prepare_chrome(args.port, args.url)
     target, opened_tab_for_probe = ensure_live_tab(args.port, args.url)
+    live_room_id = room_id_from_url(args.url) or room_id_from_url(str(target.get("url") or ""))
+    log(f"Probe version: {PROBE_VERSION} ({PROBE_BUILD})")
     log(f"Connected Chrome: {version.get('Browser', 'Chrome')}")
     log(f"Using tab: {target.get('title') or target.get('url')}")
 
@@ -2284,7 +2342,13 @@ def run() -> int:
     stderr_path: Path | None = None
     request_urls: dict[str, str] = {}
     response_meta: dict[str, dict[str, Any]] = {}
-    recorder = ProbeRecorder(probe_path, timeline_path)
+    recorder = ProbeRecorder(
+        probe_path=probe_path,
+        timeline_path=timeline_path,
+        evidence_path=evidence_path,
+        page_url=args.url,
+        live_room_id=live_room_id,
+    )
     started_at = time.time()
     run_started_at = started_at
     requested_manual_markers = (not args.no_manual_markers) and (args.manual_markers or sys.stdin.isatty())
@@ -2310,9 +2374,13 @@ def run() -> int:
         "target_url": target.get("url"),
         "target_title": target.get("title"),
         "target_id": target.get("id"),
+        "live_room_id": live_room_id,
         "chrome_tab_opened_by_probe": opened_tab_for_probe,
         "chrome": version.get("Browser"),
+        "probe_version": PROBE_VERSION,
+        "probe_build": PROBE_BUILD,
         "probe_path": str(probe_path),
+        "product_evidence_log_path": str(evidence_path),
         "timeline_path": str(timeline_path),
         "summary_path": str(summary_path),
         "report_path": str(report_path),
@@ -2645,6 +2713,7 @@ def run() -> int:
         summary["recording_returncode"] = ffmpeg_returncode
         summary["recording_completed"] = ffmpeg_returncode in (None, 0)
         summary["candidate_signal_count"] = recorder.signal_count
+        summary["product_evidence_count"] = recorder.evidence_count
         summary["weak_signal_count"] = max(0, recorder.signal_count - recorder.strong_signal_count)
         summary["strong_signal_count"] = recorder.strong_signal_count
         summary["active_product_change_count"] = recorder.active_change_count
@@ -2722,6 +2791,7 @@ def run() -> int:
         )
         log(f"Probe summary: {summary_path}")
         log(f"Probe report: {report_path}")
+        log(f"Product evidence: {evidence_path}")
         log(f"Probe events: {probe_path}")
         log(f"Timeline: {timeline_path}")
         return 0
