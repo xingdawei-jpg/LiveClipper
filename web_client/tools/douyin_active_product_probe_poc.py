@@ -590,7 +590,22 @@ def is_control_stop_note(note: str) -> bool:
 
 
 def log(message: str) -> None:
-    print(f"[{dt.datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    line = f"[{dt.datetime.now().strftime('%H:%M:%S')}] {message}"
+    try:
+        print(line, flush=True)
+        return
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    fallback = os.environ.get("LIVECLIPPER_TOOL_STDIO_FALLBACK_LOG", "").strip()
+    if not fallback:
+        return
+    try:
+        path = Path(fallback)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        return
 
 
 def jsonl_write(path: Path, event: dict[str, Any]) -> None:

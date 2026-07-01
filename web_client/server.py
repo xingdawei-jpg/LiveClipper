@@ -6205,6 +6205,7 @@ def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_
         cmd += ["--min-stream-quality", min_stream_quality]
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env["LIVECLIPPER_TOOL_STDIO_FALLBACK_LOG"] = str(room_dir / f"{_safe_stem(name)}_active_probe_stdio.log")
     _set_task_progress(task_id, 24, "启动抖音商品时间线探针")
     emit_log("info", "使用 active_product_probe 录制：只接受当前讲解商品强信号，货架列表仅用于补全。", scope)
     emit_log("info", f"{name}: active_product_probe 脚本：{script} ({_short_file_hash(script)})", scope)
