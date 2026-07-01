@@ -5771,6 +5771,14 @@ def _live_product_segment_naming_source(segment: dict[str, Any], payload: LiveRe
     return "title"
 
 
+def _live_product_change_key(change: dict[str, Any]) -> str:
+    product = change.get("product") if isinstance(change.get("product"), dict) else {}
+    product_id = str(product.get("product_id") or change.get("product_id") or "").strip()
+    promotion_id = str(product.get("promotion_id") or change.get("promotion_id") or "").strip()
+    title = str(product.get("title") or change.get("title") or "").strip()
+    return product_id or promotion_id or title
+
+
 def _apply_live_product_segment_names(
     segments: list[dict[str, Any]],
     payload: LiveRecPayload | None = None,
@@ -5820,6 +5828,64 @@ def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
         "unresolved_reason": str(queue.get("unresolved_reason") or ""),
         "recording_returncode": queue.get("recording_returncode"),
     }
+
+
+def _stable_active_product_changes(changes: list[dict[str, Any]], duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
+    ordered: list[dict[str, Any]] = []
+    for change in sorted(changes, key=lambda item: float(item.get("elapsed") or 0)):
+        key = _live_product_change_key(change)
+        if not key:
+            continue
+        elapsed = max(0.0, min(float(duration or 0), float(change.get("elapsed") or 0)))
+        if ordered and ordered[-1]["key"] == key:
+            ordered[-1]["end"] = elapsed
+            continue
+        ordered.append({"key": key, "start": elapsed, "change": change})
+    if not ordered:
+        return []
+
+    runs: list[dict[str, Any]] = []
+    for index, item in enumerate(ordered):
+        start = float(item["start"])
+        end = float(ordered[index + 1]["start"]) if index + 1 < len(ordered) else float(duration or start)
+        if end <= start:
+            continue
+        runs.append({"key": item["key"], "start": start, "end": end, "change": item["change"]})
+
+    # A product card can flicker or rotate faster than the anchor is actually
+    # explaining products. Treat very short runs as boundary noise.
+    stable_seconds = max(30.0, float(settings.get("switch_confirm_seconds") or 0))
+    min_export_seconds = 10.0
+    stable_runs: list[dict[str, Any]] = []
+    index = 0
+    while index < len(runs):
+        run = dict(runs[index])
+        run_duration = float(run["end"]) - float(run["start"])
+        next_run = runs[index + 1] if index + 1 < len(runs) else None
+        prev_run = stable_runs[-1] if stable_runs else None
+        if run_duration < stable_seconds:
+            if prev_run and next_run and prev_run["key"] == next_run["key"]:
+                prev_run["end"] = float(next_run["end"])
+                index += 2
+                continue
+            index += 1
+            continue
+        if stable_runs and stable_runs[-1]["key"] == run["key"]:
+            stable_runs[-1]["end"] = float(run["end"])
+        else:
+            stable_runs.append(run)
+        index += 1
+
+    return [
+        run["change"]
+        | {
+            "_stable_start": round(float(run["start"]), 3),
+            "_stable_end": round(float(run["end"]), 3),
+            "_stable_duration": round(max(0.0, float(run["end"]) - float(run["start"])), 3),
+        }
+        for run in stable_runs
+        if float(run["end"]) - float(run["start"]) >= min_export_seconds
+    ]
 
 
 def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveRecPayload) -> dict[str, Any]:
@@ -5943,13 +6009,10 @@ def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, s
     min_seconds = float(settings["min_seconds"])
     segment_seconds = max(min_seconds, min(float(settings["default_seconds"]), float(settings["max_seconds"])))
     segments: list[dict[str, Any]] = []
-    sorted_changes = sorted(changes, key=lambda item: float(item.get("elapsed") or 0))
+    sorted_changes = _stable_active_product_changes(changes, duration, settings)
     for index, change in enumerate(sorted_changes, start=1):
-        start = max(0.0, float(change.get("elapsed") or 0))
-        next_start = float(sorted_changes[index].get("elapsed") or duration) if index < len(sorted_changes) else duration
-        end = max(start, min(duration, next_start))
-        if end - start < min_seconds:
-            end = min(duration, start + min(float(settings["default_seconds"]), float(settings["max_seconds"])))
+        start = max(0.0, float(change.get("_stable_start", change.get("elapsed") or 0) or 0))
+        end = max(start, min(duration, float(change.get("_stable_end", duration) or duration)))
         if end - start < 1:
             continue
         product = change.get("product") if isinstance(change.get("product"), dict) else {}
@@ -6228,6 +6291,7 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
     clips_dir = Path(str(queue.get("clips_dir") or ""))
     clips_dir.mkdir(parents=True, exist_ok=True)
     groups_by_name: dict[str, dict[str, Any]] = {}
+    exact_segments_by_title: dict[str, dict[str, Any]] = {}
     for segment in segments:
         title = _clean_forbidden_title_text(str(segment.get("filename_stem") or _live_product_segment_filename(segment)), fallback="单品候选")
         segment["filename_stem"] = title
@@ -6235,6 +6299,19 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
         start = float(segment.get("cut_start") or segment.get("start") or 0)
         end = float(segment.get("cut_end") or segment.get("end") or start)
         if end - start < 1:
+            continue
+        exact_product_name = (
+            (
+                segment.get("naming_mode") == "product_id"
+                and segment.get("naming_source") in {"auto_product_id", "auto_promotion_id"}
+            )
+            or segment.get("naming_source") == "product_name_timestamp"
+        )
+        if exact_product_name:
+            previous = exact_segments_by_title.get(title)
+            if previous and end - start <= float(previous.get("duration") or 0):
+                continue
+            exact_segments_by_title[title] = {"segment": segment, "start": start, "end": end, "duration": end - start}
             continue
         group = groups_by_name.get(title)
         if not group:
@@ -6255,7 +6332,28 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
             groups_by_name[title] = group
         group["segments"].append((start, end))
         group["total_duration"] = float(group.get("total_duration") or 0) + max(0.0, end - start)
-    groups = list(groups_by_name.values())
+    for title, item in exact_segments_by_title.items():
+        segment = item["segment"]
+        start = float(item["start"])
+        end = float(item["end"])
+        groups_by_name[title] = {
+            "name": title,
+            "product_id": segment.get("product_id") or "",
+            "promotion_id": segment.get("promotion_id") or "",
+            "detail_url": segment.get("detail_url") or "",
+            "naming_source": segment.get("naming_source") or "",
+            "exact_name": True,
+            "flat_output": True,
+            "segments": [(start, end)],
+            "total_duration": max(0.0, end - start),
+        }
+    groups = []
+    for group in groups_by_name.values():
+        if group.get("exact_name") and group.get("naming_source") == "product_name_timestamp":
+            target = clips_dir / f"{_clean_forbidden_title_text(str(group.get('name') or ''), fallback='单品候选')}.mp4"
+            if target.is_file() and target.stat().st_size > 1000:
+                continue
+        groups.append(group)
     if not groups:
         return []
     _set_task_progress(task_id, 92, f"切出 {len(groups)} 个单品候选段")
@@ -6544,7 +6642,9 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                         for item in split_results
                         if item.get("output_path") and Path(str(item.get("output_path"))).is_file()
                     ]
-                    product_outputs.extend(cycle_product_outputs)
+                    for output_path in cycle_product_outputs:
+                        if output_path and output_path not in product_outputs:
+                            product_outputs.append(output_path)
                     if cycle_product_outputs:
                         emit_log("success", f"{name}: 第 {cycle_index} 段自动分割完成：导出 {len(cycle_product_outputs)} 个单品候选段。", scope)
                         _cleanup_live_product_intermediates(product_queue, cycle_product_outputs, room_dir, scope, name)
