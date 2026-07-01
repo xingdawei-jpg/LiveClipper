@@ -826,21 +826,11 @@ def is_status_2_product(product: dict[str, Any] | None) -> bool:
 def is_status_2_candidate_context(path: str, source_url: str = "") -> bool:
     normalized_path = str(path or "")
     lower_url = str(source_url or "").lower()
-    if normalized_path == "$.promotions[0]":
+    if "/live/promotions/page" in lower_url:
+        return False
+    if normalized_path == "$.promotions[0]" and "/live/promotions/pop" in lower_url:
         return True
-    active_url_tokens = (
-        "promotion",
-        "promotions",
-        "product",
-        "commodity",
-        "ecom",
-        "commerce",
-        "explain",
-        "detail",
-        "room/web/enter",
-        "reflow/info",
-        "webcast",
-    )
+    active_url_tokens = ("active", "current", "explain", "explaining", "pop/v3", "room_promotion")
     return bool(lower_url and any(token in lower_url for token in active_url_tokens))
 
 
@@ -848,6 +838,44 @@ def is_live_pop_product_context(path: str, source_url: str = "") -> bool:
     normalized_path = str(path or "")
     lower_url = str(source_url or "").lower()
     return normalized_path == "$.promotions[0]" and "/live/promotions/pop" in lower_url
+
+
+def is_current_product_evidence(evidence: dict[str, Any] | None) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    text = " ".join(str(value or "") for value in evidence.values()).lower()
+    current_tokens = (
+        "currentpromotionid",
+        "current_promotion",
+        "activepromotion",
+        "active_promotion",
+        "defaultpromotion",
+        "opendetailpromotion",
+        "open_detail_promotion",
+        "activeproduct",
+        "currentproduct",
+        "is_explaining",
+        "isexplain",
+        "is_current",
+        "iscurrent",
+        "visible_dom_product_card",
+        "dom_active_card",
+    )
+    if any(token in text for token in current_tokens):
+        return True
+    list_only_tokens = (
+        "promotion-title.__reactfiber",
+        "promotions[",
+        "productcards[",
+        "valid_product_cards",
+        "shop_product_cards",
+        "catalog",
+        "product_list",
+        "list[",
+    )
+    if any(token in text for token in list_only_tokens):
+        return False
+    return False
 
 
 def is_detail_context(source_url: str, path: str = "") -> bool:
@@ -1637,6 +1665,7 @@ class ProbeRecorder:
                 return {"confirm_reason": "network_status_2_plus_dom_product_card", "confidence": 85, "bucket": "dom"}
         if source.startswith("network") or event_type == "active_product_manual_or_detail_candidate":
             if same_id:
+                candidate_evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
                 if candidate_reason == "network_pop_v3_status_2_candidate":
                     if elapsed_delta <= confirm_window:
                         return {"confirm_reason": "pop_v3_status_2_network_repeat_short_window", "confidence": 85, "bucket": "network_repeat"}
@@ -1647,8 +1676,20 @@ class ProbeRecorder:
                         "review_only": True,
                         "reason": "pop_v3_repeat_without_secondary_confirmation",
                     }
+                if candidate_reason == "network_status_2_candidate" and not (
+                    is_current_product_evidence(candidate_evidence) or is_current_product_evidence(evidence)
+                ):
+                    return {
+                        "confirm_reason": "network_status_2_repeat_without_current_evidence",
+                        "confidence": 70,
+                        "bucket": "network_repeat",
+                        "review_only": True,
+                        "reason": "status_2_repeat_without_current_evidence",
+                    }
                 return {"confirm_reason": "network_status_2_plus_network_repeat", "confidence": 80, "bucket": "network_repeat"}
         if source.startswith("runtime") and same_id:
+            if not is_current_product_evidence(evidence):
+                return None
             return {"confirm_reason": "network_status_2_plus_runtime_global", "confidence": 90, "bucket": "runtime"}
         if source.startswith("im_onMessage") and (same_id or title_matches_text(candidate_product.get("title") or "", evidence_text)):
             return {"confirm_reason": "network_status_2_plus_im", "confidence": 90, "bucket": "im"}

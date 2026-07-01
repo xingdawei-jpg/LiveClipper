@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.1.6",
-  "latest_version": "2026.7.1.6",
+  "version": "2026.7.1.7",
+  "latest_version": "2026.7.1.7",
   "files": {
     "app/ai_clipper.py": "2a19548ed6e795adac7c1d8f702fae97e84031c325b82651de9cbfba480b8b67",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -43,13 +43,13 @@
     "web_client/frontend/assets/app.js": "717ac0c9e178c96e2701ab9668e2a940b0584fe8215817bf3c3b48326f9e1575",
     "web_client/frontend/assets/styles.css": "2fae698bc2598d7c5fa91e4922eac6e55b56a259d5d47a5d630f331019dadd70",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
-    "web_client/tools/douyin_active_product_probe_poc.py": "c219cf0f5fe8aa483848a2c3c62f09476d32b7f24f0ebb9c03064a5682e74a31",
+    "web_client/tools/douyin_active_product_probe_poc.py": "8ae3f6953c1db29fa1efa9ad3c057d6b3c664c826610d0b47bf89dfad0e05350",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "直播录制商品识别闭环第一步：探针自报版本并校验脚本哈希，商品证据统一落盘，生成 product_timeline/recording_summary，成功导出后归档诊断文件并保留母带。",
+  "release_notes": "收紧直播商品识别确认规则：live/promotions/page 货架列表不再作为当前讲解商品候选，Runtime 普通商品标题路径不再升级为 active_product_change，避免一段视频混多个品。",
   "update_url": "",
-  "update_message": "直播录制商品识别闭环第一步：探针自报版本并校验脚本哈希，商品证据统一落盘，生成 product_timeline/recording_summary，成功导出后归档诊断文件并保留母带。",
+  "update_message": "收紧直播商品识别确认规则：live/promotions/page 货架列表不再作为当前讲解商品候选，Runtime 普通商品标题路径不再升级为 active_product_change，避免一段视频混多个品。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-01 21:40:18"
+  "updated_at": "2026-07-01 22:26:04"
 }
