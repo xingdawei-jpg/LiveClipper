@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.1.3",
-  "latest_version": "2026.7.1.3",
+  "version": "2026.7.1.4",
+  "latest_version": "2026.7.1.4",
   "files": {
     "app/ai_clipper.py": "2a19548ed6e795adac7c1d8f702fae97e84031c325b82651de9cbfba480b8b67",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -38,7 +38,7 @@
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
     "app/updater.py": "0080eca9f9fb377080df4b1c9a74ad304a38a221cec1456aa4acc2b7a797d0d5",
     "app/volcengine_asr.py": "9db4ac67cf9fcb2726ce0b747207544933f261d98d310dbc9502ae4afa6eaa23",
-    "web_client/server.py": "d9999e79c3416fafdbedbbb61d111b8109d42773a5a2926555d24cb0fc615626",
+    "web_client/server.py": "a2c69d647cb08fb5471cb1e85a4aeee3d76e3c85c677a644d0119a170b4841c0",
     "web_client/frontend/index.html": "3a76cf25a60b9b0391c39ab8cbcfe04c94c7466ee17434bde0713c7a626d5a95",
     "web_client/frontend/assets/app.js": "717ac0c9e178c96e2701ab9668e2a940b0584fe8215817bf3c3b48326f9e1575",
     "web_client/frontend/assets/styles.css": "2fae698bc2598d7c5fa91e4922eac6e55b56a259d5d47a5d630f331019dadd70",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "5874246abd3829b1b9e4b4cf050fa1f737b2597d5fda6592fdb3055b89655f7c",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "修复直播录制单品重复导出：同一商品ID只保留一个文件，短时弹卡抖动不再切成多段；优化抖音商品探针确认逻辑。",
+  "release_notes": "修复增量更新后直播商品探针可能加载旧脚本的问题；直播录制日志显示实际探针路径和哈希，便于排查商品ID未识别。",
   "update_url": "",
-  "update_message": "修复直播录制单品重复导出：同一商品ID只保留一个文件，短时弹卡抖动不再切成多段；优化抖音商品探针确认逻辑。",
+  "update_message": "修复增量更新后直播商品探针可能加载旧脚本的问题；直播录制日志显示实际探针路径和哈希，便于排查商品ID未识别。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-01 14:01:16"
+  "updated_at": "2026-07-01 14:32:53"
 }

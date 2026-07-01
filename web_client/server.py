@@ -5925,19 +5925,34 @@ def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveR
 
 
 def _douyin_active_probe_script() -> Path:
+    script_name = "douyin_active_product_probe_poc.py"
     candidates = [
-        TOOLS_DIR / "douyin_active_product_probe_poc.py",
-        WEB_DIR / "tools" / "douyin_active_product_probe_poc.py",
-        BUNDLE_DIR / "tools" / "douyin_active_product_probe_poc.py",
-        WEB_DIR.parent / "tools" / "douyin_active_product_probe_poc.py",
-        USER_UPDATE_ROOT / "tools" / "douyin_active_product_probe_poc.py",
-        Path(sys.executable).resolve().parent / "_internal" / "tools" / "douyin_active_product_probe_poc.py",
-        Path(sys.executable).resolve().parent / "tools" / "douyin_active_product_probe_poc.py",
+        USER_UPDATE_ROOT / "web_client" / "tools" / script_name,
+        WEB_DIR / "tools" / script_name,
+        MODULE_WEB_DIR / "tools" / script_name,
+        USER_UPDATE_ROOT / "tools" / script_name,
+        WEB_DIR.parent / "tools" / script_name,
+        TOOLS_DIR / script_name,
+        BUNDLE_DIR / "tools" / script_name,
+        Path(sys.executable).resolve().parent / "_internal" / "tools" / script_name,
+        Path(sys.executable).resolve().parent / "tools" / script_name,
     ]
+    seen: set[str] = set()
     for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
         if candidate.exists():
             return candidate
     raise FileNotFoundError("未找到抖音商品时间线探针脚本。请确认 tools/douyin_active_product_probe_poc.py 存在。")
+
+
+def _short_file_hash(path: Path, length: int = 12) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:length]
+    except Exception:
+        return "unknown"
 
 
 def _python_tool_command(script: Path) -> list[str]:
@@ -6192,6 +6207,7 @@ def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_
     env.setdefault("PYTHONIOENCODING", "utf-8")
     _set_task_progress(task_id, 24, "启动抖音商品时间线探针")
     emit_log("info", "使用 active_product_probe 录制：只接受当前讲解商品强信号，货架列表仅用于补全。", scope)
+    emit_log("info", f"{name}: active_product_probe 脚本：{script} ({_short_file_hash(script)})", scope)
     proc = subprocess.Popen(
         cmd,
         cwd=str(REPO_ROOT),
