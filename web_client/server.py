@@ -44,7 +44,8 @@ def _read_app_version(path: Path) -> str:
 
 
 def _valid_app_dir(path: Path) -> bool:
-    return path.is_dir() and (path / "license_client.py").exists() and (path / "cutter_logic.py").exists()
+    required = ("license_client.py", "cutter_logic.py", "ai_model_config.py")
+    return path.is_dir() and all((path / name).exists() for name in required)
 
 
 def _app_public_key(path: Path) -> str:

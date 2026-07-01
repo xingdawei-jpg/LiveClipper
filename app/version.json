@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.1.1",
-  "latest_version": "2026.7.1.1",
+  "version": "2026.7.1.2",
+  "latest_version": "2026.7.1.2",
   "files": {
     "app/ai_clipper.py": "2a19548ed6e795adac7c1d8f702fae97e84031c325b82651de9cbfba480b8b67",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -36,9 +36,9 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "6a274b1dea2e957a9c6a17ef5d401cf5e6b5cf1b5ab9744bbece7f327bcd48c1",
+    "app/updater.py": "0080eca9f9fb377080df4b1c9a74ad304a38a221cec1456aa4acc2b7a797d0d5",
     "app/volcengine_asr.py": "9db4ac67cf9fcb2726ce0b747207544933f261d98d310dbc9502ae4afa6eaa23",
-    "web_client/server.py": "1d54a03b7d06447162f85071271bc5434c50c79849f61f71d94d03effee21b1f",
+    "web_client/server.py": "d9dea96c65607e1bd292d10de0c7eed523c124f5cd5bc83ca35a683cafa5044b",
     "web_client/frontend/index.html": "3a76cf25a60b9b0391c39ab8cbcfe04c94c7466ee17434bde0713c7a626d5a95",
     "web_client/frontend/assets/app.js": "717ac0c9e178c96e2701ab9668e2a940b0584fe8215817bf3c3b48326f9e1575",
     "web_client/frontend/assets/styles.css": "2fae698bc2598d7c5fa91e4922eac6e55b56a259d5d47a5d630f331019dadd70",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "5874246abd3829b1b9e4b4cf050fa1f737b2597d5fda6592fdb3055b89655f7c",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "修复授权 token 自动刷新和设备绑定稳定性，同步直播录制画质与抖音商品探针更新",
+  "release_notes": "修复增量更新后部分客户端缺少 ai_model_config 导致启动失败的问题",
   "update_url": "",
-  "update_message": "修复授权 token 自动刷新和设备绑定稳定性，同步直播录制画质与抖音商品探针更新",
+  "update_message": "修复增量更新后部分客户端缺少 ai_model_config 导致启动失败的问题",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-01 11:19:16"
+  "updated_at": "2026-07-01 12:26:28"
 }

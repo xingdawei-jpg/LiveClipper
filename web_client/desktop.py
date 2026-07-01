@@ -83,6 +83,9 @@ def _load_server_app():
     update_server = _updated_server_path()
     if update_server:
         update_web = update_server.parent
+        update_app = update_web.parent / "app"
+        if update_app.is_dir() and str(update_app) not in sys.path:
+            sys.path.insert(0, str(update_app))
         if str(update_web) not in sys.path:
             sys.path.insert(0, str(update_web))
         spec = importlib.util.spec_from_file_location("server", update_server)
