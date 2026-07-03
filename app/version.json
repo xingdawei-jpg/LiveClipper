@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.1.7",
-  "latest_version": "2026.7.1.7",
+  "version": "2026.7.3.1",
+  "latest_version": "2026.7.3.1",
   "files": {
     "app/ai_clipper.py": "2a19548ed6e795adac7c1d8f702fae97e84031c325b82651de9cbfba480b8b67",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -9,7 +9,7 @@
     "app/asr_api.py": "192b352d2fe4803c1e767755c3a40df98cb80f6cf5868e30d2772a40592477d6",
     "app/config.py": "f5d7a4a659e1f9baaa7279afb29563aca3bdb90c7e9fed635c8a0685ae7a63d8",
     "app/cutter.py": "438d14c8d92c4e9e0806ed0061ebcfe7f1f61b1139210db48e30c08dce2f2d13",
-    "app/cutter_logic.py": "432ee21b4de98f6b765e579b9486afcb246206d1aadef1503300dc56ada4a9aa",
+    "app/cutter_logic.py": "989eaee7f7981e50904340dad56f6b89c5a7c5dbd6644dfc080502966f565da7",
     "app/dedup_page.py": "261cc18312541e071a34cddbf8e60824beb9d55dbab0e9925ab85d095d9ba4b2",
     "app/douyin_stream.py": "d867753099a2455c149ac15ec23aea29a2a07ac7978766b466ed3f83b94a1092",
     "app/gui.py": "c977c1ad28c0a203fb2bb7e16ad38ac3ec1c0a6dff86db974b637d16d3b55a7a",
@@ -36,7 +36,7 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "0080eca9f9fb377080df4b1c9a74ad304a38a221cec1456aa4acc2b7a797d0d5",
+    "app/updater.py": "a3f737f133ba7831fb7fbb4698eef06c71322c4ffeee4df28fca87a995b63006",
     "app/volcengine_asr.py": "9db4ac67cf9fcb2726ce0b747207544933f261d98d310dbc9502ae4afa6eaa23",
     "web_client/server.py": "01874cc970979fc339a9e1222fb2a014e55cbed7d925cae428066d1ad62b1755",
     "web_client/frontend/index.html": "3a76cf25a60b9b0391c39ab8cbcfe04c94c7466ee17434bde0713c7a626d5a95",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "8ae3f6953c1db29fa1efa9ad3c057d6b3c664c826610d0b47bf89dfad0e05350",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "收紧直播商品识别确认规则：live/promotions/page 货架列表不再作为当前讲解商品候选，Runtime 普通商品标题路径不再升级为 active_product_change，避免一段视频混多个品。",
+  "release_notes": "修复镜像功能：自定义去重也按镜像开关生效，同时避免镜像滤镜在去重链路里重复叠加。",
   "update_url": "",
-  "update_message": "收紧直播商品识别确认规则：live/promotions/page 货架列表不再作为当前讲解商品候选，Runtime 普通商品标题路径不再升级为 active_product_change，避免一段视频混多个品。",
+  "update_message": "修复镜像功能：自定义去重也按镜像开关生效，同时避免镜像滤镜在去重链路里重复叠加。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-01 22:26:04"
+  "updated_at": "2026-07-03 12:39:54"
 }

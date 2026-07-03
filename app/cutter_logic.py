@@ -767,6 +767,12 @@ def _append_filter(base, extra):
     return f"{base},{extra}"
 
 
+def _video_options_without_mirror(video_options=None):
+    options = dict(video_options or {})
+    options["mirror"] = False
+    return options
+
+
 def _manual_dedup_filters(video_options=None, audio_options=None):
     video_options = video_options or {}
     audio_options = audio_options or {}
@@ -1853,7 +1859,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     dedup_audio_options = dedup_audio_options or {}
     _transition_mode, _transition_duration = _clip_transition_config(transition_options)
     _dedup_is_custom = dedup_preset == "custom"
-    _mirror_enabled = _dedup_mirror_enabled(mirror_enabled) and dedup_preset != "none" and not _dedup_is_custom
+    _mirror_enabled = _dedup_mirror_enabled(mirror_enabled) and dedup_preset != "none"
 
     # ---- 运行日志 ----
     global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
@@ -2772,20 +2778,17 @@ def process_video(video_path, srt_path=None, output_path=None,
     else:
         _log(f"去重步骤使用分辨率: {w}x{h}，去重预设: {dedup_preset}")
         if _dedup_is_custom:
-            dedup = _manual_dedup_filters(dedup_video_options, dedup_audio_options)
+            dedup = _manual_dedup_filters(_video_options_without_mirror(dedup_video_options), dedup_audio_options)
             frame_vf, frame_applied = _custom_frame_structure_filter(dedup_video_options, cfg.get("fps", 30))
             if frame_vf:
                 dedup["video_filters"] = _append_filter(dedup.get("video_filters"), frame_vf)
                 dedup.setdefault("applied", []).append(frame_applied)
         else:
-            dedup = build_dedup_filters(w, h, 0, mirror_enabled=_mirror_enabled)
+            dedup = build_dedup_filters(w, h, 0, mirror_enabled=False)
         _planned_subtitle_speed = _dedup_speed_factor(dedup)
         # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
-        # 随机镜像：整片兜底去重，概率低于旧版以减少方向变化。
-        if (not _dedup_is_custom) and _mirror_enabled and random.random() < OUTPUT_CLIP_MIRROR_PROBABILITY:
-            vf = "hflip," + vf
         # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
         af = "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.3"
         if dedup["video_filters"]:
@@ -4420,7 +4423,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     dedup_audio_options = extra_kwargs.get("dedup_audio_options") or {}
     _transition_mode, _transition_duration = _clip_transition_config(extra_kwargs.get("transition_options"))
     _dedup_is_custom = dedup_preset == "custom"
-    _mirror_enabled = _dedup_mirror_enabled(extra_kwargs.get("mirror_enabled")) and dedup_preset != "none" and not _dedup_is_custom
+    _mirror_enabled = _dedup_mirror_enabled(extra_kwargs.get("mirror_enabled")) and dedup_preset != "none"
     ai_controls = extra_kwargs.get("ai_controls")
     kb_intensity = extra_kwargs.get("kb_intensity", "中")
     _clips_only = bool(extra_kwargs.get("_clips_only"))
@@ -5386,13 +5389,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     else:
         _log(f"Dedup ({dedup_preset})...")
         if _dedup_is_custom:
-            dedup = _manual_dedup_filters(dedup_video_options, dedup_audio_options)
+            dedup = _manual_dedup_filters(_video_options_without_mirror(dedup_video_options), dedup_audio_options)
             frame_vf, frame_applied = _custom_frame_structure_filter(dedup_video_options, cfg.get("fps", 30))
             if frame_vf:
                 dedup["video_filters"] = _append_filter(dedup.get("video_filters"), frame_vf)
                 dedup.setdefault("applied", []).append(frame_applied)
         else:
-            dedup = build_dedup_filters(w, h, 0, mirror_enabled=_mirror_enabled)
+            dedup = build_dedup_filters(w, h, 0, mirror_enabled=False)
         applied = ",".join(dedup["applied"]) if dedup.get("applied") else "none"
         _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
 

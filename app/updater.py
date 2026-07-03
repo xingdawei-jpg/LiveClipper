@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.7.1.2"
+CURRENT_VERSION = "2026.7.3.1"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -105,13 +105,18 @@ def init_installed_version():
         if not os.path.exists(vf):
             # Read version from bundled version.json
             if getattr(sys, 'frozen', False):
-                vj = os.path.join(os.path.dirname(sys.executable), '_internal', 'version.json')
+                base_dir = os.path.dirname(sys.executable)
+                candidates = [
+                    os.path.join(base_dir, '_internal', 'version.json'),
+                    os.path.join(base_dir, '_internal', 'app', 'version.json'),
+                ]
             else:
-                vj = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')
-            if os.path.exists(vj):
+                candidates = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')]
+            vj = next((item for item in candidates if os.path.exists(item)), "")
+            if vj:
                 with open(vj, 'r', encoding='utf-8-sig') as f:
                     data = json.load(f)
-                ver = data.get('version', CURRENT_VERSION)
+                ver = data.get('latest_version') or data.get('version', CURRENT_VERSION)
                 _set_installed_version(ver)
                 return ver
             else:
