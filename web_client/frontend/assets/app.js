@@ -430,9 +430,21 @@ async function api(path, options = {}) {
   sanitizeApiPayload(body);
   if (!response.ok) {
     const detail = typeof body === "object" ? body.detail || body.message : body;
-    throw new Error(sanitizeApiText(detail, "\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u9875\u9762\u53c2\u6570\u540e\u91cd\u8bd5\u3002") || `HTTP ${response.status}`);
+    const error = new Error(sanitizeApiText(detail, "\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u9875\u9762\u53c2\u6570\u540e\u91cd\u8bd5\u3002") || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.body = body;
+    throw error;
   }
   return body;
+}
+
+function isApiNotFound(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return Number(error?.status) === 404 || /(^|\b)(404|not found)(\b|$)|找不到|未找到/.test(message);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function upload(path, formData) {
@@ -3609,8 +3621,8 @@ async function submitFeature(feature) {
     if (groups.length > 1) {
       payload.groups = groups;
       payload.video_paths = groups[0].video_paths;
-      preflightFeature = "mix-batch";
-      endpoint = "/api/mix/batch/start";
+      await submitMixBatch(payload, groups);
+      return;
     } else if (groups.length === 1) {
       payload.video_paths = groups[0].video_paths;
     }
@@ -3622,6 +3634,114 @@ async function submitFeature(feature) {
   });
   toast(result.message || "任务已提交", result.ok ? "success" : "warning");
   refreshTasks();
+}
+
+function mixSingleGroupPayload(basePayload, group) {
+  const payload = {
+    ...basePayload,
+    video_paths: Array.isArray(group?.video_paths) ? group.video_paths : [],
+  };
+  delete payload.groups;
+  return payload;
+}
+
+async function submitMixBatch(payload, groups) {
+  let batchPreflightOk = false;
+  try {
+    await runPreflight("mix-batch", payload, "mix");
+    batchPreflightOk = true;
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error;
+    appendLog("mix", {
+      time: new Date().toLocaleTimeString(),
+      level: "warning",
+      message: "当前后端没有批量混剪预检接口，已切换为兼容模式逐组提交。",
+    });
+  }
+
+  if (batchPreflightOk) {
+    try {
+      const result = await api("/api/mix/batch/start", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      toast(result.message || "批量混剪任务已提交", result.ok ? "success" : "warning");
+      refreshTasks();
+      return;
+    } catch (error) {
+      if (!isApiNotFound(error)) throw error;
+      appendLog("mix", {
+        time: new Date().toLocaleTimeString(),
+        level: "warning",
+        message: "当前运行的后端还没有批量混剪接口，已切换为兼容模式逐组提交。建议重启客户端或使用新版完整包。",
+      });
+    }
+  }
+
+  await submitMixBatchLegacyQueue(payload, groups);
+}
+
+async function submitMixBatchLegacyQueue(basePayload, groups) {
+  const cleanGroups = groups.map((group, index) => normalizeMixGroup(group, index)).filter((group) => group.video_paths.length);
+  if (!cleanGroups.length) throw new Error("请至少保存 1 个混剪素材组。");
+  for (const group of cleanGroups) {
+    await runPreflight("mix", mixSingleGroupPayload(basePayload, group), "mix");
+  }
+
+  toast(`兼容模式：将按顺序提交 ${cleanGroups.length} 组混剪`, "warning");
+  appendLog("mix", {
+    time: new Date().toLocaleTimeString(),
+    level: "warning",
+    message: `兼容模式启动：共 ${cleanGroups.length} 组。请保持此页面打开，当前组完成后会自动提交下一组。`,
+  });
+
+  const completed = [];
+  for (let index = 0; index < cleanGroups.length; index += 1) {
+    const group = cleanGroups[index];
+    const singlePayload = mixSingleGroupPayload(basePayload, group);
+    appendLog("mix", {
+      time: new Date().toLocaleTimeString(),
+      level: "info",
+      message: `兼容模式提交第 ${index + 1}/${cleanGroups.length} 组：${group.name}`,
+    });
+    const result = await api("/api/mix/start", {
+      method: "POST",
+      body: JSON.stringify(singlePayload),
+    });
+    refreshTasks();
+    const task = await waitForTaskComplete(result.task_id, "mix");
+    if (task.status !== "completed") {
+      const reason = task.error || task.message || "任务未完成";
+      throw new Error(`第 ${index + 1} 组混剪失败：${reason}`);
+    }
+    completed.push(task.output || task.outputs?.[0] || group.name);
+  }
+
+  toast(`兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组`, "success");
+  appendLog("mix", {
+    time: new Date().toLocaleTimeString(),
+    level: "success",
+    message: `兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组。`,
+  });
+  refreshTasks();
+}
+
+async function waitForTaskComplete(taskId, scope = "mix") {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 6 * 60 * 60 * 1000) {
+    await delay(2500);
+    let data = {};
+    try {
+      data = await api("/api/tasks");
+    } catch (error) {
+      continue;
+    }
+    const task = (data.tasks || []).find((item) => item.id === taskId);
+    if (!task) continue;
+    if (["completed", "failed", "cancelled"].includes(task.status)) return task;
+    if (task.scope === scope) updateLogProgressBar(scope, progressFromTask(task));
+  }
+  return { id: taskId, status: "failed", error: "等待混剪任务完成超时。" };
 }
 
 async function runPreflight(feature, payload, scope) {
