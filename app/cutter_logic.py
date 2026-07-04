@@ -439,9 +439,15 @@ def _append_seek_input_args(cmd, video_path, start, accurate=False):
         start_value = 0.0
     if _is_ts_like_video(video_path):
         cmd += ["-fflags", "+genpts"]
-    # Keep final exports on the stable 2026.6.26.2 seek path. The small online
-    # preview has its own precise renderer; using output-side -ss here can trim
-    # preview-selected sub-sentences after filters and cause tail words to drop.
+    if accurate and start_value > 0.001:
+        # Preview-selected sub-sentences need frame-accurate cutting. Use a small
+        # preroll for speed, then trim precisely after decoding.
+        pre_seek = max(0.0, start_value - 2.0)
+        fine_seek = start_value - pre_seek
+        cmd += ["-ss", f"{pre_seek:.3f}", "-i", video_path]
+        if fine_seek > 0.001:
+            cmd += ["-ss", f"{fine_seek:.3f}"]
+        return cmd
     cmd += ["-ss", f"{start_value:.3f}", "-i", video_path]
     return cmd
 
@@ -2159,6 +2165,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         return {"ok": True, "asr_only": True}
 
     from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
+    preference_summary = {}
     if _cancelled():
         _log("已取消。"); return {"ok": False, "error": "cancelled"}
     if ai_is_enabled():
@@ -2189,6 +2196,10 @@ def process_video(video_path, srt_path=None, output_path=None,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
             )
+            try:
+                preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
+            except Exception:
+                preference_summary = {}
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
                 ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
@@ -2219,6 +2230,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _multi_result_cache['category_summary'] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
             except Exception:
                 pass
+            _multi_result_cache['preference_summary'] = dict(preference_summary or {})
             # 保存SRT内容
             if srt_path and os.path.exists(srt_path):
                 with open(srt_path, "r", encoding="utf-8") as _f:
@@ -4418,6 +4430,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     def _cancelled():
         return cancel_event and cancel_event.is_set()
 
+    _mix_run_started = time.time()
     dedup_preset = _normalize_dedup_preset(dedup_preset)
     dedup_video_options = extra_kwargs.get("dedup_video_options") or {}
     dedup_audio_options = extra_kwargs.get("dedup_audio_options") or {}
@@ -4427,7 +4440,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     ai_controls = extra_kwargs.get("ai_controls")
     kb_intensity = extra_kwargs.get("kb_intensity", "中")
     _clips_only = bool(extra_kwargs.get("_clips_only"))
-    global _hw_fallback, _hw_encoder_checked, _hw_encoder
+    global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
     _hw_fallback = False
     _hw_encoder_checked = False
     _hw_encoder = None
@@ -4626,6 +4639,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
 
     # 传递时长设置到 AI 模块
     import ai_clipper as _ai_mod
+    preference_summary = {}
     _ai_mod._AI_TARGET_DURATION = target_duration
     if target_duration <= 40:
         _ai_mod._AI_CLIP_COUNT = "8-12"
@@ -4722,6 +4736,10 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           merge_mode=True,
                                           target_duration=target_duration,
                                           ai_controls=ai_controls)
+        try:
+            preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
+        except Exception:
+            preference_summary = {}
     except Exception as e:
         _log(f"AI 选片失败: {e}"); import traceback; _log(traceback.format_exc())
         shutil.rmtree(tmp, ignore_errors=True); return False
@@ -4738,6 +4756,58 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     def _norm_mix_text(txt):
         txt = _strip_mix_marker(txt).lower()
         return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", txt)
+
+    def _mix_source_balance_candidate_quality(txt, duration):
+        raw = str(txt or "").strip()
+        norm = _norm_mix_text(raw)
+        if not norm:
+            return False, "空文本", 0.0
+        try:
+            duration = float(duration or 0)
+        except Exception:
+            duration = 0.0
+        if duration < 3.0:
+            return False, "过短", 0.0
+        if duration > 16.0:
+            return False, "过长", 0.0
+
+        negative_groups = [
+            ("预售/工期", ("预售", "二十天", "20天", "十五天", "15天", "十天", "七天", "几天", "工期", "排单", "生产", "备货", "补货", "发货", "到货")),
+            ("库存/订单", ("库存", "卖完", "卖光", "抢完", "下单", "订单", "两百件", "200件", "200单", "单子", "销量", "开播", "一分钟")),
+            ("负面口播", ("别骂", "骂我", "不要骂", "怪我", "喷我", "抱歉", "不好意思", "没办法")),
+            ("交易/客服", ("客服", "售后", "链接", "小黄车", "购物车", "后台", "发券", "福利", "运费险")),
+        ]
+        for reason, words in negative_groups:
+            if any(word.lower() in norm for word in words):
+                return False, reason, 0.0
+
+        positive_groups = [
+            ("版型", ("显瘦", "遮肉", "藏肉", "收腰", "显高", "比例", "版型", "剪裁", "肩线", "肩膀", "骨架", "胯宽", "盖臀", "宽松", "修身")),
+            ("面料", ("面料", "材质", "手感", "柔软", "透气", "亲肤", "凉快", "不闷", "不粘", "垂感", "弹力", "纱线", "不起球")),
+            ("场景", ("通勤", "上班", "出门", "旅游", "度假", "海边", "拍照", "逛街", "日常", "搭配", "好搭")),
+            ("颜色", ("颜色", "显白", "白色", "蓝色", "黑色", "高级", "干净", "清爽", "复古")),
+            ("品质", ("做工", "工艺", "细节", "质感", "高级感", "精致", "走线", "大牌")),
+        ]
+        matched_groups = []
+        hit_count = 0
+        for label, words in positive_groups:
+            hits = sum(1 for word in words if word.lower() in norm)
+            if hits:
+                matched_groups.append(label)
+                hit_count += hits
+        if not matched_groups:
+            return False, "缺少产品卖点", 0.0
+
+        compact_len = len(norm)
+        score = hit_count * 12.0 + len(set(matched_groups)) * 18.0
+        if 5.0 <= duration <= 12.5:
+            score += 18.0
+        elif duration < 5.0:
+            score += 6.0
+        else:
+            score += 10.0
+        score += min(18.0, compact_len / 8.0)
+        return True, "+".join(matched_groups[:3]), score
 
     def _infer_source_idx_from_srt(txt, start, end):
         import difflib
@@ -4798,6 +4868,107 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         key = _source_path_key(source)
         return _source_lookup.get(key, -1) if key else -1
 
+    def _mix_meta_type(clip):
+        return str((clip or {}).get("type") or "").lower()
+
+    def _mix_meta_duration(clip):
+        try:
+            return float((clip or {}).get("duration") or 0)
+        except Exception:
+            try:
+                return max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
+            except Exception:
+                return 0.0
+
+    def _mix_meta_total(clips):
+        return sum(max(0.0, _mix_meta_duration(c)) for c in clips or [])
+
+    def _mix_meta_is_hook(clip):
+        return "hook" in _mix_meta_type(clip)
+
+    def _mix_meta_is_close(clip):
+        ctype = _mix_meta_type(clip)
+        return "close" in ctype or ctype in ("cta", "call_to_action", "urgency")
+
+    def _mix_final_order(clips):
+        first_hook = []
+        middle = []
+        closes = []
+        for clip in clips or []:
+            if _mix_meta_is_close(clip):
+                closes.append(clip)
+            elif _mix_meta_is_hook(clip) and not first_hook:
+                first_hook.append(clip)
+            else:
+                middle.append(clip)
+        return first_hook + middle + closes
+
+    def _mix_reclose_after_source_balance(clips):
+        """Keep source-balance clips, then re-trim and restore hook/product/close order."""
+        if not clips:
+            return clips
+        try:
+            target_seconds = float(target_duration or 60)
+        except Exception:
+            target_seconds = 60.0
+        target_high = target_seconds + max(5.0, target_seconds / 6.0)
+        before_total = _mix_meta_total(clips)
+        working = list(clips)
+        removed = []
+
+        while _mix_meta_total(working) > target_high + 0.2:
+            current_total = _mix_meta_total(working)
+            overshoot = current_total - target_high
+            source_counts = {}
+            for item in working:
+                source_counts[item.get("source")] = source_counts.get(item.get("source"), 0) + 1
+            candidates = []
+            for idx, item in enumerate(working):
+                if item.get("source_balance"):
+                    continue
+                if _mix_meta_is_hook(item) or _mix_meta_is_close(item):
+                    continue
+                if source_counts.get(item.get("source"), 0) <= 1:
+                    continue
+                dur = _mix_meta_duration(item)
+                if dur <= 0:
+                    continue
+                try:
+                    score = float(item.get("score") or 0)
+                except Exception:
+                    score = 0.0
+                covers = dur >= overshoot
+                candidates.append((
+                    0 if covers else 1,
+                    abs(dur - overshoot) if covers else -dur,
+                    score,
+                    idx,
+                    item,
+                ))
+            if not candidates:
+                _log(f"混剪来源均衡收口: 超出上限 {current_total:.1f}s>{target_high:.1f}s，但没有可安全回收的普通片段")
+                break
+            candidates.sort(key=lambda item: item[:4])
+            _, _, _, remove_idx, removed_clip = candidates[0]
+            working.pop(remove_idx)
+            removed.append(removed_clip)
+            text = re.sub(r"\s+", " ", str(removed_clip.get("text") or "")).strip()[:40]
+            _log(
+                f"混剪来源均衡收口: 回收 {removed_clip.get('start', 0):.1f}-{removed_clip.get('end', 0):.1f}s "
+                f"({_mix_meta_duration(removed_clip):.1f}s) | {text}"
+            )
+
+        after_trim_total = _mix_meta_total(working)
+        if removed:
+            _log(f"混剪来源均衡收口: {len(clips)}段/{before_total:.1f}s -> {len(working)}段/{after_trim_total:.1f}s")
+
+        ordered = _mix_final_order(working)
+        if ordered != working:
+            _log("混剪来源均衡收口: 已重新整理 Hook/Product/Close 顺序")
+        for idx, item in enumerate(ordered):
+            item["idx"] = idx
+        return ordered
+
     all_clips_meta = []
     tc = 0
     for clip in ordered_clips:
@@ -4839,17 +5010,35 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         for src_idx, vp in enumerate(video_list):
             if vp in used_sources:
                 continue
-            candidates = [
-                entry for entry in _mix_srt_entries
-                if int(entry.get("source_idx", -1)) == src_idx
-            ]
+            candidates = []
+            rejected_balance = {}
+            for entry in _mix_srt_entries:
+                if int(entry.get("source_idx", -1)) != src_idx:
+                    continue
+                _start = float(entry.get("start", 0))
+                _end = float(entry.get("end", _start))
+                _duration = max(0.0, _end - _start)
+                _text = str(entry.get("text", "") or "").strip()
+                _ok, _reason, _quality_score = _mix_source_balance_candidate_quality(_text, _duration)
+                if not _ok:
+                    rejected_balance[_reason] = rejected_balance.get(_reason, 0) + 1
+                    continue
+                entry = dict(entry)
+                entry["_source_balance_score"] = _quality_score
+                entry["_source_balance_reason"] = _reason
+                candidates.append(entry)
             candidates.sort(
                 key=lambda entry: (
+                    float(entry.get("_source_balance_score", 0)),
                     min(12.0, max(0.0, float(entry.get("end", 0)) - float(entry.get("start", 0)))),
                     len(_norm_mix_text(entry.get("text", ""))),
                 ),
                 reverse=True,
             )
+            if not candidates:
+                detail = "、".join(f"{reason}{count}" for reason, count in sorted(rejected_balance.items(), key=lambda item: -item[1])[:4])
+                _log(f"混剪来源均衡: V{src_idx+1} 未找到合格补片" + (f"（跳过: {detail}）" if detail else ""))
+                continue
             for entry in candidates:
                 start = float(entry.get("start", 0))
                 end = float(entry.get("end", start))
@@ -4867,15 +5056,17 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     "score": 70,
                     "duration": duration,
                     "source": vp,
+                    "source_balance": True,
                 })
                 used_sources.add(vp)
                 used_keys.add(key)
                 tc += 1
                 added += 1
-                _log(f"混剪来源均衡: AI 只命中单一素材，已从 V{src_idx+1} 补入 {start:.1f}-{end:.1f}s")
+                _log(f"混剪来源均衡: AI 只命中单一素材，已从 V{src_idx+1} 补入 {start:.1f}-{end:.1f}s（{entry.get('_source_balance_reason', '卖点')}）")
                 break
         if added:
             _log(f"混剪来源均衡: 补入 {added} 个素材来源片段")
+            all_clips_meta = _mix_reclose_after_source_balance(all_clips_meta)
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
 
@@ -4894,6 +5085,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _multi_result_cache["category_summary"] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
             except Exception:
                 pass
+            _multi_result_cache["preference_summary"] = dict(preference_summary or {})
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": True, "clips_cached": True}
 
@@ -4989,6 +5181,23 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _t = str(_text or "").strip()
         return _t.startswith(("然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实", "它", "这个", "这款", "这件", "你看"))
 
+    def _next_selected_start_same_source(index, source, current_start):
+        nearest_start = None
+        for next_idx, next_clip in enumerate(sorted_clips):
+            if next_idx == index:
+                continue
+            if next_clip.get("source") != source:
+                continue
+            try:
+                next_start = float(next_clip.get("start", 0))
+            except Exception:
+                continue
+            if next_start <= current_start + 0.05:
+                continue
+            if nearest_start is None or next_start < nearest_start:
+                nearest_start = next_start
+        return nearest_start
+
     _cut_stage_started = time.time()
     for ci, clip in enumerate(sorted_clips):
         if _cancelled():
@@ -4996,12 +5205,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
 
         vp = clip["source"]
         c_type = clip["type"]
-        start = clip["start"]
+        start = float(clip["start"])
+        _next_same_source_start = _next_selected_start_same_source(ci, vp, start)
         preview_exact = bool(clip.get("preview_exact"))
         if preview_exact:
             clip = dict(clip)
             clip["end"] = clip["end"]
-        end = clip["end"] + 0.1  # 缓冲避免尾部被切 + 0.1  # +0.1s缓冲避免语音尾部被切
+        end = float(clip["end"]) + 0.1  # 缓冲避免尾部被切 + 0.1  # +0.1s缓冲避免语音尾部被切
 
         # 混剪每个源视频都有自己的0秒时间轴，按当前source的SRT边界补齐完整句。
         try:
@@ -5034,12 +5244,24 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         except Exception:
             pass
 
+        if _next_same_source_start is not None and end > _next_same_source_start:
+            old_end = end
+            end = max(start + 0.1, _next_same_source_start - 0.02)
+            _log(f"相邻片段保护: clip {ci+1} end {old_end:.2f}s→{end:.2f}s，避免与下一段重复")
+
         _tail_guard = LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS if ci == len(sorted_clips) - 1 else CLIP_AUDIO_TAIL_GUARD_SECONDS
         _extra_tail_guard = max(0.0, _tail_guard - 0.1)
         if _extra_tail_guard > 0:
             old_end = end
             end += _extra_tail_guard
-            _log(f"Tail audio guard: clip {ci+1} extended {old_end:.2f}s->{end:.2f}s")
+            tail_limited = False
+            if _next_same_source_start is not None and end > _next_same_source_start:
+                end = max(start + 0.1, _next_same_source_start - 0.02)
+                tail_limited = True
+            if tail_limited:
+                _log(f"Tail audio guard: clip {ci+1} limited {old_end:.2f}s->{end:.2f}s，避免与下一段重复")
+            else:
+                _log(f"Tail audio guard: clip {ci+1} extended {old_end:.2f}s->{end:.2f}s")
 
         if False and ci == len(sorted_clips) - 1:
             old_end = end
@@ -5132,7 +5354,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if rc == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
             temp_files.append(out_clip)
             _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
-            _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type})
+            _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
         else:
             _log(f"  Cut failed (rc={rc})")
             if not _hw_fallback and _get_video_encoder():
@@ -5159,7 +5381,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     if rc2 == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
                         temp_files.append(out_clip)
                         _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
-                        _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type})
+                        _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
                         _log(f"  Cut retry OK ({_sw_name})")
                     else:
                         _log(f"  Cut retry failed ({_sw_name}, rc={rc2})")
@@ -5225,8 +5447,10 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # Probe clip stream info
     clip_has_video = []
     clip_has_audio = []
+    clip_durations = []
     clip_probe_summaries = []
     for tf in temp_files:
+        clip_durations.append(_probe_media_duration(tf))
         p = subprocess.run([ffmpeg, "-i", tf], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True, encoding="utf-8", errors="replace",
                           creationflags=_NO_WINDOW, timeout=15)
@@ -5247,8 +5471,12 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     raw_concat = os.path.join(tmp, "raw_concat.mp4")
     concat_copy_ok = False
     stderr_data = ""
+    has_preview_exact_clips = any(bool(item.get("preview_exact")) for item in _mix_cut_maps)
 
-    if all(clip_has_video) and all(clip_has_audio):
+    if has_preview_exact_clips:
+        _log("Concat copy: preview-exact clips detected, using timestamp-normalized concat")
+
+    if all(clip_has_video) and all(clip_has_audio) and not has_preview_exact_clips:
         list_file = os.path.join(tmp, "concat_list.txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for tf in temp_files:
@@ -5281,20 +5509,36 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     if not concat_copy_ok:
         n = len(temp_files)
         inputs = []
+        filter_normalizers = []
         filter_parts = []
         in_idx = 0
 
         for i in range(n):
             inputs.extend(["-i", temp_files[i]])
+            clip_input_idx = in_idx
             streams = []
             if clip_has_video[i]:
-                streams.append(f"[{in_idx}:v]")
+                v_label = f"vnorm{i}"
+                filter_normalizers.append(
+                    f"[{clip_input_idx}:v]setpts=PTS-STARTPTS,fps={VIDEO_CONFIG['fps']},format=yuv420p,setsar=1[{v_label}]"
+                )
+                streams.append(f"[{v_label}]")
             if clip_has_audio[i]:
-                streams.append(f"[{in_idx}:a]")
+                a_label = f"anorm{i}"
+                filter_normalizers.append(
+                    f"[{clip_input_idx}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
+                )
+                streams.append(f"[{a_label}]")
             else:
-                inputs.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
+                silent_duration = clip_durations[i] if i < len(clip_durations) else 1.0
+                silent_duration = max(0.1, float(silent_duration or 1.0))
+                inputs.extend(["-f", "lavfi", "-t", f"{silent_duration:.3f}", "-i", "anullsrc=r=44100:cl=stereo"])
                 in_idx += 1
-                streams.append(f"[{in_idx}:a]")
+                a_label = f"anorm{i}"
+                filter_normalizers.append(
+                    f"[{in_idx}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
+                )
+                streams.append(f"[{a_label}]")
             filter_parts.append(streams)
             in_idx += 1
 
@@ -5312,12 +5556,16 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             concat_filter += "[outa]"
         else:
             concat_filter = concat_filter.replace("[outv]", "[outv][outa]")
+        if filter_normalizers:
+            concat_filter = ";".join(filter_normalizers + [concat_filter])
 
         cmd = [ffmpeg, "-y"] + inputs + ["-filter_complex", concat_filter]
         if has_v_out:
             cmd += ["-map", "[outv]"]
         if has_a_out or not any(clip_has_audio):
             cmd += ["-map", "[outa]"]
+        if has_v_out:
+            cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
         cmd += _intermediate_vcodec_args()
         cmd += ["-c:a", "aac", raw_concat]
 
@@ -5493,12 +5741,46 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # Cleanup + return
     # ============================================================
     final_mb = os.path.getsize(final) / (1024 * 1024) if os.path.exists(final) else 0
+    _actual_dur = 0.0
+    try:
+        _ffprobe = os.path.join(os.path.dirname(ffmpeg), "ffprobe" + (".exe" if os.name == "nt" else ""))
+        _r = subprocess.run(
+            [_ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", final],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=_NO_WINDOW,
+        )
+        if _r.returncode == 0 and _r.stdout.strip():
+            _actual_dur = float(_r.stdout.strip())
+    except Exception:
+        pass
+
+    _report_old_dur, _report_old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
+    try:
+        TARGET_DURATION = target_duration
+        TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)
+        _report = _build_cut_report(sorted_clips, len(sorted_clips), len(sorted_clips), final, final_mb)
+        _print_cut_report(_report, _log)
+    finally:
+        TARGET_DURATION, TARGET_DURATION_TOLERANCE = _report_old_dur, _report_old_tol
+
+    _elapsed = max(0.0, time.time() - _mix_run_started)
+    if _elapsed >= 60:
+        _elapsed_text = f"{int(_elapsed // 60)}分{_elapsed % 60:.1f}秒"
+    else:
+        _elapsed_text = f"{_elapsed:.1f}秒"
     shutil.rmtree(tmp, ignore_errors=True)
 
     _log(f"\nMix done!")
     _log(f"  Sources: {len(video_list)} videos")
     _log(f"  Clips: {len(sorted_clips)}")
+    if _actual_dur > 0:
+        _log(f"  成品真实时长: {_actual_dur:.1f}s")
     _log(f"  Output: {final}")
     _log(f"  Size: {final_mb:.1f}MB")
+    _log(f"  混剪总用时: {_elapsed_text}")
 
     return {"ok": True, "output_path": final, "clips": len(sorted_clips), "sources": len(video_list), "size_mb": final_mb}

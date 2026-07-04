@@ -516,6 +516,76 @@ h2 {
   color: var(--muted);
 }
 
+.video-count-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  margin-left: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.mix-group-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mix-group-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  margin-top: 8px;
+}
+
+.mix-group-list.is-empty {
+  display: none;
+}
+
+.mix-group-chip {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  max-width: 100%;
+  min-height: 30px;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.mix-group-chip strong,
+.mix-group-chip em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.mix-group-chip span {
+  overflow: hidden;
+  max-width: 180px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.mix-group-chip.is-active {
+  border-color: rgba(10, 132, 255, 0.4);
+  background: var(--focus-soft);
+  color: var(--accent-text);
+}
+
 .content-grid {
   display: grid;
   gap: 14px;
@@ -1706,7 +1776,7 @@ input[type="checkbox"] {
 
 .clip-preview-summary {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
@@ -1737,6 +1807,10 @@ input[type="checkbox"] {
 }
 
 .clip-preview-summary strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text);
   font-size: 14px;
 }
@@ -3130,7 +3204,7 @@ body.live-detail-modal-open {
 
 .log-progress-meta {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   font-size: 12px;
@@ -3145,6 +3219,17 @@ body.live-detail-modal-open {
   overflow: hidden;
   color: var(--text);
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-progress-batch {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--accent-text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 

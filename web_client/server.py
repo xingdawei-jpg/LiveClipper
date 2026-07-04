@@ -1188,6 +1188,15 @@ class MixPayload(BaseModel):
     pip_pos: str = "鍙充笅"
 
 
+class MixBatchGroup(BaseModel):
+    name: str = ""
+    video_paths: list[str] = Field(default_factory=list)
+
+
+class MixBatchPayload(MixPayload):
+    groups: list[MixBatchGroup] = Field(default_factory=list)
+
+
 class AiScanPayload(BaseModel):
     video_paths: list[str] = Field(default_factory=list)
     output_dir: str = ""
@@ -2047,6 +2056,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         "smart-preview",
         "smart-from-preview",
         "mix",
+        "mix-batch",
         "mix-preview",
         "ai-scan",
         "ai-scan-export",
@@ -2079,6 +2089,18 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         paths = _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
         if len(paths) == 1:
             warnings.append("混剪只添加了 1 个视频，建议添加至少 2 个素材。")
+        _preflight_output_dir(data.get("output_dir"), warnings, errors)
+        _preflight_pip(data, warnings, errors)
+        _preflight_ai_settings(feature, warnings)
+    elif feature == "mix-batch":
+        groups = data.get("groups") if isinstance(data.get("groups"), list) else []
+        if not groups:
+            errors.append("请至少保存 1 个混剪素材组。")
+        for index, group in enumerate(groups, start=1):
+            group_data = group if isinstance(group, dict) else {}
+            paths = _preflight_file_list(group_data.get("video_paths"), f"第 {index} 组视频", errors, min_count=1)
+            if len(paths) == 1:
+                warnings.append(f"第 {index} 组只添加了 1 个视频，建议至少 2 个素材。")
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
         _preflight_ai_settings(feature, warnings)
@@ -3875,7 +3897,7 @@ def _preview_feedback_preference_summary() -> dict[str, Any]:
 
     confidence = _preview_feedback_confidence(total_samples)
     notes = [
-        "这是只读摘要，当前不参与自动成片打分。",
+        "这是只读摘要；自动推荐会按 AI 学习强度进入软参考和本地兜底。",
         "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
         "断句、闲聊、环境干扰、库存催促属于结构性风险，偶尔被保留也不会直接变成喜欢规则。",
     ]
@@ -4542,6 +4564,96 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
         emit_log("error", f"混剪成片失败：{exc}", scope)
 
 
+def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
+    scope = "mix"
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备批量混剪")
+    try:
+        _ensure_feature_access("混剪成片")
+        from cutter_logic import process_video_mix
+
+        groups: list[tuple[str, list[Path]]] = []
+        for index, group in enumerate(payload.groups, start=1):
+            paths = _existing_paths(group.video_paths, f"第 {index} 组视频")
+            name = (group.name or "").strip() or f"第{index}组"
+            groups.append((name, paths))
+        if not groups:
+            raise ValueError("请至少保存 1 个混剪素材组。")
+
+        total_groups = len(groups)
+        outputs: list[str] = []
+        failures: list[str] = []
+        emit_log("info", f"批量混剪开始：{total_groups} 组，目标时长={payload.duration}秒", scope)
+
+        for index, (group_name, paths) in enumerate(groups, start=1):
+            if _is_task_cancelled(task_id):
+                emit_log("warning", "批量混剪已停止。", scope)
+                return
+            group_base = 10 + ((index - 1) / total_groups) * 84
+            group_span = 84 / total_groups
+            _set_task_progress(task_id, group_base, f"处理 {index}/{total_groups}: {group_name}")
+
+            out_dir = _default_output_dir(paths[0], payload.output_dir, "mix_output")
+            output_path = _mix_output_path(out_dir, paths[0])
+            output_path = output_path.with_name(f"{output_path.stem}_g{index:02d}{output_path.suffix}")
+            pip_path, used_pip_file = _pick_pip_asset(payload, scope)
+            emit_log("info", f"混剪批量 [{index}/{total_groups}] 开始：{group_name}，{len(paths)} 个视频，输出 {output_path}", scope)
+            try:
+                result = process_video_mix(
+                    [str(p) for p in paths],
+                    output_path=str(output_path),
+                    dedup_preset=payload.dedup_preset,
+                    dedup_video_options=payload.video,
+                    dedup_audio_options=payload.audio,
+                    transition_options=payload.transition,
+                    subtitle_overlay=payload.subtitle_overlay,
+                    log_fn=_task_log_fn(task_id, scope, base=group_base + 5, span=max(8, group_span * 0.72)),
+                    cancel_event=_task_cancel_event(task_id),
+                    force_category=None if payload.category in ("", "自动检测", "自动检测") else payload.category,
+                    focus_hint=payload.focus_hint,
+                    ai_controls=payload.ai_controls,
+                    target_duration=payload.duration,
+                    num_versions=payload.versions,
+                    pip_path=pip_path or "",
+                    pip_size=payload.pip_size,
+                    pip_opacity=payload.pip_opacity,
+                    pip_pos=payload.pip_pos,
+                    smart_crop_enabled=payload.smart_crop_enabled,
+                    crop_level=payload.crop_level,
+                    ken_burns_enabled=payload.ken_burns_enabled,
+                    mirror_enabled=payload.mirror_enabled,
+                    kb_intensity=payload.ken_burns_intensity,
+                )
+                if not result:
+                    raise RuntimeError("混剪处理失败。")
+                _archive_used_pip(used_pip_file, scope)
+                outputs.append(str(output_path))
+                _set_task_progress(task_id, min(94, 10 + (index / total_groups) * 84), f"完成 {index}/{total_groups}: {group_name}")
+                emit_log("success", f"混剪批量 [{index}/{total_groups}] 完成：{group_name}", scope)
+            except Exception as group_exc:
+                failures.append(f"第 {index} 组 {group_name}: {group_exc}")
+                emit_log("error", f"混剪批量 [{index}/{total_groups}] 失败：{group_name}，{group_exc}", scope)
+
+        if not outputs:
+            raise RuntimeError("批量混剪没有成功输出。")
+        _consume_trial("混剪成片", units=len(outputs), scope=scope)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=outputs[0],
+            outputs=outputs,
+            result_count=len(outputs),
+            message=f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组",
+        )
+        if failures:
+            emit_log("warning", f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组，失败 {len(failures)} 组。", scope)
+        else:
+            emit_log("success", f"批量混剪完成：成功 {len(outputs)} 组。", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"批量混剪失败：{exc}", scope)
+
+
 def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None:
     scope = "mix"
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="准备混剪 AI 预览")
@@ -4600,6 +4712,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         if not mix_sources:
             mix_sources = [str(path) for path in paths]
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
+        preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -4610,6 +4723,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         raw_clips = _attach_mix_sources_to_preview_clips(raw_clips, mix_sources)
         if category_summary:
             dedup_summary["category_summary"] = category_summary
+        if preference_summary:
+            dedup_summary["preference_summary"] = preference_summary
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         public_clips = _preview_public_clips(raw_clips, srt_text, sources=mix_sources, merge_mode=True)
         _set_task_progress(task_id, 94, "生成预览列表")
@@ -5876,6 +5991,8 @@ def _write_live_record_user_artifacts(queue: dict[str, Any], summary: dict[str, 
         "version": 1,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "recording": str(output),
+        "recording_original": queue.get("recording_original") or "",
+        "recording_remuxed_to_mp4": bool(queue.get("recording_remuxed_to_mp4")),
         "recording_duration": queue.get("recording_duration"),
         "recognition_status": status,
         "room_name": queue.get("room_name") or "",
@@ -5888,6 +6005,8 @@ def _write_live_record_user_artifacts(queue: dict[str, Any], summary: dict[str, 
         "version": 1,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "recording": str(output),
+        "recording_original": queue.get("recording_original") or "",
+        "recording_remuxed_to_mp4": bool(queue.get("recording_remuxed_to_mp4")),
         "recording_duration": queue.get("recording_duration"),
         "stream_quality": queue.get("stream_quality") or "",
         "recognition_status": status,
@@ -5911,6 +6030,58 @@ def _write_live_record_user_artifacts(queue: dict[str, Any], summary: dict[str, 
     _write_json_file(recording_summary_path, recording_summary)
     queue["product_timeline_json"] = str(product_timeline_path)
     queue["recording_summary"] = str(recording_summary_path)
+
+
+def _remux_live_recording_to_mp4(output: Path, scope: str, name: str) -> Path:
+    if output.suffix.lower() != ".ts":
+        return output
+    if not output.exists() or output.stat().st_size < 1000:
+        return output
+    target = output.with_suffix(".mp4")
+    remux_log = output.with_suffix(".remux.log")
+    cmd = [
+        _ffmpeg_cmd(),
+        "-hide_banner",
+        "-y",
+        "-fflags",
+        "+genpts+igndts",
+        "-i",
+        str(output),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(target),
+    ]
+    try:
+        with remux_log.open("wb") as log_handle:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_handle,
+                timeout=1800,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
+            emit_log("warning", f"{name}: TS 转 MP4 失败，已保留原始 TS 母带继续处理。", scope)
+            return output
+        source_size = output.stat().st_size
+        emit_log("success", f"{name}: 已自动转为 MP4 母带：{target.name} ({target.stat().st_size / 1024 / 1024:.1f}MB)", scope)
+        if str(os.environ.get("LIVECLIPPER_KEEP_TS_RECORDING") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+            try:
+                output.unlink()
+                emit_log("info", f"{name}: 已移除 TS 临时母带：{output.name} ({source_size / 1024 / 1024:.1f}MB)", scope)
+            except Exception as exc:
+                emit_log("warning", f"{name}: MP4 已生成，但移除 TS 临时母带失败：{exc}", scope)
+        return target
+    except subprocess.TimeoutExpired:
+        emit_log("warning", f"{name}: TS 转 MP4 超时，已保留原始 TS 母带继续处理。", scope)
+        return output
+    except Exception as exc:
+        emit_log("warning", f"{name}: TS 转 MP4 异常，已保留原始 TS 母带继续处理：{exc}", scope)
+        return output
 
 
 def _stable_active_product_changes(changes: list[dict[str, Any]], duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5984,6 +6155,8 @@ def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveR
         "version": 1,
         "created_at": created_at,
         "recording": str(output),
+        "recording_original": str(summary.get("recording_original_output") or ""),
+        "recording_remuxed_to_mp4": bool(summary.get("recording_remuxed_to_mp4")),
         "recording_duration": round(duration, 3),
         "mode": "duration_fallback",
         "room_name": payload.room_name,
@@ -6190,6 +6363,16 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
     output = Path(str(summary.get("recording_output") or ""))
     if not output.exists() or output.stat().st_size < 1000:
         raise RuntimeError("active_product_probe 未生成有效录制文件。")
+    original_output = output
+    output = _remux_live_recording_to_mp4(output, "live-rec", _safe_stem(payload.room_name or "live"))
+    if output != original_output:
+        summary["recording_original_output"] = str(original_output)
+        summary["recording_output"] = str(output)
+        summary["recording_remuxed_to_mp4"] = True
+        try:
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     settings = _live_product_split_settings(payload)
     info = _probe_video_info(str(output))
     duration = float(info.get("duration") or 0)
@@ -6219,6 +6402,7 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
         "probe_review_segments": str(summary.get("review_segments_path") or ""),
         "probe_catalog": str(summary.get("catalog_path") or ""),
         "recording_log": str(summary.get("recording_log") or output.with_suffix(".ffmpeg.log")),
+        "recording_remux_log": str(original_output.with_suffix(".remux.log")) if original_output.suffix.lower() == ".ts" else "",
         "stream_quality": _normalize_live_stream_quality(summary.get("stream_quality")),
         "probe_version": summary.get("probe_version") or "",
         "probe_build": summary.get("probe_build") or "",
@@ -6290,6 +6474,20 @@ def _request_live_probe_stop(info: dict[str, Any]) -> bool:
         return True
     except Exception:
         return False
+
+
+def _schedule_live_probe_force_stop(task_id: str, proc: subprocess.Popen[Any], name: str, scope: str, delay: float = 90.0) -> None:
+    if not proc or proc.poll() is not None:
+        return
+
+    def _watchdog() -> None:
+        time.sleep(delay)
+        if proc.poll() is not None or not _is_task_cancelled(task_id):
+            return
+        emit_log("warning", f"{name}: 停止收尾超过 {int(delay)} 秒，强制结束录制后台进程。", scope)
+        _terminate_process_tree(proc)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
 
 
 def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_dir: Path, name: str, scope: str) -> tuple[Path, dict[str, Any] | None, list[str]]:
@@ -6520,6 +6718,7 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
         "probe_review_segments",
         "probe_catalog",
         "recording_log",
+        "recording_remux_log",
         "product_timeline_json",
         "recording_summary",
     ):
@@ -6540,6 +6739,7 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
             ".catalog.jsonl",
             ".active_product_probe_report.md",
             ".ffmpeg.log",
+            ".remux.log",
         ):
             paths.append(recording.with_suffix(suffix))
     seen: set[str] = set()
@@ -7005,6 +7205,8 @@ def _stop_live_all() -> int:
                 event.set()
         proc = info.get("process")
         if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
+            if proc:
+                _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "直播录制"), "live-rec")
             graceful_probe_stops += 1
             stopped += 1
             continue
@@ -7026,6 +7228,8 @@ def _stop_live_task_process(task_id: str) -> int:
         return 0
     proc = info.get("process")
     if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
+        if proc:
+            _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "直播录制"), "live-rec")
         return 1
     if proc and proc.poll() is None:
         _terminate_process_tree(proc)
@@ -7376,6 +7580,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         resolved_srt = str(cutter_mod._multi_result_cache.get("srt_path") or srt_path or video.with_suffix(".srt"))
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
+        preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -7385,6 +7590,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         )
         if category_summary:
             dedup_summary["category_summary"] = category_summary
+        if preference_summary:
+            dedup_summary["preference_summary"] = preference_summary
         _set_task_progress(task_id, 94, "生成预览列表")
         public_clips = _preview_public_clips(raw_clips, srt_text)
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
@@ -8219,6 +8426,17 @@ def start_mix(payload: MixPayload) -> dict[str, Any]:
     task_id = _new_task("mix", "混剪成片")
     threading.Thread(target=_run_mix, args=(task_id, payload), daemon=True).start()
     return {"ok": True, "task_id": task_id, "message": "混剪任务已启动。"}
+
+
+@app.post("/api/mix/batch/start")
+def start_mix_batch(payload: MixBatchPayload) -> dict[str, Any]:
+    _ensure_scope_idle("mix", "批量混剪")
+    _raise_preflight_errors("mix-batch", payload)
+    if not payload.groups:
+        raise HTTPException(status_code=400, detail="请至少保存 1 个混剪素材组。")
+    task_id = _new_task("mix", "批量混剪")
+    threading.Thread(target=_run_mix_batch, args=(task_id, payload), daemon=True).start()
+    return {"ok": True, "task_id": task_id, "message": f"批量混剪任务已启动，共 {len(payload.groups)} 组。"}
 
 
 @app.post("/api/mix/preview/start")

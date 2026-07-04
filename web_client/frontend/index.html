@@ -69,7 +69,7 @@
         <div class="content-grid smart-grid">
           <section class="panel panel-large">
             <div class="panel-header">
-              <h2>视频</h2>
+              <h2>视频 <span class="video-count-chip" data-video-count-for="video-paths">0个</span></h2>
               <div class="log-header-actions">
                 <button class="button button-secondary button-small" data-action="pick-videos" data-target="video-paths">添加视频</button>
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="video-paths">清空</button>
@@ -434,7 +434,7 @@
         <div class="content-grid smart-grid">
           <section class="panel panel-large">
             <div class="panel-header">
-              <h2>视频素材</h2>
+              <h2>视频素材 <span class="video-count-chip" data-video-count-for="mix-video-paths">0个</span></h2>
               <div class="log-header-actions">
                 <button class="button button-secondary button-small" data-action="pick-videos" data-target="mix-video-paths">添加视频</button>
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
@@ -447,6 +447,12 @@
               </div>
               <div class="video-list video-list-compact" data-list-for="mix-video-paths"></div>
             </div>
+            <div class="mix-group-tools">
+              <button class="button button-secondary button-small" data-action="mix-save-group">保存当前组</button>
+              <button class="button button-secondary button-small" data-action="mix-new-group">新增组</button>
+              <button class="button button-muted button-small" data-action="mix-delete-group">删除组</button>
+            </div>
+            <div class="mix-group-list" id="mix-group-list"></div>
             <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
             <div class="field-row">
               <label for="mix-output-dir">输出目录</label>

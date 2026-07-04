@@ -11,6 +11,8 @@ const state = {
   pipPoolRequestSeq: {},
   keywordConfig: {},
   progressByScope: {},
+  mixGroups: [],
+  activeMixGroupIndex: null,
   previewDrafts: {},
   previewDraftSaveTimers: {},
   previewDetailSelection: { smart: null, mix: null },
@@ -570,6 +572,10 @@ function bindActions() {
       if (action === "clear-video-list") clearVideoList(target.dataset.target);
       if (action === "remove-video") removeVideoPath(target.dataset.target, Number(target.dataset.index));
       if (action === "move-video") moveVideoPath(target.dataset.target, Number(target.dataset.index), Number(target.dataset.direction));
+      if (action === "mix-save-group") saveCurrentMixGroup();
+      if (action === "mix-new-group") newMixGroup();
+      if (action === "mix-delete-group") deleteActiveMixGroup();
+      if (action === "mix-select-group") selectMixGroup(Number(target.dataset.index));
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-smart-from-preview") await startSmartFromPreview();
       if (action === "start-mix-preview") await startMixPreview();
@@ -659,6 +665,7 @@ function bindActions() {
   bindFileDropTargets();
   injectDiagnosticButtons();
   ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "vs-video-paths", "dedup-video-paths"].forEach(renderVideoList);
+  renderMixGroups();
   document.querySelectorAll(".path-box").forEach((box) => {
     box.addEventListener("input", () => renderVideoList(box.id));
   });
@@ -1102,6 +1109,7 @@ function setupLogProgressBars() {
       <div class="log-progress-meta">
         <span class="log-progress-title">进度</span>
         <strong class="log-progress-label">等待任务</strong>
+        <span class="log-progress-batch" hidden></span>
         <span class="log-progress-percent">0%</span>
       </div>
       <div class="log-progress-track"><span class="log-progress-fill"></span></div>
@@ -1150,6 +1158,7 @@ function progressFromTask(task) {
   const status = task.status || "queued";
   const text = [task.title, task.message, task.error].filter(Boolean).join(" ");
   const inferred = inferProgressStage(text);
+  const batch = batchProgressFromText(text);
   const explicitProgress = Number(task.progress);
   const hasExplicitProgress = Number.isFinite(explicitProgress);
   const statusLabels = {
@@ -1160,11 +1169,11 @@ function progressFromTask(task) {
     cancelled: "已停止",
   };
 
-  if (status === "completed") return { taskId: task.id, label: statusLabels.completed, percent: 100, status, source: "task" };
-  if (status === "failed") return { taskId: task.id, label: task.error || statusLabels.failed, percent: 100, status, source: "task" };
-  if (status === "cancelled") return { taskId: task.id, label: statusLabels.cancelled, percent: 100, status, source: "task" };
+  if (status === "completed") return { taskId: task.id, label: statusLabels.completed, percent: 100, status, source: "task", batch };
+  if (status === "failed") return { taskId: task.id, label: task.error || statusLabels.failed, percent: 100, status, source: "task", batch };
+  if (status === "cancelled") return { taskId: task.id, label: statusLabels.cancelled, percent: 100, status, source: "task", batch };
   if (status === "queued") {
-    return { taskId: task.id, label: task.message || statusLabels.queued, percent: hasExplicitProgress ? explicitProgress : 6, status, source: "task" };
+    return { taskId: task.id, label: task.message || statusLabels.queued, percent: hasExplicitProgress ? explicitProgress : 6, status, source: "task", batch };
   }
 
   const previous = state.progressByScope[scope];
@@ -1175,6 +1184,25 @@ function progressFromTask(task) {
     percent: Math.max(previousPercent, hasExplicitProgress ? explicitProgress : inferred.percent || 10),
     status,
     source: "task",
+    batch,
+  };
+}
+
+function batchProgressFromText(text) {
+  const value = String(text || "");
+  const match = value.match(/(?:处理|完成)\s*(\d+)\s*\/\s*(\d+)/) || value.match(/\[(\d+)\s*\/\s*(\d+)\]/);
+  if (!match) return null;
+  const current = Number(match[1]);
+  const total = Number(match[2]);
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 1) return null;
+  const safeCurrent = Math.max(1, Math.min(total, current));
+  const remaining = Math.max(0, total - safeCurrent);
+  return {
+    current: safeCurrent,
+    total,
+    remaining,
+    text: `(${safeCurrent}/${total})`,
+    title: `共 ${total} 个视频，当前第 ${safeCurrent} 个，后续 ${remaining} 个`,
   };
 }
 
@@ -1224,9 +1252,16 @@ function updateLogProgressBar(scope, progress) {
 
   el.className = `log-progress is-${status}`;
   const labelEl = el.querySelector(".log-progress-label");
+  const batchEl = el.querySelector(".log-progress-batch");
   const percentEl = el.querySelector(".log-progress-percent");
   const fill = el.querySelector(".log-progress-fill");
   if (labelEl) labelEl.textContent = label;
+  if (batchEl) {
+    const batch = progress.batch || batchProgressFromText(label);
+    batchEl.hidden = !batch;
+    batchEl.textContent = batch?.text || "";
+    batchEl.title = batch?.title || "";
+  }
   if (percentEl) percentEl.textContent = `${percent}%`;
   if (fill) fill.style.width = `${percent}%`;
 }
@@ -1717,7 +1752,7 @@ function buildPreferenceSummaryFromSamples(samples = []) {
     conflicts,
     brief,
     notes: [
-      "这是前端只读摘要，当前不参与自动成片打分。",
+      "这是前端只读摘要；自动推荐会按 AI 学习强度进入软参考和本地兜底。",
       "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
     ],
   };
@@ -1748,7 +1783,7 @@ function renderAiFeedbackSummary(summary = {}) {
     ${renderStyleProfile(profile)}
     <div class="feedback-summary-head">
       <strong>取舍依据</strong>
-      <span>只读 · ${escapeHtml(summary.confidence || "观察中")} · ${Number(summary.sample_count || 0)} 条样本</span>
+      <span>摘要 · ${escapeHtml(summary.confidence || "观察中")} · ${Number(summary.sample_count || 0)} 条样本</span>
     </div>
     ${brief.length ? `<div class="preference-brief">${brief.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
     <div class="preference-summary-grid">
@@ -2548,6 +2583,120 @@ function clearVideoList(targetId) {
   setLines(targetId, []);
 }
 
+function mixGroupName(paths = [], fallbackIndex = 0) {
+  const first = String(paths[0] || "").split(/[\\/]/).filter(Boolean).pop() || "";
+  const stem = first.replace(/\.[^.]+$/, "").trim();
+  return stem ? stem.slice(0, 28) : `第${fallbackIndex + 1}组`;
+}
+
+function normalizeMixGroup(group, index = 0) {
+  const paths = Array.isArray(group?.video_paths)
+    ? group.video_paths.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const name = String(group?.name || "").trim() || mixGroupName(paths, index);
+  return { name, video_paths: paths };
+}
+
+function syncActiveMixGroupFromEditor() {
+  const index = state.activeMixGroupIndex;
+  if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) return;
+  const paths = getLines("mix-video-paths");
+  state.mixGroups[index] = normalizeMixGroup({ ...state.mixGroups[index], video_paths: paths }, index);
+}
+
+function saveCurrentMixGroup() {
+  const paths = getLines("mix-video-paths");
+  if (!paths.length) {
+    toast("当前组没有视频素材", "warning");
+    return;
+  }
+  const currentIndex = state.activeMixGroupIndex;
+  if (Number.isInteger(currentIndex) && currentIndex >= 0 && currentIndex < state.mixGroups.length) {
+    state.mixGroups[currentIndex] = normalizeMixGroup({ ...state.mixGroups[currentIndex], video_paths: paths }, currentIndex);
+    renderMixGroups();
+    toast(`已更新第 ${currentIndex + 1} 组`, "success");
+    return;
+  }
+  const nextIndex = state.mixGroups.length;
+  state.mixGroups.push(normalizeMixGroup({ video_paths: paths }, nextIndex));
+  state.activeMixGroupIndex = nextIndex;
+  renderMixGroups();
+  toast(`已保存第 ${nextIndex + 1} 组`, "success");
+}
+
+function newMixGroup() {
+  const paths = getLines("mix-video-paths");
+  if (paths.length) {
+    if (Number.isInteger(state.activeMixGroupIndex) && state.activeMixGroupIndex >= 0 && state.activeMixGroupIndex < state.mixGroups.length) {
+      syncActiveMixGroupFromEditor();
+    } else {
+      state.mixGroups.push(normalizeMixGroup({ video_paths: paths }, state.mixGroups.length));
+    }
+  }
+  state.activeMixGroupIndex = null;
+  setLines("mix-video-paths", []);
+  renderMixGroups();
+  toast(`准备第 ${state.mixGroups.length + 1} 组`, "success");
+}
+
+function deleteActiveMixGroup() {
+  const index = state.activeMixGroupIndex;
+  if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) {
+    toast("请先选择要删除的组", "warning");
+    return;
+  }
+  state.mixGroups.splice(index, 1);
+  if (state.mixGroups.length) {
+    state.activeMixGroupIndex = Math.min(index, state.mixGroups.length - 1);
+    setLines("mix-video-paths", state.mixGroups[state.activeMixGroupIndex].video_paths);
+  } else {
+    state.activeMixGroupIndex = null;
+    setLines("mix-video-paths", []);
+  }
+  renderMixGroups();
+  toast("已删除当前组", "success");
+}
+
+function selectMixGroup(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) return;
+  syncActiveMixGroupFromEditor();
+  state.activeMixGroupIndex = index;
+  setLines("mix-video-paths", state.mixGroups[index].video_paths);
+  renderMixGroups();
+}
+
+function collectMixBatchGroups() {
+  syncActiveMixGroupFromEditor();
+  const groups = state.mixGroups.map((group, index) => normalizeMixGroup(group, index));
+  const current = getLines("mix-video-paths");
+  if (current.length && !Number.isInteger(state.activeMixGroupIndex)) {
+    groups.push(normalizeMixGroup({ video_paths: current }, groups.length));
+  }
+  return groups.filter((group) => group.video_paths.length);
+}
+
+function renderMixGroups() {
+  const box = $("mix-group-list");
+  if (!box) return;
+  const groups = state.mixGroups.map((group, index) => normalizeMixGroup(group, index));
+  if (!groups.length) {
+    box.innerHTML = "";
+    box.classList.add("is-empty");
+    return;
+  }
+  box.classList.remove("is-empty");
+  box.innerHTML = groups.map((group, index) => {
+    const active = index === state.activeMixGroupIndex;
+    const title = `${group.name} · ${group.video_paths.length} 个视频`;
+    return `
+      <button class="mix-group-chip ${active ? "is-active" : ""}" type="button" data-action="mix-select-group" data-index="${index}" title="${escapeHtml(title)}">
+        <strong>${index + 1}</strong>
+        <span>${escapeHtml(group.name)}</span>
+        <em>${group.video_paths.length}个</em>
+      </button>`;
+  }).join("");
+}
+
 function normalizeVideoPath(path) {
   return String(path || "").trim().replace(/\//g, "\\").toLowerCase();
 }
@@ -2592,6 +2741,7 @@ function renderVideoList(targetId) {
   if (!box) return;
   const lines = getLines(targetId);
   const isCompact = compactVideoListTargetIds.has(targetId);
+  updateVideoCountBadge(targetId, lines.length);
   box.closest(".video-picker-card")?.classList.toggle("has-videos", lines.length > 0);
   const infoMap = videoInfoMap(targetId);
   const duplicateMap = videoListDuplicateMap(lines);
@@ -2637,6 +2787,13 @@ function renderVideoList(targetId) {
   }).join("");
   bindVideoRowDrag(box, targetId);
   inspectVideoList(targetId, lines);
+}
+
+function updateVideoCountBadge(targetId, count) {
+  document.querySelectorAll(`[data-video-count-for="${targetId}"]`).forEach((badge) => {
+    badge.textContent = `${Number(count) || 0}个`;
+    badge.title = `已添加 ${Number(count) || 0} 个视频素材`;
+  });
 }
 
 function bindVideoRowDrag(box, targetId) {
@@ -3445,8 +3602,21 @@ async function submitFeature(feature) {
   }
   await saveFeaturePreferences();
   const payload = collectFeaturePayload(feature);
-  await runPreflight(feature, payload, scopeForFeature(feature));
-  const result = await api(`/api/${feature}/start`, {
+  let preflightFeature = feature;
+  let endpoint = `/api/${feature}/start`;
+  if (feature === "mix") {
+    const groups = collectMixBatchGroups();
+    if (groups.length > 1) {
+      payload.groups = groups;
+      payload.video_paths = groups[0].video_paths;
+      preflightFeature = "mix-batch";
+      endpoint = "/api/mix/batch/start";
+    } else if (groups.length === 1) {
+      payload.video_paths = groups[0].video_paths;
+    }
+  }
+  await runPreflight(preflightFeature, payload, scopeForFeature(feature));
+  const result = await api(endpoint, {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -4220,12 +4390,14 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     autoRemovedCount: Number(dedupSummary.auto_removed_count || 0),
     manualCheckCount: Number(dedupSummary.manual_check_count || 0),
     categorySummary: dedupSummary.category_summary || {},
+    preferenceSummary: dedupSummary.preference_summary || {},
   };
 }
 
 function renderPreviewSummary(analysis) {
   const diffText = analysis.diff >= 0 ? `+${analysis.diff.toFixed(1)}s` : `${analysis.diff.toFixed(1)}s`;
   const category = analysis.categorySummary || {};
+  const preference = analysis.preferenceSummary || {};
   const mainCategory = category.main_category || "-";
   const protectedCategories = Array.isArray(category.protected_categories)
     ? category.protected_categories.filter((item) => item && item !== mainCategory)
@@ -4236,6 +4408,18 @@ function renderPreviewSummary(analysis) {
   const categoryText = protectedCategories.length
     ? `${mainCategory}+${protectedCategories.join("/")}`
     : mainCategory;
+  const preferenceText = preference.used_label || preference.label || "-";
+  const preferenceTitleParts = [];
+  if (preference.mode) preferenceTitleParts.push(preference.mode);
+  if (preference.matched_label && preference.matched_label !== preferenceText) {
+    preferenceTitleParts.push(`命中：${preference.matched_label}`);
+  }
+  if (preference.score !== undefined && preference.score !== null && preference.score !== "") {
+    preferenceTitleParts.push(`分数：${preference.score}`);
+  }
+  if (preference.detail) preferenceTitleParts.push(preference.detail);
+  if (preference.error) preferenceTitleParts.push(`异常：${preference.error}`);
+  const preferenceTitle = preferenceTitleParts.join("；") || preferenceText;
   const warningText = analysis.warnings.length
     ? `<div class="preview-warnings">${analysis.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`
     : `<div class="preview-warnings is-ok"><span>未发现明显时间戳风险。</span></div>`;
@@ -4247,6 +4431,7 @@ function renderPreviewSummary(analysis) {
       <div><span>已自动处理</span><strong class="is-${analysis.autoRemovedCount ? "warn" : "ok"}">${analysis.autoRemovedCount ? `${analysis.autoRemovedCount} 段` : "无"}</strong></div>
       <div><span>人工检查</span><strong class="is-${analysis.manualCheckCount ? "warn" : "ok"}">${analysis.manualCheckCount ? `${analysis.manualCheckCount} 组` : "无"}</strong></div>
       <div><span>品类</span><strong title="${escapeHtml(categoryTitle)}">${escapeHtml(categoryText)}</strong></div>
+      <div><span>AI偏好</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
     </div>
     ${warningText}
   `;

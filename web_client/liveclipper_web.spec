@@ -19,6 +19,12 @@ WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
 FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
 ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
+WEBVIEW2_RUNTIME_DIR = os.path.join(
+    ROOT_DIR,
+    "vendor",
+    "webview2_runtime_x64",
+    "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64",
+)
 
 
 def _existing(items):
@@ -98,6 +104,7 @@ certifi_pem = _module_file("certifi", "cacert.pem")
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
 datas += _existing([(ICON_FILE, "assets")])
+datas += _existing([(WEBVIEW2_RUNTIME_DIR, "webview2_runtime")])
 datas += _app_datas()
 datas += _tool_datas()
 datas += _existing([
