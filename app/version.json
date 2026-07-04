@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.3.2",
-  "latest_version": "2026.7.3.2",
+  "version": "2026.7.4.1",
+  "latest_version": "2026.7.4.1",
   "files": {
     "app/ai_clipper.py": "22265dd3677153333f64b9ffef7fa6adb7ba41d9398c46093282e8947e11ab25",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "8ae3f6953c1db29fa1efa9ad3c057d6b3c664c826610d0b47bf89dfad0e05350",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "新增批量混剪素材组与批量进度展示，AI 偏好学习参与选片兜底并在预览展示偏好摘要；包含镜像功能修复和 WebView2 固定版桌面包。",
+  "release_notes": "新增打包窗口入口文档和飞书代理/订单管理表初始化工具；刷新更新清单版本，便于客户端识别本次发布。",
   "update_url": "",
-  "update_message": "新增批量混剪素材组与批量进度展示，AI 偏好学习参与选片兜底并在预览展示偏好摘要；包含镜像功能修复和 WebView2 固定版桌面包。",
+  "update_message": "新增打包窗口入口文档和飞书代理/订单管理表初始化工具；刷新更新清单版本，便于客户端识别本次发布。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-04 08:28:10"
+  "updated_at": "2026-07-04 08:34:24"
 }
