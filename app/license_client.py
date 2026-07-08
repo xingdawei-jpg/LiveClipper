@@ -915,7 +915,7 @@ def _fc_activate(code, machine_id, result_info, expires_at):
         url = f"{_VERIFY_API_URL}/api/activate"
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             _store_license_token_from_response(result)
             return result
@@ -1282,6 +1282,18 @@ def activate_with_code(code):
         int(time.time()) + plan_days_pre * 86400,
     )
     fc_ok = _server_result_ok(server_result)
+    if server_result is None:
+        # The server may finish writing Feishu after the activate request times out.
+        # A follow-up verify recovers the signed token and avoids a false activation failure.
+        verify_result = _verify_online(code, current_mid)
+        if verify_result is not None:
+            if verify_result.get("revoked"):
+                return {"ok": False, "msg": "该激活码已被吊销，无法激活"}
+            if not _server_result_ok(verify_result):
+                return {"ok": False, "msg": verify_result.get("msg", "服务器激活失败")}
+            server_result = verify_result
+            fc_ok = True
+            _update_online_verify_time()
     if server_result is not None:
         if server_result.get("revoked"):
             return {"ok": False, "msg": "该激活码已被吊销，无法激活"}
@@ -1291,6 +1303,11 @@ def activate_with_code(code):
     elif not local_signature_verified:
         return {"ok": False, "msg": "需要联网验证激活码，请联网后重试"}
 
+    if _TOKEN_REQUIRED and not _token_activation_result(_load_cache()):
+        verify_result = _verify_online(code, current_mid)
+        if verify_result is not None and _server_result_ok(verify_result):
+            _update_online_verify_time()
+            server_result = server_result or verify_result
     if _TOKEN_REQUIRED and not _token_activation_result(_load_cache()):
         return {"ok": False, "msg": "服务端未签发可验证的 license token"}
 
@@ -1432,14 +1449,17 @@ def check_activation():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
     cache = _load_cache()
-    token_result = _token_activation_result(cache)
-    if token_result:
-        return token_result
     if _TOKEN_REQUIRED:
+        token_result = _token_activation_result(cache)
         refreshed = _refresh_token_from_saved_code(cache)
         if refreshed:
             return refreshed
+        if token_result:
+            return token_result
         return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
+    token_result = _token_activation_result(cache)
+    if token_result:
+        return token_result
 
     if cache and cache.get("code"):
         code = cache["code"]

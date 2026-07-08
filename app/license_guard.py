@@ -48,6 +48,10 @@ def get_feature_access(refresh=False):
         import license_client as lc
 
         status = lc.check_activation() if refresh else lc.check_activation_cached()
+        if status.get("activated") and not refresh:
+            online_status = lc.check_activation()
+            if online_status.get("need_activate") or online_status.get("activated"):
+                status = online_status
         if status.get("need_activate") and "token" in str(status.get("reason") or "").lower():
             status = lc.check_activation()
         try:

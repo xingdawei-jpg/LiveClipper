@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.4.2",
-  "latest_version": "2026.7.4.2",
+  "version": "2026.7.4.3",
+  "latest_version": "2026.7.4.3",
   "files": {
     "app/ai_clipper.py": "22265dd3677153333f64b9ffef7fa6adb7ba41d9398c46093282e8947e11ab25",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -15,9 +15,9 @@
     "app/gui.py": "c977c1ad28c0a203fb2bb7e16ad38ac3ec1c0a6dff86db974b637d16d3b55a7a",
     "app/keywords.json": "7f72fab3a24ca24327a11286266d1f0039a75f4005de3a606917901bde500ca4",
     "app/launcher.py": "df39ebbb8628558aa95bd969d986b817e8bf215d7c5e757f232b62f2a973afa6",
-    "app/license_client.py": "b604aba61f74793126fdb1498deb916332a4b513e1a63ad3e30282e2f1853239",
+    "app/license_client.py": "487336b98f31fab7e9320700d4c71e0a1de4d10da76de4055c55e9a4fc5412ea",
     "app/license_events.py": "534bd79038823c0007165e60e5cee2f45ba6497c02de2b15949c8a9b167ad5bb",
-    "app/license_guard.py": "82fa8f1e303a02883df6acfcb79ba0e08a5b0bd477352157d1af9d848345c144",
+    "app/license_guard.py": "1e1775fdd229a60e6823393a9e2d0095e14042e61462a39048c0d775e7550223",
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/license_token.py": "f6409d17087a6a41ecd702869191b96701dbe6abeead9325a4376d12dc3e8382",
     "app/live_recorder_page.py": "8b9809a209b3d5a0b3e3f076b10d98f309b39e4b8fff9c0d83d4cfaf6036cb47",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "8ae3f6953c1db29fa1efa9ad3c057d6b3c664c826610d0b47bf89dfad0e05350",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "修复多组混剪在更新后遇到批量接口 Not Found 时无法启动的问题；前端会优先使用新版批量接口，旧后端会自动退回逐组排队提交，并同步更新版本兜底。",
+  "release_notes": "修复授权吊销后旧本地 token 仍放行的问题；激活请求超时时会自动补一次在线验证，减少误报需要联网重试。",
   "update_url": "",
-  "update_message": "修复多组混剪在更新后遇到批量接口 Not Found 时无法启动的问题；前端会优先使用新版批量接口，旧后端会自动退回逐组排队提交，并同步更新版本兜底。",
+  "update_message": "修复授权吊销后旧本地 token 仍放行的问题；激活请求超时时会自动补一次在线验证，减少误报需要联网重试。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
-  "force_update": false,
-  "updated_at": "2026-07-04 18:31:09"
+  "force_update": true,
+  "updated_at": "2026-07-08 20:39:47"
 }
