@@ -16,6 +16,13 @@ const state = {
   previewDrafts: {},
   previewDraftSaveTimers: {},
   previewDetailSelection: { smart: null, mix: null },
+  previewInlineVideos: {},
+  previewSplitRatios: {},
+  previewPrepAutoCollapsed: { smart: false, mix: false },
+  runningScopes: new Set(),
+  latestTasks: [],
+  lastIssuesByScope: {},
+  lastPreflightLog: null,
   liveRooms: [],
   liveRoomFilter: "all",
   liveRoomSearch: "",
@@ -366,6 +373,17 @@ const aiPresets = {
     selling: ["面料质感", "穿着体验", "场景搭配"],
     avoid: ["价格", "库存", "闲聊"],
   },
+  food_fresh: {
+    label: "食品/生鲜",
+    category: "食品/生鲜",
+    goal: "食欲种草",
+    focus: "口感食欲",
+    hook: "试吃反应开头",
+    ending: "发货保鲜",
+    strictness: "标准",
+    selling: ["口感食欲", "新鲜品质", "发货保鲜", "场景吃法"],
+    avoid: ["价格", "闲聊", "保健功效", "重复卖点"],
+  },
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -395,6 +413,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadLatestSmartPreview();
   loadLatestMixPreview();
   renderUpdateState();
+  syncFlowActionState();
   setTimeout(() => {
     checkUpdate({ quiet: true }).catch((error) => {
       console.warn("Update check failed", error);
@@ -572,6 +591,10 @@ function bindActions() {
   document.body.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
     if (!target) return;
+    if (target.disabled || target.getAttribute("aria-disabled") === "true") {
+      event.preventDefault();
+      return;
+    }
     const action = target.dataset.action;
 
     try {
@@ -580,6 +603,7 @@ function bindActions() {
       if (action === "pick-file") await pickFile(target.dataset.target, target.dataset.kind || "file");
       if (action === "pick-directory") await pickDirectory(target.dataset.target);
       if (action === "open-path") await openPath(target.dataset.target);
+      if (action === "open-task-output") await openPathValue(target.dataset.path);
       if (action === "stop-scope") await stopScope(target.dataset.scope || state.page);
       if (action === "clear-video-list") clearVideoList(target.dataset.target);
       if (action === "remove-video") removeVideoPath(target.dataset.target, Number(target.dataset.index));
@@ -688,6 +712,8 @@ function injectDiagnosticButtons() {
     const panel = header.closest(".log-panel");
     const logView = panel?.querySelector(".log-view");
     const scope = logView?.id?.replace(/^log-/, "") || "";
+    const title = header.querySelector("h2");
+    if (title && title.textContent.trim() === "运行日志") title.textContent = "运行摘要";
     let actions = header.querySelector(".log-header-actions");
     if (!actions) {
       actions = document.createElement("div");
@@ -737,6 +763,10 @@ function updateDiagnosticButton(button) {
   button.textContent = state.diagnosticsVisible ? `收起诊断${suffix}` : `高级诊断${suffix}`;
 }
 
+function logPanelForScope(scope) {
+  return $(`log-${scope}`)?.closest(".log-panel") || null;
+}
+
 function bindAiPresetControls() {
   refreshAiPresetOptions();
   document.querySelectorAll("[data-ai-preset]").forEach((select) => {
@@ -746,7 +776,7 @@ function bindAiPresetControls() {
   });
 
   ["sc", "mix"].forEach((prefix) => {
-    [`${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`].forEach((id) => {
+    [`${prefix}-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`].forEach((id) => {
       $(id)?.addEventListener("change", () => markAiPresetCustom(prefix));
     });
     document.querySelectorAll(`[data-ai-control="${prefix}-selling"], [data-ai-control="${prefix}-avoid"]`).forEach((input) => {
@@ -802,6 +832,7 @@ function applyAiPreset(prefix, presetKey) {
   if (!prefix || presetKey === "custom") return;
   const preset = allAiPresets()[presetKey];
   if (!preset) return;
+  setSelectIfPresent(`${prefix}-category`, preset.category);
   setSelectIfPresent(`${prefix}-focus`, preset.focus);
   setSelectIfPresent(`${prefix}-goal`, preset.goal);
   setSelectIfPresent(`${prefix}-hook-style`, preset.hook);
@@ -826,6 +857,7 @@ function customSellingValues(prefix) {
 function collectCurrentAiPreset(prefix, label) {
   return {
     label,
+    category: $(`${prefix}-category`)?.value || "自动检测",
     goal: $(`${prefix}-goal`)?.value || "自动",
     focus: $(`${prefix}-focus`)?.value || "自动",
     hook: $(`${prefix}-hook-style`)?.value || "自动",
@@ -937,6 +969,15 @@ function applyControlGroup(group, saved) {
     if (Array.isArray(ai[`${prefix}-selling`])) setCheckedValues(`${prefix}-selling`, ai[`${prefix}-selling`]);
     if (Array.isArray(ai[`${prefix}-avoid`])) setCheckedValues(`${prefix}-avoid`, ai[`${prefix}-avoid`]);
   });
+}
+
+function refreshPipPool(prefix) {
+  const folder = $(`${prefix}-pip-folder`)?.value.trim() || "";
+  if (!folder) {
+    delete state.pipPoolByPrefix[prefix];
+    return;
+  }
+  inspectPipPool(prefix);
 }
 
 function refreshFeaturePreferenceUi() {
@@ -1055,12 +1096,35 @@ function bindPreviewModalShortcuts() {
   });
 }
 
+function collapsiblePanelStorageKey(panel) {
+  const id = panel?.dataset?.collapsiblePanel;
+  if (!id) return "";
+  if (panel.dataset.collapseGroup) return `lc:panel:${id}:compact-v1`;
+  return `lc:panel:${id}`;
+}
+
+function setCollapsiblePanelCollapsed(panel, collapsed, persist = true) {
+  if (!panel) return;
+  const key = collapsiblePanelStorageKey(panel);
+  panel.classList.toggle("is-collapsed", collapsed);
+  if (persist && key) localStorage.setItem(key, collapsed ? "closed" : "open");
+  updatePanelSummary(panel);
+}
+
+function collapseSiblingPanels(panel) {
+  const group = panel?.dataset?.collapseGroup;
+  if (!group) return;
+  document.querySelectorAll(`[data-collapse-group="${group}"]`).forEach((item) => {
+    if (item !== panel) setCollapsiblePanelCollapsed(item, true);
+  });
+}
+
 function setupCollapsiblePanels() {
   document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => {
     const id = panel.dataset.collapsiblePanel;
     const header = panel.querySelector(".panel-header");
     if (!id || !header || header.querySelector(".collapse-toggle")) return;
-    const saved = localStorage.getItem(`lc:panel:${id}`);
+    const saved = localStorage.getItem(collapsiblePanelStorageKey(panel));
     if (!saved && panel.dataset.defaultOpen === "true") panel.classList.remove("is-collapsed");
     if (saved === "open") panel.classList.remove("is-collapsed");
     if (saved === "closed") panel.classList.add("is-collapsed");
@@ -1073,9 +1137,9 @@ function setupCollapsiblePanels() {
     button.type = "button";
     button.className = "button button-muted button-small collapse-toggle";
     button.addEventListener("click", () => {
-      panel.classList.toggle("is-collapsed");
-      localStorage.setItem(`lc:panel:${id}`, panel.classList.contains("is-collapsed") ? "closed" : "open");
-      updatePanelSummary(panel);
+      const shouldOpen = panel.classList.contains("is-collapsed");
+      if (shouldOpen) collapseSiblingPanels(panel);
+      setCollapsiblePanelCollapsed(panel, !shouldOpen);
     });
     header.appendChild(button);
 
@@ -1115,16 +1179,37 @@ function setupLogProgressBars() {
     if (!scope || logView.parentElement?.querySelector(`[data-log-progress="${scope}"]`)) return;
 
     const progress = document.createElement("div");
-    progress.className = "log-progress is-idle";
+    progress.className = "run-summary log-progress is-idle";
     progress.dataset.logProgress = scope;
     progress.innerHTML = `
-      <div class="log-progress-meta">
-        <span class="log-progress-title">进度</span>
-        <strong class="log-progress-label">等待任务</strong>
-        <span class="log-progress-batch" hidden></span>
-        <span class="log-progress-percent">0%</span>
+      <div class="run-summary-grid">
+        <div class="run-summary-progress-block">
+          <div class="run-summary-ring" data-run-summary-ring>
+            <span data-run-summary-ratio>0/0</span>
+          </div>
+          <div class="run-summary-main">
+            <div class="log-progress-meta">
+              <span class="log-progress-title">运行进度</span>
+              <strong class="log-progress-label">等待任务</strong>
+              <span class="log-progress-percent">0%</span>
+            </div>
+            <div class="log-progress-track"><span class="log-progress-fill"></span></div>
+            <span class="log-progress-batch" hidden></span>
+          </div>
+        </div>
+        <div class="run-summary-section">
+          <div class="run-summary-section-title">最近成片</div>
+          <div class="run-summary-list" data-run-summary-recent>
+            <span class="run-summary-muted">暂无成片记录</span>
+          </div>
+        </div>
+        <div class="run-summary-section run-summary-issue-section">
+          <div class="run-summary-section-title">异常原因</div>
+          <div class="run-summary-issue is-empty" data-run-summary-issue>
+            <span>暂无异常</span>
+          </div>
+        </div>
       </div>
-      <div class="log-progress-track"><span class="log-progress-fill"></span></div>
     `;
     logView.parentElement?.insertBefore(progress, logView);
     updateLogProgressBar(scope, { label: "等待任务", percent: 0, status: "idle" });
@@ -1143,6 +1228,10 @@ function updateLogProgressFromTasks(tasks = []) {
       return;
     }
     if (latest && current?.taskId === latest.id) {
+      updateLogProgressBar(scope, progressFromTask(latest));
+      return;
+    }
+    if (latest && (!current?.taskId || current.status === "idle")) {
       updateLogProgressBar(scope, progressFromTask(latest));
       return;
     }
@@ -1165,12 +1254,61 @@ function taskTime(task) {
   return Number(task?.finished_at || task?.started_at || fromId || 0);
 }
 
+function batchNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function formatBatchProgress({ total, done = 0, current = 0, failed = 0, label = "", status = "" } = {}) {
+  const safeTotal = Math.max(0, Math.floor(batchNumber(total)));
+  if (safeTotal <= 1) return null;
+  const safeFailed = Math.max(0, Math.floor(batchNumber(failed)));
+  const safeDone = Math.max(0, Math.min(safeTotal, Math.floor(batchNumber(done))));
+  const safeCurrent = Math.max(0, Math.min(safeTotal, Math.floor(batchNumber(current))));
+  const cleanLabel = String(label || "").trim();
+  const finishedWithFailures = status === "completed" && safeFailed > 0;
+  const mainText = finishedWithFailures ? `成功 ${safeDone}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`;
+  const parts = [mainText];
+  if (!["completed", "failed", "cancelled"].includes(status) && safeCurrent > 0 && safeDone < safeTotal) {
+    parts.push(`正在第 ${safeCurrent} 个`);
+  }
+  if (safeFailed > 0) parts.push(`失败 ${safeFailed}`);
+  const titleParts = [`共 ${safeTotal} 个`, `已完成 ${safeDone} 个`];
+  if (safeCurrent > 0 && safeDone < safeTotal) titleParts.push(`当前第 ${safeCurrent} 个`);
+  if (safeFailed > 0) titleParts.push(`失败 ${safeFailed} 个`);
+  if (cleanLabel) titleParts.push(cleanLabel);
+  return {
+    total: safeTotal,
+    done: safeDone,
+    current: safeCurrent,
+    failed: safeFailed,
+    label: cleanLabel,
+    text: parts.join(" · "),
+    shortText: finishedWithFailures ? `成功 ${safeDone}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`,
+    title: titleParts.join(" · "),
+  };
+}
+
+function batchProgressFromTask(task) {
+  if (!task) return null;
+  const structured = formatBatchProgress({
+    total: task.batch_total,
+    done: task.batch_done,
+    current: task.batch_current,
+    failed: task.batch_failed,
+    label: task.batch_label,
+    status: task.status || "",
+  });
+  if (structured) return structured;
+  return batchProgressFromText([task.title, task.message, task.error].filter(Boolean).join(" "), task.status || "");
+}
+
 function progressFromTask(task) {
   const scope = task.scope || "settings";
   const status = task.status || "queued";
   const text = [task.title, task.message, task.error].filter(Boolean).join(" ");
   const inferred = inferProgressStage(text);
-  const batch = batchProgressFromText(text);
+  const batch = batchProgressFromTask(task);
   const explicitProgress = Number(task.progress);
   const hasExplicitProgress = Number.isFinite(explicitProgress);
   const statusLabels = {
@@ -1200,22 +1338,173 @@ function progressFromTask(task) {
   };
 }
 
-function batchProgressFromText(text) {
+function batchProgressFromText(text, status = "") {
   const value = String(text || "");
-  const match = value.match(/(?:处理|完成)\s*(\d+)\s*\/\s*(\d+)/) || value.match(/\[(\d+)\s*\/\s*(\d+)\]/);
+  const success = value.match(/成功\s*(\d+)\s*\/\s*(\d+)/);
+  if (success) {
+    return formatBatchProgress({
+      done: Number(success[1]),
+      total: Number(success[2]),
+      status: status || "completed",
+    });
+  }
+  const match = value.match(/(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*\/\s*(\d+)(?:\s*[:：]\s*([^。；\n]+))?/) || value.match(/\[(\d+)\s*\/\s*(\d+)\]/);
   if (!match) return null;
-  const current = Number(match[1]);
-  const total = Number(match[2]);
+  const hasAction = match.length > 3;
+  const action = hasAction ? match[1] : "处理";
+  const current = Number(hasAction ? match[2] : match[1]);
+  const total = Number(hasAction ? match[3] : match[2]);
   if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 1) return null;
   const safeCurrent = Math.max(1, Math.min(total, current));
-  const remaining = Math.max(0, total - safeCurrent);
-  return {
-    current: safeCurrent,
+  const isCurrentStep = ["处理", "扫描", "导出", "快速分割"].includes(action);
+  return formatBatchProgress({
     total,
-    remaining,
-    text: `(${safeCurrent}/${total})`,
-    title: `共 ${total} 个视频，当前第 ${safeCurrent} 个，后续 ${remaining} 个`,
-  };
+    done: isCurrentStep ? safeCurrent - 1 : safeCurrent,
+    current: isCurrentStep ? safeCurrent : 0,
+    failed: action === "跳过失败" ? 1 : 0,
+    label: hasAction ? match[4] || "" : "",
+    status,
+  });
+}
+
+function taskStatusLabel(status) {
+  return {
+    queued: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已停止",
+    idle: "待处理",
+  }[status] || status || "待处理";
+}
+
+function taskPercent(task) {
+  const value = Number(task?.progress);
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? Math.round(value) : 0));
+}
+
+function newestScopedTasks(tasks, scope) {
+  return scopedProgressTasks(tasks, scope).sort((a, b) => {
+    const aActive = ["queued", "running"].includes(a.status) ? 1 : 0;
+    const bActive = ["queued", "running"].includes(b.status) ? 1 : 0;
+    if (aActive !== bActive) return bActive - aActive;
+    return taskTime(b) - taskTime(a);
+  });
+}
+
+function issueSuggestion(message) {
+  const text = String(message || "");
+  if (/素材|视频|至少|添加|不存在|路径/.test(text)) return "请补充素材或检查文件路径。";
+  if (/API|Key|模型|DeepSeek|OpenAI|连接|网络|代理/.test(text)) return "请到设置里检查 AI 配置和网络。";
+  if (/权限|目录|写入|保存|输出/.test(text)) return "请换一个可写的输出目录。";
+  if (/ffmpeg|编码|转码|裁剪|合成|导出/i.test(text)) return "请检查源视频是否可播放，必要时换稳定转码。";
+  return "打开高级诊断查看详细原因。";
+}
+
+function issueForScope(scope, scopedTasks) {
+  const failed = newestTask(scopedTasks.filter((task) => task.status === "failed"));
+  if (failed) {
+    const message = failed.error || failed.message || "任务处理失败。";
+    return {
+      title: failed.title || "任务失败",
+      message,
+      suggestion: issueSuggestion(message),
+      tone: "error",
+    };
+  }
+
+  const active = newestTask(scopedTasks.filter((task) => ["queued", "running"].includes(task.status)));
+  const issue = state.lastIssuesByScope[scope];
+  if (active && issue) {
+    return {
+      title: issue.level === "warning" ? "提示" : "异常",
+      message: issue.message,
+      suggestion: issueSuggestion(issue.message),
+      tone: issue.level === "warning" ? "warning" : "error",
+    };
+  }
+  return null;
+}
+
+function fileNameFromPath(path) {
+  const text = String(path || "").trim().replace(/[\\/]+$/, "");
+  if (!text) return "";
+  return text.split(/[\\/]/).filter(Boolean).pop() || text;
+}
+
+function completedOutputsFromTasks(tasks) {
+  const rows = [];
+  for (const task of tasks || []) {
+    if (task.status !== "completed") continue;
+    const outputs = Array.isArray(task.outputs) ? task.outputs.filter(Boolean) : [];
+    if (!outputs.length && task.output) outputs.push(task.output);
+    if (!outputs.length && task.output_dir) outputs.push(task.output_dir);
+    outputs.slice(0, 4).forEach((path, index) => {
+      const name = fileNameFromPath(path) || task.title || "输出文件";
+      const total = outputs.length || Number(task.result_count || 0) || 1;
+      rows.push({
+        path,
+        name,
+        title: task.title || "成片",
+        meta: total > 1 ? `${index + 1}/${total}` : "已完成",
+        time: taskTime(task),
+      });
+    });
+  }
+  return rows.sort((a, b) => b.time - a.time);
+}
+
+function renderRecentOutputRows(tasks) {
+  const outputs = completedOutputsFromTasks(tasks).slice(0, 3);
+  if (!outputs.length) return '<span class="run-summary-muted">暂无成片记录</span>';
+  return outputs.map((item) => `
+    <div class="run-output-row">
+      <span class="run-task-dot"></span>
+      <div class="run-output-main">
+        <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</strong>
+        <span>${escapeHtml(item.title)} · ${escapeHtml(item.meta)}</span>
+      </div>
+      <button type="button" class="run-output-button" data-action="open-task-output" data-path="${escapeHtml(item.path)}" title="${escapeHtml(item.path)}">打开文件夹</button>
+    </div>
+  `).join("");
+}
+
+function renderRunSummary(scope) {
+  const el = document.querySelector(`[data-log-progress="${scope}"]`);
+  if (!el) return;
+  const progress = state.progressByScope[scope] || { label: "等待任务", percent: 0, status: "idle" };
+  const scoped = newestScopedTasks(state.latestTasks || [], scope);
+  const focusTask = newestTask(scoped.filter((task) => ["queued", "running"].includes(task.status))) || newestTask(scoped);
+  const batch = progress.batch || batchProgressFromTask(focusTask);
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || taskPercent(focusTask))));
+  const ratio = batch ? `${batch.done}/${batch.total}` : (percent ? `${percent}%` : "0/0");
+
+  el.style.setProperty("--run-summary-percent", `${percent}%`);
+  const ring = el.querySelector("[data-run-summary-ring]");
+  const ratioEl = el.querySelector("[data-run-summary-ratio]");
+  const recentEl = el.querySelector("[data-run-summary-recent]");
+  const issueEl = el.querySelector("[data-run-summary-issue]");
+
+  if (ring) ring.className = `run-summary-ring is-${progress.status || "idle"}`;
+  if (ratioEl) ratioEl.textContent = ratio;
+  if (recentEl) recentEl.innerHTML = renderRecentOutputRows(scoped);
+
+  const issue = issueForScope(scope, scoped);
+  if (issueEl) {
+    issueEl.className = `run-summary-issue ${issue ? `is-${issue.tone}` : "is-empty"}`;
+    issueEl.innerHTML = issue
+      ? `
+        <strong>${escapeHtml(issue.title)}</strong>
+        <span>${escapeHtml(issue.message)}</span>
+        <em>${escapeHtml(issue.suggestion)}</em>
+      `
+      : "<span>暂无异常</span>";
+  }
+}
+
+function renderRunSummaries(tasks = state.latestTasks || []) {
+  state.latestTasks = tasks || [];
+  progressScopes.forEach((scope) => renderRunSummary(scope));
 }
 
 function updateProgressFromLog(scope, item = {}) {
@@ -1224,23 +1513,25 @@ function updateProgressFromLog(scope, item = {}) {
   if (!scope || !text) return;
 
   if (level === "error") {
-    updateLogProgressBar(scope, { label: "处理失败", percent: 100, status: "failed" });
+    updateLogProgressBar(scope, { label: "处理失败", percent: 100, status: "failed", batch: batchProgressFromText(text, "failed") });
     return;
   }
   if (level === "success" || /任务完成|成片完成|混剪完成|预览完成|处理完成|成功|已生成/.test(text)) {
-    updateLogProgressBar(scope, { label: "已完成", percent: 100, status: "completed" });
+    updateLogProgressBar(scope, { label: "已完成", percent: 100, status: "completed", batch: batchProgressFromText(text, "completed") });
     return;
   }
 
   const inferred = inferProgressStage(text);
-  if (!inferred.label) return;
+  const batch = batchProgressFromText(text, "running");
+  if (!inferred.label && !batch) return;
   const previous = state.progressByScope[scope] || {};
   if (previous.source === "task" && previous.taskId && previous.status === "running") return;
   updateLogProgressBar(scope, {
-    label: inferred.label,
+    label: inferred.label || previous.label || "运行中",
     percent: Math.max(previous.percent || 0, inferred.percent),
     status: "running",
     taskId: previous.taskId,
+    batch,
   });
 }
 
@@ -1269,13 +1560,14 @@ function updateLogProgressBar(scope, progress) {
   const fill = el.querySelector(".log-progress-fill");
   if (labelEl) labelEl.textContent = label;
   if (batchEl) {
-    const batch = progress.batch || batchProgressFromText(label);
+    const batch = progress.batch || batchProgressFromText(label, status);
     batchEl.hidden = !batch;
     batchEl.textContent = batch?.text || "";
     batchEl.title = batch?.title || "";
   }
   if (percentEl) percentEl.textContent = `${percent}%`;
   if (fill) fill.style.width = `${percent}%`;
+  renderRunSummary(scope);
 }
 
 function resetLogProgress(scope) {
@@ -2065,6 +2357,7 @@ async function resetKeywords() {
 }
 
 async function clearCache() {
+  if (!window.confirm("清理 AI 选片预览缓存后，需要重新生成预览。确认继续？")) return;
   const result = await api("/api/cache/clear", { method: "POST", body: "{}" });
   toast(result.message || "缓存清理完成", "success");
 }
@@ -2799,6 +3092,7 @@ function renderVideoList(targetId) {
   }).join("");
   bindVideoRowDrag(box, targetId);
   inspectVideoList(targetId, lines);
+  syncFlowActionState();
 }
 
 function updateVideoCountBadge(targetId, count) {
@@ -2806,6 +3100,37 @@ function updateVideoCountBadge(targetId, count) {
     badge.textContent = `${Number(count) || 0}个`;
     badge.title = `已添加 ${Number(count) || 0} 个视频素材`;
   });
+}
+
+function setButtonsEnabled(selector, enabled, reason = "") {
+  document.querySelectorAll(selector).forEach((button) => {
+    if (button.dataset.enabledTitle === undefined) {
+      button.dataset.enabledTitle = button.getAttribute("title") || "";
+    }
+    button.disabled = !enabled;
+    button.setAttribute("aria-disabled", enabled ? "false" : "true");
+    button.classList.toggle("is-disabled", !enabled);
+    button.title = enabled ? button.dataset.enabledTitle : reason || button.dataset.enabledTitle || "";
+  });
+}
+
+function previewReady(preview) {
+  return preview?.id && preview.status === "ready" && (preview.clips || []).some((clip) => clip?.selected !== false);
+}
+
+function syncFlowActionState() {
+  const smartHasVideos = getVideoPaths().length > 0;
+  const mixHasVideos = getLines("mix-video-paths").length > 0;
+  const runningScopes = state.runningScopes instanceof Set ? state.runningScopes : new Set();
+
+  setButtonsEnabled('[data-action="start-smart-preview"]', smartHasVideos, "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-cut"]', smartHasVideos, "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-from-preview"]', previewReady(state.smartPreview), "先生成并保留 AI 选片预览");
+  setButtonsEnabled('[data-action="start-mix-preview"]', mixHasVideos, "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="feature-submit"][data-feature="mix"]', mixHasVideos, "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview), "先生成并保留混剪 AI 选片预览");
+  setButtonsEnabled('[data-action="stop-scope"][data-scope="smart-cut"]', runningScopes.has("smart-cut"), "当前没有智能成片任务");
+  setButtonsEnabled('[data-action="stop-scope"][data-scope="mix"]', runningScopes.has("mix"), "当前没有混剪任务");
 }
 
 function bindVideoRowDrag(box, targetId) {
@@ -3025,7 +3350,7 @@ function bindDedupCustomControls() {
 }
 
 function collectSmartPayload(options = {}) {
-  const requireVideos = options.requireVideos !== false;
+  const requireVideos = options.requireVideos === true;
   const videoPaths = getVideoPaths();
   if (requireVideos && !videoPaths.length) {
     throw new Error("请先填写视频路径");
@@ -3154,13 +3479,46 @@ async function startMixFromPreview() {
     order: selection.order,
     selected_segments: selection.selectedSegments,
   };
-  await runPreflight("mix", payload, "mix");
+  await runPreflight("mix-from-preview", payload, "mix");
   const result = await api("/api/mix/from-preview/start", {
     method: "POST",
     body: JSON.stringify(payload),
   });
   toast(result.message || "预览混剪任务已启动", "success");
   refreshTasks();
+}
+
+function previewPageId(scope = "smart") {
+  return scope === "mix" ? "page-mix" : "page-smart-cut";
+}
+
+function previewPanelPrefix(scope = "smart") {
+  return scope === "mix" ? "mix" : "sc";
+}
+
+function autoCollapsePreviewPrepPanels(scope = "smart") {
+  const prefix = previewPanelPrefix(scope);
+  document.querySelectorAll(`[data-summary-prefix="${prefix}"]`).forEach((panel) => {
+    setCollapsiblePanelCollapsed(panel, true);
+  });
+}
+
+function setPreviewLayoutState(scope = "smart", preview = null) {
+  const clips = preview?.clips || [];
+  const status = preview?.status || "";
+  const isRunning = status === "running" || status === "queued";
+  const hasResult = Boolean(preview?.id && status === "ready" && clips.length);
+  const page = $(previewPageId(scope));
+  if (isRunning) return;
+  page?.classList.toggle("has-preview-result", hasResult);
+  if (!hasResult) {
+    state.previewPrepAutoCollapsed[scope] = false;
+    return;
+  }
+  if (!state.previewPrepAutoCollapsed[scope]) {
+    autoCollapsePreviewPrepPanels(scope);
+    state.previewPrepAutoCollapsed[scope] = true;
+  }
 }
 
 function getPreviewState(scope = "smart") {
@@ -3185,6 +3543,107 @@ function renderPreviewStateKeepStoryScroll(scope = "smart") {
   renderPreviewState(scope);
   const list = previewBox(scope)?.querySelector(".clip-story-list");
   if (list) list.scrollTop = scrollTop;
+}
+
+function previewSplitStorageKey(scope = "smart") {
+  return `liveclipper:preview-split:${scope}`;
+}
+
+function clampPreviewSplitRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 70;
+  return Math.max(38, Math.min(74, number));
+}
+
+function previewSplitRatio(scope = "smart") {
+  if (state.previewSplitRatios[scope] !== undefined) {
+    return clampPreviewSplitRatio(state.previewSplitRatios[scope]);
+  }
+  let stored = null;
+  try {
+    stored = localStorage.getItem(previewSplitStorageKey(scope));
+  } catch (error) {
+    stored = null;
+  }
+  const ratio = clampPreviewSplitRatio(stored || 70);
+  state.previewSplitRatios[scope] = ratio;
+  return ratio;
+}
+
+function applyPreviewSplitRatio(scope = "smart", ratio = null) {
+  const value = clampPreviewSplitRatio(ratio ?? previewSplitRatio(scope));
+  state.previewSplitRatios[scope] = value;
+  const workbench = previewBox(scope)?.querySelector(`[data-preview-workbench="${scope}"]`);
+  if (!workbench) return;
+  workbench.style.setProperty("--preview-left", `${value}%`);
+  const resizer = workbench.querySelector(`[data-preview-resizer="${scope}"]`);
+  if (resizer) resizer.setAttribute("aria-valuenow", String(Math.round(value)));
+}
+
+function savePreviewSplitRatio(scope = "smart", ratio = 70) {
+  const value = clampPreviewSplitRatio(ratio);
+  state.previewSplitRatios[scope] = value;
+  try {
+    localStorage.setItem(previewSplitStorageKey(scope), String(value));
+  } catch (error) {
+    // Split position is a comfort setting; ignore storage failures.
+  }
+  applyPreviewSplitRatio(scope, value);
+}
+
+function previewSplitRatioFromPointer(workbench, clientX) {
+  const rect = workbench.getBoundingClientRect();
+  const width = Math.max(1, rect.width);
+  const handle = workbench.querySelector(".clip-preview-resizer");
+  const handleWidth = handle?.getBoundingClientRect().width || 10;
+  const minLeft = Math.min(Math.max(340, width * 0.38), width - 260);
+  const minRight = Math.min(300, width * 0.42);
+  const maxLeft = Math.max(minLeft, width - minRight - handleWidth);
+  const rawLeft = clientX - rect.left;
+  const left = Math.max(minLeft, Math.min(maxLeft, rawLeft));
+  return Math.round((left / width) * 1000) / 10;
+}
+
+function bindPreviewSplitResizer(box, scope = "smart") {
+  const workbench = box.querySelector(`[data-preview-workbench="${scope}"]`);
+  const resizer = workbench?.querySelector(`[data-preview-resizer="${scope}"]`);
+  if (!workbench || !resizer) return;
+  applyPreviewSplitRatio(scope);
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    workbench.classList.add("is-resizing");
+    document.body.classList.add("is-preview-resizing");
+    resizer.setPointerCapture?.(event.pointerId);
+    const onMove = (moveEvent) => {
+      const ratio = previewSplitRatioFromPointer(workbench, moveEvent.clientX);
+      applyPreviewSplitRatio(scope, ratio);
+    };
+    const onUp = (upEvent) => {
+      const ratio = previewSplitRatioFromPointer(workbench, upEvent.clientX);
+      savePreviewSplitRatio(scope, ratio);
+      workbench.classList.remove("is-resizing");
+      document.body.classList.remove("is-preview-resizing");
+      resizer.releasePointerCapture?.(upEvent.pointerId);
+      resizer.removeEventListener("pointermove", onMove);
+      resizer.removeEventListener("pointerup", onUp);
+      resizer.removeEventListener("pointercancel", onUp);
+    };
+    resizer.addEventListener("pointermove", onMove);
+    resizer.addEventListener("pointerup", onUp);
+    resizer.addEventListener("pointercancel", onUp);
+  });
+  resizer.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = previewSplitRatio(scope);
+    let next = current;
+    if (event.key === "ArrowLeft") next = current - 2;
+    if (event.key === "ArrowRight") next = current + 2;
+    if (event.key === "Home") next = 50;
+    if (event.key === "End") next = 70;
+    savePreviewSplitRatio(scope, next);
+  });
 }
 
 function previewDraftKey(scope, previewId) {
@@ -3487,6 +3946,94 @@ function bindPreviewRowDrag(box, scope = "smart") {
   });
 }
 
+function previewInlineVideoKey(scope, preview, clip, draft = null) {
+  if (!preview?.id || !clip) return "";
+  const clipIndex = Number(clip.index);
+  const selection = draft || buildPreviewDraftFromState(scope);
+  const selectedSegments = selection?.selected_segments && Array.isArray(selection.selected_segments[String(clipIndex)])
+    ? selection.selected_segments[String(clipIndex)].join(",")
+    : "";
+  const selected = Array.isArray(selection?.selected_indices) && selection.selected_indices.includes(clipIndex) ? "1" : "0";
+  return `${scope}:${preview.id}:${clipIndex}:${selected}:${selectedSegments}`;
+}
+
+function previewInlineVideoPanel(scope, index, key) {
+  return Array.from(document.querySelectorAll(`[data-preview-inline-video="${scope}"]`))
+    .find((node) => Number(node.dataset.previewIndex) === Number(index) && node.dataset.videoKey === key) || null;
+}
+
+function setInlinePreviewStatus(panel, message, type = "info") {
+  const status = panel?.querySelector("[data-preview-inline-status]");
+  if (!status) return;
+  status.textContent = message || "";
+  status.classList.toggle("is-hidden", !message);
+  status.classList.toggle("is-error", type === "error");
+}
+
+function applyInlinePreviewVideoState(scope, index, key) {
+  const panel = previewInlineVideoPanel(scope, index, key);
+  if (!panel) return;
+  const video = panel.querySelector("[data-preview-inline-player]");
+  const entry = state.previewInlineVideos[key] || {};
+  if (entry.url) {
+    if (video && video.getAttribute("src") !== entry.url) {
+      video.src = entry.url;
+      video.load();
+    }
+    video?.classList.remove("is-hidden");
+    setInlinePreviewStatus(panel, "", "info");
+    return;
+  }
+  video?.classList.add("is-hidden");
+  if (entry.status === "loading") {
+    setInlinePreviewStatus(panel, "正在生成所选片段小视频...", "info");
+  } else if (entry.error) {
+    setInlinePreviewStatus(panel, `小视频生成失败：${entry.error}`, "error");
+  } else {
+    setInlinePreviewStatus(panel, "选择片段后显示小视频。", "info");
+  }
+}
+
+async function ensureInlinePreviewVideo(scope = "smart", index = null) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || preview.status !== "ready") return;
+  const clipIndex = Number(index);
+  const clip = preview.clips?.find((item) => Number(item.index) === clipIndex);
+  if (!clip) return;
+  syncPreviewClipSelections(scope);
+  const segments = previewSegments(clip);
+  if (clip.selected === false || (segments.length && !selectedPreviewSegments(clip).length)) return;
+  const draft = commitPreviewDraft(scope, { remote: true });
+  const key = previewInlineVideoKey(scope, preview, clip, draft);
+  if (!key) return;
+  const existing = state.previewInlineVideos[key];
+  if (existing?.url || existing?.status === "loading" || existing?.error) {
+    applyInlinePreviewVideoState(scope, clipIndex, key);
+    return;
+  }
+  state.previewInlineVideos[key] = { status: "loading" };
+  applyInlinePreviewVideoState(scope, clipIndex, key);
+  const endpoint = scope === "mix" ? "/api/mix/preview/clip-video" : "/api/smart-cut/preview/clip-video";
+  try {
+    const result = await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify({
+        preview_id: preview.id,
+        clip_index: clipIndex,
+        scope,
+        selected_indices: draft.selected_indices || [],
+        order: draft.order || [],
+        selected_segments: draft.selected_segments || {},
+        updated_at: draft.updated_at || Date.now(),
+      }),
+    });
+    state.previewInlineVideos[key] = { status: "ready", url: result.url };
+  } catch (error) {
+    state.previewInlineVideos[key] = { status: "failed", error: error.message || String(error || "未知错误") };
+  }
+  applyInlinePreviewVideoState(scope, clipIndex, key);
+}
+
 async function previewClipVideo(index, scope = "smart") {
   const preview = scope === "mix" ? state.mixPreview : state.smartPreview;
   if (!preview?.id || preview.status !== "ready") {
@@ -3744,6 +4291,15 @@ async function waitForTaskComplete(taskId, scope = "mix") {
   return { id: taskId, status: "failed", error: "等待混剪任务完成超时。" };
 }
 
+function shouldAppendPreflightLog(scope, level, message) {
+  const key = `${scope || "settings"}:${level}:${message}`;
+  const now = Date.now();
+  const last = state.lastPreflightLog || {};
+  if (last.key === key && now - Number(last.time || 0) < 3000) return false;
+  state.lastPreflightLog = { key, time: now };
+  return true;
+}
+
 async function runPreflight(feature, payload, scope) {
   const result = await api("/api/preflight", {
     method: "POST",
@@ -3753,19 +4309,25 @@ async function runPreflight(feature, payload, scope) {
   const warnings = result.warnings || [];
   if (errors.length) {
     const message = `启动检查未通过：${errors.join("；")}`;
-    appendLog(scope || "settings", {
-      time: new Date().toLocaleTimeString(),
-      level: "error",
-      message: `${message}。解决办法：请先修正红色错误后再启动任务。`,
-    });
+    const logMessage = `${message}。解决办法：请先修正红色错误后再启动任务。`;
+    if (shouldAppendPreflightLog(scope, "error", logMessage)) {
+      appendLog(scope || "settings", {
+        time: new Date().toLocaleTimeString(),
+        level: "error",
+        message: logMessage,
+      });
+    }
     throw new Error(message);
   }
   if (warnings.length) {
-    appendLog(scope || "settings", {
-      time: new Date().toLocaleTimeString(),
-      level: "warning",
-      message: `启动检查提示：${warnings.join("；")}`,
-    });
+    const logMessage = `启动检查提示：${warnings.join("；")}`;
+    if (shouldAppendPreflightLog(scope, "warning", logMessage)) {
+      appendLog(scope || "settings", {
+        time: new Date().toLocaleTimeString(),
+        level: "warning",
+        message: logMessage,
+      });
+    }
     toast(`启动检查提示：${warnings[0]}${warnings.length > 1 ? `（另有 ${warnings.length - 1} 项）` : ""}`, "warning");
   }
   return result;
@@ -3885,10 +4447,14 @@ async function refreshTasks() {
   try {
     const data = await api("/api/tasks");
     const tasks = data.tasks || [];
+    state.latestTasks = tasks;
     const latest = tasks.slice(-8).reverse();
+    state.runningScopes = new Set(tasks.filter((task) => ["queued", "running"].includes(task.status)).map((task) => task.scope));
     syncLiveRoomActivityFromTasks(tasks);
     renderTaskBadges(latest);
     updateLogProgressFromTasks(tasks);
+    renderRunSummaries(tasks);
+    syncFlowActionState();
   } catch (error) {
     // The log websocket already reports connection state; keep this quiet.
   }
@@ -4193,21 +4759,65 @@ function renderClipStoryText(clip, repeatTags = "") {
   return `<strong class="clip-text clip-story-text clip-selected-summary" data-preview-selected-text title="${escapeHtml(text)}">${escapeHtml(text)}${repeatTags}</strong>`;
 }
 
-function renderClipStoryCard(clip, position, scope, analysis, activeIndex) {
+function sourceBaseName(value) {
+  return String(value || "").split(/[\\/]/).filter(Boolean).pop() || String(value || "");
+}
+
+function previewSourceAlias(scope, preview, clip) {
+  if (scope !== "mix") return "";
+  const sourceName = String(clip?.source || clip?.source_name || "").trim();
+  const sources = Array.isArray(preview?.sources) ? preview.sources : [];
+  const sourceIndex = sources.findIndex((item) => {
+    const value = typeof item === "object" && item
+      ? String(item.path || item.source || item.name || "").trim()
+      : String(item || "").trim();
+    if (!value || !sourceName) return false;
+    return value === sourceName || sourceBaseName(value) === sourceBaseName(sourceName);
+  });
+  if (sourceIndex >= 0) return `V${sourceIndex + 1}`;
+  const marker = selectedPreviewText(clip).match(/\bV(\d+)\b/i);
+  if (marker) return `V${marker[1]}`;
+  return sourceName ? "V?" : "";
+}
+
+function previewClipReasonParts(clip, analysis, { includeRisk = true } = {}) {
+  const clipIndex = Number(clip?.index);
+  const risk = analysis?.riskByIndex?.get(clipIndex);
+  if (clip?.selected === false) {
+    return [risk?.detail || "未选"];
+  }
+  const parts = [];
+  const focus = String(clip?.focus || clip?.focus_block || "").trim();
+  if (focus) parts.push(`重点：${focus}`);
+  const tags = classifyClipScoreTags(clip)
+    .filter((tag) => tag.label && tag.label !== "普通")
+    .map((tag) => tag.label);
+  if (tags.length) parts.push(`命中：${Array.from(new Set(tags)).slice(0, 3).join("/")}`);
+  const score = Number(clip?.score || 0);
+  if (score) parts.push(`AI分 ${score.toFixed(1)}`);
+  if (includeRisk && risk?.label && risk.label !== "正常") parts.push(`检查：${risk.label}`);
+  return parts.length ? parts : [`${clipTypeLabel(clip?.clip_type)}片段，建议结合字幕和画面确认`];
+}
+
+function renderClipStoryMeta(clip, position, scope, preview, analysis) {
   const typeLabel = clipTypeLabel(clip.clip_type);
   const bounds = effectiveClipBounds(clip);
   const time = `${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)}`;
-  const duration = `${bounds.duration.toFixed(1)}s`;
+  const alias = previewSourceAlias(scope, preview, clip);
+  const parts = [
+    `#${position + 1}`,
+    typeLabel,
+    time,
+    ...previewClipReasonParts(clip, analysis, { includeRisk: true }),
+  ];
+  if (alias) parts.push(alias);
+  const text = parts.filter(Boolean).join(" · ");
+  return `<span class="clip-story-meta" title="${escapeHtml(text)}">${escapeHtml(text)}</span>`;
+}
+
+function renderClipStoryCard(clip, position, scope, preview, analysis, activeIndex) {
   const checked = clip.selected === false ? "" : "checked";
-  const { risk, riskLabel, riskClass } = previewClipRisk(clip, analysis);
   const repeatTags = renderManualRepeatTags(clip);
-  const sourceName = clip.source_name || clip.source || "";
-  const source = scope === "mix" && sourceName
-    ? `<span class="clip-story-source" title="${escapeHtml(sourceName)}"> · ${escapeHtml(sourceName.split(/[\\/]/).filter(Boolean).pop() || sourceName)}</span>`
-    : "";
-  const riskBadge = riskClass === "ok" && riskLabel === "正常"
-    ? ""
-    : `<span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>`;
   return `
     <article class="clip-preview-row clip-story-card ${clip.selected === false ? "is-unselected" : ""} ${Number(clip.index) === activeIndex ? "is-active" : ""}" draggable="true" data-preview-row data-preview-scope="${scope}" data-preview-index="${clip.index}">
       <div class="clip-story-select">
@@ -4216,14 +4826,38 @@ function renderClipStoryCard(clip, position, scope, analysis, activeIndex) {
       </div>
       <div class="clip-story-main">
         <div class="clip-story-topline">
-          <span class="clip-story-meta">#${position + 1} · ${escapeHtml(typeLabel)} · ${escapeHtml(time)} · ${escapeHtml(duration)}${source}</span>
-          ${riskBadge}
+          ${renderClipStoryMeta(clip, position, scope, preview, analysis)}
         </div>
         <div class="clip-content">
           ${renderClipStoryText(clip, repeatTags)}
         </div>
       </div>
     </article>
+  `;
+}
+
+function renderPreviewInlineVideo(scope, preview, clip) {
+  const segments = previewSegments(clip);
+  const hasSelectedText = clip.selected !== false && (!segments.length || selectedPreviewSegments(clip).length);
+  const draft = buildPreviewDraftFromState(scope);
+  const key = previewInlineVideoKey(scope, preview, clip, draft);
+  const entry = state.previewInlineVideos[key] || {};
+  const videoClass = entry.url ? "" : "is-hidden";
+  const statusClass = entry.url ? "is-hidden" : "";
+  const statusText = !hasSelectedText
+    ? "勾选左侧片段或句子后显示小视频。"
+    : entry.error
+      ? `小视频生成失败：${entry.error}`
+      : entry.status === "loading"
+        ? "正在生成所选片段小视频..."
+        : "正在准备所选片段小视频...";
+  return `
+    <div class="clip-detail-video" data-preview-inline-video="${scope}" data-preview-index="${Number(clip.index)}" data-video-key="${escapeHtml(key)}">
+      <div class="clip-detail-video-stage">
+        <video class="${videoClass}" data-preview-inline-player controls playsinline preload="metadata" ${entry.url ? `src="${escapeHtml(entry.url)}"` : ""}></video>
+        <div class="clip-detail-video-status ${statusClass} ${entry.error ? "is-error" : ""}" data-preview-inline-status>${escapeHtml(statusText)}</div>
+      </div>
+    </div>
   `;
 }
 
@@ -4258,18 +4892,18 @@ function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
   return `
     <aside class="clip-detail-panel" data-preview-detail="${scope}">
       <div class="clip-detail-head">
-        <div>
-          <span>句子选择</span>
+        <div class="clip-detail-title">
           <strong>#${position + 1} ${escapeHtml(typeLabel)}</strong>
+          <span>${escapeHtml(time)}</span>
         </div>
-        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">预览</button>
+        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">打开大预览</button>
       </div>
       <div class="clip-detail-stats">
-        <span>${escapeHtml(time)}</span>
         <span>${escapeHtml(duration)}</span>
         <span>${escapeHtml(segmentCountText)}</span>
         <span class="clip-risk is-${riskClass}" title="${escapeHtml(risk?.detail || riskLabel)}">${escapeHtml(riskLabel)}</span>
       </div>
+      ${renderPreviewInlineVideo(scope, preview, clip)}
       <div class="clip-detail-segments">
         ${segmentRows}
       </div>
@@ -4282,13 +4916,14 @@ function renderPreviewWorkbench(scope, preview, targetId) {
   const clips = preview?.clips || [];
   const analysis = analyzeSmartPreview(preview, targetId);
   const activeIndex = previewDetailIndex(scope, clips);
-  const rows = clips.map((clip, position) => renderClipStoryCard(clip, position, scope, analysis, activeIndex));
+  const rows = clips.map((clip, position) => renderClipStoryCard(clip, position, scope, preview, analysis, activeIndex));
   return `
     <div data-preview-summary="${scope}">${renderPreviewSummary(analysis)}</div>
-    <div class="clip-preview-workbench">
+    <div class="clip-preview-workbench" data-preview-workbench="${scope}" style="--preview-left: ${previewSplitRatio(scope)}%;">
       <div class="clip-story-list" role="list">
         ${rows.join("")}
       </div>
+      <div class="clip-preview-resizer" data-preview-resizer="${scope}" role="separator" aria-orientation="vertical" aria-label="调整片段列表和详情宽度" aria-valuemin="38" aria-valuemax="74" aria-valuenow="${Math.round(previewSplitRatio(scope))}" tabindex="0" title="拖动调整左右分栏"></div>
       ${renderPreviewDetailPanel(scope, preview, analysis, activeIndex)}
     </div>
   `;
@@ -4301,6 +4936,8 @@ function renderSmartPreview(preview) {
   const clips = preview?.clips || [];
   if (count) count.textContent = String(clips.length || 0);
   box.classList.toggle("empty", !clips.length);
+  setPreviewLayoutState("smart", preview);
+  syncFlowActionState();
   if (!preview?.id) {
     box.innerHTML = "<p>点击“AI选片预览”，先看 AI 会选哪些片段，再决定是否成片。</p>";
     closePreviewVideo();
@@ -4323,6 +4960,8 @@ function renderSmartPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("smart", preview, "sc-duration");
   updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
+  bindPreviewSplitResizer(box, "smart");
+  ensureInlinePreviewVideo("smart", previewDetailIndex("smart", clips));
 }
 
 function renderMixPreview(preview) {
@@ -4332,6 +4971,8 @@ function renderMixPreview(preview) {
   const clips = preview?.clips || [];
   if (count) count.textContent = String(clips.length || 0);
   box.classList.toggle("empty", !clips.length);
+  setPreviewLayoutState("mix", preview);
+  syncFlowActionState();
   if (!preview?.id) {
     box.innerHTML = "<p>点击“AI选片预览”，先看混剪会从哪些素材里选哪些片段。</p>";
     closePreviewVideo("mix");
@@ -4354,6 +4995,8 @@ function renderMixPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("mix", preview, "mix-duration");
   updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
+  bindPreviewSplitResizer(box, "mix");
+  ensureInlinePreviewVideo("mix", previewDetailIndex("mix", clips));
 }
 
 function renderClipMeta(clip, position, riskLabel) {
@@ -4587,7 +5230,18 @@ function taskItem(task) {
   };
   const stateText = task.message || statusLabels[task.status] || task.status || "";
   const text = `${escapeHtml(task.title || task.scope)} · ${escapeHtml(stateText)}`;
-  return `<span class="${cls}" title="${escapeHtml(task.error || "")}">${text}</span>`;
+  const batch = batchProgressFromTask(task);
+  const batchChip = batch
+    ? `<span class="task-batch-chip" title="${escapeHtml(batch.title)}">${escapeHtml(batch.shortText || batch.text)}</span>`
+    : "";
+  const outputs = Array.isArray(task.outputs) ? task.outputs.filter(Boolean) : [];
+  const output = outputs[0] || task.output || "";
+  const outputLabel = outputs.length > 1 ? `打开结果(${outputs.length})` : "打开结果";
+  const outputAction = task.status === "completed" && output
+    ? `<button type="button" class="task-output-button" data-action="open-task-output" data-path="${escapeHtml(output)}" title="${escapeHtml(output)}">${outputLabel}</button>`
+    : "";
+  const title = [task.error, batch?.title, output].filter(Boolean).join("\n");
+  return `<span class="${cls}" title="${escapeHtml(title)}"><span class="task-pill-text">${text}</span>${batchChip}${outputAction}</span>`;
 }
 
 async function loadScanResults() {
@@ -5432,26 +6086,29 @@ function appendLog(scope, item) {
   const container = $(`log-${targetScope}`);
   if (!container) return;
 
-  const diagnostic = isDiagnosticLog(item);
-  const destination = diagnostic ? ensureDiagnosticLogView(targetScope) : container;
+  const destination = ensureDiagnosticLogView(targetScope);
   if (!destination) return;
 
-  if (diagnostic) {
-    destination.querySelector(".diagnostic-empty")?.remove();
-  }
+  destination.querySelector(".diagnostic-empty")?.remove();
 
   const row = createLogRow(item);
   destination.appendChild(row);
   destination.scrollTop = destination.scrollHeight;
   updateProgressFromLog(targetScope, item);
 
-  if (diagnostic) {
-    state.diagnosticLogs[targetScope] = (state.diagnosticLogs[targetScope] || 0) + 1;
-    document.querySelectorAll(`.diagnostic-toggle[data-scope="${targetScope}"]`).forEach(updateDiagnosticButton);
-    return;
+  const level = String(item.level || "info").toLowerCase();
+  if (level === "error" || (level === "warning" && isImportantWarning(item.message || ""))) {
+    state.lastIssuesByScope[targetScope] = {
+      level,
+      message: item.message || item.raw || "任务遇到问题。",
+      time: Date.now(),
+    };
   }
 
-  state.logs[targetScope] = (state.logs[targetScope] || 0) + 1;
+  state.diagnosticLogs[targetScope] = (state.diagnosticLogs[targetScope] || 0) + 1;
+  state.logs[targetScope] = state.diagnosticLogs[targetScope];
+  document.querySelectorAll(`.diagnostic-toggle[data-scope="${targetScope}"]`).forEach(updateDiagnosticButton);
+  renderRunSummary(targetScope);
   const counter = $(logCounterId(targetScope));
   if (counter) counter.textContent = String(state.logs[targetScope]);
 }
@@ -5459,6 +6116,9 @@ function appendLog(scope, item) {
 function createLogRow(item) {
   const row = document.createElement("div");
   row.className = `log-entry is-${item.level || "info"}`;
+  if ((item.level || "info") === "warning" && isImportantWarning(item.message || "")) {
+    row.classList.add("is-important");
+  }
 
   const time = document.createElement("span");
   time.className = "log-time";
@@ -5482,6 +6142,10 @@ function createLogRow(item) {
   return row;
 }
 
+function isImportantWarning(message) {
+  return /AI API Key|云端语音识别|本地语音识别|ASR|Whisper|火山|阿里云|启动检查提示/.test(String(message || ""));
+}
+
 function isDiagnosticLog(item) {
   const level = String(item?.level || "info").toLowerCase();
   const message = String(item?.message || "");
@@ -5498,7 +6162,6 @@ function isDiagnosticLog(item) {
     "目标时长",
     "使用本地SRT",
     "AI选片完成",
-    "最终片单",
     "智能成片任务完成",
     "混剪成片完成",
     "处理失败",
@@ -5533,6 +6196,23 @@ function isDiagnosticLog(item) {
     "编码器:",
     "去重效果",
     "音频提取",
+    "最终片单",
+    "阶段耗时",
+    "切割报告",
+    "综合评分:",
+    "总时长:",
+    "输出路径:",
+    "路径:",
+    "大小:",
+    "片段:",
+    "Hook:",
+    "品类:",
+    "拼接 ",
+    "拼接完成",
+    "[STEP]",
+    "━━",
+    "▰",
+    "▱",
   ];
   if (diagnosticTokens.some((token) => compact.includes(token))) return true;
   if (/^\s*(hook|product|close|bridge|trend)\s*\|/i.test(compact)) return true;
@@ -5567,9 +6247,11 @@ function clearLog(scope) {
   }
   state.logs[scope] = 0;
   state.diagnosticLogs[scope] = 0;
+  delete state.lastIssuesByScope[scope];
   const counter = $(logCounterId(scope));
   if (counter) counter.textContent = "0";
   resetLogProgress(scope);
+  renderRunSummary(scope);
   document.querySelectorAll(`.diagnostic-toggle[data-scope="${scope}"]`).forEach(updateDiagnosticButton);
 }
 
@@ -5589,8 +6271,12 @@ function escapeHtml(value) {
 function toast(message, type = "success") {
   const stack = $("toast-stack");
   if (!stack) return;
+  const key = `${type}:${String(message || "")}`;
+  const existing = Array.from(stack.querySelectorAll(".toast")).find((node) => node.dataset.toastKey === key);
+  if (existing) existing.remove();
   const item = document.createElement("div");
   item.className = `toast ${type}`;
+  item.dataset.toastKey = key;
   item.textContent = message;
   stack.appendChild(item);
   setTimeout(() => item.remove(), 3600);

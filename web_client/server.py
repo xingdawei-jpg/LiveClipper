@@ -70,8 +70,12 @@ def _select_app_dir(*candidates: Path) -> Path:
 
 USER_UPDATE_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
+ENV_BUNDLE_DIR = Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve() if os.environ.get("LIVECLIPPER_BUNDLE_DIR") else None
 
-if getattr(sys, "frozen", False):
+if ENV_BUNDLE_DIR and ENV_BUNDLE_DIR.exists():
+    BUNDLE_DIR = ENV_BUNDLE_DIR
+    REPO_ROOT = BUNDLE_DIR
+elif getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     REPO_ROOT = BUNDLE_DIR
 else:
@@ -95,11 +99,11 @@ def _select_web_dir(*candidates: Path) -> Path:
     return candidates[0]
 
 
-if getattr(sys, "frozen", False):
+if ENV_BUNDLE_DIR or getattr(sys, "frozen", False):
     WEB_DIR = _select_web_dir(BUNDLE_DIR / "web_client", MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
 else:
     WEB_DIR = _select_web_dir(MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
-if getattr(sys, "frozen", False):
+if ENV_BUNDLE_DIR or getattr(sys, "frozen", False):
     APP_DIR = _select_app_dir(
         REPO_ROOT / "app",
         WEB_DIR.parent / "app",
@@ -107,9 +111,9 @@ if getattr(sys, "frozen", False):
     )
 else:
     APP_DIR = _select_app_dir(
-        USER_UPDATE_ROOT / "app",
         REPO_ROOT / "app",
         WEB_DIR.parent / "app",
+        USER_UPDATE_ROOT / "app",
     )
 FRONTEND_DIR = WEB_DIR / "frontend"
 ASSETS_DIR = FRONTEND_DIR / "assets"
@@ -316,27 +320,13 @@ def _progress_message(raw: str, scope: str) -> str | None:
         "目标时长:",
         "使用本地SRT",
         "SRT已缓存",
-        "Hook候选池",
         "素材分组:",
         "结构修复:",
-        "版本1结构:",
-        "版本2结构:",
-        "最终片段",
-        "最终片段明细:",
         "最终片单:",
-        "多版本: AI输出",
-        "AI输出",
-        "编排AI:",
         "JSON不完整",
         "降级方案",
         "成品时长:",
-        "路径:",
-        "大小:",
-        "片段:",
-        "综合评分:",
-        "Hook:",
         "警告:",
-        "去重效果:",
         "多版本输出完成",
     )
     if any(token in compact for token in important_tokens):
@@ -379,6 +369,19 @@ def _progress_message(raw: str, scope: str) -> str | None:
         "前置清洗",
         "SRT短条目合并",
         "SRT预去重",
+        "阶段耗时:",
+        "切割报告",
+        "综合评分:",
+        "总时长:",
+        "输出路径:",
+        "路径:",
+        "大小:",
+        "片段:",
+        "Hook:",
+        "品类:",
+        "━━",
+        "▰",
+        "▱",
         "品类过滤:",
         "品类合法性校验",
         "卖点聚焦",
@@ -404,6 +407,7 @@ def _progress_message(raw: str, scope: str) -> str | None:
         "开始切割",
         "切割 [",
         "OK [",
+        "拼接 ",
         "拼接完成:",
         "整体去重",
         "去重步骤",
@@ -1315,6 +1319,11 @@ def _new_task(scope: str, title: str) -> str:
             "started_at": None,
             "finished_at": None,
             "error": "",
+            "batch_total": 0,
+            "batch_done": 0,
+            "batch_current": 0,
+            "batch_failed": 0,
+            "batch_label": "",
         }
     return task_id
 
@@ -1357,7 +1366,57 @@ def _set_task(task_id: str, **updates: Any) -> None:
             if next_status == "cancelled":
                 updates.setdefault("progress", 100)
                 updates.setdefault("message", "已停止")
+            if updates.get("message"):
+                parsed = _task_batch_updates_from_message(str(updates.get("message") or ""))
+                if parsed:
+                    parsed.update(updates)
+                    updates = parsed
             _TASKS[task_id].update(updates)
+
+
+_BATCH_PROGRESS_RE = re.compile(
+    r"(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*/\s*(\d+)(?:\s*[:：]\s*(.+))?"
+)
+_BATCH_SUCCESS_RE = re.compile(r"成功\s*(\d+)\s*/\s*(\d+)")
+
+
+def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    if not text:
+        return {}
+
+    success = _BATCH_SUCCESS_RE.search(text)
+    if success:
+        done = int(success.group(1))
+        total = int(success.group(2))
+        if total > 1:
+            return {
+                "batch_total": total,
+                "batch_done": max(0, min(total, done)),
+                "batch_current": 0,
+            }
+
+    match = _BATCH_PROGRESS_RE.search(text)
+    if not match:
+        return {}
+
+    action = match.group(1)
+    current = int(match.group(2))
+    total = int(match.group(3))
+    if total <= 1:
+        return {}
+
+    safe_current = max(1, min(total, current))
+    is_current_step = action in {"处理", "扫描", "导出", "快速分割"}
+    label = (match.group(4) or "").strip()
+    updates: dict[str, Any] = {
+        "batch_total": total,
+        "batch_done": safe_current - 1 if is_current_step else safe_current,
+        "batch_current": safe_current if is_current_step else 0,
+    }
+    if label:
+        updates["batch_label"] = label[:120]
+    return updates
 
 
 _TASK_PROGRESS_RULES: tuple[tuple[float, str, tuple[str, ...]], ...] = (
@@ -1380,6 +1439,7 @@ def _set_task_progress(task_id: str, progress: float, message: str | None = None
         task["progress"] = max(0, min(99, max(current, float(progress))))
         if message:
             task["message"] = message
+            task.update(_task_batch_updates_from_message(message))
 
 
 def _task_progress_from_log(raw: str) -> tuple[float, str] | None:
@@ -1648,6 +1708,41 @@ def _default_output_dir(video: Path, explicit: str, folder: str = "output") -> P
     return out
 
 
+def _collect_smart_cut_outputs(out_dir: Path, video: Path, started_at: float, explicit_output: Path | None, result: Any) -> list[str]:
+    outputs: list[Path] = []
+    if explicit_output and explicit_output.exists():
+        outputs.append(explicit_output)
+
+    try:
+        expected_versions = int(result.get("版本数") or result.get("versions") or 0) if isinstance(result, dict) else 0
+    except Exception:
+        expected_versions = 0
+    if expected_versions > 1:
+        prefix = f"{video.stem}_切片_"
+        for candidate in out_dir.iterdir():
+            if not candidate.is_file() or candidate.suffix.lower() != ".mp4":
+                continue
+            if not candidate.name.startswith(prefix) or "_v" not in candidate.stem:
+                continue
+            try:
+                if candidate.stat().st_mtime < started_at - 5:
+                    continue
+            except Exception:
+                continue
+            outputs.append(candidate)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for item in outputs:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    unique.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0)
+    return [str(path) for path in unique]
+
+
 def _video_split_mode(payload: VideoSplitPayload) -> str:
     return "duration" if str(payload.mode or "").strip().lower() in {"duration", "seconds", "time"} else "count"
 
@@ -1860,7 +1955,7 @@ def _preflight_pip(data: dict[str, Any], warnings: list[str], errors: list[str])
 
 
 def _preflight_ai_settings(feature: str, warnings: list[str]) -> None:
-    if feature not in {"smart-cut", "smart-preview", "smart-from-preview", "mix", "mix-preview", "ai-scan", "ai-scan-export", "ai-scan-export-merge"}:
+    if feature not in {"smart-cut", "smart-preview", "smart-from-preview", "mix", "mix-preview", "mix-from-preview", "ai-scan", "ai-scan-export", "ai-scan-export-merge"}:
         return
     settings = _load_settings()
     if not (settings.get("api_key") or "").strip():
@@ -2058,6 +2153,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         "mix",
         "mix-batch",
         "mix-preview",
+        "mix-from-preview",
         "ai-scan",
         "ai-scan-export",
         "ai-scan-export-merge",
@@ -2072,7 +2168,9 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         _preflight_ffmpeg(errors)
 
     if feature in {"smart-cut", "smart-preview"}:
-        _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
+        paths = _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
+        if feature == "smart-preview" and len(paths) > 1:
+            warnings.append("AI 选片预览当前只预览第 1 个视频；直接开始成片会按列表处理全部视频。")
         _preflight_single_file(data.get("srt_path"), "字幕文件", errors, required=False)
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
@@ -2082,6 +2180,11 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             errors.append("请先生成 AI 选片预览。")
         if not data.get("selected_indices"):
             errors.append("请至少保留一个片段。")
+        try:
+            if int(data.get("versions") or 1) > 1:
+                warnings.append("用预览成片会按当前预览结果固定输出 1 个版本；多版本请使用“开始成片”。")
+        except Exception:
+            pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
         _preflight_ai_settings(feature, warnings)
@@ -2089,6 +2192,19 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         paths = _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
         if len(paths) == 1:
             warnings.append("混剪只添加了 1 个视频，建议添加至少 2 个素材。")
+        _preflight_output_dir(data.get("output_dir"), warnings, errors)
+        _preflight_pip(data, warnings, errors)
+        _preflight_ai_settings(feature, warnings)
+    elif feature == "mix-from-preview":
+        if not str(data.get("preview_id") or "").strip():
+            errors.append("请先生成混剪 AI 选片预览。")
+        if not data.get("selected_indices"):
+            errors.append("请至少保留一个片段。")
+        try:
+            if int(data.get("versions") or 1) > 1:
+                warnings.append("用预览混剪会按当前预览结果固定输出 1 个版本；多版本请使用“开始混剪”。")
+        except Exception:
+            pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
         _preflight_ai_settings(feature, warnings)
@@ -2451,7 +2567,7 @@ def _normalize_preview_final_clips(
         if hasattr(ai_mod, "_remove_expanded_overlap_clips"):
             _step("expanded_overlap_dedup", lambda items: ai_mod._remove_expanded_overlap_clips(items, None))
         if hasattr(ai_mod, "_reorder_product_focus_blocks"):
-            normalized = list(ai_mod._reorder_product_focus_blocks(normalized, None) or normalized)
+            normalized = list(ai_mod._reorder_product_focus_blocks(normalized, None, preferred_cat=preferred_category) or normalized)
         if srt_text and not merge_mode:
             try:
                 from cutter_logic import _apply_srt_cut_alignment, _parse_srt_to_segments, _srt_text_for_range
@@ -3208,6 +3324,20 @@ def _preview_feedback_log_path() -> Path:
     return _safe_user_child("ai_feedback", "preview_selection_feedback.jsonl")
 
 
+def _feedback_category_bucket(category: Any) -> str:
+    text = str(category or "").strip()
+    if "食品" in text or "生鲜" in text:
+        return "food_fresh"
+    if text and text not in {"自动", "自动检测", "auto"}:
+        return "clothing"
+    return "general"
+
+
+def _feedback_scope_key(scope: str, category: Any = "") -> str:
+    base = str(scope or "smart").strip() or "smart"
+    return f"{base}:{_feedback_category_bucket(category)}"
+
+
 def _preview_feedback_text(value: Any, limit: int = 140) -> str:
     text = _strip_preview_source_marker(value)
     text = re.sub(r"\s+", " ", text).strip()
@@ -3340,12 +3470,17 @@ def _build_preview_selection_feedback(
         "move_to_front": moved_to_front[:20],
         "move_to_end": moved_to_end[:20],
     }
+    category = str(preview.get("category") or draft.get("category") or "").strip()
+    feedback_scope = str(preview.get("feedback_scope") or _feedback_scope_key(scope, category)).strip()
 
     return {
         "created_at": time.time(),
         "created_at_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "event": event,
         "scope": scope,
+        "feedback_scope": feedback_scope,
+        "category": category,
+        "category_bucket": _feedback_category_bucket(category),
         "preview_id": str(preview.get("id") or draft.get("preview_id") or ""),
         "target_duration": preview.get("target_duration"),
         "selected_clip_count": len(selected),
@@ -4443,34 +4578,24 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
     temp_dir = Path(tempfile.gettempdir()) / "live_cutter_web_asr"
     temp_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.md5(str(video).encode("utf-8", errors="ignore")).hexdigest()[:12]
-    wav = temp_dir / f"audio_{digest}_{int(time.time())}.wav"
+    audio_path: Path | None = None
     try:
-        cmd = [
-            _ffmpeg_cmd(),
-            "-y",
-            "-i",
-            str(video),
-            "-vn",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(wav),
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
-        if result.returncode != 0 or not wav.exists():
-            detail = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
-            if detail:
-                detail = detail.splitlines()[-1]
-            emit_log("warning", f"云端语音识别准备音频失败: {detail or result.returncode}", scope)
-            return None
+        from volcengine_asr import prepare_volcengine_audio, volcengine_asr
 
-        from volcengine_asr import volcengine_asr
+        prepared = prepare_volcengine_audio(
+            str(video),
+            str(temp_dir),
+            prefix=f"audio_{digest}_{int(time.time())}",
+            ffmpeg=_ffmpeg_cmd(),
+            log_fn=lambda msg: emit_log("info", msg, scope),
+        )
+        if not prepared:
+            emit_log("warning", "云端语音识别准备音频失败，正在使用本地语音识别。", scope)
+            return None
+        audio_path = Path(prepared)
 
         segments = volcengine_asr(
-            str(wav),
+            str(audio_path),
             app_id,
             access_token,
             tos_ak,
@@ -4493,7 +4618,8 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
         return None
     finally:
         try:
-            wav.unlink(missing_ok=True)
+            if audio_path:
+                audio_path.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -4557,8 +4683,15 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             return
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("混剪成片", scope=scope)
-        _set_task(task_id, status="completed", finished_at=time.time())
-        emit_log("success", "混剪成片完成。", scope)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=str(output_path),
+            outputs=[str(output_path)],
+            result_count=1,
+        )
+        emit_log("success", f"混剪成片完成：{output_path}", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"混剪成片失败：{exc}", scope)
@@ -4582,6 +4715,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         total_groups = len(groups)
         outputs: list[str] = []
         failures: list[str] = []
+        _set_task(task_id, batch_total=total_groups, batch_done=0, batch_current=1, batch_failed=0, batch_label="")
         emit_log("info", f"批量混剪开始：{total_groups} 组，目标时长={payload.duration}秒", scope)
 
         for index, (group_name, paths) in enumerate(groups, start=1):
@@ -4631,6 +4765,8 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                 emit_log("success", f"混剪批量 [{index}/{total_groups}] 完成：{group_name}", scope)
             except Exception as group_exc:
                 failures.append(f"第 {index} 组 {group_name}: {group_exc}")
+                _set_task_progress(task_id, min(94, 10 + (index / total_groups) * 84), f"跳过失败 {index}/{total_groups}: {group_name}")
+                _set_task(task_id, batch_failed=len(failures))
                 emit_log("error", f"混剪批量 [{index}/{total_groups}] 失败：{group_name}，{group_exc}", scope)
 
         if not outputs:
@@ -4644,6 +4780,11 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
             outputs=outputs,
             result_count=len(outputs),
             message=f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组",
+            batch_total=total_groups,
+            batch_done=len(outputs),
+            batch_current=0,
+            batch_failed=len(failures),
+            batch_label="",
         )
         if failures:
             emit_log("warning", f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组，失败 {len(failures)} 组。", scope)
@@ -4664,6 +4805,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         status="running",
         message="正在生成混剪 AI 选片预览。",
         created_at=time.time(),
+        category=payload.category,
+        feedback_scope=_feedback_scope_key("mix", payload.category),
         target_duration=payload.duration,
         clips=[],
     )
@@ -4736,6 +4879,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             video=str(paths[0]),
             video_name=paths[0].name,
             sources=mix_sources,
+            category=preferred_category,
+            feedback_scope=_feedback_scope_key("mix", preferred_category),
             target_duration=payload.duration,
             srt_text=srt_text,
             raw_clips=raw_clips,
@@ -5684,6 +5829,7 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
         if not videos:
             raise ValueError("请先添加视频。")
         total_videos = max(1, len(videos))
+        _set_task(task_id, batch_total=total_videos, batch_done=0, batch_current=1 if total_videos > 1 else 0, batch_failed=0, batch_label="")
         _set_task_progress(task_id, 8, f"准备处理 {total_videos} 个视频")
         base_dir = _default_output_dir(videos[0], payload.output_dir, "dedup_output")
         emit_log("info", f"开始批量二创消重，共 {len(videos)} 个视频。", scope)
@@ -5695,6 +5841,8 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
                 break
             if not video.exists():
                 failures.append(f"{video.name}: 文件不存在")
+                _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"跳过失败 {index}/{total_videos}: {video.name}")
+                _set_task(task_id, batch_failed=len(failures))
                 emit_log("error", f"[{index}/{len(videos)}] 文件不存在：{video}", scope)
                 continue
             out_dir = base_dir if payload.output_dir.strip() else _default_output_dir(video, "", "dedup_output")
@@ -5710,11 +5858,24 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             else:
                 failures.append(f"{video.name}: {stderr_text or '视频处理失败'}")
                 _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"跳过失败 {index}/{total_videos}: {video.name}")
+                _set_task(task_id, batch_failed=len(failures))
                 emit_log("error", f"[{index}/{len(videos)}] 处理失败：{_short_error(stderr_text)}。解决办法：{_solution_for_error(stderr_text)}", scope)
         if not outputs:
             raise RuntimeError(failures[0] if failures else "没有生成成功的视频。")
         _consume_trial("创作辅助", scope=scope)
-        _set_task(task_id, status="completed", finished_at=time.time(), output=outputs[0], outputs=outputs)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=outputs[0],
+            outputs=outputs,
+            result_count=len(outputs),
+            batch_total=total_videos,
+            batch_done=len(outputs),
+            batch_current=0,
+            batch_failed=len(failures),
+            batch_label="",
+        )
         if failures:
             emit_log("warning", f"批量二创消重完成：成功 {len(outputs)} 个，失败 {len(failures)} 个。", scope)
         else:
@@ -7294,11 +7455,10 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         if not paths:
             raise ValueError("请至少填写一个视频文件路径。")
         total_videos = max(1, len(paths))
+        _set_task(task_id, batch_total=total_videos, batch_done=0, batch_current=1 if total_videos > 1 else 0, batch_failed=0, batch_label="")
         _set_task_progress(task_id, 8, f"校验 {total_videos} 个素材")
 
-        output_dir = Path(payload.output_dir.strip().strip('"')) if payload.output_dir.strip() else None
-        if output_dir:
-            output_dir.mkdir(parents=True, exist_ok=True)
+        outputs: list[str] = []
 
         for index, video in enumerate(paths, start=1):
             if _is_task_cancelled(task_id):
@@ -7307,9 +7467,11 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             if not video.exists():
                 raise FileNotFoundError(f"视频不存在：{video}")
 
-            out_path = None
-            if output_dir:
-                out_path = str(output_dir / f"{_safe_stem(video.stem)}_smart_cut_{_stamp_name()}.mp4")
+            out_dir = _default_output_dir(video, payload.output_dir, "output")
+            if payload.output_dir.strip():
+                out_path = out_dir / f"{_safe_stem(video.stem)}_smart_cut_{_stamp_name()}.mp4"
+            else:
+                out_path = out_dir / f"{video.stem}_爆款切片_{_stamp_name()}.mp4"
 
             pip_path, used_pip_file = _pick_pip_asset(payload, "smart-cut")
             emit_log("info", f"[{index}/{len(paths)}] 开始处理 {video.name}", "smart-cut")
@@ -7317,9 +7479,10 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             file_span = 82 / total_videos
             _set_task_progress(task_id, file_base, f"处理 {index}/{total_videos}: {video.name}")
             version_count = payload.versions
+            file_started_at = time.time()
             common_kwargs = dict(
                 srt_path=payload.srt_path.strip() or None,
-                output_path=out_path,
+                output_path=str(out_path),
                 dedup_preset=payload.dedup_preset,
                 dedup_video_options=payload.video,
                 dedup_audio_options=payload.audio,
@@ -7353,8 +7516,10 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     **common_kwargs,
                     kb_intensity=payload.ken_burns_intensity,
                 )
-            if not result:
+            result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else bool(result)
+            if not result_ok:
                 raise RuntimeError(f"{video.name} 处理失败。")
+            outputs.extend(_collect_smart_cut_outputs(out_dir, video, file_started_at, out_path, result))
             if _is_task_cancelled(task_id):
                 emit_log("warning", "任务已停止。", "smart-cut")
                 return
@@ -7366,8 +7531,20 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", "smart-cut")
             return
-        _set_task(task_id, status="completed", finished_at=time.time())
-        emit_log("success", "智能成片任务完成。", "smart-cut")
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=outputs[0] if outputs else "",
+            outputs=outputs,
+            result_count=len(outputs),
+            batch_total=total_videos,
+            batch_done=total_videos,
+            batch_current=0,
+            batch_failed=0,
+            batch_label="",
+        )
+        emit_log("success", f"智能成片任务完成，输出 {len(outputs)} 个文件。", "smart-cut")
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"智能成片失败: {exc}", "smart-cut")
@@ -7514,7 +7691,14 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             return
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("混剪成片", scope=scope)
-        _set_task(task_id, status="completed", finished_at=time.time(), output=str(output_path))
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=str(output_path),
+            outputs=[str(output_path)],
+            result_count=1,
+        )
         emit_log("success", f"预览混剪完成：{output_path}", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
@@ -7531,6 +7715,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         status="running",
         message="正在生成 AI 选片预览。",
         created_at=time.time(),
+        category=payload.category,
+        feedback_scope=_feedback_scope_key("smart", payload.category),
         target_duration=payload.target_duration,
         clips=[],
     )
@@ -7601,6 +7787,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             message=f"AI 选片预览完成，共 {len(public_clips)} 个片段。",
             video=str(video),
             video_name=video.name,
+            category=preferred_category,
+            feedback_scope=_feedback_scope_key("smart", preferred_category),
             target_duration=payload.target_duration,
             srt_path=resolved_srt,
             srt_text=srt_text,
@@ -7679,8 +7867,15 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         _set_task_progress(task_id, 94, "整理输出")
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("智能成片", scope=scope)
-        _set_task(task_id, status="completed", finished_at=time.time())
-        emit_log("success", "预览成片完成。", scope)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=output_path,
+            outputs=[output_path],
+            result_count=1,
+        )
+        emit_log("success", f"预览成片完成：{output_path}", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"预览成片失败：{exc}", scope)
@@ -8361,7 +8556,6 @@ def get_smart_preview(preview_id: str) -> dict[str, Any]:
 @app.post("/api/smart-cut/from-preview/start")
 def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     _ensure_scope_idle("smart-cut", "预览成片")
-    _raise_preflight_errors("smart-from-preview", payload)
     if not payload.preview_id.strip():
         raise HTTPException(status_code=400, detail="请先生成 AI 选片预览。")
     preview = _get_preview(payload.preview_id)
@@ -8378,6 +8572,7 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
         payload.selected_segments = dict(draft.get("selected_segments") or {})
     if not payload.order and isinstance(draft.get("order"), list):
         payload.order = list(draft.get("order") or [])
+    _raise_preflight_errors("smart-from-preview", payload)
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再成片。")
     clip_count = len(preview.get("raw_clips") or [])
@@ -8480,6 +8675,7 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
         payload.selected_segments = dict(draft.get("selected_segments") or {})
     if not payload.order and isinstance(draft.get("order"), list):
         payload.order = list(draft.get("order") or [])
+    _raise_preflight_errors("mix-from-preview", payload)
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再混剪。")
     clip_count = len(preview.get("raw_clips") or [])

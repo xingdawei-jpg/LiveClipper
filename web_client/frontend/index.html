@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260628-live-min-quality">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260709-run-summary-outputs">
 </head>
 <body>
   <div class="app-shell">
@@ -67,7 +67,7 @@
         </header>
 
         <div class="content-grid smart-grid">
-          <section class="panel panel-large">
+          <section class="panel panel-large material-panel">
             <div class="panel-header">
               <h2>视频 <span class="video-count-chip" data-video-count-for="video-paths">0个</span></h2>
               <div class="log-header-actions">
@@ -102,7 +102,7 @@
             </div>
           </section>
 
-          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="sc-params" data-summary-kind="params" data-summary-prefix="sc" data-default-open="true" data-advanced-panel="sc-params">
+          <section class="panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-params" data-summary-kind="params" data-summary-prefix="sc" data-collapse-group="sc-top" data-advanced-panel="sc-params">
             <div class="panel-header">
               <h2>成片参数</h2>
             </div>
@@ -193,7 +193,7 @@
             </div>
           </section>
 
-          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="sc-pip" data-summary-kind="pip" data-summary-prefix="sc">
+          <section class="panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-pip" data-summary-kind="pip" data-summary-prefix="sc" data-collapse-group="sc-top">
             <div class="panel-header">
               <h2>画中画</h2>
             </div>
@@ -260,7 +260,7 @@
             </div>
           </section>
 
-          <section class="panel panel-wide ai-params-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-default-open="true" data-advanced-panel="sc-ai">
+          <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-collapse-group="sc-top" data-advanced-panel="sc-ai">
             <div class="panel-header">
               <h2>AI参数</h2>
             </div>
@@ -275,6 +275,7 @@
                   <option value="commute">通勤场景</option>
                   <option value="fast">快速促单</option>
                   <option value="gentle">温柔讲解</option>
+                  <option value="food_fresh">食品/生鲜</option>
                 </select>
                 <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="sc">保存</button>
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
@@ -291,6 +292,7 @@
                   <option>外套</option>
                   <option>套装</option>
                   <option>鞋子</option>
+                  <option>食品/生鲜</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -305,6 +307,12 @@
                   <option>性价比</option>
                   <option>紧迫稀缺</option>
                   <option>流行趋势</option>
+                  <option>口感食欲</option>
+                  <option>新鲜品质</option>
+                  <option>产地溯源</option>
+                  <option>规格分量</option>
+                  <option>发货保鲜</option>
+                  <option>场景吃法</option>
                 </select>
               </div>
             </div>
@@ -318,6 +326,9 @@
                   <option>显瘦转化</option>
                   <option>质感高级</option>
                   <option>快速促单</option>
+                  <option>食欲种草</option>
+                  <option>新鲜转化</option>
+                  <option>囤货转化</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -328,6 +339,9 @@
                   <option>上身效果开头</option>
                   <option>爆点金句开头</option>
                   <option>主播强推荐开头</option>
+                  <option>试吃反应开头</option>
+                  <option>细节近景开头</option>
+                  <option>产地品质开头</option>
                   <option>不强制Hook</option>
                 </select>
               </div>
@@ -348,11 +362,17 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="尺寸长度"> 尺寸长度</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="工艺细节"> 工艺细节</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="对比优势"> 对比优势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="口感食欲"> 口感食欲</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="新鲜品质"> 新鲜品质</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="产地溯源"> 产地溯源</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="规格分量"> 规格分量</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="发货保鲜"> 发货保鲜</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="场景吃法"> 场景吃法</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="通用卖点"> 通用卖点</label>
               </div>
               <div class="field-row">
                 <label for="sc-selling-custom">自定义词</label>
-                <input id="sc-selling-custom" type="text" data-ai-control="sc-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、显高">
+                <input id="sc-selling-custom" type="text" data-ai-control="sc-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
@@ -364,6 +384,7 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="闲聊"> 闲聊</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="搭配其他品"> 搭配其他品</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="重复卖点"> 重复卖点</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="保健功效"> 保健功效</label>
               </div>
             </div>
             <div class="field-pair advanced-param">
@@ -374,6 +395,9 @@
                   <option>尺码引导</option>
                   <option>信任背书</option>
                   <option>场景收尾</option>
+                  <option>囤货收尾</option>
+                  <option>发货保鲜</option>
+                  <option>复购背书</option>
                   <option>自然结束</option>
                   <option>不要促单</option>
                 </select>
@@ -394,7 +418,7 @@
               <h2>AI选片预览</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="smart-preview-count">0</span>
-                <button class="button button-muted button-small" data-action="clear-cache">清缓存</button>
+                <button class="button button-muted button-small" data-action="clear-cache" title="清理 AI 选片预览缓存">清选片缓存</button>
                 <button class="button button-primary button-small" data-action="start-smart-from-preview">用预览成片</button>
               </div>
             </div>
@@ -432,7 +456,7 @@
         </header>
 
         <div class="content-grid smart-grid">
-          <section class="panel panel-large">
+          <section class="panel panel-large material-panel">
             <div class="panel-header">
               <h2>视频素材 <span class="video-count-chip" data-video-count-for="mix-video-paths">0个</span></h2>
               <div class="log-header-actions">
@@ -469,7 +493,7 @@
             </div>
           </section>
 
-          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="mix-params" data-summary-kind="params" data-summary-prefix="mix" data-default-open="true" data-advanced-panel="mix-params">
+          <section class="panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-params" data-summary-kind="params" data-summary-prefix="mix" data-collapse-group="mix-top" data-advanced-panel="mix-params">
             <div class="panel-header">
               <h2>成片参数</h2>
             </div>
@@ -560,7 +584,7 @@
             </div>
           </section>
 
-          <section class="panel collapsible-panel is-collapsed" data-collapsible-panel="mix-pip" data-summary-kind="pip" data-summary-prefix="mix">
+          <section class="panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-pip" data-summary-kind="pip" data-summary-prefix="mix" data-collapse-group="mix-top">
             <div class="panel-header">
               <h2>画中画</h2>
             </div>
@@ -627,7 +651,7 @@
             </div>
           </section>
 
-          <section class="panel panel-wide ai-params-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-default-open="true" data-advanced-panel="mix-ai">
+          <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-collapse-group="mix-top" data-advanced-panel="mix-ai">
             <div class="panel-header">
               <h2>AI参数</h2>
             </div>
@@ -642,6 +666,7 @@
                   <option value="commute">通勤场景</option>
                   <option value="fast">快速促单</option>
                   <option value="gentle">温柔讲解</option>
+                  <option value="food_fresh">食品/生鲜</option>
                 </select>
                 <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="mix">保存</button>
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
@@ -658,6 +683,7 @@
                   <option>外套</option>
                   <option>套装</option>
                   <option>鞋子</option>
+                  <option>食品/生鲜</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -672,6 +698,12 @@
                   <option>性价比</option>
                   <option>紧迫稀缺</option>
                   <option>流行趋势</option>
+                  <option>口感食欲</option>
+                  <option>新鲜品质</option>
+                  <option>产地溯源</option>
+                  <option>规格分量</option>
+                  <option>发货保鲜</option>
+                  <option>场景吃法</option>
                 </select>
               </div>
             </div>
@@ -685,6 +717,9 @@
                   <option>显瘦转化</option>
                   <option>质感高级</option>
                   <option>快速促单</option>
+                  <option>食欲种草</option>
+                  <option>新鲜转化</option>
+                  <option>囤货转化</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -695,6 +730,9 @@
                   <option>上身效果开头</option>
                   <option>爆点金句开头</option>
                   <option>主播强推荐开头</option>
+                  <option>试吃反应开头</option>
+                  <option>细节近景开头</option>
+                  <option>产地品质开头</option>
                   <option>不强制Hook</option>
                 </select>
               </div>
@@ -715,11 +753,17 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="尺寸长度"> 尺寸长度</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="工艺细节"> 工艺细节</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="对比优势"> 对比优势</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="口感食欲"> 口感食欲</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="新鲜品质"> 新鲜品质</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="产地溯源"> 产地溯源</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="规格分量"> 规格分量</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="发货保鲜"> 发货保鲜</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="场景吃法"> 场景吃法</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="通用卖点"> 通用卖点</label>
               </div>
               <div class="field-row">
                 <label for="mix-selling-custom">自定义词</label>
-                <input id="mix-selling-custom" type="text" data-ai-control="mix-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、显高">
+                <input id="mix-selling-custom" type="text" data-ai-control="mix-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
@@ -731,6 +775,7 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="闲聊"> 闲聊</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="搭配其他品"> 搭配其他品</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="重复卖点"> 重复卖点</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="保健功效"> 保健功效</label>
               </div>
             </div>
             <div class="field-pair advanced-param">
@@ -741,6 +786,9 @@
                   <option>尺码引导</option>
                   <option>信任背书</option>
                   <option>场景收尾</option>
+                  <option>囤货收尾</option>
+                  <option>发货保鲜</option>
+                  <option>复购背书</option>
                   <option>自然结束</option>
                   <option>不要促单</option>
                 </select>
@@ -761,7 +809,7 @@
               <h2>AI选片预览</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="mix-preview-count">0</span>
-                <button class="button button-muted button-small" data-action="clear-cache">清缓存</button>
+                <button class="button button-muted button-small" data-action="clear-cache" title="清理混剪 AI 选片预览缓存">清选片缓存</button>
                 <button class="button button-primary button-small" data-action="start-mix-from-preview">用预览混剪</button>
               </div>
             </div>
@@ -1750,6 +1798,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260630-live-candidate-ts-fix" defer></script>
+  <script src="/assets/app.js?v=20260709-run-summary-outputs" defer></script>
 </body>
 </html>

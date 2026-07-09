@@ -21,6 +21,8 @@ MODULE_WEB_DIR = Path(__file__).resolve().parent
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
     REPO_ROOT = BUNDLE_DIR
+    os.environ.setdefault("LIVECLIPPER_BUNDLE_DIR", str(BUNDLE_DIR))
+    os.environ.setdefault("LIVECLIPPER_FROZEN", "1")
 else:
     BUNDLE_DIR = MODULE_WEB_DIR.parent
     REPO_ROOT = MODULE_WEB_DIR.parent
@@ -84,7 +86,7 @@ def _updated_server_path() -> Path | None:
     if not (update_web / "frontend" / "index.html").exists():
         return None
 
-    bundled_web = Path(__file__).resolve().parent
+    bundled_web = BUNDLE_DIR / "web_client" if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
     if _version_key(_read_version(update_web.parent)) <= _version_key(_read_version(bundled_web.parent)):
         return None
     return update_web / "server.py"

@@ -2039,22 +2039,17 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _v2_apikey = _cfg2.get("volc_api_key", "")
                     if not _volc_used and all([_v2_tos_ak, _v2_tos_sk]) and (all([_v2_app_id, _v2_token]) or _v2_apikey):
                         _log("启动火山引擎语音识别...")
-                        from volcengine_asr import volcengine_asr
+                        from volcengine_asr import prepare_volcengine_audio, volcengine_asr
                         import tempfile as _tf2
                         import hashlib as _hl2
                         _temp_dir2 = _os2.path.join(_tf2.gettempdir(), "live_cutter_stt")
                         _os2.makedirs(_temp_dir2, exist_ok=True)
                         _vhash = _hl2.md5(video_path.encode("utf-8")).hexdigest()[:8]
-                        _wav2 = _os2.path.join(_temp_dir2, f"audio_{_vhash}.wav")
                         _srt2 = _os2.path.join(_temp_dir2, f"sub_{_vhash}.srt")
-                        # 提取音频
                         _ff2 = get_ffmpeg_cmd()
-                        _ext_cmd = [_ff2, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav2]
-                        _pk2 = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        _p2 = subprocess.Popen(_ext_cmd, **_pk2, creationflags=_NO_WINDOW)
-                        _p2.wait(timeout=120)
-                        if _p2.returncode == 0 and _os2.path.exists(_wav2):
-                            _segs2 = volcengine_asr(_wav2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, region=_cfg2.get("volc_region", "cn-beijing"), log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
+                        _audio2 = prepare_volcengine_audio(video_path, _temp_dir2, prefix=f"audio_{_vhash}", ffmpeg=_ff2, log_fn=_log, timeout=120)
+                        if _audio2 and _os2.path.exists(_audio2):
+                            _segs2 = volcengine_asr(_audio2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, region=_cfg2.get("volc_region", "cn-beijing"), log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
                             if _segs2:
                                 # 生成 SRT 文件
                                 _srt_lines = []
@@ -3638,10 +3633,14 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             if not all([v_tos_ak, v_tos_sk]) or not (all([v_app_id, v_token]) or v_apikey):
                 _log("volcengine_asr: 未配置火山引擎参数，跳过")
                 return
-            from volcengine_asr import volcengine_asr
+            from volcengine_asr import prepare_volcengine_audio, volcengine_asr
             v_bucket = cfg.get("volc_bucket", "livec")
-            segs = volcengine_asr(wav_path, v_app_id, v_token, v_tos_ak, v_tos_sk,
-                                 bucket=v_bucket, region=cfg.get("volc_region", "cn-beijing"), log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
+            volc_audio = prepare_volcengine_audio(wav_path, temp_dir, prefix="volc_final_audio", ffmpeg=ffmpeg, log_fn=_log, timeout=120)
+            if not volc_audio:
+                _log("火山引擎 ASR 音频准备失败，将降级到 Whisper")
+                return
+            segs = volcengine_asr(volc_audio, v_app_id, v_token, v_tos_ak, v_tos_sk,
+                                  bucket=v_bucket, region=cfg.get("volc_region", "cn-beijing"), log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
             if segs:
                 raw_segments = segs
                 volcengine_success = True
@@ -4536,16 +4535,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _asr_ok = False
             if _asr_enabled:
                 try:
-                    from volcengine_asr import volcengine_asr
+                    from volcengine_asr import prepare_volcengine_audio, volcengine_asr
                     import hashlib, tempfile, json
                     _td = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
                     os.makedirs(_td, exist_ok=True)
                     _vh = hashlib.md5(vp.encode("utf-8")).hexdigest()[:8]
-                    _wav = os.path.join(_td, f"audio_{_vh}.wav")
-                    if not os.path.exists(_wav):
-                        subprocess.run([ffmpeg, "-y", "-i", vp, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, creationflags=_NO_WINDOW)
-                    srts = volcengine_asr(_wav,
+                    _audio = prepare_volcengine_audio(vp, _td, prefix=f"audio_{_vh}", ffmpeg=ffmpeg, log_fn=_log, timeout=120)
+                    if not _audio:
+                        raise RuntimeError("火山音频准备失败")
+                    srts = volcengine_asr(_audio,
                                          _cfg4.get("volc_app_id", ""),
                                          _cfg4.get("volc_access_token", ""),
                                          _cfg4.get("volc_tos_ak", ""),

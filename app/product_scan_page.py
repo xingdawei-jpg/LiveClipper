@@ -274,8 +274,11 @@ class ProductScanPage(tk.Frame):
         # 新版API Key优先，旧版app_id+token兜底
         if (provider is None or provider == "volc") and all([vak, vsk]) and (v_apikey or all([va, vt])):
             try:
-                from volcengine_asr import volcengine_asr as vasr
-                segs = vasr(wav, va, vt, vak, vsk, bucket=vb,
+                from volcengine_asr import prepare_volcengine_audio, volcengine_asr as vasr
+                volc_audio = prepare_volcengine_audio(wav, temp_dir, prefix=f"volc_{vhash}", ffmpeg=ffmpeg, log_fn=lambda m: self._log(f"  {m}", "info"), timeout=120)
+                if not volc_audio:
+                    raise RuntimeError("火山音频准备失败")
+                segs = vasr(volc_audio, va, vt, vak, vsk, bucket=vb,
                             log_fn=lambda m: self._log(f"  {m}", "info"), api_key=v_apikey or None)
                 if segs:
                     srt = video_path.rsplit(".", 1)[0] + ".srt"

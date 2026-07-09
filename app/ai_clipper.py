@@ -343,8 +343,18 @@ def _build_preview_feedback_profile_from_records(records, scope=None, limit=12):
             "move_to_end": [],
             "summary": {"sample_count": 0, "positive": [], "negative": [], "conflicts": []},
         }
-    scoped_records = [item for item in records if not scope or item.get("scope") == scope]
-    if not scoped_records and scope:
+    def _matches_scope(record):
+        if not scope:
+            return True
+        record_scope = str(record.get("feedback_scope") or "").strip()
+        if record_scope:
+            return record_scope == scope
+        if ":" in str(scope):
+            return False
+        return record.get("scope") == scope
+
+    scoped_records = [item for item in records if _matches_scope(item)]
+    if not scoped_records and scope and ":" not in str(scope):
         scoped_records = records
     kept_items = []
     rejected_items = []
@@ -1086,13 +1096,16 @@ def _score_hook_text_candidate(text, duration, hook_keywords=None, focus_hint=No
         "肩宽", "腰粗", "肚子", "拜拜肉", "你们",
     ]
     pain_words = [
-        "胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "壮",
-        "肉", "遮", "藏", "不敢穿", "穿不进去", "卡", "勒",
+        "胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "显壮",
+        "肉多", "遮肉", "藏肉", "不敢穿", "穿不进去", "卡肉", "勒肉",
     ]
     effect_words = [
         "显瘦", "显高", "显白", "显腿长", "比例", "直角肩",
         "腰线", "拉长", "高级", "气质", "干净", "明亮", "薄",
     ]
+    food_sensory_words = ["好吃", "鲜甜", "脆甜", "爆汁", "多汁", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "拉丝", "试吃", "咬一口"]
+    food_fresh_words = ["新鲜", "鲜活", "现摘", "现采", "现捕", "现捞", "冷链", "保鲜", "锁鲜", "果园", "产地"]
+    food_visual_words = ["切开", "掰开", "开箱", "开袋", "个头", "果径", "饱满", "一大颗", "一整箱"]
     contrast_words = [
         "不是", "但是", "反而", "一下子", "直接", "居然",
         "完全", "一点都不", "你看", "看到没有", "有没有发现",
@@ -1121,6 +1134,15 @@ def _score_hook_text_candidate(text, duration, hook_keywords=None, focus_hint=No
     if any(w in txt for w in effect_words):
         score += 7
         reasons.append("效果")
+    if any(w in txt for w in food_sensory_words):
+        score += 10
+        reasons.append("口感")
+    if any(w in txt for w in food_fresh_words):
+        score += 7
+        reasons.append("新鲜")
+    if any(w in txt for w in food_visual_words):
+        score += 7
+        reasons.append("近景")
     if any(w in txt for w in contrast_words):
         score += 5
         reasons.append("反差")
@@ -1144,7 +1166,8 @@ def _score_hook_text_candidate(text, duration, hook_keywords=None, focus_hint=No
         score -= 4
     if score < 10:
         return 0.0, []
-    if not any(reason in reasons for reason in ("爆词", "强情绪", "人群", "痛点", "效果", "问句")):
+    concrete_reasons = {"强情绪", "痛点", "效果", "口感", "新鲜", "近景", "反差", "问句", "偏好"}
+    if not any(reason in reasons for reason in concrete_reasons):
         return 0.0, []
     return score, reasons
 
@@ -1281,23 +1304,38 @@ def _repair_multi_version_structure(clips, available_pool, reserved_hook, reserv
         if log_fn:
             log_fn(msg)
 
+    try:
+        _hook_words = load_keywords().get("hook_keywords", [])
+    except Exception:
+        _hook_words = []
+
+    def _usable_hook(clip):
+        score, _reasons = _final_hook_quality_score(
+            clip[1] if len(clip) > 1 else "",
+            _clip_duration_value(clip),
+            _hook_words,
+            None,
+            None,
+        )
+        return score >= 20.0
+
     inserted = []
     current_hook = any(_is_hook_clip(c) for c in repaired)
     if not current_hook:
         hook = None
-        if reserved_hook and not _clip_overlaps_any(reserved_hook, repaired) and not _clip_overlaps_any(reserved_hook, used_clips):
+        if reserved_hook and _usable_hook(reserved_hook) and not _clip_overlaps_any(reserved_hook, repaired) and not _clip_overlaps_any(reserved_hook, used_clips):
             hook = reserved_hook
         if hook:
             repaired.insert(0, hook)
             inserted.append("补Hook")
         else:
             in_clip = _pick_best_multi_version_candidate(repaired, _multi_version_hook_candidate_score, [], [])
-            if in_clip:
+            if in_clip and _usable_hook(in_clip):
                 repaired = [_retag_clip_type(in_clip, "hook")] + [c for c in repaired if c is not in_clip]
                 inserted.append("Product转Hook")
             else:
                 extra = _pick_best_multi_version_candidate(available_pool, _multi_version_hook_candidate_score, repaired, used_clips)
-                if extra:
+                if extra and _usable_hook(extra):
                     repaired.insert(0, _retag_clip_type(extra, "hook"))
                     inserted.append("补替代Hook")
 
@@ -1552,8 +1590,15 @@ def load_keywords():
         _clean_keyword_map(_pick("clip_keywords", {})),
         merged_forbidden,
     )
+    source_pref = _clean_keyword_map(_pick("preference_keywords", {}))
+    try:
+        default_pref = _clean_keyword_map(_DEFAULT_PREFERENCE_KEYWORDS)
+    except Exception:
+        default_pref = {}
+    merged_pref_base = dict(default_pref)
+    merged_pref_base.update(source_pref)
     merged_pref = _strip_forbidden_keyword_conflicts(
-        _clean_keyword_map(_pick("preference_keywords", {})),
+        merged_pref_base,
         merged_forbidden,
     )
     merged_filler = _clean_keyword_list(_pick("filler_words", []))
@@ -1615,6 +1660,12 @@ _DEFAULT_PREFERENCE_KEYWORDS = {
     "工艺细节": ['工艺', '成本', '做工', '走线', '细节', '设计', '拼接', '剪裁', '立体', '版型', '定型', '压褶', '褶皱', '花边', '蕾丝边', '包边', '锁边', '双线', '加固', '五金', '拉链', '扣子', '纽扣', '口袋', '里衬', '加绒', '加厚', '薄款', '定染', '染色', '固色', '色牢度'],
     "穿着体验": ['舒适', '不勒', '自在', '轻盈', '无感', '不紧绷', '活动方便', '不束缚', '不扎人', '亲肤', '不闷', '不热', '轻薄', '凉爽', '温暖', '贴身', '宽松', '有余量', '不卡', '不掉', '不滑', '不卷边'],
     "对比优势": ['买不到', '外面没有', '不一样', '区别', '独特', '独家', '外面买', '比外面', '比市面', '比商场', '同价位', '同品质', '这个价', '值这个价', '性价比高', '划算', '超值', '几十块', '商场同款', '代工厂', '源头', '一手', '直接', '没有第二家'],
+    "口感食欲": ['好吃', '鲜甜', '脆甜', '爆汁', '多汁', '汁水', '入口', '口感', '肉质', '鲜嫩', '软糯', '酥脆', 'Q弹', '弹牙', '拉丝', '试吃', '开吃', '开袋', '开箱', '切开', '掰开', '咬一口', '吃起来', '闻起来'],
+    "新鲜品质": ['新鲜', '鲜活', '现摘', '现采', '现捕', '现捞', '当天采', '当天发', '鲜度', '品质', '果形', '果径', '个头', '饱满', '净果', '坏果', '坏包赔', '源头', '基地', '果园', '产区', '原产地'],
+    "产地溯源": ['产地', '原产地', '源头', '基地', '果园', '农场', '牧场', '渔港', '海捕', '直采', '直发', '溯源', '农户', '合作社', '产区', '当季', '应季'],
+    "规格分量": ['规格', '净含量', '净重', '克重', '重量', '斤装', '箱装', '袋装', '盒装', '整箱', '大果', '中果', '果径', '个头', '份量', '分量', '一斤', '两斤', '三斤', '五斤'],
+    "发货保鲜": ['发货', '现发', '冷链', '冰袋', '保温箱', '泡沫箱', '顺丰', '次日达', '保鲜', '锁鲜', '冷冻', '速冻', '常温', '冷藏', '售后', '坏果包赔', '破损包赔'],
+    "场景吃法": ['早餐', '夜宵', '下午茶', '办公室', '孩子', '老人', '全家', '聚餐', '火锅', '烧烤', '煲汤', '下饭', '拌饭', '空气炸锅', '简单一热', '即食', '开袋即食', '囤货', '冰箱', '送礼'],
 }
 
 AI_FOCUS_ALIASES = {
@@ -1634,6 +1685,22 @@ AI_FOCUS_ALIASES = {
     "品质": "品质细节",
     "舒适": "穿着体验",
     "体验": "穿着体验",
+    "口感": "口感食欲",
+    "食欲": "口感食欲",
+    "试吃": "口感食欲",
+    "新鲜": "新鲜品质",
+    "鲜度": "新鲜品质",
+    "产地": "产地溯源",
+    "溯源": "产地溯源",
+    "规格": "规格分量",
+    "分量": "规格分量",
+    "净重": "规格分量",
+    "发货": "发货保鲜",
+    "冷链": "发货保鲜",
+    "保鲜": "发货保鲜",
+    "吃法": "场景吃法",
+    "食用场景": "场景吃法",
+    "囤货": "场景吃法",
     "通用卖点": "其他",
 }
 
@@ -1765,18 +1832,27 @@ def _build_ai_controls_lines(ai_controls=None):
         "显瘦转化": "目标是显瘦转化，优先选择遮肉、收腰、比例优化、上身对比相关片段。",
         "质感高级": "目标是质感高级，优先选择面料垂感、做工细节、颜色氛围、风格高级感片段。",
         "快速促单": "目标是快速促单，优先选择决策理由明确、尺码引导自然、行动号召强的片段。",
+        "食欲种草": "目标是食欲种草，优先选择试吃反应、切开近景、口感描述和强食欲画面相关片段。",
+        "新鲜转化": "目标是新鲜转化，优先选择现摘现发、产地背书、规格分量、冷链保鲜和售后保障相关片段。",
+        "囤货转化": "目标是囤货转化，优先选择家庭囤货、早餐夜宵、办公室、送礼和复购理由明确的片段。",
     }
     hook_map = {
         "痛点开头": "Hook优先用痛点开头，先圈定人群或问题，再进入卖点。",
         "上身效果开头": "Hook优先用上身效果开头，先给用户看到穿上后的核心效果。",
         "爆点金句开头": "Hook优先用主播最有冲击力的爆点金句开头。",
         "主播强推荐开头": "Hook优先用主播强推荐、强背书、强情绪的表达开头。",
+        "试吃反应开头": "Hook优先用试吃反应或口感爆点开头，让用户第一秒感到好吃、想吃。",
+        "细节近景开头": "Hook优先用切开、掰开、开箱、拉丝、爆汁、个头等可视化细节开头。",
+        "产地品质开头": "Hook优先用产地、现摘现发、鲜活品质或源头背书开头。",
         "不强制Hook": "不强制必须选择Hook类型；如果没有好Hook，可以用最完整的Product片段自然开场。",
     }
     ending_map = {
         "尺码引导": "结尾优先选择尺码/身高体重/选择建议，但不要包含价格。",
         "信任背书": "结尾优先选择主播信任背书、品质确认、闭眼入类表达。",
         "场景收尾": "结尾优先选择通勤、约会、出门、日常等场景化收尾。",
+        "囤货收尾": "结尾优先选择家庭囤货、冰箱常备、办公室零食、早餐夜宵等明确使用场景。",
+        "发货保鲜": "结尾优先选择现发、冷链、保鲜、售后保障、坏果包赔等降低顾虑的内容。",
+        "复购背书": "结尾优先选择复购、老客反馈、真实试吃、家人爱吃等信任背书。",
         "自然结束": "结尾自然结束即可，不必强行促单。",
         "不要促单": "结尾不要强促单，不要选择催拍、库存、价格、链接类片段。",
     }
@@ -1818,6 +1894,7 @@ def _hook_cap_seconds(rules=None):
 
 def _build_ai_rules_prompt(rules=None, ai_controls=None, main_category=None):
     rules = rules or _merge_ai_rules(ai_controls)
+    main_category = _normalize_forced_category(main_category) or main_category
     lines = []
     narrative = str(rules.get("narrative", "") or "").strip()
     custom_text = str(rules.get("custom_text", "") or "").strip()
@@ -1840,6 +1917,270 @@ def _build_ai_rules_prompt(rules=None, ai_controls=None, main_category=None):
     if not lines:
         return ""
     return "\n★用户AI选片规则与本次控制（优先级高）★\n" + "\n".join(f"- {line}" for line in lines) + "\n"
+
+
+def _is_food_fresh_category(category=None):
+    text = str(category or "").strip()
+    return "食品" in text or "生鲜" in text
+
+
+def _normalize_forced_category(category=None):
+    text = str(category or "").strip()
+    if not text or text == "自动检测":
+        return None
+    try:
+        for cat in PRODUCT_CATEGORIES:
+            if text == cat or text in cat or cat in text:
+                return cat
+    except NameError:
+        pass
+    if _is_food_fresh_category(text):
+        return "食品/生鲜"
+    return None
+
+
+def _feedback_category_bucket(main_category=None):
+    normalized = _normalize_forced_category(main_category)
+    if _is_food_fresh_category(normalized or main_category):
+        return "food_fresh"
+    if normalized:
+        return "clothing"
+    return "general"
+
+
+def _feedback_scope_key(scope=None, main_category=None):
+    base = str(scope or "smart").strip() or "smart"
+    return f"{base}:{_feedback_category_bucket(main_category)}"
+
+
+def _food_fresh_context_prompt(main_category=None):
+    if not _is_food_fresh_category(main_category):
+        return ""
+    return """★食品/生鲜主商品识别★
+- 用户已指定当前大品类为食品/生鲜，不要再判断它是不是食品；即使具体品名没有命中词库，也必须按食品/生鲜逻辑选片。
+- 先从字幕里识别本场主播反复介绍、试吃、展示、说明产地/规格/发货/售后的主商品。可以识别为具体品名，也可以识别为水果、海鲜、熟食等大致商品。
+- 请再判断主商品大致子类型：水果鲜食、肉禽蛋品、水产海鲜、零食烘焙、熟食/预制菜、饮品冲调、粮油调味、其他食品。无法准确判断时也不要退回通用/服装逻辑。
+- 如果同一段素材里出现多个食品商品（如蟠桃和芒果），一次成片只能围绕一个主商品；不要把不同水果/不同食品当作不同卖点混进同一条视频。
+- 不要依赖穷举商品名；按卖点维度选片：口感食欲、新鲜品质、产地溯源、规格分量、发货保鲜、场景吃法、转化信任。
+- focus字段必须写食品卖点维度或具体食品卖点，不要写版型、面料、显瘦、尺码、穿搭等服装维度。"""
+
+
+_LAST_FOOD_PRODUCT_FILTER_SUMMARY = {}
+
+FOOD_PRODUCT_GROUPS = {
+    "桃类": ["蟠桃", "水蜜桃", "蜜桃", "黄桃", "油桃", "毛桃", "桃子"],
+    "芒果类": ["芒果", "贵妃芒", "凯特芒", "金煌芒", "台农芒", "澳芒", "小台芒", "大青芒", "青芒"],
+    "苹果类": ["苹果", "红富士", "富士", "阿克苏", "冰糖心", "花牛"],
+    "梨类": ["梨", "香梨", "雪梨", "皇冠梨", "库尔勒香梨"],
+    "柑橘橙类": ["橙子", "橘子", "柑橘", "沃柑", "耙耙柑", "爱媛", "脐橙", "血橙", "砂糖橘"],
+    "葡萄类": ["葡萄", "提子", "阳光玫瑰", "夏黑", "巨峰"],
+    "樱桃车厘子类": ["车厘子", "樱桃"],
+    "莓果类": ["草莓", "蓝莓", "树莓", "黑莓"],
+    "榴莲类": ["榴莲", "猫山王", "金枕", "干尧"],
+    "荔枝龙眼类": ["荔枝", "龙眼", "桂圆", "妃子笑"],
+    "瓜类": ["西瓜", "哈密瓜", "甜瓜", "羊角蜜", "网纹瓜"],
+    "虾类": ["虾", "大虾", "鲜虾", "小龙虾", "虾仁"],
+    "蟹类": ["螃蟹", "大闸蟹", "梭子蟹", "青蟹"],
+    "鱼类": ["鱼", "三文鱼", "鳕鱼", "带鱼", "鲈鱼", "黄花鱼", "鱼片"],
+    "贝类": ["生蚝", "扇贝", "鲍鱼", "花甲", "蛤蜊"],
+    "牛肉类": ["牛肉", "牛排", "肥牛", "牛腱", "牛腩"],
+    "羊肉类": ["羊肉", "羊排", "羊腿", "羊蝎子"],
+    "猪肉类": ["猪肉", "排骨", "五花肉", "猪蹄", "腊肉"],
+    "鸡禽蛋类": ["鸡肉", "鸡翅", "鸡腿", "鸡蛋", "土鸡蛋", "鸭蛋", "鹅蛋"],
+    "零食糕点类": ["零食", "糕点", "蛋糕", "饼干", "面包", "曲奇", "麻薯", "蛋黄酥"],
+    "粮油调味类": ["大米", "五常大米", "粮油", "酱油", "醋", "调味料", "食用油"],
+}
+
+_FOOD_PRODUCT_PROOF_WORDS = [
+    "现摘", "现采", "现发", "当天发", "产地", "源头", "果园", "基地", "冷链",
+    "保鲜", "锁鲜", "净重", "规格", "斤装", "箱装", "坏果包赔", "破损包赔",
+    "好吃", "新鲜", "回购", "复购", "推荐", "买",
+]
+
+
+def _food_product_hits(text):
+    text = str(text or "")
+    hits = {}
+    for label, keywords in FOOD_PRODUCT_GROUPS.items():
+        matched = []
+        for kw in keywords:
+            if kw and kw in text:
+                matched.append(kw)
+        if matched:
+            hits[label] = matched
+    return hits
+
+
+def _food_product_main_from_texts(texts):
+    scores = {}
+    counts = {}
+    first_seen = {}
+    for idx, text in enumerate(texts or []):
+        hits = _food_product_hits(text)
+        if not hits:
+            continue
+        proof_bonus = 8 if any(word in text for word in _FOOD_PRODUCT_PROOF_WORDS) else 0
+        for label, words in hits.items():
+            strength = sum(max(2, len(word)) for word in words)
+            scores[label] = scores.get(label, 0) + 10 + strength + proof_bonus
+            counts[label] = counts.get(label, 0) + 1
+            first_seen.setdefault(label, idx)
+    if not scores:
+        return "", {}, {}
+    ranked = sorted(scores, key=lambda label: (-scores[label], first_seen.get(label, 999999), label))
+    return ranked[0], scores, counts
+
+
+def _parse_srt_time_text_segments(srt_text):
+    lines = str(srt_text or "").strip().split("\n")
+    segments = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if re.match(r'\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}', line):
+            text_parts = []
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and '-->' not in lines[j]:
+                text_parts.append(lines[j].strip())
+                j += 1
+            segments.append((line, "".join(text_parts)))
+            i = j
+        else:
+            i += 1
+    return segments
+
+
+def _filter_srt_by_food_product(cleaned_srt, log_fn=None):
+    """When food/fresh contains multiple concrete products, keep one main product per cut."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    global _LAST_FOOD_PRODUCT_FILTER_SUMMARY
+    _LAST_FOOD_PRODUCT_FILTER_SUMMARY = {}
+
+    segments = _parse_srt_time_text_segments(cleaned_srt)
+    if not segments:
+        return cleaned_srt
+    main_product, scores, counts = _food_product_main_from_texts([text for _time_line, text in segments])
+    active_products = [label for label, count in counts.items() if count > 0]
+    if len(active_products) <= 1 or not main_product:
+        if main_product:
+            _LAST_FOOD_PRODUCT_FILTER_SUMMARY = {
+                "main_product": main_product,
+                "product_scores": scores,
+                "product_counts": counts,
+                "removed_segments": 0,
+            }
+        return cleaned_srt
+
+    output_lines = []
+    removed = 0
+    removed_products = {}
+    for time_line, text in segments:
+        hits = _food_product_hits(text)
+        hit_products = set(hits)
+        if hit_products and main_product not in hit_products:
+            removed += 1
+            for label in hit_products:
+                removed_products[label] = removed_products.get(label, 0) + 1
+            continue
+        output_lines.append(time_line)
+        output_lines.append(text)
+        output_lines.append("")
+
+    product_rank = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    rank_text = "，".join(f"{label}{score:.0f}分/{counts.get(label, 0)}段" for label, score in product_rank[:5])
+    removed_text = "，".join(f"{label}{count}段" for label, count in sorted(removed_products.items(), key=lambda item: item[1], reverse=True))
+    _log(f"食品主商品隔离: 主商品={main_product}；候选={rank_text}；移除其他商品 {removed} 段{('(' + removed_text + ')') if removed_text else ''}")
+    _LAST_FOOD_PRODUCT_FILTER_SUMMARY = {
+        "main_product": main_product,
+        "product_scores": scores,
+        "product_counts": counts,
+        "removed_segments": removed,
+        "removed_products": removed_products,
+    }
+    return "\n".join(output_lines)
+
+
+def _post_filter_food_cross_product(clips, log_fn=None):
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    def _clip_text(clip):
+        if isinstance(clip, dict):
+            parts = [
+                clip.get("text"),
+                clip.get("reason"),
+                clip.get("focus"),
+                clip.get("title"),
+                clip.get("subtitle"),
+            ]
+            return " ".join(str(part or "") for part in parts if part)
+        if isinstance(clip, (list, tuple)):
+            if len(clip) > 1:
+                return str(clip[1] or "")
+            if clip:
+                return str(clip[0] or "")
+            return ""
+        return str(clip or "")
+
+    def _clip_label(clip):
+        if isinstance(clip, dict):
+            return clip.get("type") or clip.get("role") or clip.get("start") or "clip"
+        if isinstance(clip, (list, tuple)) and clip:
+            return clip[0]
+        return "clip"
+
+    if not clips:
+        return clips
+    main_product, scores, counts = _food_product_main_from_texts([_clip_text(clip) for clip in clips])
+    if not main_product or len([label for label, count in counts.items() if count > 0]) <= 1:
+        return clips
+    kept = []
+    removed = 0
+    for clip in clips:
+        text = _clip_text(clip)
+        hits = set(_food_product_hits(text))
+        if hits and main_product not in hits:
+            removed += 1
+            _log(f"食品混品过滤: 踢出非主商品片段 [{_clip_label(clip)}] {text[:30]}...(主商品={main_product}，命中={','.join(sorted(hits))})")
+            continue
+        kept.append(clip)
+    if removed:
+        _log(f"食品混品过滤: 主商品={main_product}，移除 {removed} 个其他食品商品片段，保留 {len(kept)} 个")
+    return kept
+
+
+def _category_system_overlay(main_category=None):
+    if not _is_food_fresh_category(main_category):
+        return ""
+    return f"""[品类覆盖: 食品/生鲜直播切片]
+上方女装示例只作短视频结构参考；当前主品类是食品/生鲜时，禁止套用服装词，如上身、显瘦、尺码、面料、穿搭。
+{_food_fresh_context_prompt(main_category)}
+Hook优先级: 试吃反应/切开爆汁/开箱近景/产地新鲜/规格个头/家庭囤货场景。
+Product优先级: 口感食欲、新鲜品质、产地溯源、规格分量、发货保鲜、场景吃法；每个Product只讲1-2个要点。
+Close优先级: 复购信任、坏果/破损售后、冷链保鲜、囤货场景、自然购买理由。
+合规边界: 普通食品不要输出治疗、预防、降三高、减肥、美白、养生功效、药用功效等表达；可以改成口感、风味、食用场景、传统风味、地方特色。"""
+
+
+def _category_prompt_overrides(main_category=None, multi_version=False):
+    if not _is_food_fresh_category(main_category):
+        return None
+    if multi_version:
+        return {
+            "dedup": "★食品/生鲜卖点去重★ 同一种口感或同一条产地背书不要重复堆叠；试吃、切开、规格、发货、场景各保留信息量最高的版本。",
+            "hook": "★多版本食品Hook：找出3-5个不同开头★ 试吃反应、切开爆汁/拉丝、开箱个头、产地现发、家庭囤货场景各选最佳候选（有则选）。",
+            "product": "★多版本食品Product：选择12-18个Product片段★ 先识别本场主商品和子类型，再覆盖口感食欲/新鲜品质/产地溯源/规格分量/发货保鲜/场景吃法，每个角度至少1-2个片段。",
+            "close": "★多版本食品Close：选择3-5个Close片段★ 囤货理由、复购背书、冷链保鲜、坏果包赔、自然收尾各选1-2个；避开医疗保健功效和具体价格。",
+        }
+    return {
+        "dedup": "★食品/生鲜卖点去重★ 同一种口感、同一条产地背书、同一条发货说明只选最完整的一段，避免反复说好吃/新鲜。",
+        "hook": "★食品/生鲜Hook★ 优先选试吃反应、切开爆汁、开箱个头、产地现发、家庭囤货痛点；不要用价格、链接、下单话术当Hook。",
+        "product": "★食品/生鲜Product★ 先锁定本场主商品和子类型；后续Product必须覆盖口感食欲/新鲜品质/产地溯源/规格分量/发货保鲜/场景吃法等不同角度，同一角度最多2段。",
+        "close": "★食品/生鲜Close★ 结尾优先选复购信任、售后保障、冷链保鲜、囤货场景或自然购买理由；不要剪入治疗、预防、保健、药用功效表达。",
+    }
 
 
 # ============================================================
@@ -2575,6 +2916,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
 
     global _LAST_CATEGORY_FILTER_SUMMARY
     _LAST_CATEGORY_FILTER_SUMMARY = {}
+    forced_main_cat = _normalize_forced_category(force_category)
 
     # ============================================================
     # 1. 词库配置
@@ -2592,6 +2934,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         "开价": ["划算","超值","性价比","值得","不贵"],
         "行动": ["321","拼手速"],
         "服务": ["报尺码","现货","发货","平铺晾","机洗","尺码","码数","不多了","没货","截单","断码","库存"],
+        "食品": ["现摘","现采","现发","当天发","冷链","保鲜","锁鲜","产地","果园","基地","净重","规格","斤装","箱装","坏果包赔","破损包赔","回购","复购","好吃","新鲜"],
     }
     SELLING_PROOF_ALL = []
     for v in SELLING_PROOF.values():
@@ -2601,11 +2944,22 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     GENERIC_CATEGORY_WORDS = {
         "裤", "裙", "鞋", "吊带", "背心", "马甲", "针织", "打底",
         "三件", "四件", "组合", "穿搭",
+        "食品", "生鲜", "食材", "水果", "零食",
     }
 
     def _category_keyword_weight(cat: str, keyword: str) -> float:
         if not keyword:
             return 0.0
+        if cat == "食品/生鲜":
+            if keyword in {"食品", "生鲜", "食材", "水果", "零食"}:
+                return 0.7
+            if keyword in {"虾", "蟹"}:
+                return 0.65
+            if keyword in {"现摘", "现采", "现发", "冷链", "保鲜", "产地", "果园", "基地", "坏果包赔"}:
+                return 1.5
+            if len(keyword) >= 3:
+                return 1.35
+            return 1.0
         if keyword in GENERIC_CATEGORY_WORDS or len(keyword) <= 1:
             return 0.45
         if len(keyword) >= 4:
@@ -2802,6 +3156,22 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         if _s > 0 and (_cat not in excluded_cats or proof_scores[_cat] > 0 or base_scores[_cat] > 0):
             valid_cats[_cat] = _s
     if not valid_cats:
+        if forced_main_cat:
+            _log(f"  用户指定主品类={forced_main_cat}(词库未命中，保留全部字幕并按该品类提示词处理)")
+            filtered_srt = _filter_srt_by_food_product(cleaned_srt, _log) if _is_food_fresh_category(forced_main_cat) else cleaned_srt
+            _LAST_CATEGORY_FILTER_SUMMARY = {
+                "main_category": forced_main_cat,
+                "protected_categories": [forced_main_cat],
+                "original_segments": len(seg_info),
+                "kept_segments": len(seg_info),
+                "removed_segments": 0,
+                "preview_removed": 0,
+                "cross_category_removed": 0,
+                "forced_without_keyword_hit": True,
+            }
+            if _LAST_FOOD_PRODUCT_FILTER_SUMMARY:
+                _LAST_CATEGORY_FILTER_SUMMARY["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
+            return filtered_srt, forced_main_cat
         _log("  无法识别主品类，保留全部")
         return cleaned_srt, None
 
@@ -2823,14 +3193,8 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
 
     # 用户手动指定主品类(最高优先级)
     if force_category and force_category != "自动检测":
-        # 查找匹配的品类(支持模糊匹配，如"上衣"匹配"上衣"，"裤子"匹配"裤子")
-        matched = None
-        for cat in PRODUCT_CATEGORIES:
-            if force_category in cat or cat in force_category:
-                matched = cat
-                break
-        if matched and matched in PRODUCT_CATEGORIES:
-            main_cat = matched
+        if forced_main_cat and forced_main_cat in PRODUCT_CATEGORIES:
+            main_cat = forced_main_cat
             _log(f"  用户指定主品类={main_cat}(覆盖自动检测结果)")
         else:
             _log(f"  未找到品类'{force_category}'，使用自动检测")
@@ -2975,7 +3339,13 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         _log(f"品类合法性校验: 无突兀跨品类内容")
         _LAST_CATEGORY_FILTER_SUMMARY["orphan_removed"] = 0
 
-    return "\n".join(legal_lines), main_cat
+    legal_srt = "\n".join(legal_lines)
+    if _is_food_fresh_category(main_cat):
+        legal_srt = _filter_srt_by_food_product(legal_srt, _log)
+        if _LAST_FOOD_PRODUCT_FILTER_SUMMARY:
+            _LAST_CATEGORY_FILTER_SUMMARY["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
+
+    return legal_srt, main_cat
 
 
 # ============================================================
@@ -2999,6 +3369,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
     _enforce_time_coherence = bool(_ai_rules.get("time_coherence", True))
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
+    _forced_main_cat = _normalize_forced_category(force_category)
 
     # [v9.3] 拆分长SRT条目，提高AI选片精度
     from srt_splitter import split_long_srt_entries
@@ -3020,16 +3391,17 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     if _enforce_category_filter:
         cleaned_srt, detected_main_cat = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
     else:
-        detected_main_cat = force_category if force_category and force_category != "自动检测" else None
+        detected_main_cat = _forced_main_cat
         _log("AI选片规则: 已关闭强制同一品类过滤")
     # 用检测到的品类（或用户指定）作为跨品类过滤的偏好品类
-    _cross_cat_preferred = force_category if force_category and force_category != "自动检测" else detected_main_cat
+    _cross_cat_preferred = _forced_main_cat or detected_main_cat
     _history_key = _clip_history_key(cleaned_srt)
     _recent_history = _get_recent_clip_history(_history_key)
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"差异化历史: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
-    _feedback_scope = "mix" if merge_mode else "smart"
+    _feedback_base_scope = "mix" if merge_mode else "smart"
+    _feedback_scope = _feedback_scope_key(_feedback_base_scope, _cross_cat_preferred)
     _feedback_profile = _build_preview_feedback_profile(scope=_feedback_scope)
     _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(settings, _feedback_profile)
     _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
@@ -3109,7 +3481,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             log_fn(f"AI: 当前{len(clips)}段但已有{_current_ai_dur:.1f}s，接近目标，跳过补选避免超时长")
         original_clips = list(clips)
         removed_from_dedup = []
-        clips = _dedup_clips(clips, log_fn, multi_version=multi_version, focus_hint=focus_hint, srt_text=srt_text)
+        clips = _dedup_clips(clips, log_fn, multi_version=multi_version, focus_hint=focus_hint, srt_text=srt_text, main_category=_cross_cat_preferred)
         # 从Product中提取Hook（如果AI没选Hook）
         clips = _extract_hook_from_products(clips, cleaned_srt, log_fn, focus_hint=focus_hint, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, log_fn, max_hook_sec=_hook_cap_sec, focus_hint=focus_hint, ai_controls=ai_controls)
@@ -3411,6 +3783,12 @@ def _hook_preference_keywords(focus_hint=None, ai_controls=None):
         "情绪感染": ["绝了", "太好看", "太漂亮", "惊艳", "漂亮", "美爆", "不敢信", "封神"],
         "流行趋势": ["流行", "设计感", "当季", "趋势", "风格", "松弛", "千金"],
         "面料质感": ["面料", "材质", "手感", "质感", "亲肤", "透气", "垂感", "桑蚕丝", "针织"],
+        "口感食欲": ["好吃", "脆甜", "爆汁", "多汁", "入口", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "拉丝", "试吃", "咬一口"],
+        "新鲜品质": ["新鲜", "鲜活", "现摘", "现采", "当天发", "鲜度", "品质", "饱满", "坏果包赔", "源头", "基地", "果园"],
+        "产地溯源": ["产地", "原产地", "源头", "基地", "果园", "农场", "渔港", "直采", "溯源", "产区", "应季"],
+        "规格分量": ["规格", "净含量", "净重", "重量", "斤装", "箱装", "大果", "果径", "个头", "分量"],
+        "发货保鲜": ["发货", "现发", "冷链", "冰袋", "保温箱", "保鲜", "锁鲜", "冷冻", "速冻", "坏果包赔"],
+        "场景吃法": ["早餐", "夜宵", "下午茶", "办公室", "孩子", "全家", "聚餐", "火锅", "煲汤", "下饭", "即食", "囤货"],
     }
     for pref, kws in pref_map.items():
         if pref in text or pref[:2] in text:
@@ -3424,6 +3802,12 @@ def _hook_preference_keywords(focus_hint=None, ai_controls=None):
         keywords.extend(["绝了", "太漂亮", "不敢信", "封神", "惊艳", "美爆"])
     elif hook_style == "主播强推荐开头":
         keywords.extend(["推荐", "闭眼入", "盲拍", "真的", "必须", "我跟你讲"])
+    elif hook_style == "试吃反应开头":
+        keywords.extend(["好吃", "试吃", "咬一口", "爆汁", "脆甜", "鲜嫩", "软糯", "Q弹"])
+    elif hook_style == "细节近景开头":
+        keywords.extend(["切开", "掰开", "开箱", "开袋", "个头", "果径", "拉丝", "爆汁", "饱满"])
+    elif hook_style == "产地品质开头":
+        keywords.extend(["产地", "源头", "现摘", "现采", "现发", "冷链", "鲜活", "新鲜", "果园", "基地"])
     for item in controls.get("selling_points") or []:
         if item:
             keywords.append(str(item))
@@ -3438,17 +3822,63 @@ def _has_explicit_hook_preference(focus_hint=None, ai_controls=None):
     return any(controls.get(key) for key in ("goal", "hook_style", "selling_points"))
 
 
+def _hook_source_markers(text):
+    return {str(m).upper() for m in re.findall(r"\[v\d+\]", str(text or ""), flags=re.I)}
+
+
+def _strip_hook_source_markers(text):
+    return re.sub(r"\[v\d+\]\s*", "", str(text or ""), flags=re.I)
+
+
+def _hook_has_mixed_sources(text):
+    return len(_hook_source_markers(text)) > 1
+
+
+def _hook_has_numeric_noise(text):
+    txt = str(text or "")
+    if re.search(r"\d+\s*(?:加|\+)\s*\d+", txt):
+        return True
+    if re.search(r"[一二三四五六七八九十百千万零两]{2,}\s*(?:加|\+)\s*[一二三四五六七八九十百千万零两\d]+", txt):
+        return True
+    return False
+
+
+def _hook_has_interaction_noise(text):
+    txt = str(text or "")
+    noise_words = (
+        "感谢", "谢谢", "反馈", "欢迎", "关注", "点赞", "评论", "弹幕",
+        "直播间", "客服", "私信", "稍等", "等一下", "看评论", "回放",
+    )
+    return any(word in txt for word in noise_words)
+
+
 def _is_bad_hook_candidate_text(text):
-    txt = re.sub(r"\s+", "", str(text or "")).strip("，。！？!?、 ")
+    raw = str(text or "")
+    if _hook_has_mixed_sources(raw):
+        return True
+    txt = re.sub(r"\s+", "", _strip_hook_source_markers(raw)).strip("，。！？!?、 ")
     if not txt or len(txt) < 4:
         return True
-    weak_starts = ("然后", "但是", "不过", "而且", "所以", "对吧然后", "是的然后", "那谁")
+    if _hook_has_interaction_noise(txt) or _hook_has_numeric_noise(txt):
+        return True
+    hook_risk_words = (
+        "价格", "多少钱", "链接", "小黄车", "购物车", "上车", "下单", "拍下",
+        "领券", "券后", "运费险", "包邮", "福利", "优惠", "折扣", "库存",
+        "手慢无", "秒空", "抢疯", "断码", "限时", "快没了",
+    )
+    if any(word in txt for word in hook_risk_words):
+        return True
+    weak_starts = (
+        "然后", "但是", "不过", "而且", "所以", "对吧然后", "是的然后", "那谁",
+        "是的", "对的", "好的", "好吧", "好", "来", "看一下", "就是说",
+    )
     if txt.startswith(weak_starts):
         return True
     weak_ends = (
         "都", "就", "还", "也", "和", "跟", "把", "被", "会", "可以",
         "如果", "因为", "然后", "但是", "不过", "就是", "这个", "这款",
-        "你看", "对吧", "的话"
+        "你看", "对吧", "的话", "是", "又显", "想要", "裤是", "衣服是",
+        "裙子是", "它是", "这个是", "啊", "呀", "呢", "嘛"
     )
     return txt.endswith(weak_ends)
 
@@ -3516,15 +3946,20 @@ def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=Non
     controls = _normalize_ai_controls(ai_controls)
     hook_style = controls.get("hook_style")
     crowd_words = ["姐妹", "女生", "女人", "女孩", "妈妈", "宝妈", "微胖", "小个子", "梨形", "苹果型", "胯宽", "腿粗", "大骨架", "肩宽", "腰粗", "肚子", "拜拜肉", "黄皮", "你们"]
-    pain_words = ["胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "壮", "肉", "遮", "藏", "不敢穿", "穿不进去", "卡", "勒", "副乳"]
+    pain_words = ["胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "显壮", "肉多", "遮肉", "藏肉", "不敢穿", "穿不进去", "卡肉", "勒肉", "副乳"]
     effect_words = ["上身", "效果", "显瘦", "显高", "显白", "显腿长", "比例", "直角肩", "腰线", "拉长", "高级", "气质", "干净", "明亮", "薄", "遮肉", "藏肉"]
     strong_words = ["绝了", "太漂亮", "不敢信", "天花板", "太惊艳", "太显瘦", "巨好看", "美爆", "封神", "神仙", "救命", "闭眼入", "好牛"]
     contrast_words = ["不是", "但是", "反而", "一下子", "直接", "居然", "完全", "一点都不", "你看", "看到没有", "有没有发现"]
-    recommend_words = ["推荐", "闭眼入", "盲拍", "必须", "真的", "我跟你讲", "听我的", "放心"]
+    recommend_words = ["推荐", "闭眼入", "盲拍", "必须", "我跟你讲", "听我的", "放心"]
+    food_sensory_words = ["好吃", "脆甜", "鲜甜", "爆汁", "多汁", "汁水", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "弹牙", "拉丝", "试吃", "咬一口"]
+    food_visual_words = ["切开", "掰开", "开箱", "开袋", "个头", "果径", "饱满", "满满", "一大颗", "一整箱", "看得到", "拉丝", "爆汁"]
+    food_fresh_words = ["新鲜", "鲜活", "现摘", "现采", "现捕", "现捞", "当天发", "现发", "冷链", "保鲜", "锁鲜", "产地", "果园", "基地"]
+    food_scene_words = ["早餐", "夜宵", "下午茶", "办公室", "孩子", "全家", "聚餐", "火锅", "煲汤", "下饭", "即食", "囤货", "冰箱"]
 
     weights = {
         "hook": 4.0, "strong": 5.0, "crowd": 12.0, "pain": 10.0,
         "effect": 9.0, "contrast": 6.0, "recommend": 5.0,
+        "food_sensory": 12.0, "food_visual": 10.0, "food_fresh": 9.0, "food_scene": 7.0,
     }
     if hook_style == "痛点开头":
         weights.update({"crowd": 15.0, "pain": 15.0, "effect": 8.0, "strong": 4.0, "hook": 3.0})
@@ -3534,6 +3969,12 @@ def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=Non
         weights.update({"strong": 14.0, "contrast": 8.0, "hook": 8.0, "crowd": 6.0, "pain": 6.0, "effect": 6.0})
     elif hook_style == "主播强推荐开头":
         weights.update({"recommend": 14.0, "strong": 8.0, "effect": 6.0, "hook": 6.0, "crowd": 4.0})
+    elif hook_style == "试吃反应开头":
+        weights.update({"food_sensory": 18.0, "food_visual": 9.0, "food_fresh": 6.0, "strong": 7.0, "hook": 5.0})
+    elif hook_style == "细节近景开头":
+        weights.update({"food_visual": 17.0, "food_sensory": 10.0, "food_fresh": 8.0, "hook": 5.0})
+    elif hook_style == "产地品质开头":
+        weights.update({"food_fresh": 17.0, "food_visual": 8.0, "food_sensory": 8.0, "recommend": 6.0, "hook": 5.0})
     elif hook_style == "不强制Hook":
         weights.update({"hook": 2.0, "strong": 3.0, "crowd": 8.0, "pain": 7.0, "effect": 7.0, "recommend": 3.0})
 
@@ -3555,6 +3996,10 @@ def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=Non
     add_if("效果", effect_words, weights["effect"])
     add_if("反差", contrast_words, weights["contrast"])
     add_if("推荐", recommend_words, weights["recommend"])
+    add_if("口感", food_sensory_words, weights["food_sensory"])
+    add_if("近景", food_visual_words, weights["food_visual"])
+    add_if("新鲜", food_fresh_words, weights["food_fresh"])
+    add_if("场景", food_scene_words, weights["food_scene"])
     if any(p in str(text or "") for p in ("?", "？", "吗")):
         score += 5.0
         reasons.append("问句")
@@ -3588,7 +4033,8 @@ def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=Non
 
     if len(txt) < 5:
         score -= 3.0
-    if not any(r in reasons for r in ("强情绪", "人群", "痛点", "效果", "问句", "推荐", "偏好")):
+    concrete_reasons = {"强情绪", "痛点", "效果", "反差", "口感", "近景", "新鲜", "场景", "问句", "偏好"}
+    if not any(r in reasons for r in concrete_reasons):
         return 0.0, []
     return max(0.0, score), reasons
 
@@ -3869,6 +4315,21 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=None, focus_hin
 
     best = _pick_diverse_hook_candidate(candidates, _log)
     new_start, new_end, new_txt, new_dur, _ = best
+    current_score, _current_reasons = _final_hook_quality_score(
+        hook_clip[1], hook_dur, _hook_kw, focus_hint, ai_controls
+    )
+    new_score, new_reasons = _final_hook_quality_score(
+        new_txt, new_dur, _hook_kw, focus_hint, ai_controls
+    )
+    if new_score < 20.0:
+        _log(f"短Hook检测: 候选未过质量门槛({new_score:.1f})，保留原Hook")
+        return clips
+    if current_score >= 20.0 and new_score < current_score + 6.0:
+        _log(
+            "短Hook检测: 原Hook质量仍可用，"
+            f"候选{new_score:.1f}({','.join(new_reasons[:3]) or '无'})未明显更好，保留原Hook"
+        )
+        return clips
 
     # 原Hook降为Product
     old = clips[hook_idx]
@@ -3887,6 +4348,7 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=None, focus_hin
 def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None):
     def _log(msg):
         if log_fn: log_fn(msg)
+    main_category = _normalize_forced_category(main_category) or main_category
 
     def _resolve_focus_used_label(label="", detail=""):
         text = str(label or "").strip()
@@ -4066,8 +4528,14 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                         _weights.update(_normalize_preference_weights(_file_weights))
             except Exception:
                 pass
+            _food_focus_labels = {"口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法"}
+            _food_mode = _is_food_fresh_category(main_category)
             for _fname, _fkws in _focus_hints_map.items():
                 _fname = _normalize_focus_label(_fname)
+                if _food_mode and _fname not in _food_focus_labels:
+                    continue
+                if not _food_mode and _fname in _food_focus_labels:
+                    continue
                 _score = sum(1 for _kw in _fkws if _kw in _srt_lower)
                 if _score > 0:
                     _weight = _weights.get(_fname, 1.0)
@@ -4098,12 +4566,23 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     "工艺细节": "侧重工艺品质，优先选工艺,成本,做工,定染等体现品质细节的片段",
                     "穿着体验": "侧重穿着感受，优先选舒适,不勒,自在,活动方便等体验类片段",
                     "对比优势": "侧重对比独特，优先选同价位买不到,独家,差异化的片段",
+                    "口感食欲": "侧重口感食欲，优先选试吃反应,切开爆汁,香脆软糯,Q弹拉丝等片段",
+                    "新鲜品质": "侧重新鲜品质，优先选现摘现发,鲜活饱满,坏果包赔,品质背书的片段",
+                    "产地溯源": "侧重产地溯源，优先选产地,果园基地,源头直采,当季应季等片段",
+                    "规格分量": "侧重规格分量，优先选净重,斤装,个头,果径,整箱开箱等片段",
+                    "发货保鲜": "侧重发货保鲜，优先选冷链,冰袋,保温箱,锁鲜,售后保障等片段",
+                    "场景吃法": "侧重食用场景，优先选早餐,夜宵,办公室,全家囤货,火锅煲汤等片段",
                 }
                 focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
                 # 40%概率随机换一个偏好（避免同视频永远同一个）
                 import random as _rand_switch
                 if _rand_switch.random() < 0.4 and len(_focus_hint_map_full) > 1:
-                    _alt_keys = [k for k in _focus_hint_map_full if k != _best_focus]
+                    _alt_keys = [
+                        k for k in _focus_hint_map_full
+                        if k != _best_focus and ((k in _food_focus_labels) if _food_mode else (k not in _food_focus_labels))
+                    ]
+                    if not _alt_keys:
+                        _alt_keys = [k for k in _focus_hint_map_full if k != _best_focus]
                     _alt_focus = _rand_switch.choice(_alt_keys)
                     focus = _focus_hint_map_full[_alt_focus]
                     _remember_focus_summary(
@@ -4127,22 +4606,36 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     )
                     _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
             else:
-                focus_hints = [
-                    "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
-                    "侧重面料卖点，优先选面料手感,质感相关的片段",
-                    "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
-                ]
+                if _is_food_fresh_category(main_category):
+                    focus_hints = [
+                        "侧重口感食欲，优先选试吃反应,切开爆汁,香脆软糯的片段",
+                        "侧重新鲜品质，优先选现摘现发,鲜活饱满,品质背书的片段",
+                        "侧重发货保鲜，优先选冷链,保鲜,售后保障的片段",
+                    ]
+                else:
+                    focus_hints = [
+                        "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
+                        "侧重面料卖点，优先选面料手感,质感相关的片段",
+                        "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
+                    ]
                 focus = random.choice(focus_hints)
                 _remember_focus_summary("随机偏好", "随机偏好", focus, requested="自动")
                 _log(f"AI: 随机偏好 → {focus}")
         except Exception as _e:
             # 防护：变量名拼写不一致或其他异常时，降级到随机偏好而非关键词兜底
             import random as _rand
-            focus = _rand.choice([
-                "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
-                "侧重面料卖点，优先选面料手感,质感相关的片段",
-                "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
-            ])
+            if _is_food_fresh_category(main_category):
+                focus = _rand.choice([
+                    "侧重口感食欲，优先选试吃反应,切开爆汁,香脆软糯的片段",
+                    "侧重新鲜品质，优先选现摘现发,鲜活饱满,品质背书的片段",
+                    "侧重发货保鲜，优先选冷链,保鲜,售后保障的片段",
+                ])
+            else:
+                focus = _rand.choice([
+                    "侧重身材痛点，优先选显瘦,遮肉,修饰身材的片段",
+                    "侧重面料卖点，优先选面料手感,质感相关的片段",
+                    "侧重情绪感染力，优先选主播语气最激动,最真诚的片段",
+                ])
             _remember_focus_summary("兜底偏好", "兜底偏好", focus, requested="自动", error=str(_e))
             _log(f"AI: 智能偏好异常({str(_e)})，降级随机偏好 → {focus}")
 
@@ -4196,14 +4689,30 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _product_rule = ""
         _close_rule = ""
 
+    _category_overrides = _category_prompt_overrides(main_category, multi_version=bool(_skip_focus))
+    if _category_overrides:
+        _dedup_rule = _category_overrides.get("dedup") or _dedup_rule
+        _hook_rule = _category_overrides.get("hook") or _hook_rule
+        _product_rule = _category_overrides.get("product") or _product_rule
+        _close_rule = _category_overrides.get("close") or _close_rule
+
     # 随机差异化指令（每次运行不同侧重点）
-    _diff_vibes = [
-        "★本轮选片重点：优先选主播语气最激动、情绪最饱满的片段，卖点角度越多越好★",
-        "★本轮选片重点：优先选展示上身效果、穿搭场景的片段，少选纯面料描述★",
-        "★本轮选片重点：优先选对比类、痛点解决类的内容，搭配推荐最佳★",
-        "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
-        "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
-    ]
+    if _is_food_fresh_category(main_category):
+        _diff_vibes = [
+            "★本轮选片重点：优先选试吃反应、切开爆汁、拉丝、多汁等强食欲片段★",
+            "★本轮选片重点：优先选现摘现发、产地源头、新鲜品质、坏果包赔等信任片段★",
+            "★本轮选片重点：优先选规格分量、个头净重、开箱展示、家庭囤货理由明确的片段★",
+            "★本轮选片重点：优先选早餐夜宵、办公室、孩子全家、火锅煲汤等可代入食用场景★",
+            "★本轮选片重点：优先选主播真实试吃和复购反馈，避开医疗保健功效表达★",
+        ]
+    else:
+        _diff_vibes = [
+            "★本轮选片重点：优先选主播语气最激动、情绪最饱满的片段，卖点角度越多越好★",
+            "★本轮选片重点：优先选展示上身效果、穿搭场景的片段，少选纯面料描述★",
+            "★本轮选片重点：优先选对比类、痛点解决类的内容，搭配推荐最佳★",
+            "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
+            "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
+        ]
     _diff_vibe = random.choice(_diff_vibes)
     _ai_rules_prompt = _build_ai_rules_prompt(ai_controls=ai_controls, main_category=main_category)
 
@@ -4236,6 +4745,31 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         pass
     _recent_history_prompt = f"\n{recent_history_hint}\n" if recent_history_hint else ""
     _extra_instruction_prompt = f"\n{extra_instruction}\n" if extra_instruction else ""
+    _category_context_prompt = _food_fresh_context_prompt(main_category)
+    if _is_food_fresh_category(main_category):
+        _priority_line = "- 优先选受众代入强的卖点(口感食欲>新鲜品质>产地溯源>规格分量>发货保鲜>场景吃法)"
+        _close_priority_line = '- 对于Close片段,优先选"复购背书""发货保鲜""囤货场景"类,避开含价格和保健功效的内容'
+        _coverage_examples = "口感/新鲜/产地/规格/发货/场景"
+        _example_hook_focus = "口感食欲"
+        _example_hook_reason = "试吃反应强"
+        _example_product_focus_1 = "新鲜品质"
+        _example_product_reason_1 = "现摘现发背书"
+        _example_product_focus_2 = "规格分量"
+        _example_product_reason_2 = "规格展示清楚"
+        _example_close_focus = "发货保鲜"
+        _example_close_reason = "售后信任"
+    else:
+        _priority_line = "- 优先选受众群体广的卖点(显瘦>面料>颜色>场景)"
+        _close_priority_line = '- 对于Close片段,优先选"信任强化"和"尺码引导"类,避开含价格的'
+        _coverage_examples = "版型/面料/显瘦/穿搭/品质/场景"
+        _example_hook_focus = "痛点提问"
+        _example_hook_reason = "开场爆点"
+        _example_product_focus_1 = "版型显瘦"
+        _example_product_reason_1 = "显瘦卖点突出"
+        _example_product_focus_2 = "面料触感"
+        _example_product_reason_2 = "面料描述细腻"
+        _example_close_focus = "信任强化"
+        _example_close_reason = "推荐合辑"
 
     if _skip_focus:
         # 多版本模式：AI只做素材选取，不做编排
@@ -4243,6 +4777,8 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中精选出{_clip_range}个高质量素材片段.
 
 你的任务是从SRT中选出足够多的高质量片段，后续会由AI二次编排成不同版本.素材越丰富越多元化,最终效果越好.
+
+{_category_context_prompt}
 
 选片规则:
 1. ★同一卖点如果主播用了不同表达方式(如"面料好"和"这个面料摸着特别软"),可以分别选取,因为多版本需要差异化素材★
@@ -4257,8 +4793,8 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 ★选片优先级★
 - 优先选主播语气最激动、情绪最饱满的片段
 - 优先选内容独立完整、有头有尾的片段
-- 优先选受众群体广的卖点(显瘦>面料>颜色>场景)
-- 对于Close片段,优先选"信任强化"和"尺码引导"类,避开含价格的
+{_priority_line}
+{_close_priority_line}
 
 {f"★本轮选片侧重: {focus}★" if focus else ""}
 {_ai_rules_prompt}
@@ -4266,11 +4802,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目(数组),不要填start/end时间戳.★优先选1个完整条目；如果前一句必须靠后一句承接，允许选2个连续条目，确保单片段5-10秒且语义完整★:
 [
-  {{"clip_type": "hook", "srt_indices": [3], "focus": "痛点提问", "reason": "开场爆点"}},
-  {{"clip_type": "hook", "srt_indices": [12], "focus": "效果前置", "reason": "不同钩子类型"}},
-  {{"clip_type": "product", "srt_indices": [18], "focus": "版型显瘦", "reason": "显瘦卖点突出"}},
-  {{"clip_type": "product", "srt_indices": [25], "focus": "面料触感", "reason": "面料描述细腻"}},
-  {{"clip_type": "close", "srt_indices": [45], "focus": "信任强化", "reason": "推荐合辑"}},
+  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}"}},
+  {{"clip_type": "hook", "srt_indices": [12], "focus": "{_example_product_focus_1}", "reason": "不同钩子类型"}},
+  {{"clip_type": "product", "srt_indices": [18], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}"}},
+  {{"clip_type": "product", "srt_indices": [25], "focus": "{_example_product_focus_2}", "reason": "{_example_product_reason_2}"}},
+  {{"clip_type": "close", "srt_indices": [45], "focus": "{_example_close_focus}", "reason": "{_example_close_reason}"}},
   ...
 ]
 
@@ -4282,6 +4818,8 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     else:
         user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中精选条目并编排成一个完整的带货短视频脚本.
 
+{_category_context_prompt}
+
 要求:
 1. {_dedup_rule}
 2. 像讲故事一样编排，每个片段自然衔接下一段，听起来是一段流畅的口播
@@ -4290,7 +4828,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 5. ★片段之间禁止条目编号重叠★ 同一条目只能出现在一个片段中
 6. 如果一个片段选的条目之间有间隔（如选了#05和#07但跳过#06），说明中间条目是废话需要跳过——这是正确的，代码会自动拆成两段分别剪辑
 7. [本轮选片偏好]{focus}
-   ★Hook必须匹配偏好！选不出匹配偏好的Hook就不选Hook类型，改用其他类型开头★ 前两个Product也必须切中偏好角度。 后续Product必须覆盖其他卖点角度（版型/面料/显瘦/穿搭/品质/场景等），确保单视频介绍完整。同一卖点角度最多2段，禁止全片只讲一个维度
+   ★Hook必须匹配偏好！选不出匹配偏好的Hook就不选Hook类型，改用其他类型开头★ 前两个Product也必须切中偏好角度。 后续Product必须覆盖其他卖点角度（{_coverage_examples}等），确保单视频介绍完整。同一卖点角度最多2段，禁止全片只讲一个维度
 8. {_diff_vibe}
 9. {_hook_rule}
 10. {_product_rule}
@@ -4301,8 +4839,8 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目（数组），不要填start/end时间戳。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
 [
-  {{"clip_type": "hook", "srt_indices": [3], "focus": "痛点提问", "reason": "圈人群+效果对比"}},
-  {{"clip_type": "product", "srt_indices": [8], "focus": "版型显瘦", "reason": "上身效果最强"}},
+  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}"}},
+  {{"clip_type": "product", "srt_indices": [8], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}"}},
   ...
 ]
 
@@ -4312,10 +4850,14 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 {indexed_transcript}"""
 
     _system_low, _system_high = _multi_version_target_bounds(_AI_TARGET_DURATION)
+    _system_prompt = SYSTEM_PROMPT.replace("45-65", f"{_system_low:.0f}-{_system_high:.0f}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")
+    _category_overlay = _category_system_overlay(main_category)
+    if _category_overlay:
+        _system_prompt = f"{_system_prompt}\n\n{_category_overlay}"
     body = json.dumps({
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT.replace("45-65", f"{_system_low:.0f}-{_system_high:.0f}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")},
+            {"role": "system", "content": _system_prompt},
             {"role": "user", "content": user_msg}
         ],
         "temperature": temperature,
@@ -4726,6 +5268,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
     _enforce_time_coherence = bool(_ai_rules.get("time_coherence", True))
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
+    _forced_main_cat = _normalize_forced_category(force_category)
 
     # [预处理] 与单版本相同的SRT清洗流程
     from srt_splitter import split_long_srt_entries
@@ -4743,14 +5286,17 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     if _enforce_category_filter:
         cleaned_srt, _detected_main_cat = _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=force_category)
     else:
-        _detected_main_cat = force_category if force_category and force_category != "自动检测" else None
+        _detected_main_cat = _forced_main_cat
         _log("AI选片规则: 已关闭强制同一品类过滤")
+    if _forced_main_cat:
+        _detected_main_cat = _forced_main_cat
     _history_key = _clip_history_key(cleaned_srt)
     _recent_history = _get_recent_clip_history(_history_key)
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段，本次优先避开")
-    _feedback_profile = _build_preview_feedback_profile(scope="smart")
+    _feedback_scope = _feedback_scope_key("smart", _detected_main_cat)
+    _feedback_profile = _build_preview_feedback_profile(scope=_feedback_scope)
     _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(settings, _feedback_profile)
     _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
     _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile) if _feedback_prompt_enabled else ""
@@ -4830,7 +5376,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     _log(f"AI: 素材选取成功，共{len(raw_clips)}个片段")
 
     # ★对素材做初步后处理★
-    raw_clips = _dedup_clips(raw_clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt)
+    raw_clips = _dedup_clips(raw_clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt, main_category=_detected_main_cat)
     if _enforce_category_filter:
         raw_clips = _post_filter_cross_category(raw_clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
     raw_clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
@@ -4865,16 +5411,28 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
 
     # ★第三步：确定每个版本的focus角度★
     import random as _rnd
-    _all_focus_angles = ["版型显瘦", "颜色氛围", "场景搭配", "性价比", "情绪感染", "流行趋势", "面料质感"]
-    _angle_hints_map = {
-        "版型显瘦": "Hook选显瘦/遮肉类的短爆点，Product优先选讲版型/显瘦/修饰身材的片段，按面料→版型→尺码的逻辑串联",
-        "颜色氛围": "Hook选颜色/显白类的短爆点，Product优先选讲颜色/显白/衬肤色/温柔色的片段，按颜色→穿感→场景的逻辑串联",
-        "场景搭配": "Hook选场景化的短爆点，Product优先选通勤/约会/实穿/百搭/搭配的片段，按场景→单品→搭配的逻辑串联",
-        "性价比": "Hook选品质对比类的短爆点，Product优先选品质/价值感的片段(避开具体价格)，按品质→对比→推荐串联",
-        "情绪感染": "Hook选最强情绪爆点，Product选激动/真诚的片段穿插，按情绪递进串联",
-        "流行趋势": "Hook选风格类的短爆点，Product选设计感/当季流行的片段，按风格定位→搭配→场景串联",
-        "面料质感": "Hook选触感/质感的短爆点，Product选面料/手感/亲肤的片段，按面料→版型→上身效果的逻辑串联",
-    }
+    if _is_food_fresh_category(_detected_main_cat):
+        _all_focus_angles = ["口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法", "情绪感染"]
+        _angle_hints_map = {
+            "口感食欲": "Hook选试吃反应/切开爆汁/脆甜鲜嫩等强食欲片段，Product按口感→新鲜→规格→发货信任串联",
+            "新鲜品质": "Hook选现摘现发/鲜活饱满/品质背书，Product按新鲜证明→口感反馈→产地/规格→售后串联",
+            "产地溯源": "Hook选产地源头/果园基地/产区特色，Product按源头背书→品质→口感→发货保障串联",
+            "规格分量": "Hook选个头/净重/开箱展示/大小对比，Product按规格展示→推荐规格→口感→冷链售后串联",
+            "发货保鲜": "Hook选冷链/保鲜/坏果包赔/收到货状态，Product按履约信任→新鲜口感→规格推荐串联",
+            "场景吃法": "Hook选家庭囤货/孩子老人/早餐夜宵/火锅煲汤等场景，Product按场景代入→口感→规格→发货串联",
+            "情绪感染": "Hook选主播真实试吃和强反应，Product用情绪带出口感/新鲜/规格/售后，不要夸大保健功效",
+        }
+    else:
+        _all_focus_angles = ["版型显瘦", "颜色氛围", "场景搭配", "性价比", "情绪感染", "流行趋势", "面料质感"]
+        _angle_hints_map = {
+            "版型显瘦": "Hook选显瘦/遮肉类的短爆点，Product优先选讲版型/显瘦/修饰身材的片段，按面料→版型→尺码的逻辑串联",
+            "颜色氛围": "Hook选颜色/显白类的短爆点，Product优先选讲颜色/显白/衬肤色/温柔色的片段，按颜色→穿感→场景的逻辑串联",
+            "场景搭配": "Hook选场景化的短爆点，Product优先选通勤/约会/实穿/百搭/搭配的片段，按场景→单品→搭配的逻辑串联",
+            "性价比": "Hook选品质对比类的短爆点，Product优先选品质/价值感的片段(避开具体价格)，按品质→对比→推荐串联",
+            "情绪感染": "Hook选最强情绪爆点，Product选激动/真诚的片段穿插，按情绪递进串联",
+            "流行趋势": "Hook选风格类的短爆点，Product选设计感/当季流行的片段，按风格定位→搭配→场景串联",
+            "面料质感": "Hook选触感/质感的短爆点，Product选面料/手感/亲肤的片段，按面料→版型→上身效果的逻辑串联",
+        }
 
     # 构建版本角度列表
     _version_angles = []
@@ -5017,13 +5575,14 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
     _enforce_time_coherence = bool(_ai_rules.get("time_coherence", True))
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
-    _detected_main_cat = force_category if force_category and force_category != "自动检测" else None
+    _detected_main_cat = _normalize_forced_category(main_category) or _normalize_forced_category(force_category)
     _history_key = _clip_history_key(cleaned_srt)
     _recent_history = _get_recent_clip_history(_history_key)
     _recent_history_hint = _format_recent_history_hint(_recent_history)
     if _recent_history:
         _log(f"降级多版本差异化: 检测到同素材最近已用 {len(_recent_history)} 个片段")
-    _feedback_profile = _build_preview_feedback_profile(scope="smart")
+    _feedback_scope = _feedback_scope_key("smart", main_category or _detected_main_cat)
+    _feedback_profile = _build_preview_feedback_profile(scope=_feedback_scope)
     _settings = load_settings()
     _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(_settings, _feedback_profile)
     _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
@@ -5045,6 +5604,16 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
         ("流行趋势", "以流行趋势开场（Hook+前1-2个Product讲设计感/当季流行/风格定位/松弛感/千金风），后续Product必须覆盖版型/显瘦/实穿等其他卖点，同一角度最多2段，面料最多2段"),
         ("面料质感", "以面料质感开场（Hook+前1-2个Product讲面料/手感/亲肤/丝滑/垂坠），后续Product必须覆盖版型/显瘦/颜色/穿搭等其他卖点，同一角度最多2段，★面料总共最多1段★"),
     ]
+    if _is_food_fresh_category(main_category or _detected_main_cat):
+        all_angle_hints = [
+            ("口感食欲", "以试吃反应/切开爆汁/脆甜鲜嫩开场，后续Product必须覆盖新鲜、产地、规格、发货保鲜等其他食品卖点，同一角度最多2段"),
+            ("新鲜品质", "以现摘现发/鲜活饱满/品质背书开场，后续Product按新鲜证明→口感反馈→产地/规格→售后保障串联"),
+            ("产地溯源", "以源头产地/果园基地/产区特色开场，后续Product覆盖品质、口感、规格和冷链发货，不要变成泛泛聊天"),
+            ("规格分量", "以个头/净重/开箱/大小对比开场，后续Product覆盖推荐规格、口感、新鲜和售后保障"),
+            ("发货保鲜", "以冷链/保鲜/坏果包赔/收到货状态开场，后续Product覆盖新鲜口感、产地、规格推荐和放心拍理由"),
+            ("场景吃法", "以家庭囤货/孩子老人/早餐夜宵/火锅煲汤等场景开场，后续Product覆盖口感、新鲜、规格和发货保障"),
+            ("情绪感染", "以主播真实试吃强反应开场，用情绪带出口感、新鲜、规格和售后，不要剪入治疗、保健、药用功效"),
+        ]
 
     if focus_hint and focus_hint != "自动":
         _matched = [h for h in all_angle_hints if h[0] == focus_hint or h[0][:2] == focus_hint[:2]]
@@ -5106,13 +5675,13 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
                 if _product_count >= 4:  # 只记录前4个Product
                     break
 
-        clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt)
+        clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt, main_category=main_category or _detected_main_cat)
         clips = _filter_recent_similar_clips(clips, _used_version_clips, _log, min_keep=4)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log, focus_hint=angle_name, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, _log, max_hook_sec=_hook_cap_sec, focus_hint=angle_name, ai_controls=ai_controls)
         clips = _refine_hook_by_dynamic_score(clips, cleaned_srt, _log, focus_hint=angle_name, ai_controls=ai_controls)
         if _enforce_category_filter:
-            clips = _post_filter_cross_category(clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
+            clips = _post_filter_cross_category(clips, cleaned_srt, _log, preferred_cat=main_category or _detected_main_cat)
         if _enforce_time_coherence:
             clips = _check_narrative_coherence(clips, _log)
         clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
@@ -5565,11 +6134,14 @@ def _extract_hook_from_products(clips, srt_text, log_fn=None, focus_hint=None, a
     for ci, clip in enumerate(clips):
         if clip[0] == "hook":
             _existing_hook = ci
-            _existing_hook_good = any(kw in clip[1] for kw in _hook_kw)
+            _hook_score, _hook_reasons = _final_hook_quality_score(
+                clip[1], _clip_duration_value(clip), _hook_kw, focus_hint, ai_controls
+            )
+            _existing_hook_good = _hook_score >= 20.0
             break
 
     if _existing_hook_good and (not _explicit_pref or _hook_matches_preference(clips[_existing_hook][1], focus_hint, ai_controls)):
-        _log("Hook提取: 现有Hook含爆点词，质量OK")
+        _log("Hook提取: 现有Hook已过质量门槛，保留")
         return clips
     if _existing_hook_good and _explicit_pref:
         _log(f"Hook提取: 现有Hook有爆点但不匹配偏好'{str(focus_hint)[:8]}'，继续寻找")
@@ -5586,25 +6158,16 @@ def _extract_hook_from_products(clips, srt_text, log_fn=None, focus_hint=None, a
         for es, ee, txt in _srt_entries:
             # SRT条目在clip范围内
             if es >= clip_start - 0.5 and ee <= clip_end + 0.5:
+                dur = ee - es
+                if dur < 0.8 or dur > 5.0 or _is_bad_hook_candidate_text(txt):
+                    continue
+                score, reasons = _final_hook_quality_score(txt, dur, _hook_kw, focus_hint, ai_controls)
+                if score < 20.0:
+                    continue
                 pref_hits = _hook_pref_score(txt, focus_hint, ai_controls)
                 if _explicit_pref and pref_hits:
-                    dur = ee - es
-                    if 0.8 <= dur <= 5.0 and not _is_bad_hook_candidate_text(txt):
-                        score = 18 + pref_hits * 10 + 6.0 / max(dur, 0.8)
-                        hook_candidates.append((es, ee, txt, dur, score, ci))
-                for kw in _hook_kw:
-                    if kw in txt:
-                        dur = ee - es
-                        if _is_bad_hook_candidate_text(txt):
-                            continue
-                        score = 10.0 / max(dur, 0.5)  # 越短越好
-                        if kw in ("美爆了", "绝了", "太漂亮", "不敢信", "封神", "神仙", "超级超级"):
-                            score *= 2  # 强爆点加分
-                        pref_hits = _hook_pref_score(txt, focus_hint, ai_controls)
-                        if pref_hits:
-                            score += 18 + pref_hits * 6
-                        hook_candidates.append((es, ee, txt, dur, score, ci))
-                        break
+                    score += 6.0
+                hook_candidates.append((es, ee, txt, dur, score, ci))
 
     if not hook_candidates:
         _log("Hook提取: 未找到含爆点词的SRT条目")
@@ -5628,7 +6191,7 @@ def _extract_hook_from_products(clips, srt_text, log_fn=None, focus_hint=None, a
 
     return clips
 
-def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=None):
+def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=None, main_category=None):
 
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -5812,8 +6375,15 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
             # 无Hook片段：提拔第一个Product为Hook
             if clips and clips[0][0] in ("product", "highlight"):
                 _old = clips[0]
-                clips[0] = ("hook", _old[1], _old[2], _old[3], _old[4], _old[5], *_old[6:])
-                _log(f"Hook提拔: 首位Product '{_old[1][:20]}...' → Hook")
+                _hook_kw = load_keywords().get("hook_keywords", [])
+                _hook_score, _hook_reasons = _final_hook_quality_score(
+                    _old[1], _clip_duration_value(_old), _hook_kw, focus_hint, None
+                )
+                if _hook_score >= 20.0:
+                    clips[0] = ("hook", _old[1], _old[2], _old[3], _old[4], _old[5], *_old[6:])
+                    _log(f"Hook提拔: 首位Product '{_old[1][:20]}...' → Hook ({_hook_score:.1f}/{','.join(_hook_reasons[:2])})")
+                else:
+                    _log(f"Hook提拔: 首位Product未过质量门槛({_hook_score:.1f})，保留自然开场")
 
     # [DISABLED] 品类后置打乱AI叙事顺序，由AI Prompt控制品类排列
     # clips = _enforce_product_coherence(clips, log_fn)
@@ -5857,6 +6427,12 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
                     "情绪感染": ["绝了", "太好", "真的", "超"],
                     "流行趋势": ["流行", "设计感", "当季", "趋势"],
                     "面料质感": ["面料", "材质", "手感", "质感", "桑蚕丝"],
+                    "口感食欲": ["好吃", "口感", "试吃", "爆汁", "脆甜", "鲜嫩", "软糯", "Q弹"],
+                    "新鲜品质": ["新鲜", "鲜活", "现摘", "现采", "当天发", "品质", "饱满"],
+                    "产地溯源": ["产地", "源头", "基地", "果园", "直采", "溯源"],
+                    "规格分量": ["规格", "净重", "斤装", "箱装", "个头", "果径"],
+                    "发货保鲜": ["发货", "冷链", "保鲜", "锁鲜", "坏果包赔"],
+                    "场景吃法": ["早餐", "夜宵", "办公室", "全家", "火锅", "即食", "囤货"],
                 }
                 _matched_kws = []
                 for _pref, _kws in _pref_kws.items():
@@ -5888,7 +6464,7 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
                         # 已选片段中没有匹配的，从SRT中找
                         _log(f"已选片段中无匹配偏好的内容，Hook保持不变")
 
-        clips = _reorder_product_focus_blocks(clips, log_fn)
+        clips = _reorder_product_focus_blocks(clips, log_fn, preferred_cat=main_category)
 
     # 删除过短片段（<2s且非Hook的内容不完整，但Hook可以很短）
     _short = [c for c in clips if len(c) > 3 and (c[3] - c[2]) < 2 and c[0] != "hook"]
@@ -5901,6 +6477,12 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
 
 def _detect_focus_point(text):
     RULES = [
+        ("口感食欲", ["好吃","鲜甜","脆甜","爆汁","多汁","汁水","入口","口感","肉质","鲜嫩","软糯","酥脆","Q弹","弹牙","拉丝","试吃","咬一口","吃起来"]),
+        ("新鲜品质", ["新鲜","鲜活","现摘","现采","现捕","现捞","当天发","鲜度","品质","果形","果径","个头","饱满","坏果","坏果包赔","源头","基地","果园"]),
+        ("产地溯源", ["产地","原产地","源头","基地","果园","农场","牧场","渔港","海捕","直采","直发","溯源","农户","合作社","产区","当季","应季"]),
+        ("规格分量", ["规格","净含量","净重","克重","重量","斤装","箱装","袋装","盒装","整箱","大果","中果","果径","个头","份量","分量"]),
+        ("发货保鲜", ["发货","现发","冷链","冰袋","保温箱","泡沫箱","顺丰","次日达","保鲜","锁鲜","冷冻","速冻","冷藏","售后","坏果包赔","破损包赔"]),
+        ("场景吃法", ["早餐","夜宵","下午茶","办公室","孩子","老人","全家","聚餐","火锅","烧烤","煲汤","下饭","拌饭","空气炸锅","即食","开袋即食","囤货","冰箱","送礼"]),
         ("版型", ["版型","廓形","剪裁","袖型","领型","宽松","修身","收腰","直筒","微喇","落肩","短款","长款","箱型",
                   "高腰","中腰","低腰","A字","包臀","开叉","大摆","灯笼袖","泡泡袖","垫肩","阔腿","小脚","九分",
                   "高领","V领","圆领","方领","一字肩","露肩","抓绳","杆腰",
@@ -5934,6 +6516,25 @@ def _clip_focus_block(clip):
     focus = str(clip[6] if len(clip) > 6 else "")
     hay = focus + " " + text
 
+    for block in CATEGORY_FOCUS_ORDER.get("食品/生鲜", []):
+        if block != "其他" and block in focus:
+            return block
+    for block in DEFAULT_BLOCK_ORDER:
+        if block != "其他" and block in focus:
+            return block
+
+    if any(k in hay for k in ("好吃", "鲜甜", "脆甜", "爆汁", "多汁", "汁水", "入口", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "弹牙", "拉丝", "试吃", "咬一口", "吃起来")):
+        return "口感食欲"
+    if any(k in hay for k in ("新鲜", "鲜活", "现摘", "现采", "现捕", "现捞", "当天发", "鲜度", "果形", "果径", "个头", "饱满", "坏果包赔", "源头", "基地", "果园")):
+        return "新鲜品质"
+    if any(k in hay for k in ("产地", "原产地", "源头", "基地", "果园", "农场", "牧场", "渔港", "海捕", "直采", "直发", "溯源", "农户", "合作社", "产区", "当季", "应季")):
+        return "产地溯源"
+    if any(k in hay for k in ("规格", "净含量", "净重", "克重", "重量", "斤装", "箱装", "袋装", "盒装", "整箱", "大果", "中果", "果径", "个头", "份量", "分量")):
+        return "规格分量"
+    if any(k in hay for k in ("发货", "现发", "冷链", "冰袋", "保温箱", "泡沫箱", "顺丰", "次日达", "保鲜", "锁鲜", "冷冻", "速冻", "冷藏", "坏果包赔", "破损包赔")):
+        return "发货保鲜"
+    if any(k in hay for k in ("早餐", "夜宵", "下午茶", "办公室", "孩子", "老人", "全家", "聚餐", "火锅", "烧烤", "煲汤", "下饭", "拌饭", "空气炸锅", "即食", "开袋即食", "囤货", "冰箱", "送礼")):
+        return "场景吃法"
     if any(k in hay for k in ("显瘦", "遮肉", "藏肉", "收腰", "显高", "比例", "修饰", "版型", "廓形", "剪裁", "宽松", "修身", "帽型", "帽子", "翻领", "拉链", "肩型", "盖臀")):
         return "版型显瘦"
     if any(k in hay for k in ("面料", "材质", "手感", "触感", "垂感", "透气", "亲肤", "柔软", "针织", "冰丝", "真丝", "棉麻", "不闷", "不透")):
@@ -6038,7 +6639,7 @@ def _repair_hook_followup_coherence(clips, log_fn=None):
     return reordered
 
 
-def _reorder_product_focus_blocks(clips, log_fn=None):
+def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
     """Adaptively group product clips by selling-point block.
 
     The goal is not to force every video into one fixed template. If the AI
@@ -6073,13 +6674,15 @@ def _reorder_product_focus_blocks(clips, log_fn=None):
             _log(f"卖点段落排序: 保持AI原序 ({len(clips)}段)")
         return _repair_hook_followup_coherence(base_reordered, log_fn)
 
-    # 检测主品类，使用该品类的卖点排序顺序
-    cat_counts = {}
-    for clip in products:
-        cat = _detect_product_category(str(clip[1] if len(clip) > 1 else ""))
-        if cat:
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
-    main_cat = max(cat_counts, key=cat_counts.get) if cat_counts else None
+    # 检测主品类，优先使用用户指定品类；指定食品时不要因具体品名未命中而退回通用排序。
+    main_cat = _normalize_forced_category(preferred_cat)
+    if not main_cat:
+        cat_counts = {}
+        for clip in products:
+            cat = _detect_product_category(str(clip[1] if len(clip) > 1 else ""))
+            if cat:
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        main_cat = max(cat_counts, key=cat_counts.get) if cat_counts else None
     block_order = CATEGORY_FOCUS_ORDER.get(main_cat, DEFAULT_BLOCK_ORDER) if main_cat else DEFAULT_BLOCK_ORDER
 
     blocks = [_clip_focus_block(clip) for clip in products]
@@ -6797,6 +7400,22 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     def _is_true_close_candidate(clip, min_score=5.0):
         return _close_candidate_score(clip) >= min_score
 
+    def _hook_candidate_score(clip):
+        try:
+            hook_words = load_keywords().get("hook_keywords", [])
+        except Exception:
+            hook_words = []
+        return _final_hook_quality_score(
+            clip[1] if len(clip) > 1 else "",
+            _clip_duration_value(clip),
+            hook_words,
+            None,
+            None,
+        )[0]
+
+    def _is_true_hook_candidate(clip, min_score=20.0):
+        return _hook_candidate_score(clip) >= min_score
+
     def _can_append_close(clip):
         if _clip_overlaps_any(clip, finalized):
             return False
@@ -6816,7 +7435,7 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     if demoted_close_count:
         repairs.append(f"降级弱Close{demoted_close_count}段")
 
-    source_hooks = [c for c in source_clips if _is_hook_clip(c)]
+    source_hooks = [c for c in source_clips if _is_hook_clip(c) and _is_true_hook_candidate(c)]
     source_closes = [c for c in source_clips if _is_close_clip(c) and _is_true_close_candidate(c)]
 
     if not any(_is_hook_clip(c) for c in finalized):
@@ -6832,10 +7451,12 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
                 break
         if not restored and finalized:
             for idx, clip in enumerate(finalized):
-                if not _is_close_clip(clip):
+                if not _is_close_clip(clip) and _is_true_hook_candidate(clip):
                     finalized[idx] = _with_type(clip, "hook")
                     repairs.append("首段提拔Hook")
                     break
+            if not any(_is_hook_clip(c) for c in finalized):
+                repairs.append("未找到合格Hook")
 
     if not any(_is_close_clip(c) for c in finalized):
         restored = False
@@ -6889,6 +7510,100 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     repair_msg = f", 修复={','.join(repairs)}" if repairs else ""
     _log(f"最终片单: {len(finalized)}段, {total:.1f}s, Hook={'有' if hooks else '无'}, Close={'有' if closes else '无'}{target_msg}{repair_msg}")
     return finalized
+
+
+def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=12.0, max_hook_sec=6.0, max_close_sec=14.0):
+    """Split oversized clips on SRT entry boundaries when the fallback path needs it."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips or not srt_entries:
+        return clips
+
+    result = []
+    split_count = 0
+    for clip in clips:
+        if len(clip) < 6:
+            result.append(clip)
+            continue
+        ctype = str(clip[0] or "").lower()
+        limit = max_product_sec
+        if "hook" in ctype:
+            limit = max_hook_sec
+        elif "close" in ctype or ctype in ("cta", "call_to_action", "urgency"):
+            limit = max_close_sec
+        try:
+            start = float(clip[2])
+            end = float(clip[3])
+            duration = float(clip[5])
+        except Exception:
+            result.append(clip)
+            continue
+        if duration <= limit + 0.2:
+            result.append(clip)
+            continue
+
+        text = str(clip[1] if len(clip) > 1 else "")
+        marker_match = re.search(r"\[[vV]\d+\]", text)
+        marker = marker_match.group(0).upper() if marker_match else ""
+        entries = []
+        for entry in srt_entries or []:
+            if len(entry) < 3:
+                continue
+            try:
+                es = float(entry[0])
+                ee = float(entry[1])
+            except Exception:
+                continue
+            et = str(entry[2] or "")
+            if marker and marker not in et.upper():
+                continue
+            if ee <= start + 0.05 or es >= end - 0.05:
+                continue
+            entries.append((max(start, es), min(end, ee), et))
+        if len(entries) < 2:
+            result.append(clip)
+            continue
+
+        chunks = []
+        current = []
+        current_start = None
+        for entry in entries:
+            es, ee, _text = entry
+            if not current:
+                current = [entry]
+                current_start = es
+                continue
+            projected_end = ee
+            if current_start is not None and projected_end - current_start > limit and current:
+                chunks.append(current)
+                current = [entry]
+                current_start = es
+            else:
+                current.append(entry)
+        if current:
+            chunks.append(current)
+        if len(chunks) <= 1:
+            result.append(clip)
+            continue
+
+        for chunk in chunks:
+            cs = float(chunk[0][0])
+            ce = float(chunk[-1][1])
+            if ce - cs < 0.8:
+                continue
+            values = list(clip)
+            values[1] = "".join(str(item[2] or "") for item in chunk).strip() or text
+            values[2] = cs
+            values[3] = ce
+            values[5] = max(0.0, ce - cs)
+            result.append(tuple(values))
+        split_count += 1
+
+    if split_count:
+        _log(f"长片段拆分: 拆分 {split_count} 个过长片段，{len(clips)} -> {len(result)}")
+    return result
 
 
 def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
@@ -7987,21 +8702,14 @@ def _filter_price_and_cta(clips, log_fn=None):
         has_price = any(p.search(clean) for p in price_patterns)
         if has_forbidden or has_price:
             reason = []
-            is_hook_type = 'hook' in ct.lower()
             if has_forbidden:
                 matched = [w for w in forbidden_words if w in clean]
                 reason.append(f'违禁词:{",".join(matched)}')
             if has_price:
                 reason.append('价格模式')
-            # Hook含脏话/违禁词时降级为Product，而非直接删除（保留内容）
-            if is_hook_type and has_forbidden and not has_price:
-                new_ct = 'product' if ct.lower() == 'hook' else ct.replace('Hook', 'Product').replace('hook', 'product')
-                _log(f'  价格过滤: Hook降级 [{ct}→{new_ct}] "{clean[:30]}..." ({";".join(reason)})')
-                filtered.append((new_ct, text, s, e, sc, d, *_))
-            else:
-                removed += 1
-                _log(f'  价格过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
-                continue
+            removed += 1
+            _log(f'  价格过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
+            continue
         else:
             filtered.append((ct, text, s, e, sc, d, *_))
 
@@ -8162,18 +8870,8 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
     def _log(msg):
         if log_fn: log_fn(msg)
 
-    # 构建品类词库
-    ALL_CATEGORIES = {
-        "上衣": ["上衣","T恤","衬衫","针织衫","卫衣","打底衫","小衫","衬衣","网纱罩衫","罩衫",
-                 "毛衣","短袖","长袖","吊带衫","背心","抹胸","针织","开衫","開衫","针织开衫","针织開衫"],
-        "裤子": ["裤子","牛仔裤","阔腿裤","打底裤","工装裤","休闲裤","长裤","短裤","九分裤",
-                 "小脚裤","直筒裤","牛奶裤","烟管裤","哈伦裤","裤"],
-        "裙子": ["裙子","连衣裙","半身裙","A字裙","包臀裙","长裙","短裙","百褶裙","裙",
-                 "吊带裙","碎花裙","鱼尾裙","蛋糕裙","一步裙","旗袍裙","吊带","背心裙","腰头"],
-        "外套": ["外套","风衣","西装","羽绒服","大衣","夹克","棉服","皮衣","马甲"],
-        "套装": ["套装","四件套","三件套","两件套","三件","四件","成套","整套","全套"],
-        "鞋子": ["鞋","鞋子","凉鞋","运动鞋","高跟鞋","平底鞋","单鞋","靴子","老爹鞋"],
-    }
+    # 构建品类词库（统一复用 PRODUCT_CATEGORIES，避免新增品类漏掉二道过滤）
+    ALL_CATEGORIES = PRODUCT_CATEGORIES
 
     # 从 SRT 统计每个品类的出现频率，确定主品类
     cat_counts = {}
@@ -8181,12 +8879,16 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
         count = sum(1 for kw in keywords if kw in cleaned_srt)
         if count > 0:
             cat_counts[cat] = count
-    if not cat_counts:
-        return clips
     # 使用用户指定的主品类（如果有）
-    if preferred_cat and preferred_cat in ALL_CATEGORIES:
-        main_cat = preferred_cat
+    if preferred_cat:
+        main_cat = _normalize_forced_category(preferred_cat)
+        if main_cat is None and cat_counts:
+            main_cat = max(cat_counts, key=cat_counts.get)
+        if main_cat is None:
+            return clips
     else:
+        if not cat_counts:
+            return clips
         main_cat = max(cat_counts, key=cat_counts.get)
     main_kws = set(ALL_CATEGORIES.get(main_cat, []))
     match_trigger = {"搭", "配", "搭配", "配着穿", "搭什么", "配什么"}
@@ -8242,6 +8944,8 @@ def _post_filter_cross_category(clips, cleaned_srt, log_fn, preferred_cat=None):
 
     if removed:
         _log(f"跨品类扫描: 踢出 {removed} 个非{main_cat}片段，保留 {len(kept)} 个")
+    if _is_food_fresh_category(main_cat):
+        kept = _post_filter_food_cross_product(kept, _log)
     return kept
 
 
@@ -8436,7 +9140,21 @@ PRODUCT_CATEGORIES = {
              "组合", "套装组合", "整套", "全套", "穿搭",
              "兩件套", "三件套"],
     "鞋子": ["鞋", "鞋子", "凉鞋", "运动鞋", "高跟鞋", "平底鞋", "单鞋",
-             "靴子", "老爹鞋", "帆布鞋"],
+              "靴子", "老爹鞋", "帆布鞋"],
+    "食品/生鲜": [
+        "食品", "生鲜", "食材", "水果", "蔬菜", "海鲜", "冻品", "预制菜", "零食", "坚果",
+        "苹果", "橙子", "橘子", "柑橘", "榴莲", "车厘子", "樱桃", "荔枝", "芒果", "草莓",
+        "蓝莓", "葡萄", "蟠桃", "水蜜桃", "桃子", "黄桃", "油桃", "猕猴桃", "奇异果", "西梅", "香梨", "雪梨", "枇杷", "石榴",
+        "番茄", "西红柿", "玉米", "红薯", "紫薯", "土豆", "山药", "莲藕", "菌菇", "香菇",
+        "虾", "大虾", "鲜虾", "小龙虾", "螃蟹", "大闸蟹", "生蚝", "鲍鱼", "带鱼", "三文鱼",
+        "鳕鱼", "鱼片", "牛肉", "牛排", "羊肉", "猪肉", "鸡肉", "鸡翅", "鸡蛋", "牛奶",
+        "酸奶", "奶酪", "冷冻", "速冻", "半成品", "烤肠", "水饺", "馄饨", "包子", "面包",
+        "蛋糕", "糕点", "饼干", "燕麦", "大米", "五常大米", "粮油", "调味料", "酱油",
+        "鲜活", "现摘", "现采", "现捕", "现捞",
+        "果园", "农场", "渔港",
+        "冷链", "冰袋", "保温箱", "泡沫箱", "保鲜", "锁鲜", "净含量", "净重", "斤装", "箱装",
+        "大果", "果径", "个头", "坏果包赔", "破损包赔", "开袋即食", "囤货",
+    ],
 }
 
 # 品类 → 卖点排序优先级映射
@@ -8447,6 +9165,7 @@ CATEGORY_FOCUS_ORDER = {
     "外套": ["版型显瘦", "品质细节", "面料质感", "穿着体验", "场景搭配", "尺寸长度", "颜色氛围", "工艺细节", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺", "其他"],
     "套装": ["场景搭配", "版型显瘦", "颜色氛围", "面料质感", "品质细节", "性价比", "对比优势", "尺寸长度", "穿着体验", "工艺细节", "情绪感染", "流行趋势", "紧迫稀缺", "其他"],
     "鞋子": ["场景搭配", "品质细节", "颜色氛围", "尺寸长度", "面料质感", "性价比", "对比优势", "穿着体验", "工艺细节", "情绪感染", "流行趋势", "紧迫稀缺", "其他"],
+    "食品/生鲜": ["口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法", "性价比", "情绪感染", "紧迫稀缺", "对比优势", "其他"],
 }
 
 DEFAULT_BLOCK_ORDER = ["版型显瘦", "面料质感", "穿着体验", "品质细节", "尺寸长度", "颜色氛围", "场景搭配", "工艺细节", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺", "其他"]
@@ -8459,6 +9178,7 @@ CATEGORY_PROMPT_RULES = {
     "外套": "主推外套品类。版型显瘦和品质细节优先，面料最多2段。",
     "套装": "主推套装品类。场景搭配和整体效果优先于单品卖点。",
     "鞋子": "主推鞋子品类。场景搭配和品质细节优先。",
+    "食品/生鲜": "主推食品/生鲜品类。用户指定后不要再因具体品名未命中词库而退回通用/服装逻辑；先识别本场主商品和子类型，再让口感食欲、新鲜品质、产地溯源、规格分量、发货保鲜、场景吃法至少覆盖3类；优先试吃/切开/开箱/产地/冷链/囤货片段；普通食品不得剪成治疗、预防、保健、药用功效卖点。",
 }
 
 def _detect_product_category(text):
@@ -8862,24 +9582,12 @@ def detect_main_category(srt_text, force_category=None):
     Uses same keywords as _filter_srt_by_main_product.
     Returns category name string, or None.
     """
-    CATEGORIES = {
-        "\u4e0a\u8863": ["\u4e0a\u8863", "T\u6064", "\u886c\u886b", "\u9488\u7ec7\u886b", "\u536b\u8863", "\u6253\u5e95\u886b", "\u5c0f\u886b", "\u886b\u8863", "\u7f51\u7eb1\u7f69\u886b", "\u7f69\u886b",
-                       "\u897f\u8863", "\u6bdb\u8863", "\u77ed\u8896", "\u957f\u8896", "\u540a\u5e26", "\u80cc\u5fc3", "\u62b9\u80f8", "\u8fd9\u4ef6", "\u8fd9\u6b3e", "\u8fd9\u6761",
-                       "\u9488\u7ec7", "\u6bdb\u8863", "\u536b\u8863", "\u5c0f\u886b", "\u886c\u8863", "\u7f69\u886b", "\u5e26\u94fe\u8863",
-                       "开衫", "開衫", "针织开衫", "针织開衫"],
-        "\u88e4\u5b50": ["\u88e4\u5b50", "\u725b\u4ed4\u88e4", "\u4e5d\u5206\u88e4", "\u77ed\u88e4", "\u897f\u88c5\u88e4", "\u5bbd\u677e\u88e4", "\u76f4\u7b52\u88e4", "\u5c0f\u811a\u88e4", "\u8783\u87f9\u88e4", "\u725b\u4ed4",
-                       "\u88e4", "\u88e4\u88c5", "\u8fd9\u6761"],
-        "\u88d9\u5b50": ["\u88d9\u5b50", "\u8fde\u8863\u88d9", "\u767e\u88d9\u88d9", "A\u5b57\u88d9", "\u5305\u817f\u88d9", "\u5939\u514b\u88d9", "\u7f8a\u7ed2\u88d9", "\u82b1\u5965\u88d9", "\u88d9",
-                       "\u9c7c\u5c3e\u88d9", "\u88d9\u88c5", "\u77ed\u88d9", "\u957f\u88d9"],
-        "\u5916\u5957": ["\u5916\u5957", "\u5927\u8863", "\u7fbd\u7ed2\u670d", "\u76ae\u8863", "\u897f\u88c5", "\u98ce\u8863", "\u6bdb\u5462", "\u590d\u53e4", "\u725b\u4ed4\u5916\u5957", "\u76ae\u8346",
-                       "\u590d\u53e4\u5927\u8863", "\u77ed\u5916\u5957", "\u76ae\u8863"],
-        "\u5957\u88c5": ["\u5957\u88c5", "\u56db\u4ef6\u5957", "\u4e09\u4ef6\u5957", "\u8fd0\u52a8\u5957", "\u8fde\u8863\u8863", "\u8fde\u8863\u88d9", "\u5957\u88c5\u5916\u5957", "\u5957\u88c5", "\u5168\u5957",
-                       "\u5c0f\u9999\u98ce", "\u996d\u5957"],
-        "\u978b\u5b50": ["\u978b", "\u978b\u5b50", "\u957f\u9774", "\u8fd0\u52a8\u978b", "\u9ad8\u8ddf\u978b", "\u5e73\u5e95\u978b", "\u77ed\u9774", "\u9774\u5b50", "\u77ed\u9774"],
-    }
+    CATEGORIES = PRODUCT_CATEGORIES
 
-    if force_category and force_category in CATEGORIES:
-        return force_category
+    if force_category:
+        forced = _normalize_forced_category(force_category)
+        if forced:
+            return forced
 
     scores = {}
     for cat, kws in CATEGORIES.items():
@@ -8897,15 +9605,7 @@ ALL_CATEGORIES_MODULE = None
 def _get_categories():
     global ALL_CATEGORIES_MODULE
     if ALL_CATEGORIES_MODULE is None:
-        # Copy from _post_filter_cross_category
-        ALL_CATEGORIES_MODULE = {
-            'shangyi': [],
-            'kuzi': [],
-            'qunzi': [],
-            'waitao': [],
-            'taozhuang': [],
-            'xiezi': [],
-        }
+        ALL_CATEGORIES_MODULE = dict(PRODUCT_CATEGORIES)
     return ALL_CATEGORIES_MODULE
 def is_enabled():
     settings = load_settings()

@@ -8,6 +8,9 @@ import sys
 import time
 import json
 import uuid
+import subprocess
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # PyInstaller 打包后 certifi 路径可能指向已删除的临时目录，
 # 尝试多个可能的位置找到 cacert.pem
@@ -70,6 +73,65 @@ _VOLC_REGION_ALIASES = {
     "ap-southeast-1": "ap-southeast-1",
     "\u65b0\u52a0\u5761": "ap-southeast-1",
 }
+
+
+def prepare_volcengine_audio(source_path, output_dir, prefix=None, ffmpeg="ffmpeg", log_fn=None, timeout=300):
+    """Prepare a compact 16k mono audio file for Volcengine ASR upload."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    os.makedirs(output_dir, exist_ok=True)
+    safe_prefix = prefix or f"volc_{uuid.uuid4().hex}"
+    candidates = [
+        (
+            ".mp3",
+            ["-vn", "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "16000", "-ac", "1"],
+            "MP3 64kbps",
+        ),
+        (
+            ".wav",
+            ["-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"],
+            "WAV PCM",
+        ),
+    ]
+
+    last_error = ""
+    for ext, audio_args, label in candidates:
+        audio_path = os.path.join(output_dir, f"{safe_prefix}{ext}")
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
+
+        cmd = [ffmpeg, "-y", "-i", source_path, *audio_args, audio_path]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                creationflags=_NO_WINDOW,
+            )
+            if result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+                size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+                _log(f"volcengine_asr: 音频准备完成 ({label}, {size_mb:.1f}MB)")
+                return audio_path
+            stderr = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+            last_error = stderr.splitlines()[-1] if stderr else f"ffmpeg exit {result.returncode}"
+            _log(f"volcengine_asr: {label} 音频准备失败，尝试下一个格式")
+        except Exception as exc:
+            last_error = str(exc)
+            _log(f"volcengine_asr: {label} 音频准备异常，尝试下一个格式: {exc}")
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
+
+    _log(f"volcengine_asr: 音频准备失败: {last_error}")
+    return None
 
 
 def _normalize_region(value):
@@ -470,7 +532,9 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
     # --- 3. 轮询结果 ---
     query_url = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
     start_time = time.time()
-    poll_interval = 10  # 火山引擎QPS低，10秒轮询避免429
+    poll_schedule = [2, 4, 6, 10]
+    poll_index = 0
+    poll_interval = poll_schedule[poll_index]
     _empty_count = 0
 
     while time.time() - start_time < timeout:
@@ -489,7 +553,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
 
             # 先判断处理中状态（20000001=处理中，20000000=完成）
             if status_code in ("20000001", "20000002") or "Processing" in message or "PENDING" in str(message).upper():
-                # 正常处理中，继续轮询
+                poll_index = min(poll_index + 1, len(poll_schedule) - 1)
+                poll_interval = poll_schedule[poll_index]
                 continue
             # 429限流：指数退避而不是立即放弃
             elif "429" in str(status_code) or "429" in message or "rate" in message.lower() or "limit" in message.lower():
@@ -510,6 +575,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 _cleanup_tos(_tos_client, bucket, obj_key, _log)
                 return None
             elif message and ("Processing" in message or "PENDING" in str(message).upper()):
+                poll_index = min(poll_index + 1, len(poll_schedule) - 1)
+                poll_interval = poll_schedule[poll_index]
                 continue
             # status_code为空且message为空：可能是异常响应，最多等3轮
             elif not status_code and not message:
@@ -518,6 +585,8 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                     _log("volcengine_asr: 连续3次空响应，终止轮询")
                     _cleanup_tos(_tos_client, bucket, obj_key, _log)
                     return None
+                poll_index = min(poll_index + 1, len(poll_schedule) - 1)
+                poll_interval = poll_schedule[poll_index]
                 continue
             
             # --- 4. 解析结果 ---
