@@ -4,12 +4,93 @@
 
 """
 
+import json
 import os, re, subprocess
 from config import sanitize_forbidden_title
 
 from datetime import datetime
 
 from typing import Optional, List
+
+
+
+def _ffprobe_for(ffmpeg):
+    try:
+        base = os.path.basename(str(ffmpeg)).lower()
+        if base in ("ffmpeg", "ffmpeg.exe"):
+            probe_name = "ffprobe.exe" if base.endswith(".exe") else "ffprobe"
+            candidate = os.path.join(os.path.dirname(str(ffmpeg)), probe_name)
+            if os.path.exists(candidate):
+                return candidate
+        text = str(ffmpeg)
+        if text.lower().endswith("ffmpeg.exe"):
+            return text[:-10] + "ffprobe.exe"
+        if text.lower().endswith("ffmpeg"):
+            return text[:-6] + "ffprobe"
+    except Exception:
+        pass
+    return "ffprobe"
+
+
+def _av_start_gap_seconds(path, ffmpeg):
+    try:
+        proc = subprocess.run(
+            [
+                _ffprobe_for(ffmpeg),
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,start_time",
+                "-of",
+                "json",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            creationflags=0x8000000,
+        )
+        if proc.returncode != 0:
+            return 0.0
+        data = json.loads((proc.stdout or b"{}").decode("utf-8", errors="replace") or "{}")
+        streams = data.get("streams") or []
+        video = next((item for item in streams if item.get("codec_type") == "video"), None)
+        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+        if not video or not audio:
+            return 0.0
+        return abs(float(video.get("start_time") or 0.0) - float(audio.get("start_time") or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path):
+    return subprocess.run(
+        [
+            ffmpeg, "-y",
+            "-ss", str(float(rel_st)),
+            "-i", video,
+            "-t", str(float(part_dur)),
+            "-vf", "setpts=PTS-STARTPTS,fps=30,format=yuv420p",
+            "-r", "30",
+            "-vsync", "cfr",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-af", "aresample=async=1:first_pts=0",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-shortest",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            out_path,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=600,
+        creationflags=0x8000000,
+    )
 
 
 
@@ -499,15 +580,22 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                 try:
                     # 快切 -c copy
                     r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
-                        "-t", str(float(part_dur)), "-c", "copy", out_path],
+                        "-t", str(float(part_dur)), "-c", "copy",
+                        "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out_path],
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300, creationflags=0x8000000)
-                    if r.returncode != 0 or not (os.path.exists(out_path) and os.path.getsize(out_path) > 1000):
+                    copy_ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
+                    if copy_ok:
+                        gap = _av_start_gap_seconds(out_path, ffmpeg)
+                        if gap > 0.08:
+                            if log_fn:
+                                log_fn("  音画时间戳偏移 %.3fs，切换同步安全重编码: %s" % (gap, os.path.basename(out_path)))
+                            r = _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path)
+                            copy_ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
+                    if not copy_ok:
                         last_error = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:] or [""]
                         last_error = last_error[0]
                         # 快切失败，重编码
-                        r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
-                            "-t", str(float(part_dur)), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out_path],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600, creationflags=0x8000000)
+                        r = _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path)
                         if r.returncode != 0:
                             lines = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()
                             last_error = lines[-1] if lines else last_error

@@ -411,6 +411,17 @@ def _normalize_style_profile_strength(value):
     return aliases.get(text, "auto")
 
 
+def _style_profile_selection_enabled(settings):
+    if not isinstance(settings, dict):
+        return True
+    value = settings.get("style_profile_enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "off", "no", "disabled", "关闭", "关", "否"}
+    if value is None:
+        return True
+    return bool(value)
+
+
 def _feedback_sample_count(profile):
     try:
         summary = profile.get("summary") if isinstance(profile, dict) else {}
@@ -420,8 +431,10 @@ def _feedback_sample_count(profile):
 
 
 def _feedback_effective_strength(settings, profile):
-    configured = _normalize_style_profile_strength((settings or {}).get("style_profile_strength"))
     count = _feedback_sample_count(profile)
+    if not _style_profile_selection_enabled(settings):
+        return "off", "disabled", count
+    configured = _normalize_style_profile_strength((settings or {}).get("style_profile_strength"))
     if configured == "off":
         return "off", configured, count
     if count < 3:
@@ -1443,6 +1456,19 @@ def _friendly_http(code, err=""):
     else:
         return f"请检查网络和API设置（错误码:{code}）"
 
+
+class NonRetryableAIError(RuntimeError):
+    """AI errors that user must fix in settings/account before retrying."""
+
+
+def _is_non_retryable_http(code):
+    try:
+        code = int(code)
+    except Exception:
+        return False
+    return code in {400, 401, 402, 403, 404, 413}
+
+
 def _friendly_msg(err_str):
     """翻译常见错误信息"""
     s = err_str.lower()
@@ -1487,11 +1513,12 @@ def _keyword_file_paths():
     import os
 
     app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.json")
-    user_path = os.path.join(
-        os.environ.get("APPDATA", os.path.expanduser("~")),
-        "LiveClipper",
-        "keywords.json",
-    )
+    try:
+        from config import USER_DATA_DIR
+        user_root = USER_DATA_DIR
+    except Exception:
+        user_root = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper")
+    user_path = os.path.join(user_root, "keywords.json")
     return app_path, user_path
 
 
@@ -1710,6 +1737,14 @@ def _normalize_focus_label(value):
     return AI_FOCUS_ALIASES.get(text, text)
 
 
+def _current_focus_used_label():
+    summary = globals().get("_LAST_FOCUS_SUMMARY") or {}
+    if not isinstance(summary, dict):
+        return ""
+    label = summary.get("used_label") or summary.get("label") or summary.get("matched_label") or ""
+    return _normalize_focus_label(label)
+
+
 def _normalize_preference_weights(weights):
     result = {}
     if not isinstance(weights, dict):
@@ -1755,6 +1790,7 @@ def _default_settings():
     return {
         "api_key": "", "base_url": DEEPSEEK_DEFAULT_BASE_URL,
         "model": DEEPSEEK_DEFAULT_MODEL, "enabled": False,
+        "style_profile_enabled": True,
         "style_profile_strength": "auto",
     }
 
@@ -3406,6 +3442,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _feedback_mode, _feedback_configured, _feedback_count = _feedback_effective_strength(settings, _feedback_profile)
     _feedback_prompt_enabled = _feedback_mode in {"standard", "strong"}
     _feedback_filter_enabled = _feedback_mode in {"light", "standard", "strong"}
+    _feedback_active_profile = _feedback_profile if _feedback_filter_enabled else None
     _feedback_hint = _build_preview_feedback_hint_from_profile(_feedback_profile) if _feedback_prompt_enabled else ""
     if _feedback_hint:
         _recent_history_hint = "\n".join(part for part in (_recent_history_hint, _feedback_hint) if part)
@@ -3415,7 +3452,10 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     elif _feedback_mode == "readonly":
         _log(f"剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
     elif _feedback_mode == "off":
-        _log("剪辑风格画像: 已关闭，不参与本次选片")
+        if _feedback_configured == "disabled":
+            _log("剪辑风格画像: 参与AI选片开关已关闭，不参与本次选片")
+        else:
+            _log("剪辑风格画像: 已关闭，不参与本次选片")
     _history_min_keep, _history_min_duration = _recent_filter_floor(_AI_TARGET_DURATION)
 
     def _record_history_if_needed(selected_clips):
@@ -3481,7 +3521,15 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             log_fn(f"AI: 当前{len(clips)}段但已有{_current_ai_dur:.1f}s，接近目标，跳过补选避免超时长")
         original_clips = list(clips)
         removed_from_dedup = []
-        clips = _dedup_clips(clips, log_fn, multi_version=multi_version, focus_hint=focus_hint, srt_text=srt_text, main_category=_cross_cat_preferred)
+        clips = _dedup_clips(
+            clips,
+            log_fn,
+            multi_version=multi_version,
+            focus_hint=focus_hint,
+            srt_text=srt_text,
+            main_category=_cross_cat_preferred,
+            preferred_focus=_current_focus_used_label(),
+        )
         # 从Product中提取Hook（如果AI没选Hook）
         clips = _extract_hook_from_products(clips, cleaned_srt, log_fn, focus_hint=focus_hint, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, log_fn, max_hook_sec=_hook_cap_sec, focus_hint=focus_hint, ai_controls=ai_controls)
@@ -3655,7 +3703,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _log(f"AI: 重试temperature={temperature}")
                 original_clips = list(clips)
                 continue
-            clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_profile)
+            clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_active_profile)
             _record_history_if_needed(clips)
             return clips
         _log(f"AI: 第 {attempt + 1} 次校验未通过，重试...")
@@ -3744,7 +3792,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             min_keep=_history_min_keep,
             min_duration=_history_min_duration,
         )
-        clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_profile)
+        clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_active_profile)
         _record_history_if_needed(clips)
         return clips
 
@@ -3764,7 +3812,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             min_keep=_history_min_keep,
             min_duration=_history_min_duration,
         )
-        relaxed = _enforce_target_duration_limit(relaxed, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_profile)
+        relaxed = _enforce_target_duration_limit(relaxed, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_active_profile)
         _record_history_if_needed(relaxed)
     return relaxed if relaxed else []
 
@@ -4519,7 +4567,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 pass
             try:
                 import json as _jw
-                _kw_path_weights = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
+                _kw_path_weights = _keyword_file_paths()[1]
                 if os.path.exists(_kw_path_weights):
                     with open(_kw_path_weights, "r", encoding="utf-8") as _jwf:
                         _jwdata = _jw.load(_jwf)
@@ -4734,7 +4782,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _detail_kw_prompt = ""
     try:
         import json as _dkw_json
-        _kw_path_detail = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "keywords.json")
+        _kw_path_detail = _keyword_file_paths()[1]
         if os.path.exists(_kw_path_detail):
             with open(_kw_path_detail, "r", encoding="utf-8") as _dkwf:
                 _dkw_data = _dkw_json.load(_dkwf)
@@ -4915,8 +4963,12 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         err = ""
         try: err = e.read().decode("utf-8", errors="replace")[:200]
         except Exception: pass
-        _log(f"⚠️ AI 接口调用失败 (HTTP {e.code})：{_friendly_http(e.code, err)}")
+        friendly = _friendly_http(e.code, err)
+        message = f"AI 接口调用失败 (HTTP {e.code})：{friendly}"
+        _log(f"⚠️ {message}")
         _skip_focus = _orig_skip  # 恢复全局状态
+        if _is_non_retryable_http(e.code):
+            raise NonRetryableAIError(message) from e
         return []
     except Exception as e:
         _log(f"⚠️ AI 选片失败: {_friendly_msg(str(e))}")
@@ -5306,7 +5358,10 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     elif _feedback_mode == "readonly":
         _log(f"多版本剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
     elif _feedback_mode == "off":
-        _log("多版本剪辑风格画像: 已关闭，不参与本次选片")
+        if _feedback_configured == "disabled":
+            _log("多版本剪辑风格画像: 参与AI选片开关已关闭，不参与本次选片")
+        else:
+            _log("多版本剪辑风格画像: 已关闭，不参与本次选片")
 
     # ★构建SRT条目索引★
     _indexed_srt_entries = []
@@ -5376,7 +5431,15 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     _log(f"AI: 素材选取成功，共{len(raw_clips)}个片段")
 
     # ★对素材做初步后处理★
-    raw_clips = _dedup_clips(raw_clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt, main_category=_detected_main_cat)
+    raw_clips = _dedup_clips(
+        raw_clips,
+        _log,
+        multi_version=True,
+        focus_hint=focus_hint,
+        srt_text=cleaned_srt,
+        main_category=_detected_main_cat,
+        preferred_focus=_current_focus_used_label(),
+    )
     if _enforce_category_filter:
         raw_clips = _post_filter_cross_category(raw_clips, cleaned_srt, _log, preferred_cat=_detected_main_cat)
     raw_clips = [(ct, _apply_asr_corrections(text, _log), s, e, sc, d, focus)
@@ -5593,7 +5656,10 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
     elif _feedback_mode == "readonly":
         _log(f"降级多版本剪辑风格画像: 样本{_feedback_count}条，未满3条，仅记录不参与选片")
     elif _feedback_mode == "off":
-        _log("降级多版本剪辑风格画像: 已关闭，不参与本次选片")
+        if _feedback_configured == "disabled":
+            _log("降级多版本剪辑风格画像: 参与AI选片开关已关闭，不参与本次选片")
+        else:
+            _log("降级多版本剪辑风格画像: 已关闭，不参与本次选片")
     all_angle_hints = [
         ("版型显瘦", "以版型显瘦开场（Hook+前1-2个Product讲显瘦/遮肉/修饰身材/收腰/遮副乳），后续Product必须覆盖颜色/穿搭/品质等其他卖点，同一角度最多2段，面料最多2段"),
         ("颜色氛围", "以颜色氛围开场（Hook+前1-2个Product讲颜色/显白/衬肤色/抬气色/温柔色），后续Product必须覆盖版型/显瘦/穿搭等其他卖点，同一角度最多2段，面料最多2段"),
@@ -5675,7 +5741,15 @@ def _multi_version_fallback(srt_text, log_fn, force_category, focus_hint, num_ve
                 if _product_count >= 4:  # 只记录前4个Product
                     break
 
-        clips = _dedup_clips(clips, _log, multi_version=True, focus_hint=focus_hint, srt_text=cleaned_srt, main_category=main_category or _detected_main_cat)
+        clips = _dedup_clips(
+            clips,
+            _log,
+            multi_version=True,
+            focus_hint=focus_hint,
+            srt_text=cleaned_srt,
+            main_category=main_category or _detected_main_cat,
+            preferred_focus=_current_focus_used_label() or angle_name,
+        )
         clips = _filter_recent_similar_clips(clips, _used_version_clips, _log, min_keep=4)
         clips = _extract_hook_from_products(clips, cleaned_srt, _log, focus_hint=angle_name, ai_controls=ai_controls)
         clips = _force_short_hook(clips, cleaned_srt, _log, max_hook_sec=_hook_cap_sec, focus_hint=angle_name, ai_controls=ai_controls)
@@ -6191,7 +6265,7 @@ def _extract_hook_from_products(clips, srt_text, log_fn=None, focus_hint=None, a
 
     return clips
 
-def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=None, main_category=None):
+def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=None, main_category=None, preferred_focus=None):
 
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -6464,7 +6538,12 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
                         # 已选片段中没有匹配的，从SRT中找
                         _log(f"已选片段中无匹配偏好的内容，Hook保持不变")
 
-        clips = _reorder_product_focus_blocks(clips, log_fn, preferred_cat=main_category)
+        clips = _reorder_product_focus_blocks(
+            clips,
+            log_fn,
+            preferred_cat=main_category,
+            preferred_focus=preferred_focus or _current_focus_used_label() or focus_hint,
+        )
 
     # 删除过短片段（<2s且非Hook的内容不完整，但Hook可以很短）
     _short = [c for c in clips if len(c) > 3 and (c[3] - c[2]) < 2 and c[0] != "hook"]
@@ -6564,7 +6643,37 @@ def _clip_focus_block(clip):
     return "其他"
 
 
-def _repair_hook_followup_coherence(clips, log_fn=None):
+def _known_focus_blocks():
+    blocks = []
+    orders = []
+    category_orders = globals().get("CATEGORY_FOCUS_ORDER") or {}
+    if isinstance(category_orders, dict):
+        orders.extend(category_orders.values())
+    orders.append(globals().get("DEFAULT_BLOCK_ORDER") or [])
+    for order in orders:
+        for block in order or []:
+            if block and block not in blocks:
+                blocks.append(block)
+    return blocks
+
+
+def _focus_label_to_block(label):
+    text = _normalize_focus_label(label)
+    text = str(text or "").strip()
+    if not text or text in {"自动", "默认", "随机偏好", "兜底偏好", "全量选片", "通用卖点", "其他"}:
+        return ""
+
+    for block in _known_focus_blocks():
+        if block == "其他":
+            continue
+        if text == block or block in text or text in block:
+            return block
+
+    block = _clip_focus_block(("product", text, 0, 0, 0, 0, text))
+    return "" if block == "其他" else block
+
+
+def _repair_hook_followup_coherence(clips, log_fn=None, preferred_focus=None):
     """Move the best related product clip directly after Hook when needed."""
     def _log(msg):
         if log_fn:
@@ -6585,6 +6694,9 @@ def _repair_hook_followup_coherence(clips, log_fn=None):
     first = clips[first_idx]
     hook_text = str(hook[1] if len(hook) > 1 else "")
     hook_block = _clip_focus_block(hook)
+    preferred_block = _focus_label_to_block(preferred_focus)
+    if preferred_block and _clip_focus_block(first) == preferred_block:
+        return clips
 
     def _time_gap_score(clip):
         try:
@@ -6639,13 +6751,14 @@ def _repair_hook_followup_coherence(clips, log_fn=None):
     return reordered
 
 
-def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
+def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None, preferred_focus=None):
     """Adaptively group product clips by selling-point block.
 
     The goal is not to force every video into one fixed template. If the AI
-    already produced a coherent narrative, keep it. If it jumps between blocks
-    or time ranges, gently group related selling points while keeping the first
-    AI-selected product block as the narrative anchor.
+    already produced a coherent narrative, keep it. When the current AI
+    preference is present in selected clips, use that block as the narrative
+    anchor; otherwise gently group related selling points around the first
+    AI-selected product block.
     """
     def _log(msg):
         if log_fn:
@@ -6667,12 +6780,12 @@ def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
             products.append(clip)
 
     base_reordered = (hooks[:1] if hooks else []) + products + closes
-    if len(products) < 4:
+    if not products:
         if base_reordered != clips:
             _log(f"卖点段落排序: 保持AI原序，仅修正hook/close位置 ({len(clips)}段)")
         else:
             _log(f"卖点段落排序: 保持AI原序 ({len(clips)}段)")
-        return _repair_hook_followup_coherence(base_reordered, log_fn)
+        return _repair_hook_followup_coherence(base_reordered, log_fn, preferred_focus=preferred_focus)
 
     # 检测主品类，优先使用用户指定品类；指定食品时不要因具体品名未命中而退回通用排序。
     main_cat = _normalize_forced_category(preferred_cat)
@@ -6686,6 +6799,8 @@ def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
     block_order = CATEGORY_FOCUS_ORDER.get(main_cat, DEFAULT_BLOCK_ORDER) if main_cat else DEFAULT_BLOCK_ORDER
 
     blocks = [_clip_focus_block(clip) for clip in products]
+    preferred_block = _focus_label_to_block(preferred_focus)
+    preferred_present = bool(preferred_block and preferred_block in blocks)
     block_rank = {block: idx for idx, block in enumerate(block_order)}
 
     def _rank(block):
@@ -6715,16 +6830,24 @@ def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
             pass
 
     scattered = _has_scattered_blocks(blocks)
-    needs_reorder = scattered or inversions >= 2 or time_backtracks >= 2
+    first_product_block = blocks[0] if blocks else None
+    preferred_mismatch = preferred_present and first_product_block != preferred_block
+    order_noise = len(products) >= 4 and (scattered or inversions >= 2 or time_backtracks >= 2)
+    needs_reorder = preferred_mismatch or order_noise
     if not needs_reorder:
+        pref_note = ""
+        if preferred_block:
+            pref_note = f"，偏好{preferred_block}{'已在前排' if preferred_present else '未命中'}"
         if base_reordered != clips:
-            _log(f"卖点段落排序: 保持AI原序，仅修正hook/close位置 ({len(clips)}段)")
+            _log(f"卖点段落排序: 保持AI原序，仅修正hook/close位置{pref_note} ({len(clips)}段)")
         else:
-            _log(f"卖点段落排序: 保持AI原序 ({len(clips)}段)")
-        return _repair_hook_followup_coherence(base_reordered, log_fn)
+            _log(f"卖点段落排序: 保持AI原序{pref_note} ({len(clips)}段)")
+        return _repair_hook_followup_coherence(base_reordered, log_fn, preferred_focus=preferred_focus)
 
-    anchor = next((block for block in blocks if block != "其他"), blocks[0] if blocks else None)
-    if anchor in block_order:
+    anchor = preferred_block if preferred_present else next((block for block in blocks if block != "其他"), blocks[0] if blocks else None)
+    if preferred_present:
+        adaptive_order = [preferred_block] + [block for block in block_order if block != preferred_block]
+    elif anchor in block_order:
         anchor_idx = block_order.index(anchor)
         adaptive_order = block_order[anchor_idx:] + block_order[:anchor_idx]
     else:
@@ -6756,10 +6879,13 @@ def _reorder_product_focus_blocks(clips, log_fn=None, preferred_cat=None):
 
     block_summary = [f"{block}{len(grouped[block])}" for block in adaptive_order if block in grouped and grouped[block]]
     detail = f"，同卖点时间整理{sorted_group_count}组" if sorted_group_count else ""
-    _log(f"卖点段落排序: 自适应整理({main_cat or '通用'}，锚点={anchor}) {' → '.join(block_summary)}{detail}")
+    pref_note = f"，偏好={preferred_block}" if preferred_block else ""
+    if preferred_block and not preferred_present:
+        pref_note += "未命中"
+    _log(f"卖点段落排序: 自适应整理({main_cat or '通用'}{pref_note}，锚点={anchor}) {' → '.join(block_summary)}{detail}")
 
     reordered = (hooks[:1] if hooks else []) + ordered_products + closes
-    return _repair_hook_followup_coherence(reordered, log_fn)
+    return _repair_hook_followup_coherence(reordered, log_fn, preferred_focus=preferred_focus)
 
 
 # ============================================================
@@ -7497,7 +7623,11 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     others = [c for c in finalized if not _is_hook_clip(c) and not _is_close_clip(c)]
     if hooks or closes:
         finalized = (hooks[:1] if hooks else []) + others + closes
-        finalized = _repair_hook_followup_coherence(finalized, log_fn)
+        finalized = _repair_hook_followup_coherence(
+            finalized,
+            log_fn,
+            preferred_focus=_current_focus_used_label(),
+        )
 
     total = sum(_clip_duration_value(c) for c in finalized)
     target_msg = ""

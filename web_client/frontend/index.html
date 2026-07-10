@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260709-run-summary-outputs">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260710-ai-fatal-errors">
 </head>
 <body>
   <div class="app-shell">
@@ -1527,7 +1527,7 @@
                   <h2>剪辑风格画像</h2>
                   <button class="button button-secondary" data-action="refresh-ai-feedback">刷新</button>
                 </div>
-                <p class="panel-note">根据你在 AI 预览里保留、删除、拖到开头或结尾的选择，逐渐形成专属选片风格。当前先做可视化学习，后续逐步参与 AI 选片。</p>
+                <p class="panel-note">根据你在 AI 预览里保留、删除、拖到开头或结尾的选择，逐渐形成专属选片风格。</p>
                 <div class="metric-row">
                   <div>
                     <span class="metric-label">学习次数</span>
@@ -1544,6 +1544,10 @@
                   <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
                   <button class="button button-muted" data-action="clear-ai-feedback">清空学习数据</button>
                 </div>
+                <label class="switch-row">
+                  <span>参与 AI 选片</span>
+                  <input id="s-style-profile-enabled" type="checkbox" checked>
+                </label>
                 <div class="field-row compact">
                   <label for="s-style-profile-strength">AI 学习强度</label>
                   <select id="s-style-profile-strength">
@@ -1554,7 +1558,7 @@
                     <option value="strong">强</option>
                   </select>
                 </div>
-                <p class="panel-note">自动推荐会根据样本数量调节：样本少时只读，样本足够后再轻度或标准参与 AI 选片。</p>
+                <p class="panel-note">关闭后画像仍会继续学习和展示，但不会进入 AI 提示、过滤或排序加权。自动推荐会根据样本数量调节参与强度。</p>
                 <div class="feedback-summary-box" id="ai-feedback-summary">
                   <p class="panel-note">剪辑风格画像会在积累人工选择后自动生成。</p>
                 </div>
@@ -1704,6 +1708,15 @@
                   <input id="runtime-user-data" type="text" readonly>
                 </div>
                 <div class="field-row">
+                  <label for="user-data-dir">迁移目录</label>
+                  <div class="input-with-button">
+                    <input id="user-data-dir" type="text" placeholder="选择 D/E 盘中的 LiveClipperData 文件夹">
+                    <button class="button button-secondary" data-action="pick-directory" data-target="user-data-dir">浏览</button>
+                    <button class="button button-muted" data-action="open-path" data-target="user-data-dir">打开</button>
+                  </div>
+                </div>
+                <p class="panel-note">迁移后，设置、词库、剪辑风格画像、预览缓存和拖拽缓存会写入新目录；授权和更新指针仍保留在系统默认位置。</p>
+                <div class="field-row">
                   <label>源码目录</label>
                   <input id="runtime-repo-root" type="text" readonly>
                 </div>
@@ -1748,6 +1761,7 @@
                   <button class="button button-secondary" data-action="check-update">检查更新</button>
                   <button class="button button-secondary" data-action="apply-update">安装更新</button>
                   <button class="button button-secondary" data-action="feedback">反馈</button>
+                  <button class="button button-secondary" data-action="apply-user-data-dir">应用数据目录</button>
                   <button class="button button-secondary" data-action="clear-cache">清理缓存</button>
                 </div>
               </div>
@@ -1798,6 +1812,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260709-run-summary-outputs" defer></script>
+  <script src="/assets/app.js?v=20260710-ai-fatal-errors" defer></script>
 </body>
 </html>

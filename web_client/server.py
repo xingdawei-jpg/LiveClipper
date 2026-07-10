@@ -10,6 +10,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -139,6 +140,7 @@ _LOG_SEQ = 0
 _LOG_LAST_BY_SCOPE: dict[str, str] = {}
 _TASKS: dict[str, dict[str, Any]] = {}
 _TASK_LOCK = threading.Lock()
+_OUTPUT_HISTORY_LOCK = threading.Lock()
 _CANCELLED_TASKS: set[str] = set()
 _TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _SCAN_RESULTS: dict[str, Any] = {"products": [], "merged": []}
@@ -232,8 +234,8 @@ def _solution_for_error(raw: str) -> str:
         return "请检查系统时间、证书、代理和防火墙；公司网络可尝试切换热点。"
     if "401" in lower or "403" in lower or "unauthorized" in lower or "forbidden" in lower or "鉴权" in lower or "api key" in lower or "ak" in lower or "sk" in lower:
         return "请到设置页重新填写密钥，并确认账号权限、地域和桶名一致。"
-    if "quota" in lower or "余额" in lower or "insufficient" in lower or "限额" in lower:
-        return "请检查账号余额、调用额度或并发限制。"
+    if "402" in lower or "quota" in lower or "余额" in lower or "insufficient" in lower or "限额" in lower:
+        return "请到模型平台检查余额和调用额度，充值或更换可用 API Key 后再试。"
     if "conversion failed" in lower or "codec" in lower or "decode" in lower or "encode" in lower or "invalid argument" in lower:
         return "请先用播放器确认源视频能正常播放；仍失败时可换一个输出目录，或把视频转成标准 MP4 后重试。"
     if "no valid speech" in lower or "silence" in lower or "无有效语音" in lower:
@@ -250,6 +252,9 @@ def _solution_for_error(raw: str) -> str:
 
 
 def _friendly_error_message(raw: str) -> str:
+    lower = str(raw or "").lower()
+    if "402" in lower or "余额不足" in raw:
+        return "AI 接口余额不足：请到模型平台充值，或在设置中更换可用 API Key 后再试。"
     return f"处理失败：{_short_error(raw)}。解决办法：{_solution_for_error(raw)}"
 
 
@@ -812,6 +817,7 @@ def _load_settings() -> dict[str, Any]:
         "aliyun_bucket": "",
         "aliyun_region": "oss-cn-shanghai",
         "preference_weights": dict(DEFAULT_PREFERENCE_WEIGHTS),
+        "style_profile_enabled": True,
         "style_profile_strength": "auto",
         "ai_rules": dict(DEFAULT_AI_RULES),
         "ui_theme": "system",
@@ -875,6 +881,371 @@ def _safe_user_child(*parts: str) -> Path:
     if not str(target).lower().startswith(str(base).lower()):
         raise HTTPException(status_code=400, detail="Unsafe path")
     return target
+
+
+def _default_user_data_dir() -> Path:
+    try:
+        import config
+        return Path(config._default_user_data_dir()).resolve()
+    except Exception:
+        return (Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper").resolve()
+
+
+def _user_data_location_file() -> Path:
+    try:
+        import config
+        return Path(config._location_file()).resolve()
+    except Exception:
+        return _default_user_data_dir() / "user_data_location.json"
+
+
+def _path_same(left: Path, right: Path) -> bool:
+    try:
+        return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
+    except Exception:
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _path_is_child(path: Path, parent: Path) -> bool:
+    try:
+        path_resolved = path.resolve()
+        parent_resolved = parent.resolve()
+        return os.path.normcase(str(path_resolved)).startswith(os.path.normcase(str(parent_resolved)) + os.sep)
+    except Exception:
+        return False
+
+
+def _validate_user_data_target(raw: str) -> Path:
+    text = str(raw or "").strip().strip('"')
+    if not text:
+        raise HTTPException(status_code=400, detail="请选择用户数据目录。")
+    target = Path(os.path.expandvars(text)).expanduser()
+    if not target.is_absolute():
+        target = target.resolve()
+    if str(target) in {target.anchor, str(Path(target.anchor))}:
+        raise HTTPException(status_code=400, detail="不能直接选择磁盘根目录，请新建一个 LiveClipperData 文件夹。")
+    current = _get_user_data_dir()
+    if not _path_same(target, current) and _path_is_child(target, current):
+        raise HTTPException(status_code=400, detail="新目录不能放在当前用户数据目录里面，请选择另一个磁盘或独立文件夹。")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        probe = target / f".liveclipper_write_test_{os.getpid()}.tmp"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"目标目录不可写：{exc}") from exc
+    return target.resolve()
+
+
+_USER_DATA_MIGRATE_SKIP = {
+    "cache",
+    "temp",
+    "clip_previews",
+    "web_uploads",
+    "app",
+    "web_client",
+    "__pycache__",
+    "user_data_location.json",
+}
+
+
+def _copy_user_data_persistent(current: Path, target: Path) -> dict[str, Any]:
+    if _path_same(current, target) or not current.exists():
+        return {"files": 0, "bytes": 0, "items": []}
+    copied_files = 0
+    copied_bytes = 0
+    copied_items: list[str] = []
+    for child in current.iterdir():
+        if child.name in _USER_DATA_MIGRATE_SKIP:
+            continue
+        if _path_same(child, target) or _path_is_child(target, child):
+            continue
+        dst = target / child.name
+        try:
+            if child.is_dir():
+                shutil.copytree(child, dst, dirs_exist_ok=True)
+                copied_items.append(child.name)
+                for item in child.rglob("*"):
+                    if item.is_file():
+                        copied_files += 1
+                        copied_bytes += item.stat().st_size
+            elif child.is_file():
+                shutil.copy2(child, dst)
+                copied_items.append(child.name)
+                copied_files += 1
+                copied_bytes += child.stat().st_size
+        except Exception as exc:
+            emit_log("warning", f"用户数据迁移跳过 {child.name}: {exc}", "settings")
+    return {"files": copied_files, "bytes": copied_bytes, "items": copied_items}
+
+
+def _cache_clear_active_tasks() -> list[str]:
+    with _TASK_LOCK:
+        return [
+            str(task.get("title") or task.get("scope") or task_id)
+            for task_id, task in _TASKS.items()
+            if task.get("status") in {"queued", "running"}
+        ]
+
+
+def _cache_target_stats(path: Path) -> dict[str, Any]:
+    files = 0
+    size = 0
+    try:
+        if path.is_file():
+            return {"files": 1, "bytes": path.stat().st_size}
+        if path.is_dir():
+            for item in path.rglob("*"):
+                try:
+                    if item.is_file():
+                        files += 1
+                        size += item.stat().st_size
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return {"files": files, "bytes": size}
+
+
+def _remove_cache_target(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        stats = _cache_target_stats(path)
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+        removed = not path.exists()
+        return {
+            "path": str(path),
+            "files": int(stats.get("files") or 0),
+            "bytes": int(stats.get("bytes") or 0),
+            "mb": round(float(stats.get("bytes") or 0) / 1024 / 1024, 2),
+            "removed": removed,
+        }
+    except Exception as exc:
+        return {"path": str(path), "files": 0, "bytes": 0, "mb": 0, "removed": False, "error": str(exc)}
+
+
+def _cache_clear_targets() -> list[Path]:
+    targets: list[Path] = []
+    for name in ("cache", "temp", "clip_previews", "web_uploads"):
+        targets.append(_safe_user_child(name))
+
+    temp_root = Path(tempfile.gettempdir())
+    for name in ("live_cutter_web_asr", "live_cutter_stt", "livec_schedule", "liveclipper_ts_normalized"):
+        targets.append(temp_root / name)
+    for prefix in ("liveclipper_asr_", "liveclipper_volc_diag_"):
+        try:
+            targets.extend(path for path in temp_root.iterdir() if path.name.startswith(prefix))
+        except Exception:
+            pass
+
+    root = Path("C:/")
+    try:
+        if (root / "lc_temp").exists():
+            targets.append(root / "lc_temp")
+        targets.extend(
+            path for path in root.iterdir()
+            if path.is_dir() and (path.name.startswith("lc_temp_") or path.name.startswith("lc_temp_mix_"))
+        )
+    except Exception:
+        pass
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in targets:
+        key = str(path).replace("/", "\\").lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _output_history_file() -> Path:
+    return _safe_user_child("output_history.json")
+
+
+def _normalize_history_path(value: Any) -> str:
+    return str(value or "").strip().strip('"')
+
+
+def _output_history_name(path: str) -> str:
+    try:
+        return Path(path).name or path
+    except Exception:
+        return path
+
+
+def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, Any]]:
+    if str(task.get("status") or "") != "completed":
+        return []
+    paths: list[str] = []
+    raw_outputs = task.get("outputs")
+    if isinstance(raw_outputs, list):
+        paths.extend(_normalize_history_path(item) for item in raw_outputs)
+    output = _normalize_history_path(task.get("output"))
+    if output:
+        paths.append(output)
+    if not paths:
+        output_dir = _normalize_history_path(task.get("output_dir"))
+        if output_dir:
+            paths.append(output_dir)
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = path.replace("/", "\\").lower()
+        if not path or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(path)
+
+    total = len(cleaned) or int(task.get("result_count") or 0) or 1
+    created_at = float(task.get("finished_at") or task.get("started_at") or time.time())
+    records: list[dict[str, Any]] = []
+    for index, path in enumerate(cleaned, start=1):
+        records.append(
+            {
+                "path": path,
+                "name": _output_history_name(path),
+                "scope": task.get("scope") or "",
+                "title": task.get("title") or "成片",
+                "task_id": task.get("id") or "",
+                "created_at": created_at,
+                "created_at_text": datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                "index": index,
+                "total": total,
+                "exists": Path(path).exists(),
+            }
+        )
+    return records
+
+
+def _read_output_history_items() -> list[dict[str, Any]]:
+    path = _output_history_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+    except Exception:
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and _normalize_history_path(item.get("path"))]
+
+
+def _write_output_history_items(items: list[dict[str, Any]]) -> None:
+    path = _output_history_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "items": items[:120], "updated_at": time.time()}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _merge_output_history_items(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for item in group or []:
+            path = _normalize_history_path(item.get("path"))
+            if not path:
+                continue
+            key = path.replace("/", "\\").lower()
+            current = merged.get(key, {})
+            if current and item.get("source") == "scan":
+                next_item = {**item, **current}
+            else:
+                next_item = {**current, **item}
+            next_item.update({"path": path, "name": next_item.get("name") or _output_history_name(path)})
+            try:
+                next_item["exists"] = Path(path).exists()
+            except Exception:
+                next_item["exists"] = False
+            merged[key] = next_item
+    return sorted(merged.values(), key=lambda item: float(item.get("created_at") or 0), reverse=True)
+
+
+def _record_output_history(task: dict[str, Any]) -> None:
+    try:
+        records = _output_history_records_from_task(task)
+        if not records:
+            return
+        with _OUTPUT_HISTORY_LOCK:
+            existing = _read_output_history_items()
+            _write_output_history_items(_merge_output_history_items(records, existing))
+    except Exception:
+        return
+
+
+def _output_history_dirs_from_preferences() -> list[tuple[str, Path]]:
+    scope_map = {
+        "smart_cut": "smart-cut",
+        "mix": "mix",
+        "dedup": "dedup",
+        "product_scan": "product-scan",
+        "video_split": "video-split",
+        "live_rec": "live-rec",
+    }
+    dirs: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    prefs = _load_preferences()
+    for group_key, group in prefs.items():
+        if not isinstance(group, dict):
+            continue
+        scope = scope_map.get(str(group_key), "")
+        values = group.get("values") if isinstance(group.get("values"), dict) else {}
+        for key, value in values.items():
+            if key not in {"output-dir", "mix-output-dir", "dedup-output-dir", "ps-output-dir", "vs-output-dir", "live-save-dir"}:
+                continue
+            raw = _normalize_history_path(value)
+            if not raw:
+                continue
+            path = Path(raw)
+            key_norm = str(path).replace("/", "\\").lower()
+            if key_norm in seen:
+                continue
+            seen.add(key_norm)
+            dirs.append((scope, path))
+    return dirs
+
+
+def _scan_output_history_from_preferences(limit: int = 80) -> list[dict[str, Any]]:
+    extensions = {".mp4", ".mov", ".m4v"}
+    records: list[dict[str, Any]] = []
+    for scope, root in _output_history_dirs_from_preferences()[:12]:
+        if not root.exists() or not root.is_dir():
+            continue
+        scanned = 0
+        try:
+            iterator = root.rglob("*")
+            for path in iterator:
+                scanned += 1
+                if scanned > 2500 or len(records) >= limit:
+                    break
+                if not path.is_file() or path.suffix.lower() not in extensions:
+                    continue
+                try:
+                    stat = path.stat()
+                    created_at = stat.st_mtime
+                except Exception:
+                    created_at = time.time()
+                records.append(
+                    {
+                        "path": str(path),
+                        "name": path.name,
+                        "scope": scope,
+                        "title": "历史成片",
+                        "task_id": "",
+                        "created_at": created_at,
+                        "created_at_text": datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                        "index": 1,
+                        "total": 1,
+                        "exists": True,
+                        "source": "scan",
+                    }
+                )
+        except Exception:
+            continue
+    return sorted(records, key=lambda item: float(item.get("created_at") or 0), reverse=True)[:limit]
 
 
 def _preferences_file() -> Path:
@@ -1101,6 +1472,7 @@ class SettingsPayload(BaseModel):
     aliyun_bucket: str = ""
     aliyun_region: str = ""
     preference_weights: dict[str, float] = Field(default_factory=dict)
+    style_profile_enabled: bool = True
     style_profile_strength: str = "auto"
     ai_rules: dict[str, Any] = Field(default_factory=dict)
     ui_theme: str = "system"
@@ -1120,6 +1492,11 @@ class FileDialogPayload(BaseModel):
 
 class PathPayload(BaseModel):
     path: str = ""
+
+
+class UserDataDirPayload(BaseModel):
+    path: str = ""
+    migrate: bool = True
 
 
 class PathsPayload(BaseModel):
@@ -1349,6 +1726,7 @@ def _ensure_scope_idle(scope: str, current_title: str = "任务") -> None:
 
 
 def _set_task(task_id: str, **updates: Any) -> None:
+    completed_snapshot: dict[str, Any] | None = None
     with _TASK_LOCK:
         if task_id in _TASKS:
             current = _TASKS[task_id]
@@ -1372,6 +1750,10 @@ def _set_task(task_id: str, **updates: Any) -> None:
                     parsed.update(updates)
                     updates = parsed
             _TASKS[task_id].update(updates)
+            if _TASKS[task_id].get("status") == "completed":
+                completed_snapshot = dict(_TASKS[task_id])
+    if completed_snapshot:
+        _record_output_history(completed_snapshot)
 
 
 _BATCH_PROGRESS_RE = re.compile(
@@ -1419,15 +1801,41 @@ def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
     return updates
 
 
+_LOG_PROGRESS_SIGNAL_RE = re.compile(r"\[PROGRESS\]\s*(\d+(?:\.\d+)?)", re.I)
+_CUT_PROGRESS_RE = re.compile(r"(?:切割|Cut)\s*\[(\d+)\s*/\s*(\d+)\]", re.I)
+
+
 _TASK_PROGRESS_RULES: tuple[tuple[float, str, tuple[str, ...]], ...] = (
-    (12, "准备素材", ("任务已启动", "开始处理", "目标时长", "读取", "上传", "路径")),
+    (12, "准备素材", ("任务已启动", "开始处理", "目标时长", "读取", "上传")),
     (22, "标准化素材", ("TS", "标准化", "normalized", "remux", "转码", "CFR", "genpts")),
-    (36, "识别字幕", ("SRT", "字幕", "ASR", "识别", "Whisper", "火山", "阿里云", "语音")),
-    (56, "AI 选片", ("AI", "候选", "评分", "选片", "片单", "预览")),
-    (68, "去重变速", ("去重", "变速", "dedup", "speed", "重复")),
-    (82, "剪辑合成", ("剪辑", "裁剪", "片段", "合成", "混剪", "Cut", "Concat")),
-    (92, "导出成品", ("导出", "输出", "成品", "保存", "路径")),
+    (36, "识别字幕", ("语音识别中", "启动本地语音识别", "云端语音识别", "ASR 识别", "ASR成功", "ASR 成功")),
+    (56, "AI 选片", ("AI 智能选片", "AI 选片", "候选", "评分", "片单", "最终片单", "预览列表")),
+    (64, "分析画面", ("检测到源视频", "输出分辨率", "SmartCrop: 检测", "SmartCrop: 应用", "SmartCrop: cover")),
+    (72, "裁剪片段", ("开始切割", "切割片段中", "裁剪", "剪辑", "Cut [")),
+    (84, "动态画面", ("KenBurns", "Ken Burns", "动态", "缩放")),
+    (86, "拼接合并", ("拼接", "Concatenating", "Concat done", "Concat copy")),
+    (90, "去重处理", ("整体去重", "去重步骤", "去重效果", "去重完成", "dedup")),
+    (94, "字幕处理", ("字幕处理中", "字幕时间轴", "字幕烧录", "drawtext", "DeepSeek修复", "画中画")),
+    (97, "收尾校验", ("成品真实时长", "切割报告", "生成成功", "输出路径", "大小:", "片段:")),
 )
+
+
+def _label_for_internal_progress(percent: float) -> str:
+    if percent >= 98:
+        return "收尾校验"
+    if percent >= 90:
+        return "字幕烧录"
+    if percent >= 78:
+        return "字幕处理"
+    if percent >= 65:
+        return "提取音频"
+    if percent >= 60:
+        return "去重处理"
+    if percent >= 50:
+        return "拼接合并"
+    if percent >= 30:
+        return "裁剪片段"
+    return "剪辑处理中"
 
 
 def _set_task_progress(task_id: str, progress: float, message: str | None = None) -> None:
@@ -1436,8 +1844,9 @@ def _set_task_progress(task_id: str, progress: float, message: str | None = None
         if not task or task.get("status") == "cancelled":
             return
         current = float(task.get("progress") or 0)
-        task["progress"] = max(0, min(99, max(current, float(progress))))
-        if message:
+        incoming = max(0, min(99, float(progress)))
+        task["progress"] = max(current, incoming)
+        if message and incoming >= current - 0.5:
             task["message"] = message
             task.update(_task_batch_updates_from_message(message))
 
@@ -1446,14 +1855,58 @@ def _task_progress_from_log(raw: str) -> tuple[float, str] | None:
     text = str(raw or "")
     if not text:
         return None
+    signal = _LOG_PROGRESS_SIGNAL_RE.search(text)
+    if signal:
+        value = float(signal.group(1))
+        percent = value * 100 if value <= 1 else value
+        percent = max(0, min(99, percent))
+        return percent, _label_for_internal_progress(percent)
+
+    cut_match = _CUT_PROGRESS_RE.search(text)
+    if cut_match:
+        current = max(1, int(cut_match.group(1)))
+        total = max(1, int(cut_match.group(2)))
+        percent = 72 + (min(current, total) - 1) / total * 10
+        return min(82, percent), f"裁剪片段 {min(current, total)}/{total}"
+
     for progress, label, tokens in _TASK_PROGRESS_RULES:
         if any(token in text for token in tokens):
             return progress, label
     return None
 
 
+def _is_fatal_ai_log(message: str) -> bool:
+    text = str(message or "")
+    lower = text.lower()
+    if "ai" not in lower and "api" not in lower and "deepseek" not in lower:
+        return False
+    fatal_tokens = (
+        "http 400",
+        "http400",
+        "http 401",
+        "http401",
+        "http 402",
+        "http402",
+        "http 403",
+        "http403",
+        "http 404",
+        "http404",
+        "http 413",
+        "http413",
+        "余额不足",
+        "api key 无效",
+        "api key无效",
+        "接口地址错误",
+        "base url",
+    )
+    return any(token in lower or token in text for token in fatal_tokens)
+
+
 def _task_log_fn(task_id: str, scope: str, base: float = 10, span: float = 80):
     def _log(message: str) -> None:
+        if _is_fatal_ai_log(message):
+            emit_log("error", message, scope)
+            return
         emit_log("info", message, scope)
         stage = _task_progress_from_log(message)
         if stage:
@@ -1675,6 +2128,107 @@ def _probe_video_info(path_value: str) -> dict[str, Any]:
         info["message"] = f"检测失败：{exc}"
     _VIDEO_INFO_CACHE[key] = dict(info)
     return info
+
+
+def _probe_av_start_gap(path: Path) -> tuple[float, float, float, bool]:
+    try:
+        proc = subprocess.run(
+            [
+                _ffprobe_cmd(),
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,start_time,duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            return 0.0, 0.0, 0.0, False
+        data = json.loads((proc.stdout or b"{}").decode("utf-8", errors="replace") or "{}")
+        streams = data.get("streams") or []
+        video = next((item for item in streams if item.get("codec_type") == "video"), None)
+        audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+        if not video:
+            return 0.0, 0.0, 0.0, bool(audio)
+        video_start = float(video.get("start_time") or 0.0)
+        audio_start = float(audio.get("start_time") or 0.0) if audio else 0.0
+        return video_start, audio_start, abs(video_start - audio_start), bool(audio)
+    except Exception:
+        return 0.0, 0.0, 0.0, False
+
+
+def _transcode_live_recording_sync(source: Path, target: Path, scope: str, name: str, reason: str) -> bool:
+    tmp_target = target.with_name(f"{target.stem}.sync_tmp{target.suffix}")
+    cmd = [
+        _ffmpeg_cmd(),
+        "-hide_banner",
+        "-y",
+        "-fflags",
+        "+genpts+igndts",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "setpts=PTS-STARTPTS,fps=30,format=yuv420p",
+        "-r",
+        "30",
+        "-vsync",
+        "cfr",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-af",
+        "aresample=async=1:first_pts=0",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-shortest",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-movflags",
+        "+faststart",
+        str(tmp_target),
+    ]
+    log_path = target.with_suffix(".sync.log")
+    try:
+        emit_log("info", f"{name}: 检测到直播录制时间戳偏移（{reason}），正在生成同步安全版 MP4。", scope)
+        with log_path.open("wb") as log_handle:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_handle,
+                timeout=3600,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        if proc.returncode == 0 and tmp_target.exists() and tmp_target.stat().st_size > 1000:
+            os.replace(tmp_target, target)
+            _VIDEO_INFO_CACHE.clear()
+            return True
+    except Exception as exc:
+        emit_log("warning", f"{name}: 同步安全版 MP4 生成异常：{exc}", scope)
+    try:
+        if tmp_target.exists():
+            tmp_target.unlink()
+    except Exception:
+        pass
+    return False
 
 
 def _clean_forbidden_title_text(name: str, fallback: str = "output") -> str:
@@ -2530,6 +3084,7 @@ def _normalize_preview_final_clips(
     merge_mode: bool = False,
     default_source: str = "",
     preferred_category: str = "",
+    preferred_focus: str = "",
 ) -> tuple[list[Any], dict[str, Any]]:
     """Apply the same final-retention cleanup before showing preview rows."""
     original_count = len(clips or [])
@@ -2567,7 +3122,15 @@ def _normalize_preview_final_clips(
         if hasattr(ai_mod, "_remove_expanded_overlap_clips"):
             _step("expanded_overlap_dedup", lambda items: ai_mod._remove_expanded_overlap_clips(items, None))
         if hasattr(ai_mod, "_reorder_product_focus_blocks"):
-            normalized = list(ai_mod._reorder_product_focus_blocks(normalized, None, preferred_cat=preferred_category) or normalized)
+            normalized = list(
+                ai_mod._reorder_product_focus_blocks(
+                    normalized,
+                    None,
+                    preferred_cat=preferred_category,
+                    preferred_focus=preferred_focus,
+                )
+                or normalized
+            )
         if srt_text and not merge_mode:
             try:
                 from cutter_logic import _apply_srt_cut_alignment, _parse_srt_to_segments, _srt_text_for_range
@@ -3753,16 +4316,42 @@ def _preview_feedback_configured_strength() -> str:
         return "auto"
 
 
-def _preview_feedback_learning_status(sample_count: int, configured_strength: str = "auto") -> tuple[str, str]:
+def _preview_feedback_selection_enabled_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "off", "no", "disabled", "关闭", "关", "否"}
+    if value is None:
+        return True
+    return bool(value)
+
+
+def _preview_feedback_selection_enabled() -> bool:
+    try:
+        settings = _load_settings()
+        return _preview_feedback_selection_enabled_value(settings.get("style_profile_enabled", True))
+    except Exception:
+        return True
+
+
+def _preview_feedback_learning_status(
+    sample_count: int,
+    configured_strength: str = "auto",
+    selection_enabled: bool = True,
+) -> tuple[str, str]:
     configured_strength = _preview_feedback_normalize_strength(configured_strength)
+    if sample_count <= 0:
+        status = "未开始"
+    elif sample_count <= 2:
+        status = "观察中"
+    elif sample_count <= 9:
+        status = "初步成型"
+    else:
+        status = "稳定画像"
+    if not selection_enabled:
+        return status, "不参与选片"
     if sample_count <= 0:
         return "未开始", "关闭" if configured_strength == "off" else "只读"
     if sample_count <= 2:
         return "观察中", "关闭" if configured_strength == "off" else "只读"
-    if sample_count <= 9:
-        status = "初步成型"
-    else:
-        status = "稳定画像"
     if configured_strength == "off":
         return status, "关闭"
     if configured_strength == "light":
@@ -3854,7 +4443,8 @@ def _preview_feedback_style_profile(
 ) -> dict[str, Any]:
     record_count = len(records)
     configured_strength = _preview_feedback_configured_strength()
-    status, impact = _preview_feedback_learning_status(total_samples, configured_strength)
+    selection_enabled = _preview_feedback_selection_enabled()
+    status, impact = _preview_feedback_learning_status(total_samples, configured_strength, selection_enabled)
     latest_at = _preview_feedback_latest_at(records)
     hook_counts = _preview_feedback_role_signal_counts(records, {"hook_positive", "move_to_front"})
     ending_counts = _preview_feedback_role_signal_counts(records, {"close_positive", "move_to_end"})
@@ -3888,16 +4478,18 @@ def _preview_feedback_style_profile(
         summary.append(f"节奏画像：卖点密度{metrics['selling_density']}，节奏{metrics['rhythm']}，上下文{metrics['context_length']}。")
 
     ai_hint_parts = []
-    if selling_preferences:
-        ai_hint_parts.append("优先选择" + "、".join(item["label"] for item in selling_preferences[:4]))
-    if avoid_preferences:
-        ai_hint_parts.append("避免" + "、".join(item["label"] for item in avoid_preferences[:4]))
-    ai_hint_parts.append(f"剪辑节奏偏{metrics['rhythm']}，上下文长度偏{metrics['context_length']}，CTA强度偏{metrics['cta_strength']}")
+    if selection_enabled:
+        if selling_preferences:
+            ai_hint_parts.append("优先选择" + "、".join(item["label"] for item in selling_preferences[:4]))
+        if avoid_preferences:
+            ai_hint_parts.append("避免" + "、".join(item["label"] for item in avoid_preferences[:4]))
+        ai_hint_parts.append(f"剪辑节奏偏{metrics['rhythm']}，上下文长度偏{metrics['context_length']}，CTA强度偏{metrics['cta_strength']}")
 
     return {
         "name": "剪辑风格画像",
         "status": status,
         "impact": impact,
+        "selection_enabled": selection_enabled,
         "configured_strength": configured_strength,
         "learned_records": record_count,
         "sample_count": total_samples,
@@ -4740,7 +5332,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     dedup_audio_options=payload.audio,
                     transition_options=payload.transition,
                     subtitle_overlay=payload.subtitle_overlay,
-                    log_fn=_task_log_fn(task_id, scope, base=group_base + 5, span=max(8, group_span * 0.72)),
+                    log_fn=_task_log_fn(task_id, scope, base=group_base + 5, span=max(8, group_span * 0.88)),
                     cancel_event=_task_cancel_event(task_id),
                     force_category=None if payload.category in ("", "自动检测", "自动检测") else payload.category,
                     focus_hint=payload.focus_hint,
@@ -4862,6 +5454,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             str(cutter_mod._multi_result_cache.get("srt_text") or ""),
             merge_mode=True,
             preferred_category=preferred_category,
+            preferred_focus=str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
         )
         raw_clips = _attach_mix_sources_to_preview_clips(raw_clips, mix_sources)
         if category_summary:
@@ -6212,10 +6805,13 @@ def _remux_live_recording_to_mp4(output: Path, scope: str, name: str) -> Path:
         "0",
         "-c",
         "copy",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         str(target),
     ]
+    source_size = output.stat().st_size
     try:
         with remux_log.open("wb") as log_handle:
             proc = subprocess.run(
@@ -6226,9 +6822,19 @@ def _remux_live_recording_to_mp4(output: Path, scope: str, name: str) -> Path:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
-            emit_log("warning", f"{name}: TS 转 MP4 失败，已保留原始 TS 母带继续处理。", scope)
-            return output
-        source_size = output.stat().st_size
+            if _transcode_live_recording_sync(output, target, scope, name, "direct remux failed"):
+                emit_log("info", f"{name}: TS 已通过同步安全转码生成 MP4。", scope)
+            else:
+                emit_log("warning", f"{name}: TS 转 MP4 失败，已保留原始 TS 母带继续处理。", scope)
+                return output
+        else:
+            video_start, audio_start, gap, has_audio = _probe_av_start_gap(target)
+            if has_audio and gap > 0.08:
+                reason = f"video={video_start:.3f}s audio={audio_start:.3f}s gap={gap:.3f}s"
+                if _transcode_live_recording_sync(output, target, scope, name, reason):
+                    emit_log("info", f"{name}: 已修正 TS 转 MP4 音画时间戳偏移 {gap:.3f}s。", scope)
+                else:
+                    emit_log("warning", f"{name}: 同步安全版 MP4 生成失败，继续使用直接转封装版本。", scope)
         emit_log("success", f"{name}: 已自动转为 MP4 母带：{target.name} ({target.stat().st_size / 1024 / 1024:.1f}MB)", scope)
         if str(os.environ.get("LIVECLIPPER_KEEP_TS_RECORDING") or "").strip().lower() not in {"1", "true", "yes", "on"}:
             try:
@@ -6238,6 +6844,9 @@ def _remux_live_recording_to_mp4(output: Path, scope: str, name: str) -> Path:
                 emit_log("warning", f"{name}: MP4 已生成，但移除 TS 临时母带失败：{exc}", scope)
         return target
     except subprocess.TimeoutExpired:
+        if _transcode_live_recording_sync(output, target, scope, name, "direct remux timeout"):
+            emit_log("info", f"{name}: TS 已通过同步安全转码生成 MP4。", scope)
+            return target
         emit_log("warning", f"{name}: TS 转 MP4 超时，已保留原始 TS 母带继续处理。", scope)
         return output
     except Exception as exc:
@@ -7488,7 +8097,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 dedup_audio_options=payload.audio,
                 transition_options=payload.transition,
                 subtitle_overlay=payload.subtitle_overlay,
-                log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.78)),
+                log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.90)),
                 cancel_event=_task_cancel_event(task_id),
                 force_category=None if payload.category in ("", "自动检测") else payload.category,
                 pip_path=pip_path,
@@ -7773,6 +8382,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             srt_text,
             default_source=str(video),
             preferred_category=preferred_category,
+            preferred_focus=str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
         )
         if category_summary:
             dedup_summary["category_summary"] = category_summary
@@ -7902,6 +8512,9 @@ def runtime() -> dict[str, Any]:
         "app_dir": str(APP_DIR),
         "web_dir": str(WEB_DIR),
         "user_data_dir": str(_get_user_data_dir()),
+        "default_user_data_dir": str(_default_user_data_dir()),
+        "user_data_location_file": str(_user_data_location_file()),
+        "user_data_custom": not _path_same(_get_user_data_dir(), _default_user_data_dir()),
         "license_public_key_suffix": public_key_suffix,
         "supports_web_incremental_updates": _safe_web_incremental_supported(),
         "mode": "local-web-client",
@@ -8043,6 +8656,50 @@ async def dialog_directory() -> dict[str, Any]:
         return {"ok": True, "path": path}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"打开目录选择窗口失败：{exc}") from exc
+
+
+@app.post("/api/user-data-dir")
+def set_user_data_dir(payload: UserDataDirPayload) -> dict[str, Any]:
+    active = _cache_clear_active_tasks()
+    if active:
+        names = "、".join(active[:3])
+        suffix = "..." if len(active) > 3 else ""
+        raise HTTPException(status_code=409, detail=f"当前有任务运行中（{names}{suffix}），请完成或停止任务后再迁移用户数据目录。")
+
+    current = _get_user_data_dir()
+    target = _validate_user_data_target(payload.path)
+    migrated = {"files": 0, "bytes": 0, "items": []}
+    if payload.migrate:
+        migrated = _copy_user_data_persistent(current, target)
+
+    try:
+        import config
+        config.set_user_data_dir(str(target))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"保存用户数据目录失败：{exc}") from exc
+
+    try:
+        import ai_clipper
+        cache = getattr(ai_clipper, "_keywords_cache", None)
+        if isinstance(cache, dict):
+            cache["_data"] = None
+            cache["_mtime"] = 0
+    except Exception:
+        pass
+
+    message = f"用户数据目录已切换到：{target}"
+    if migrated.get("files"):
+        message += f"；已迁移 {migrated['files']} 个文件"
+    emit_log("success", message, "settings")
+    return {
+        "ok": True,
+        "message": message,
+        "user_data_dir": str(_get_user_data_dir()),
+        "default_user_data_dir": str(_default_user_data_dir()),
+        "user_data_location_file": str(_user_data_location_file()),
+        "user_data_custom": not _path_same(_get_user_data_dir(), _default_user_data_dir()),
+        "migrated": migrated,
+    }
 
 
 @app.post("/api/uploads/files")
@@ -8380,17 +9037,50 @@ def reset_keywords() -> dict[str, Any]:
 @app.post("/api/cache/clear")
 def clear_cache() -> dict[str, Any]:
     global _PREVIEW_CLEARED_AT
-    removed = []
-    for name in ("cache", "temp", "clip_previews", "web_uploads"):
-        target = _safe_user_child(name)
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-            removed.append(str(target))
+    active = _cache_clear_active_tasks()
+    if active:
+        names = "、".join(active[:3])
+        suffix = "..." if len(active) > 3 else ""
+        raise HTTPException(status_code=409, detail=f"当前有任务运行中（{names}{suffix}），请完成或停止任务后再清理缓存。")
+
+    removed_items = []
+    for target in _cache_clear_targets():
+        result = _remove_cache_target(target)
+        if result:
+            removed_items.append(result)
+
     with _CLIP_PREVIEW_LOCK:
         _PREVIEW_CLEARED_AT = time.time()
         _CLIP_PREVIEWS.clear()
-    emit_log("success", "缓存清理完成。", "settings")
-    return {"ok": True, "message": "缓存清理完成", "removed": removed}
+    try:
+        _VIDEO_INFO_CACHE.clear()
+        _VIDEO_FP_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        import cutter_logic as cutter_mod
+        cutter_mod._multi_result_cache = {}
+    except Exception:
+        pass
+
+    freed_bytes = sum(int(item.get("bytes") or 0) for item in removed_items if item.get("removed"))
+    failed = [item for item in removed_items if not item.get("removed")]
+    freed_mb = round(freed_bytes / 1024 / 1024, 1)
+    if failed:
+        message = f"缓存清理完成，释放约 {freed_mb} MB；{len(failed)} 个项目可能被占用未删除"
+        emit_log("warning", message, "settings")
+    else:
+        message = f"缓存清理完成，释放约 {freed_mb} MB"
+        emit_log("success", message, "settings")
+    return {
+        "ok": True,
+        "message": message,
+        "removed": [item["path"] for item in removed_items if item.get("removed")],
+        "removed_items": removed_items,
+        "freed_bytes": freed_bytes,
+        "freed_mb": freed_mb,
+        "failed": failed,
+    }
 
 
 @app.post("/api/path/open")
@@ -8434,6 +9124,23 @@ def inspect_pip_pool(payload: PathPayload) -> dict[str, Any]:
 def list_tasks() -> dict[str, Any]:
     with _TASK_LOCK:
         return {"tasks": list(_TASKS.values())[-50:]}
+
+
+@app.get("/api/output-history")
+def output_history(scope: str = "", limit: int = 50) -> dict[str, Any]:
+    safe_limit = max(1, min(120, int(limit or 50)))
+    scope_text = str(scope or "").strip()
+    with _TASK_LOCK:
+        task_records: list[dict[str, Any]] = []
+        for task in list(_TASKS.values()):
+            task_records.extend(_output_history_records_from_task(task))
+    with _OUTPUT_HISTORY_LOCK:
+        persisted = _read_output_history_items()
+    scanned = _scan_output_history_from_preferences(limit=safe_limit)
+    items = _merge_output_history_items(task_records, persisted, scanned)
+    if scope_text:
+        items = [item for item in items if str(item.get("scope") or "") == scope_text or not item.get("scope")]
+    return {"ok": True, "items": items[:safe_limit]}
 
 
 @app.post("/api/tasks/stop-scope")

@@ -2283,8 +2283,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     old_preset = DEDUP_PRESET
     DEDUP_PRESET = dedup_preset
 
-    # 每个任务使用独立临时目录。旧版固定 C:\lc_temp，多任务/预览并发时会互相删除或锁住 clip 文件。
-    temp_dir = tempfile.mkdtemp(prefix="lc_temp_", dir="C:\\")
+    # 每个任务使用独立临时目录。前面 TS 标准化也写入这个目录，结束时统一清理。
     will_subtitle = subtitle_overlay and SUBTITLE_OVERLAY.get("enabled")
     _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置Whisper+DeepSeek修复）' if will_subtitle else '关'}")
     _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}" + (f" (单片段概率 {OUTPUT_CLIP_MIRROR_PROBABILITY:.0%})" if _mirror_enabled else ""))

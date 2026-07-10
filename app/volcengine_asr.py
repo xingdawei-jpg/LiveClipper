@@ -86,12 +86,12 @@ def prepare_volcengine_audio(source_path, output_dir, prefix=None, ffmpeg="ffmpe
     candidates = [
         (
             ".mp3",
-            ["-vn", "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "16000", "-ac", "1"],
+            ["-map", "0:a:0?", "-vn", "-af", "aresample=async=1:first_pts=0", "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "16000", "-ac", "1"],
             "MP3 64kbps",
         ),
         (
             ".wav",
-            ["-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"],
+            ["-map", "0:a:0?", "-vn", "-af", "aresample=async=1:first_pts=0", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1"],
             "WAV PCM",
         ),
     ]
@@ -105,7 +105,7 @@ def prepare_volcengine_audio(source_path, output_dir, prefix=None, ffmpeg="ffmpe
         except Exception:
             pass
 
-        cmd = [ffmpeg, "-y", "-i", source_path, *audio_args, audio_path]
+        cmd = [ffmpeg, "-y", "-fflags", "+genpts", "-i", source_path, *audio_args, audio_path]
         try:
             result = subprocess.run(
                 cmd,

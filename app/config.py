@@ -3,9 +3,65 @@
 # ============================================================
 
 # 用户数据目录（更新不丢失配置）
+import json
 import os
 import re
-USER_DATA_DIR = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper')
+
+
+def _default_user_data_dir():
+    return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper')
+
+
+def _location_file():
+    return os.path.join(_default_user_data_dir(), 'user_data_location.json')
+
+
+def _normalize_user_data_dir(path):
+    text = str(path or '').strip().strip('"')
+    if not text:
+        return _default_user_data_dir()
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(text)))
+
+
+def _configured_user_data_dir():
+    env_path = os.environ.get('LIVECLIPPER_USER_DATA_DIR')
+    if env_path:
+        return _normalize_user_data_dir(env_path)
+    try:
+        pointer = _location_file()
+        if os.path.exists(pointer):
+            with open(pointer, 'r', encoding='utf-8-sig') as f:
+                data = json.load(f)
+            custom = data.get('user_data_dir') if isinstance(data, dict) else ''
+            if custom:
+                return _normalize_user_data_dir(custom)
+    except Exception:
+        pass
+    return _default_user_data_dir()
+
+
+def set_user_data_dir(path):
+    global USER_DATA_DIR, SETTINGS_PATH
+    target = _normalize_user_data_dir(path)
+    os.makedirs(target, exist_ok=True)
+    default = _normalize_user_data_dir(_default_user_data_dir())
+    os.makedirs(default, exist_ok=True)
+    pointer = _location_file()
+    if os.path.normcase(target) == os.path.normcase(default):
+        try:
+            if os.path.exists(pointer):
+                os.remove(pointer)
+        except Exception:
+            pass
+    else:
+        with open(pointer, 'w', encoding='utf-8') as f:
+            json.dump({'user_data_dir': target}, f, ensure_ascii=False, indent=2)
+    USER_DATA_DIR = target
+    SETTINGS_PATH = os.path.join(USER_DATA_DIR, 'ai_settings.json')
+    return USER_DATA_DIR
+
+
+USER_DATA_DIR = _configured_user_data_dir()
 SETTINGS_PATH = os.path.join(USER_DATA_DIR, 'ai_settings.json')
 
 # 一、片段类型 → 关键词分级（精简版：每词只归属一个类型，职责清晰）

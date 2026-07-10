@@ -21,6 +21,8 @@ const state = {
   previewPrepAutoCollapsed: { smart: false, mix: false },
   runningScopes: new Set(),
   latestTasks: [],
+  outputHistory: [],
+  outputHistoryFetchedAt: 0,
   lastIssuesByScope: {},
   lastPreflightLog: null,
   liveRooms: [],
@@ -79,6 +81,7 @@ const settingFields = {
   hardware_encoder_enabled: "s-hardware-encoder",
   subtitle_font_size: "s-subtitle-font-size",
   ui_font_size: "s-ui-font-size",
+  style_profile_enabled: "s-style-profile-enabled",
   style_profile_strength: "s-style-profile-strength",
 };
 
@@ -100,13 +103,17 @@ const compactVideoListTargetIds = new Set(["video-paths", "mix-video-paths"]);
 const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "video-split", "dedup", "live-rec", "settings"];
 
 const progressStageRules = [
-  { label: "准备素材", percent: 12, tokens: ["任务已启动", "启动", "目标时长", "读取", "上传", "路径"] },
-  { label: "标准化素材", percent: 20, tokens: ["TS", "标准化", "normalized", "remux", "转码", "CFR"] },
-  { label: "识别字幕", percent: 34, tokens: ["SRT", "字幕", "ASR", "识别", "Whisper", "火山", "阿里云", "语音"] },
-  { label: "AI 分析", percent: 52, tokens: ["AI", "候选", "评分", "选片", "片单", "预览"] },
-  { label: "去重变速", percent: 68, tokens: ["去重", "变速", "dedup", "speed", "重复"] },
-  { label: "剪辑合成", percent: 82, tokens: ["剪辑", "裁剪", "片段", "合成", "混剪", "Cut", "Concat"] },
-  { label: "导出成品", percent: 92, tokens: ["导出", "输出", "成品", "保存", "路径"] },
+  { label: "准备素材", percent: 12, tokens: ["任务已启动", "启动", "目标时长", "读取", "上传"] },
+  { label: "标准化素材", percent: 22, tokens: ["TS", "标准化", "normalized", "remux", "转码", "CFR"] },
+  { label: "识别字幕", percent: 36, tokens: ["语音识别中", "启动本地语音识别", "云端语音识别", "ASR 识别", "ASR成功", "ASR 成功"] },
+  { label: "AI 分析", percent: 56, tokens: ["AI 智能选片", "AI 选片", "候选", "评分", "片单", "最终片单", "预览列表"] },
+  { label: "分析画面", percent: 64, tokens: ["检测到源视频", "输出分辨率", "SmartCrop: 检测", "SmartCrop: 应用", "SmartCrop: cover"] },
+  { label: "裁剪片段", percent: 72, tokens: ["开始切割", "切割片段中", "裁剪", "剪辑", "Cut ["] },
+  { label: "动态画面", percent: 84, tokens: ["KenBurns", "Ken Burns", "动态", "缩放"] },
+  { label: "拼接合并", percent: 86, tokens: ["拼接", "Concatenating", "Concat done", "Concat copy"] },
+  { label: "去重处理", percent: 90, tokens: ["整体去重", "去重步骤", "去重效果", "去重完成", "dedup"] },
+  { label: "字幕处理", percent: 94, tokens: ["字幕处理中", "字幕时间轴", "字幕烧录", "drawtext", "DeepSeek修复", "画中画"] },
+  { label: "收尾校验", percent: 97, tokens: ["成品真实时长", "切割报告", "生成成功", "输出路径", "大小:", "片段:"] },
   { label: "已完成", percent: 100, tokens: ["完成", "成功", "ready", "已生成"] },
 ];
 
@@ -667,6 +674,7 @@ function bindActions() {
       if (action === "toggle-update-card") toggleUpdateCard();
       if (action === "close-update-card") closeUpdateCard();
       if (action === "feedback") feedback();
+      if (action === "apply-user-data-dir") await applyUserDataDir();
     } catch (error) {
       toast(error.message || String(error), "error");
     }
@@ -1185,11 +1193,12 @@ function setupLogProgressBars() {
       <div class="run-summary-grid">
         <div class="run-summary-progress-block">
           <div class="run-summary-ring" data-run-summary-ring>
-            <span data-run-summary-ratio>0/0</span>
+            <span data-run-summary-ratio>0%</span>
+            <small>总进度</small>
           </div>
           <div class="run-summary-main">
             <div class="log-progress-meta">
-              <span class="log-progress-title">运行进度</span>
+              <span class="log-progress-title">当前步骤</span>
               <strong class="log-progress-label">等待任务</strong>
               <span class="log-progress-percent">0%</span>
             </div>
@@ -1299,8 +1308,19 @@ function batchProgressFromTask(task) {
     label: task.batch_label,
     status: task.status || "",
   });
+  const inferred = batchProgressFromText([task.title, task.message, task.error].filter(Boolean).join(" "), task.status || "");
+  if (structured && inferred && structured.total === inferred.total) {
+    return formatBatchProgress({
+      total: structured.total,
+      done: Math.max(batchNumber(structured.done), batchNumber(inferred.done)),
+      current: batchNumber(inferred.current) || batchNumber(structured.current),
+      failed: Math.max(batchNumber(structured.failed), batchNumber(inferred.failed)),
+      label: inferred.label || structured.label,
+      status: task.status || "",
+    }) || structured;
+  }
   if (structured) return structured;
-  return batchProgressFromText([task.title, task.message, task.error].filter(Boolean).join(" "), task.status || "");
+  return inferred;
 }
 
 function progressFromTask(task) {
@@ -1383,6 +1403,70 @@ function taskPercent(task) {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? Math.round(value) : 0));
 }
 
+function clampProgressPercent(value, fallback = 0) {
+  const number = Number(value);
+  const safeFallback = Number(fallback);
+  const next = Number.isFinite(number) ? number : (Number.isFinite(safeFallback) ? safeFallback : 0);
+  return Math.max(0, Math.min(100, Math.round(next)));
+}
+
+function taskSummaryText(task) {
+  return [task?.title, task?.message, task?.error].filter(Boolean).join(" ");
+}
+
+function taskHasOutput(task) {
+  return Boolean(
+    task?.output ||
+    task?.output_dir ||
+    (Array.isArray(task?.outputs) && task.outputs.some(Boolean))
+  );
+}
+
+function isAiSelectionPreviewTask(task) {
+  const text = taskSummaryText(task);
+  return /AI\s*选片预览|AI选片预览|混剪\s*AI\s*选片预览|混剪AI选片预览/.test(text);
+}
+
+function isPreviewOutputTask(task) {
+  return /预览成片|预览混剪/.test(taskSummaryText(task));
+}
+
+function totalProgressFromSummary(progress, task, batch) {
+  const status = progress?.status || task?.status || "idle";
+  const stepPercent = clampProgressPercent(progress?.percent, taskPercent(task));
+  if (batch?.total > 1) {
+    const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
+    const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
+    return {
+      percent: Math.round((done / total) * 100),
+      text: `${done}/${total}`,
+      status,
+    };
+  }
+  if (!task) {
+    return { percent: stepPercent, text: `${stepPercent}%`, status };
+  }
+  if (status === "failed") {
+    return { percent: Math.min(99, stepPercent), text: "失败", status };
+  }
+  if (status === "cancelled") {
+    return { percent: Math.min(99, stepPercent), text: "停止", status };
+  }
+  if (isPreviewOutputTask(task)) {
+    const percent = status === "completed" ? 100 : Math.min(99, 50 + Math.round(stepPercent * 0.5));
+    return { percent, text: `${percent}%`, status };
+  }
+  if (isAiSelectionPreviewTask(task)) {
+    const percent = status === "completed" ? 50 : Math.min(50, Math.round(stepPercent * 0.5));
+    return { percent, text: `${percent}%`, status };
+  }
+  if (status === "completed" || taskHasOutput(task)) {
+    const percent = status === "completed" ? 100 : stepPercent;
+    return { percent, text: `${percent}%`, status };
+  }
+  return { percent: stepPercent, text: `${stepPercent}%`, status };
+}
+
 function newestScopedTasks(tasks, scope) {
   return scopedProgressTasks(tasks, scope).sort((a, b) => {
     const aActive = ["queued", "running"].includes(a.status) ? 1 : 0;
@@ -1395,6 +1479,7 @@ function newestScopedTasks(tasks, scope) {
 function issueSuggestion(message) {
   const text = String(message || "");
   if (/素材|视频|至少|添加|不存在|路径/.test(text)) return "请补充素材或检查文件路径。";
+  if (/402|余额不足|quota|balance|充值/i.test(text)) return "请到模型平台充值，或在设置中更换可用 API Key。";
   if (/API|Key|模型|DeepSeek|OpenAI|连接|网络|代理/.test(text)) return "请到设置里检查 AI 配置和网络。";
   if (/权限|目录|写入|保存|输出/.test(text)) return "请换一个可写的输出目录。";
   if (/ffmpeg|编码|转码|裁剪|合成|导出/i.test(text)) return "请检查源视频是否可播放，必要时换稳定转码。";
@@ -1432,6 +1517,10 @@ function fileNameFromPath(path) {
   return text.split(/[\\/]/).filter(Boolean).pop() || text;
 }
 
+function outputPathKey(path) {
+  return String(path || "").trim().replace(/[\\/]+/g, "\\").toLowerCase();
+}
+
 function completedOutputsFromTasks(tasks) {
   const rows = [];
   for (const task of tasks || []) {
@@ -1454,8 +1543,37 @@ function completedOutputsFromTasks(tasks) {
   return rows.sort((a, b) => b.time - a.time);
 }
 
-function renderRecentOutputRows(tasks) {
-  const outputs = completedOutputsFromTasks(tasks).slice(0, 3);
+function outputRowsForScope(scope, tasks) {
+  const rows = [];
+  for (const item of state.outputHistory || []) {
+    const path = String(item.path || "").trim();
+    if (!path) continue;
+    const itemScope = String(item.scope || "");
+    if (itemScope && scope && itemScope !== scope) continue;
+    const total = Number(item.total || item.result_count || 0);
+    const index = Number(item.index || 0);
+    rows.push({
+      path,
+      name: item.name || fileNameFromPath(path) || "输出文件",
+      title: item.title || "成片",
+      meta: total > 1 && index > 0 ? `${index}/${total}` : "已完成",
+      time: Number(item.created_at || item.finished_at || 0),
+    });
+  }
+  rows.push(...completedOutputsFromTasks(tasks));
+  const seen = new Set();
+  return rows
+    .filter((item) => {
+      const key = outputPathKey(item.path);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => Number(b.time || 0) - Number(a.time || 0));
+}
+
+function renderRecentOutputRows(scope, tasks) {
+  const outputs = outputRowsForScope(scope, tasks).slice(0, 2);
   if (!outputs.length) return '<span class="run-summary-muted">暂无成片记录</span>';
   return outputs.map((item) => `
     <div class="run-output-row">
@@ -1476,18 +1594,17 @@ function renderRunSummary(scope) {
   const scoped = newestScopedTasks(state.latestTasks || [], scope);
   const focusTask = newestTask(scoped.filter((task) => ["queued", "running"].includes(task.status))) || newestTask(scoped);
   const batch = progress.batch || batchProgressFromTask(focusTask);
-  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || taskPercent(focusTask))));
-  const ratio = batch ? `${batch.done}/${batch.total}` : (percent ? `${percent}%` : "0/0");
+  const totalProgress = totalProgressFromSummary(progress, focusTask, batch);
 
-  el.style.setProperty("--run-summary-percent", `${percent}%`);
+  el.style.setProperty("--run-summary-percent", `${totalProgress.percent}%`);
   const ring = el.querySelector("[data-run-summary-ring]");
   const ratioEl = el.querySelector("[data-run-summary-ratio]");
   const recentEl = el.querySelector("[data-run-summary-recent]");
   const issueEl = el.querySelector("[data-run-summary-issue]");
 
-  if (ring) ring.className = `run-summary-ring is-${progress.status || "idle"}`;
-  if (ratioEl) ratioEl.textContent = ratio;
-  if (recentEl) recentEl.innerHTML = renderRecentOutputRows(scoped);
+  if (ring) ring.className = `run-summary-ring is-${totalProgress.status || "idle"}`;
+  if (ratioEl) ratioEl.textContent = totalProgress.text;
+  if (recentEl) recentEl.innerHTML = renderRecentOutputRows(scope, scoped);
 
   const issue = issueForScope(scope, scoped);
   if (issueEl) {
@@ -1672,6 +1789,7 @@ async function loadRuntime() {
     state.runtime = data;
     $("app-version").textContent = `v${data.version}`;
     $("runtime-user-data").value = data.user_data_dir || "";
+    if ($("user-data-dir")) $("user-data-dir").value = data.user_data_dir || "";
     $("runtime-repo-root").value = data.repo_root || "";
     renderUpdateState();
   } catch (error) {
@@ -1726,7 +1844,7 @@ async function loadSettings(showToast = false) {
     if (key === "asr_provider") value = normalizeProvider(value || data.asr_preset);
     if (key === "volc_region") value = normalizeVolcRegion(value);
     if (element.type === "checkbox") {
-      element.checked = Boolean(value);
+      element.checked = normalizeBooleanSetting(value, key === "style_profile_enabled");
     } else {
       element.value = value ?? "";
     }
@@ -1754,6 +1872,7 @@ function collectSettings() {
   data.volc_access_token = "";
   data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
   data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
+  data.style_profile_enabled = normalizeBooleanSetting(data.style_profile_enabled, true);
   data.style_profile_strength = normalizeStyleProfileStrength(data.style_profile_strength);
   data.preference_weights = collectPreferenceWeights();
   data.ai_rules = collectAiRules();
@@ -1836,6 +1955,16 @@ function styleProfileStatusFromSamples(sampleCount = 0) {
   return { status: "稳定画像", impact: "标准" };
 }
 
+function normalizeBooleanSetting(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return Boolean(fallback);
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["0", "false", "off", "no", "disabled", "关闭", "关", "否"].includes(text)) return false;
+    if (["1", "true", "on", "yes", "enabled", "开启", "开", "是"].includes(text)) return true;
+  }
+  return Boolean(value);
+}
+
 function normalizeStyleProfileStrength(value = "auto") {
   const text = String(value || "auto").trim().toLowerCase();
   if (["off", "关闭", "关", "false"].includes(text)) return "off";
@@ -1882,6 +2011,7 @@ function buildStyleProfileFromSummary(summary = {}) {
     },
     summary: Array.isArray(summary.brief) ? summary.brief : [],
     ai_hint: "",
+    selection_enabled: true,
   };
 }
 
@@ -1901,12 +2031,13 @@ function renderStyleProfile(profile = {}) {
   const summary = Array.isArray(profile.summary) ? profile.summary : [];
   const latest = Number(profile.latest_at || 0);
   const latestText = latest ? new Date(latest * 1000).toLocaleDateString() : "暂无";
+  const selectionText = profile.selection_enabled === false ? "不参与选片" : "参与选片";
   return `
     <div class="style-profile-card">
       <div class="style-profile-head">
         <div>
           <strong>${escapeHtml(profile.name || "剪辑风格画像")}</strong>
-          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
+          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 选片：${escapeHtml(selectionText)} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
         </div>
         <div class="style-profile-stats">
           <span>成片调整 ${Number(profile.learned_records || 0)}</span>
@@ -2357,9 +2488,31 @@ async function resetKeywords() {
 }
 
 async function clearCache() {
-  if (!window.confirm("清理 AI 选片预览缓存后，需要重新生成预览。确认继续？")) return;
+  if (!window.confirm("将清理成片/预览临时缓存，不会删除已导出的成片和原始素材；之后需要重新生成 AI 预览。确认继续？")) return;
   const result = await api("/api/cache/clear", { method: "POST", body: "{}" });
   toast(result.message || "缓存清理完成", "success");
+}
+
+async function applyUserDataDir() {
+  const value = $("user-data-dir")?.value.trim() || "";
+  if (!value) {
+    toast("请先选择用户数据目录", "warning");
+    return;
+  }
+  const current = state.runtime?.user_data_dir || "";
+  const same = current && value.replace(/[\\/]+$/g, "").toLowerCase() === current.replace(/[\\/]+$/g, "").toLowerCase();
+  if (same) {
+    toast("当前已经使用这个用户数据目录", "warning");
+    return;
+  }
+  if (!window.confirm("将把设置、词库和剪辑风格画像迁移到新目录。不会删除原目录，迁移期间请不要运行成片任务。确认继续？")) return;
+  const result = await api("/api/user-data-dir", {
+    method: "POST",
+    body: JSON.stringify({ path: value, migrate: true }),
+  });
+  toast(result.message || "用户数据目录已切换", "success");
+  await loadRuntime();
+  await loadSettings(false);
 }
 
 function toggleSecret(button) {
@@ -4448,6 +4601,7 @@ async function refreshTasks() {
     const data = await api("/api/tasks");
     const tasks = data.tasks || [];
     state.latestTasks = tasks;
+    await refreshOutputHistory();
     const latest = tasks.slice(-8).reverse();
     state.runningScopes = new Set(tasks.filter((task) => ["queued", "running"].includes(task.status)).map((task) => task.scope));
     syncLiveRoomActivityFromTasks(tasks);
@@ -4457,6 +4611,18 @@ async function refreshTasks() {
     syncFlowActionState();
   } catch (error) {
     // The log websocket already reports connection state; keep this quiet.
+  }
+}
+
+async function refreshOutputHistory(force = false) {
+  const now = Date.now();
+  if (!force && state.outputHistoryFetchedAt && now - state.outputHistoryFetchedAt < 8000) return;
+  try {
+    const data = await api("/api/output-history?limit=80");
+    state.outputHistory = Array.isArray(data.items) ? data.items : [];
+    state.outputHistoryFetchedAt = now;
+  } catch (error) {
+    state.outputHistoryFetchedAt = now;
   }
 }
 
@@ -4792,9 +4958,7 @@ function previewClipReasonParts(clip, analysis, { includeRisk = true } = {}) {
   const tags = classifyClipScoreTags(clip)
     .filter((tag) => tag.label && tag.label !== "普通")
     .map((tag) => tag.label);
-  if (tags.length) parts.push(`命中：${Array.from(new Set(tags)).slice(0, 3).join("/")}`);
-  const score = Number(clip?.score || 0);
-  if (score) parts.push(`AI分 ${score.toFixed(1)}`);
+  if (tags.length) parts.push(`标签：${Array.from(new Set(tags)).slice(0, 4).join("/")}`);
   if (includeRisk && risk?.label && risk.label !== "正常") parts.push(`检查：${risk.label}`);
   return parts.length ? parts : [`${clipTypeLabel(clip?.clip_type)}片段，建议结合字幕和画面确认`];
 }
@@ -5004,8 +5168,6 @@ function renderClipMeta(clip, position, riskLabel) {
     `#${position + 1}`,
     `原序${Number(clip?.index || 0) + 1}`,
   ];
-  const score = Number(clip?.score || 0);
-  if (score) pieces.push(`分数${score.toFixed(1)}`);
   if (clip?.focus_block && clip.focus_block !== clip.focus) pieces.push(`块:${clip.focus_block}`);
   if (clip?.source_name) pieces.push(`源:${clip.source_name}`);
   if (clip?.selected === false) pieces.push("已取消");
@@ -5014,30 +5176,70 @@ function renderClipMeta(clip, position, riskLabel) {
 }
 
 function clipTextForScore(clip) {
-  return `${clip?.clip_type || ""} ${clip?.focus || ""} ${clip?.text || ""}`.toLowerCase();
+  const selected = typeof selectedPreviewText === "function" ? selectedPreviewText(clip) : "";
+  return `${clip?.clip_type || ""} ${clip?.focus || ""} ${clip?.focus_block || ""} ${selected || clip?.text || ""}`.toLowerCase();
 }
 
 function classifyClipScoreTags(clip) {
   const text = clipTextForScore(clip);
   const tags = [];
-  const add = (label, tone = "info", detail = "") => tags.push({ label, tone, detail: detail || label });
-  if ((clip?.clip_type || "").toLowerCase() === "hook" || /hook|爆点|痛点|开头|第一眼|有没有发现|姐妹们/.test(text)) {
-    add("Hook", "strong", "开头吸引片段");
+  const seen = new Set();
+  const add = (label, tone = "info", detail = "") => {
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    tags.push({ label, tone, detail: detail || label });
+  };
+  const type = String(clip?.clip_type || "").toLowerCase();
+  const focus = String(clip?.focus_block || clip?.focus || "").trim();
+
+  if (type === "hook" || /hook|爆点|痛点|开头|第一眼|有没有发现|姐妹/.test(text)) {
+    add("开头候选", "strong", "可能承担开头吸引作用");
+  } else if (type === "close" || type === "call_to_action" || /收尾|尺码引导|放心拍|建议大家|喜欢的/.test(text)) {
+    add("收尾候选", "neutral", "可能承担结尾承接或转化作用");
   }
-  if (/显瘦|遮肉|收腰|面料|质感|亲肤|显白|高级|好看|版型|垂感|透气|不皱|小个子|高腰|颜色|工艺|舒服|薄/.test(text)) {
-    add("卖点", "good", "包含产品卖点");
+
+  if (focus && focus !== "其他") {
+    add(focus, "good", `AI 标注卖点：${focus}`);
   }
-  if (/尺码|码|s码|m码|l码|xl|xxl|斤|身高|体重|小码|中码|大码|正码|拍大|拍小/.test(text)) {
-    add("尺码", "neutral", "包含尺码/体重信息");
+
+  const focusRules = [
+    ["版型显瘦", /显瘦|遮肉|藏肉|收腰|显高|显腿长|比例|小个子|梨形|苹果型|胯宽|腿粗|大骨架|盖臀|修身|宽松|版型/, "修饰身材或版型效果"],
+    ["面料质感", /面料|材质|手感|触感|亲肤|柔软|垂感|垂坠|透气|冰丝|真丝|纯棉|棉麻|针织|不闷|不透|厚实|薄款/, "面料、触感或穿着质感"],
+    ["颜色氛围", /颜色|色系|显白|提气色|抬气色|黄皮|黑色|白色|咖色|复古|高级色|温柔色|氛围感|上镜/, "颜色、肤色或视觉氛围"],
+    ["场景搭配", /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭/, "穿着场景或搭配建议"],
+    ["穿着体验", /舒服|舒适|不勒|不紧绷|自在|轻盈|无感|不卡|不掉|不卷边|活动方便|不束缚|不扎人|凉爽|温暖/, "穿着感受或活动体验"],
+    ["品质细节", /品质|质感|做工|走线|细节|高级感|精致|缝合|刺绣|蕾丝|重工|大牌|专柜/, "品质背书或细节描述"],
+    ["尺寸长度", /裙长|衣长|袖长|长度|九分|七分|短款|中长款|过膝|不过膝|露脚踝|遮小腿|盖住|刚好/, "长度、比例或遮盖位置"],
+    ["工艺细节", /工艺|成本|拼接|剪裁|立体|定型|压褶|包边|锁边|加固|五金|拉链|扣子|里衬|固色/, "工艺结构或制作细节"],
+    ["对比优势", /买不到|外面没有|不一样|区别|独特|独家|同价位|同品质|比外面|比商场|没有第二家|源头/, "对比、稀缺或差异化"],
+    ["情绪感染", /绝了|太漂亮|太好看|美爆|太爱|神仙|封神|超级|天呐|妈呀|信我|相信我|真心|自留|美哭|疯了/, "主播情绪或强推荐语气"],
+    ["流行趋势", /流行|当季|新款|原创|不撞款|爆款|热门|趋势|法式|新中式|设计师|小众|时髦|松弛感|多巴胺|复古|国风/, "流行趋势或风格标签"],
+    ["紧迫稀缺", /限量|限时|手慢无|秒空|断码|断货|补不到|不补货|最后|错过|下架|余量|稀缺|卖完/, "紧迫或稀缺表达"],
+    ["口感食欲", /好吃|鲜甜|脆甜|爆汁|多汁|汁水|入口|口感|鲜嫩|软糯|酥脆|q弹|弹牙|拉丝|试吃|咬一口/, "试吃、口感或食欲画面"],
+    ["新鲜品质", /新鲜|鲜活|现摘|现采|现捕|现捞|当天发|鲜度|品质|果形|果径|个头|饱满|坏果包赔|基地|果园/, "新鲜度、品质或售后信任"],
+    ["产地溯源", /产地|原产地|源头|基地|果园|农场|牧场|渔港|海捕|直采|直发|溯源|农户|合作社|当季|应季/, "产地、源头或供应链背书"],
+    ["规格分量", /规格|净含量|净重|克重|重量|斤装|箱装|袋装|盒装|整箱|大果|中果|果径|个头|份量|分量/, "规格、重量或分量展示"],
+    ["发货保鲜", /发货|现发|冷链|冰袋|保温箱|泡沫箱|顺丰|次日达|保鲜|锁鲜|冷冻|速冻|冷藏|破损包赔/, "发货、物流或保鲜保障"],
+    ["场景吃法", /早餐|夜宵|下午茶|办公室|孩子|老人|全家|聚餐|火锅|烧烤|煲汤|下饭|拌饭|空气炸锅|即食|囤货|送礼/, "食用场景或吃法建议"],
+  ];
+  focusRules.forEach(([label, pattern, detail]) => {
+    if (label !== focus && pattern.test(text)) add(label, "good", detail);
+  });
+
+  if (/尺码|码数|s码|m码|l码|xl|xxl|身高|体重|小码|中码|大码|正码|拍大|拍小|卡码/.test(text)) {
+    add("尺码信息", "neutral", "包含尺码、身高或体重信息");
   }
-  if (/通勤|上班|上学|约会|旅游|日常|逛街|聚会|见家长|职场|教师|体制|场景|夏天|春天|秋天|冬天/.test(text)) {
-    add("场景", "neutral", "包含穿着场景");
+  if (/(\d+(\.\d+)?\s*(元|块|¥|￥))|价格|福利价|到手价|原价|现价|优惠|券|半价|折扣|\d+\s*折/.test(text)) {
+    add("疑似价格", "warn", "可能包含价格、折扣或优惠表达");
   }
-  if (/(\d+(\.\d+)?\s*(元|块|米|¥|￥))|价格|福利价|到手|拍下|下单|库存|链接|号链接|优惠|券/.test(text)) {
-    add("疑似价格", "warn", "可能包含价格/下单/库存信息");
+  if (/拍下|下单|小黄车|购物车|链接|号链接|上车|挂车|库存|补货|刷新拍/.test(text)) {
+    add("疑似下单", "warn", "可能包含下单、链接或库存信息");
   }
-  if (/嗯+|啊+|然后呢|然后的话|这个的话|就是说|对吧|是不是|家人们|宝贝们|直播间|稍等|看一下|废话|闲聊|哈哈|欢迎|关注/.test(text)) {
-    add("疑似废话", "warn", "可能是口头禅、闲聊或直播间废话");
+  if (/感谢|反馈|评论区|公屏|扣[0-9一二三四五六七八九十]|后台|稍等|等一下|看一下后台|有没有码|欢迎|关注/.test(text)) {
+    add("互动废话", "warn", "可能是直播互动、后台或评论区内容");
+  }
+  if (/^(嗯+|啊+|好+|对+|是的|然后|这个的话|就是说|那个的话)|然后呢|然后的话|对吧|哈哈|闲聊/.test(text)) {
+    add("口头废话", "warn", "可能是口头禅或承接废话");
   }
   return tags.length ? tags : [{ label: "普通", tone: "muted", detail: "未识别到明显标签" }];
 }
@@ -5178,7 +5380,7 @@ function renderPreviewSummary(analysis) {
     preferenceTitleParts.push(`命中：${preference.matched_label}`);
   }
   if (preference.score !== undefined && preference.score !== null && preference.score !== "") {
-    preferenceTitleParts.push(`分数：${preference.score}`);
+    preferenceTitleParts.push(`命中强度：${preference.score}`);
   }
   if (preference.detail) preferenceTitleParts.push(preference.detail);
   if (preference.error) preferenceTitleParts.push(`异常：${preference.error}`);
