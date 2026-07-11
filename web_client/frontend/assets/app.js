@@ -1306,6 +1306,7 @@ function formatBatchProgress({ total, done = 0, current = 0, failed = 0, label =
     done: safeDone,
     current: safeCurrent,
     failed: safeFailed,
+    status,
     label: cleanLabel,
     text: parts.join(" · "),
     shortText: finishedWithFailures ? `成功 ${safeDone}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`,
@@ -1336,6 +1337,30 @@ function batchProgressFromTask(task) {
   }
   if (structured) return structured;
   return inferred;
+}
+
+function batchProgressFromOutputHistory(scope) {
+  const candidates = (state.outputHistory || [])
+    .filter((item) => {
+      if (String(item.scope || "") !== String(scope || "")) return false;
+      return Math.max(batchNumber(item.batch_total), batchNumber(item.total)) > 1;
+    })
+    .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+  const latest = candidates[0];
+  if (!latest) return null;
+
+  const total = Math.max(1, Math.floor(batchNumber(latest.batch_total, latest.total)));
+  const taskId = String(latest.task_id || "");
+  const createdAt = Number(latest.created_at || 0);
+  const related = candidates.filter((item) => {
+    if (taskId) return String(item.task_id || "") === taskId;
+    return Number(item.created_at || 0) === createdAt && Number(item.total || 0) === Number(latest.total || 0);
+  });
+  const recordedDone = Math.max(...related.map((item) => batchNumber(item.batch_done)), 0);
+  const indexedDone = new Set(related.map((item) => Number(item.index || 0)).filter((value) => value > 0)).size;
+  const done = Math.max(recordedDone, indexedDone);
+  const failed = Math.max(...related.map((item) => batchNumber(item.batch_failed)), 0);
+  return formatBatchProgress({ total, done, failed, status: "completed" });
 }
 
 function progressFromTask(task) {
@@ -1447,13 +1472,16 @@ function isPreviewOutputTask(task) {
 }
 
 function totalProgressFromSummary(progress, task, batch) {
-  const status = progress?.status || task?.status || "idle";
+  const progressStatus = progress?.status || "idle";
+  const status = progressStatus !== "idle" ? progressStatus : (task?.status || batch?.status || "idle");
   const stepPercent = clampProgressPercent(progress?.percent, taskPercent(task));
   if (batch?.total > 1) {
     const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
     const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
     const completedPercent = Math.round((done / total) * 100);
-    const percent = Math.max(completedPercent, stepPercent);
+    const percent = ["failed", "cancelled"].includes(status)
+      ? completedPercent
+      : (status === "completed" ? 100 : Math.max(completedPercent, stepPercent));
     return {
       percent,
       text: `${percent}%`,
@@ -1610,7 +1638,9 @@ function renderRunSummary(scope) {
   const progress = state.progressByScope[scope] || { label: "等待任务", percent: 0, status: "idle" };
   const scoped = newestScopedTasks(state.latestTasks || [], scope);
   const focusTask = newestTask(scoped.filter((task) => ["queued", "running"].includes(task.status))) || newestTask(scoped);
-  const batch = progress.batch || batchProgressFromTask(focusTask);
+  const taskBatch = batchProgressFromTask(focusTask);
+  const historyBatch = !focusTask ? batchProgressFromOutputHistory(scope) : null;
+  const batch = progress.batch || taskBatch || historyBatch;
   const totalProgress = totalProgressFromSummary(progress, focusTask, batch);
 
   el.style.setProperty("--run-summary-percent", `${totalProgress.percent}%`);
@@ -1620,6 +1650,15 @@ function renderRunSummary(scope) {
   const recentEl = el.querySelector("[data-run-summary-recent]");
   const issueEl = el.querySelector("[data-run-summary-issue]");
 
+  if (historyBatch && !progress.batch) {
+    const labelEl = el.querySelector(".log-progress-label");
+    const percentEl = el.querySelector(".log-progress-percent");
+    const fill = el.querySelector(".log-progress-fill");
+    el.className = "log-progress is-completed";
+    if (labelEl) labelEl.textContent = "已完成";
+    if (percentEl) percentEl.textContent = "100%";
+    if (fill) fill.style.width = "100%";
+  }
   if (ring) ring.className = `run-summary-ring is-${totalProgress.status || "idle"}`;
   if (ratioEl) ratioEl.textContent = totalProgress.text;
   if (batchHeader) {

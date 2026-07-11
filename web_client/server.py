@@ -1103,6 +1103,9 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
         cleaned.append(path)
 
     total = len(cleaned) or int(task.get("result_count") or 0) or 1
+    batch_total = max(total, int(task.get("batch_total") or 0))
+    batch_done = max(0, min(batch_total, int(task.get("batch_done") or total)))
+    batch_failed = max(0, int(task.get("batch_failed") or 0))
     created_at = float(task.get("finished_at") or task.get("started_at") or time.time())
     records: list[dict[str, Any]] = []
     for index, path in enumerate(cleaned, start=1):
@@ -1117,6 +1120,9 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
                 "created_at_text": datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S"),
                 "index": index,
                 "total": total,
+                "batch_total": batch_total,
+                "batch_done": batch_done,
+                "batch_failed": batch_failed,
                 "exists": Path(path).exists(),
             }
         )
