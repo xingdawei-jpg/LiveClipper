@@ -8068,78 +8068,99 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         _set_task_progress(task_id, 8, f"校验 {total_videos} 个素材")
 
         outputs: list[str] = []
+        failures: list[str] = []
 
         for index, video in enumerate(paths, start=1):
             if _is_task_cancelled(task_id):
                 emit_log("warning", "任务已停止。", "smart-cut")
                 return
-            if not video.exists():
-                raise FileNotFoundError(f"视频不存在：{video}")
-
-            out_dir = _default_output_dir(video, payload.output_dir, "output")
-            if payload.output_dir.strip():
-                out_path = out_dir / f"{_safe_stem(video.stem)}_smart_cut_{_stamp_name()}.mp4"
-            else:
-                out_path = out_dir / f"{video.stem}_爆款切片_{_stamp_name()}.mp4"
-
-            pip_path, used_pip_file = _pick_pip_asset(payload, "smart-cut")
-            emit_log("info", f"[{index}/{len(paths)}] 开始处理 {video.name}", "smart-cut")
             file_base = 10 + ((index - 1) / total_videos) * 82
             file_span = 82 / total_videos
-            _set_task_progress(task_id, file_base, f"处理 {index}/{total_videos}: {video.name}")
-            version_count = payload.versions
-            file_started_at = time.time()
-            common_kwargs = dict(
-                srt_path=payload.srt_path.strip() or None,
-                output_path=str(out_path),
-                dedup_preset=payload.dedup_preset,
-                dedup_video_options=payload.video,
-                dedup_audio_options=payload.audio,
-                transition_options=payload.transition,
-                subtitle_overlay=payload.subtitle_overlay,
-                log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.90)),
-                cancel_event=_task_cancel_event(task_id),
-                force_category=None if payload.category in ("", "自动检测") else payload.category,
-                pip_path=pip_path,
-                pip_size=payload.pip_size,
-                pip_opacity=payload.pip_opacity,
-                pip_pos=payload.pip_pos,
-                focus_hint=payload.focus_hint,
-                ai_controls=payload.ai_controls,
-                mirror_enabled=payload.mirror_enabled,
-                smart_crop_enabled=payload.smart_crop_enabled,
-                crop_level=payload.crop_level,
-                ken_burns_enabled=payload.ken_burns_enabled,
-                target_duration=payload.target_duration,
-            )
-            if version_count > 1:
-                result = process_video_multi(
-                    str(video),
-                    **common_kwargs,
-                    num_versions=version_count,
-                    kb_intensity=payload.ken_burns_intensity,
+            try:
+                if not video.exists():
+                    raise FileNotFoundError(f"视频不存在：{video}")
+
+                out_dir = _default_output_dir(video, payload.output_dir, "output")
+                if payload.output_dir.strip():
+                    out_path = out_dir / f"{_safe_stem(video.stem)}_smart_cut_{_stamp_name()}.mp4"
+                else:
+                    out_path = out_dir / f"{video.stem}_爆款切片_{_stamp_name()}.mp4"
+
+                pip_path, used_pip_file = _pick_pip_asset(payload, "smart-cut")
+                emit_log("info", f"[{index}/{len(paths)}] 开始处理 {video.name}", "smart-cut")
+                _set_task_progress(task_id, file_base, f"处理 {index}/{total_videos}: {video.name}")
+                version_count = payload.versions
+                file_started_at = time.time()
+                common_kwargs = dict(
+                    srt_path=payload.srt_path.strip() or None,
+                    output_path=str(out_path),
+                    dedup_preset=payload.dedup_preset,
+                    dedup_video_options=payload.video,
+                    dedup_audio_options=payload.audio,
+                    transition_options=payload.transition,
+                    subtitle_overlay=payload.subtitle_overlay,
+                    log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.90)),
+                    cancel_event=_task_cancel_event(task_id),
+                    force_category=None if payload.category in ("", "自动检测") else payload.category,
+                    pip_path=pip_path,
+                    pip_size=payload.pip_size,
+                    pip_opacity=payload.pip_opacity,
+                    pip_pos=payload.pip_pos,
+                    focus_hint=payload.focus_hint,
+                    ai_controls=payload.ai_controls,
+                    mirror_enabled=payload.mirror_enabled,
+                    smart_crop_enabled=payload.smart_crop_enabled,
+                    crop_level=payload.crop_level,
+                    ken_burns_enabled=payload.ken_burns_enabled,
+                    target_duration=payload.target_duration,
                 )
-            else:
-                result = process_video(
-                    str(video),
-                    **common_kwargs,
-                    kb_intensity=payload.ken_burns_intensity,
-                )
-            result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else bool(result)
-            if not result_ok:
-                raise RuntimeError(f"{video.name} 处理失败。")
-            outputs.extend(_collect_smart_cut_outputs(out_dir, video, file_started_at, out_path, result))
-            if _is_task_cancelled(task_id):
-                emit_log("warning", "任务已停止。", "smart-cut")
-                return
-            _archive_used_pip(used_pip_file, "smart-cut")
-            _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"完成 {index}/{total_videos}: {video.name}")
-            emit_log("success", f"处理完成: {video.name}", "smart-cut")
-            _consume_trial("智能成片", scope="smart-cut")
+                if version_count > 1:
+                    result = process_video_multi(
+                        str(video),
+                        **common_kwargs,
+                        num_versions=version_count,
+                        kb_intensity=payload.ken_burns_intensity,
+                    )
+                else:
+                    result = process_video(
+                        str(video),
+                        **common_kwargs,
+                        kb_intensity=payload.ken_burns_intensity,
+                    )
+                if _is_task_cancelled(task_id):
+                    emit_log("warning", "任务已停止。", "smart-cut")
+                    return
+                result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else bool(result)
+                if not result_ok:
+                    reason = ""
+                    if isinstance(result, dict):
+                        reason = str(result.get("error") or result.get("message") or "").strip()
+                    raise RuntimeError(f"{video.name} 处理失败：{reason}" if reason else f"{video.name} 处理失败。")
+                produced_outputs = _collect_smart_cut_outputs(out_dir, video, file_started_at, out_path, result)
+                if not produced_outputs:
+                    raise RuntimeError(f"{video.name} 未生成输出文件。")
+                outputs.extend(produced_outputs)
+                _archive_used_pip(used_pip_file, "smart-cut")
+                _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"完成 {index}/{total_videos}: {video.name}")
+                emit_log("success", f"处理完成: {video.name}", "smart-cut")
+                _consume_trial("智能成片", scope="smart-cut")
+            except Exception as video_exc:
+                if _is_task_cancelled(task_id):
+                    emit_log("warning", "任务已停止。", "smart-cut")
+                    return
+                failures.append(f"{video.name}: {video_exc}")
+                _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"跳过失败 {index}/{total_videos}: {video.name}")
+                _set_task(task_id, batch_failed=len(failures))
+                emit_log("error", f"[{index}/{total_videos}] 智能成片失败，已跳过继续下一个：{video.name}，{video_exc}", "smart-cut")
 
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", "smart-cut")
             return
+        if not outputs:
+            detail = failures[0] if failures else "没有成功输出。"
+            if total_videos > 1:
+                raise RuntimeError(f"批量智能成片没有成功输出：{detail}")
+            raise RuntimeError(detail)
         _set_task(
             task_id,
             status="completed",
@@ -8147,13 +8168,17 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             output=outputs[0] if outputs else "",
             outputs=outputs,
             result_count=len(outputs),
+            message=f"智能成片完成：成功 {len(outputs)}/{total_videos} 个",
             batch_total=total_videos,
-            batch_done=total_videos,
+            batch_done=len(outputs),
             batch_current=0,
-            batch_failed=0,
+            batch_failed=len(failures),
             batch_label="",
         )
-        emit_log("success", f"智能成片任务完成，输出 {len(outputs)} 个文件。", "smart-cut")
+        if failures:
+            emit_log("warning", f"智能成片批量完成：成功 {len(outputs)}/{total_videos} 个，失败 {len(failures)} 个。", "smart-cut")
+        else:
+            emit_log("success", f"智能成片任务完成，输出 {len(outputs)} 个文件。", "smart-cut")
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"智能成片失败: {exc}", "smart-cut")

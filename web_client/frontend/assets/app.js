@@ -722,6 +722,22 @@ function injectDiagnosticButtons() {
     const scope = logView?.id?.replace(/^log-/, "") || "";
     const title = header.querySelector("h2");
     if (title && title.textContent.trim() === "运行日志") title.textContent = "运行摘要";
+    if (title && !header.querySelector(".run-summary-heading")) {
+      const heading = document.createElement("div");
+      heading.className = "run-summary-heading";
+      title.insertAdjacentElement("beforebegin", heading);
+      heading.appendChild(title);
+
+      const batchSummary = document.createElement("span");
+      batchSummary.className = "run-summary-header-batch";
+      batchSummary.dataset.runSummaryBatch = scope;
+      batchSummary.hidden = true;
+      batchSummary.innerHTML = `
+        <span>批量剪辑</span>
+        <strong data-run-summary-batch-ratio>已完成 0/0</strong>
+      `;
+      heading.appendChild(batchSummary);
+    }
     let actions = header.querySelector(".log-header-actions");
     if (!actions) {
       actions = document.createElement("div");
@@ -1203,7 +1219,6 @@ function setupLogProgressBars() {
               <span class="log-progress-percent">0%</span>
             </div>
             <div class="log-progress-track"><span class="log-progress-fill"></span></div>
-            <span class="log-progress-batch" hidden></span>
           </div>
         </div>
         <div class="run-summary-section">
@@ -1437,9 +1452,11 @@ function totalProgressFromSummary(progress, task, batch) {
   if (batch?.total > 1) {
     const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
     const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
+    const completedPercent = Math.round((done / total) * 100);
+    const percent = Math.max(completedPercent, stepPercent);
     return {
-      percent: Math.round((done / total) * 100),
-      text: `${done}/${total}`,
+      percent,
+      text: `${percent}%`,
       status,
     };
   }
@@ -1599,11 +1616,25 @@ function renderRunSummary(scope) {
   el.style.setProperty("--run-summary-percent", `${totalProgress.percent}%`);
   const ring = el.querySelector("[data-run-summary-ring]");
   const ratioEl = el.querySelector("[data-run-summary-ratio]");
+  const batchHeader = document.querySelector(`[data-run-summary-batch="${scope}"]`);
   const recentEl = el.querySelector("[data-run-summary-recent]");
   const issueEl = el.querySelector("[data-run-summary-issue]");
 
   if (ring) ring.className = `run-summary-ring is-${totalProgress.status || "idle"}`;
   if (ratioEl) ratioEl.textContent = totalProgress.text;
+  if (batchHeader) {
+    const showBatch = Number(batch?.total || 0) > 1;
+    batchHeader.hidden = !showBatch;
+    const batchRatio = batchHeader.querySelector("[data-run-summary-batch-ratio]");
+    if (batchRatio && showBatch) {
+      const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
+      const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
+      batchRatio.textContent = `已完成 ${done}/${total}`;
+      batchHeader.title = batch.title || `共 ${total} 个，已完成 ${done} 个`;
+    } else {
+      batchHeader.title = "";
+    }
+  }
   if (recentEl) recentEl.innerHTML = renderRecentOutputRows(scope, scoped);
 
   const issue = issueForScope(scope, scoped);
@@ -1672,16 +1703,9 @@ function updateLogProgressBar(scope, progress) {
 
   el.className = `log-progress is-${status}`;
   const labelEl = el.querySelector(".log-progress-label");
-  const batchEl = el.querySelector(".log-progress-batch");
   const percentEl = el.querySelector(".log-progress-percent");
   const fill = el.querySelector(".log-progress-fill");
   if (labelEl) labelEl.textContent = label;
-  if (batchEl) {
-    const batch = progress.batch || batchProgressFromText(label, status);
-    batchEl.hidden = !batch;
-    batchEl.textContent = batch?.text || "";
-    batchEl.title = batch?.title || "";
-  }
   if (percentEl) percentEl.textContent = `${percent}%`;
   if (fill) fill.style.width = `${percent}%`;
   renderRunSummary(scope);
@@ -4352,30 +4376,26 @@ async function submitMixBatch(payload, groups) {
     batchPreflightOk = true;
   } catch (error) {
     if (!isApiNotFound(error)) throw error;
+    batchPreflightOk = false;
+  }
+
+  try {
+    const result = await api("/api/mix/batch/start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    toast(result.message || "批量混剪任务已提交", result.ok ? "success" : "warning");
+    refreshTasks();
+    return;
+  } catch (error) {
+    if (!isApiNotFound(error)) throw error;
     appendLog("mix", {
       time: new Date().toLocaleTimeString(),
       level: "warning",
-      message: "当前后端没有批量混剪预检接口，已切换为兼容模式逐组提交。",
+      message: batchPreflightOk
+        ? "当前运行的后端还没有批量混剪接口，已切换为兼容模式逐组提交。建议重启客户端或使用新版完整包。"
+        : "当前运行的后端还没有批量混剪接口/预检接口，已切换为兼容模式逐组提交。建议重启客户端或使用新版完整包。",
     });
-  }
-
-  if (batchPreflightOk) {
-    try {
-      const result = await api("/api/mix/batch/start", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      toast(result.message || "批量混剪任务已提交", result.ok ? "success" : "warning");
-      refreshTasks();
-      return;
-    } catch (error) {
-      if (!isApiNotFound(error)) throw error;
-      appendLog("mix", {
-        time: new Date().toLocaleTimeString(),
-        level: "warning",
-        message: "当前运行的后端还没有批量混剪接口，已切换为兼容模式逐组提交。建议重启客户端或使用新版完整包。",
-      });
-    }
   }
 
   await submitMixBatchLegacyQueue(payload, groups);
@@ -5229,7 +5249,7 @@ function classifyClipScoreTags(clip) {
   if (/尺码|码数|s码|m码|l码|xl|xxl|身高|体重|小码|中码|大码|正码|拍大|拍小|卡码/.test(text)) {
     add("尺码信息", "neutral", "包含尺码、身高或体重信息");
   }
-  if (/(\d+(\.\d+)?\s*(元|块|¥|￥))|价格|福利价|到手价|原价|现价|优惠|券|半价|折扣|\d+\s*折/.test(text)) {
+  if (/(\d+(\.\d+)?\s*(元|块|¥|￥))|价格|福利价|到手价|原价|现价|优惠|券|领券|满减|半价|折扣|\d+\s*折/.test(text)) {
     add("疑似价格", "warn", "可能包含价格、折扣或优惠表达");
   }
   if (/拍下|下单|小黄车|购物车|链接|号链接|上车|挂车|库存|补货|刷新拍/.test(text)) {

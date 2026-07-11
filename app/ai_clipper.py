@@ -3740,7 +3740,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         # [v9.4] Close片段语句完整性保障
         clips = ensure_sentence_complete(clips, srt_text, log_fn)
         clips = trim_repetitive_filler(clips, srt_text, log_fn)
-        clips = trim_tail_filler(clips, srt_text, log_fn)
+        # Do not trim tail filler by character ratio here. It can cut in the
+        # middle of natural speech; boundary/context repair below is safer.
         # [v9.4] Close完整性 → [v9.6] 全片段语句完整性
         clips = _split_long_clips(clips, _indexed_srt_entries, log_fn)
         clips = _trim_filler_start(clips, srt_text, log_fn)
@@ -4209,14 +4210,22 @@ def _pick_diverse_hook_candidate(candidates, log_fn=None):
     return chosen
 
 
-def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=None, focus_hint=None, ai_controls=None):
-    """Hook > 5秒时，从SRT短条目中找1-4秒爆点词替换原Hook。
+def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=5.0, focus_hint=None, ai_controls=None):
+    """Hook exceeds the configured cap: replace it with a short SRT hook candidate.
+
+    max_hook_sec=None means the user selected "不限", so this pass is disabled.
+
+    Hook > 5秒时，从SRT短条目中找1-4秒爆点词替换原Hook。
     原Hook降为Product，新Hook用SRT精确时间戳，保证1-3秒。
     """
-    MAX_HOOK_SEC = 5.0 if max_hook_sec is None else float(max_hook_sec)
-
     def _log(msg):
         if log_fn: log_fn(msg)
+
+    if max_hook_sec is None:
+        _log("短Hook检测: Hook上限=不限，跳过时长替换")
+        return clips
+
+    MAX_HOOK_SEC = float(max_hook_sec)
 
     if not clips or not srt_text or MAX_HOOK_SEC <= 0:
         return clips
@@ -4471,6 +4480,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             re.compile(r'半价|对折'),
             re.compile(r'\d+\s*折'),
             re.compile(r'[到拿]手价?\s*[一两三四五六七八九十百千万\d]+'),
+            re.compile(r'满减|领券|优惠券|消费券|凑单'),
             re.compile(r'拍.*链接|链接.*拍|去拍|赶紧拍|刷新拍'),
         ]
         _indexed_lines = []
@@ -7642,14 +7652,40 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     return finalized
 
 
-def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=12.0, max_hook_sec=6.0, max_close_sec=14.0):
-    """Split oversized clips on SRT entry boundaries when the fallback path needs it."""
+def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=20.0, max_hook_sec=10.0, max_close_sec=15.0):
+    """Split oversized clips only at safe SRT semantic boundaries."""
     def _log(msg):
         if log_fn:
             log_fn(msg)
 
     if not clips or not srt_entries:
         return clips
+
+    weak_endings = (
+        "然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实",
+        "这个", "这款", "这件", "它是", "它会", "你会", "你看", "的话",
+        "我觉得", "感觉", "有没有发现", "你去", "去",
+        "的", "了", "呀", "呢", "吧", "咯", "啊", "哈", "啦", "嘛",
+    )
+    continuation_starts = (
+        "然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实",
+        "它", "这个", "这款", "这件", "你看", "是的", "对", "没错",
+    )
+
+    def _norm_entry_text(value):
+        return re.sub(r"\[V\d+\]", "", str(value or "")).strip()
+
+    def _entry_has_safe_end(value):
+        txt = _norm_entry_text(value).rstrip("，,、；;：: ")
+        if not txt:
+            return False
+        if txt.endswith(weak_endings):
+            return False
+        return True
+
+    def _entry_starts_continuation(value):
+        txt = _norm_entry_text(value)
+        return bool(txt) and txt.startswith(continuation_starts)
 
     result = []
     split_count = 0
@@ -7707,6 +7743,9 @@ def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=12.0
                 continue
             projected_end = ee
             if current_start is not None and projected_end - current_start > limit and current:
+                if not _entry_has_safe_end(current[-1][2]) or _entry_starts_continuation(_text):
+                    current.append(entry)
+                    continue
                 chunks.append(current)
                 current = [entry]
                 current_start = es
@@ -8195,10 +8234,11 @@ def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
             if _is_pure_filler_entry(nt):
                 context_tail_filler_skip_count += 1
                 break
-            if not force_append and not (_ends_need_context(pieces[-1]) or _starts_as_continuation(nt)):
+            needs_semantic_append = force_append or _ends_need_context(pieces[-1]) or _starts_as_continuation(nt)
+            if not needs_semantic_append:
                 break
             delta = max(0.0, ne - new_end)
-            if total_before_context + context_extra_used + delta > context_total_cap and not (is_priority_boundary and force_append):
+            if total_before_context + context_extra_used + delta > context_total_cap and not needs_semantic_append:
                 context_skip_count += 1
                 break
             new_end = ne
@@ -8816,6 +8856,7 @@ def _filter_price_and_cta(clips, log_fn=None):
         re.compile(r'半价|对折'),                      # 半价
         re.compile(r'\d+\s*折'),                     # 3折, 5折
         re.compile(r'[到拿]手价?\s*[一两三四五六七八九十百千万\d]+'),  # 到手一百多
+        re.compile(r'满减|领券|优惠券|消费券|凑单'),  # 促销/领券
         re.compile(r'拍.*链接|链接.*拍|去拍|赶紧拍|刷新拍'),  # CTA
     ]
     # 绝对禁止词：从关键词管理读取（用户可自定义）
