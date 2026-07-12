@@ -17,6 +17,7 @@ APP_DIR = os.path.join(ROOT_DIR, "app")
 TOOLS_DIR = os.path.join(ROOT_DIR, "tools")
 WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
+SERVER_FILE = os.path.join(WEB_DIR, "server.py")
 FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
 ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
 WEBVIEW2_RUNTIME_DIR = os.path.join(
@@ -103,6 +104,7 @@ certifi_pem = _module_file("certifi", "cacert.pem")
 
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
+datas += _existing([(SERVER_FILE, "web_client")])
 datas += _existing([(ICON_FILE, "assets")])
 datas += _existing([(WEBVIEW2_RUNTIME_DIR, "webview2_runtime")])
 datas += _app_datas()

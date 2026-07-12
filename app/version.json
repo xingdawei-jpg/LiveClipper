@@ -4,8 +4,8 @@
   "files": {
     "app/ai_clipper.py": "9107356b22633a0fc9290961b2bd55b33ff4ea589ec6f798829c7558f7b3c163",
     "app/cutter_logic.py": "5e0a5ccde52ad73ab19755e46f75d93a533e947552093376ade125401dcaf787",
-    "app/updater.py": "3334b669c67aba40de471304a9d35d0689510dd7f9467be1081190d845b93422",
-    "web_client/server.py": "dab49b867b6ae95ac15d17b1d7d51817f1ec260a767e225e6f039803c202f388",
+    "app/updater.py": "7c3319d3fe37c38709f2a1192c6cda20931868cf4b0ffb64a2f9f3b59064333a",
+    "web_client/server.py": "a267804250451ee588a0ef04c23b45b86e2720d11d5af3723cfc339ce2598717",
     "web_client/frontend/index.html": "1b3c0e51243145dc696733c419ba60b2b872561ef58b73113538a109d659d472",
     "web_client/frontend/assets/app.js": "3eadfbf53d5efacaa8de13e21337ad5e41fcb4e2cc35ceea70598b1124883ad4",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
@@ -16,9 +16,9 @@
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "8e86b816271b7a564c2b93cb2bd261c5f8a39ab890c4ddf097dd7f2e2dbee741"
   },
-  "release_notes": "完整包修复：消除打包版误加载根目录旧 updater.py 的同名模块冲突，解决旧设备更新后仍运行旧后端、批量数量不显示、单个失败中断整批的问题；运行信息新增实际 server.py 路径与批量容错引擎版本；本版本必须使用新版完整包安装。",
+  "release_notes": "完整包修复：消除打包版误加载根目录旧 updater.py 的同名模块冲突，解决旧设备更新后仍运行旧后端、批量数量不显示、单个失败中断整批的问题；修复完整包运行完整性误报；运行信息新增实际 server.py 路径与批量容错引擎版本；本版本必须使用新版完整包安装。",
   "update_url": "",
-  "update_message": "完整包修复：消除打包版误加载根目录旧 updater.py 的同名模块冲突，解决旧设备更新后仍运行旧后端、批量数量不显示、单个失败中断整批的问题；运行信息新增实际 server.py 路径与批量容错引擎版本；本版本必须使用新版完整包安装。",
+  "update_message": "完整包修复：消除打包版误加载根目录旧 updater.py 的同名模块冲突，解决旧设备更新后仍运行旧后端、批量数量不显示、单个失败中断整批的问题；修复完整包运行完整性误报；运行信息新增实际 server.py 路径与批量容错引擎版本；本版本必须使用新版完整包安装。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -33,5 +33,5 @@
   "requires_full_package": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-13 06:55:23"
+  "updated_at": "2026-07-13 07:05:10"
 }

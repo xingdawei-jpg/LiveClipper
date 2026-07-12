@@ -366,9 +366,13 @@ def _active_runtime_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _manifest_local_path(relative_path):
+def _manifest_local_paths(relative_path):
     normalized = _manifest_target_path(relative_path)
-    return os.path.join(_active_runtime_root(), *normalized.split("/"))
+    root = _active_runtime_root()
+    paths = [os.path.join(root, *normalized.split("/"))]
+    if normalized.startswith("web_client/tools/"):
+        paths.append(os.path.join(root, "tools", os.path.basename(normalized)))
+    return list(dict.fromkeys(paths))
 
 
 def _normalized_file_sha256(path):
@@ -390,8 +394,8 @@ def _manifest_integrity_mismatches(version_info):
         expected = str(files.get(name) or "").lower()
         if not expected:
             continue
-        actual = _normalized_file_sha256(_manifest_local_path(name))
-        if actual != expected:
+        matched = any(_normalized_file_sha256(path) == expected for path in _manifest_local_paths(name))
+        if not matched:
             mismatches.append(name)
     return mismatches
 

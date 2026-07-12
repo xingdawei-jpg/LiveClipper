@@ -9511,19 +9511,27 @@ def _runtime_integrity_summary() -> dict[str, Any]:
     mismatched: list[str] = []
     for name in targets:
         if name.startswith("app/"):
-            path = APP_DIR / name.removeprefix("app/")
+            paths = [APP_DIR / name.removeprefix("app/")]
         elif name.startswith("web_client/"):
-            path = WEB_DIR / name.removeprefix("web_client/")
+            relative = name.removeprefix("web_client/")
+            paths = [WEB_DIR / relative]
+            if relative.startswith("tools/"):
+                paths.append(BUNDLE_DIR / "tools" / Path(relative).name)
         else:
             continue
-        try:
-            data = path.read_bytes()
-            if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
-                data = data.replace(b"\r\n", b"\n")
-            actual = hashlib.sha256(data).hexdigest().lower()
-        except Exception:
-            actual = ""
-        if actual != str(files.get(name) or "").lower():
+        expected = str(files.get(name) or "").lower()
+        matched = False
+        for path in paths:
+            try:
+                data = path.read_bytes()
+                if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
+                    data = data.replace(b"\r\n", b"\n")
+                if hashlib.sha256(data).hexdigest().lower() == expected:
+                    matched = True
+                    break
+            except Exception:
+                continue
+        if not matched:
             mismatched.append(name)
     return {"ok": not mismatched, "checked": len(targets), "mismatched": mismatched}
 
