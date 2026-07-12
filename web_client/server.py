@@ -3734,6 +3734,45 @@ def _preview_analysis_summaries(cache: dict[str, Any], requested_focus: Any = ""
     return category_summary, preference_summary, topic_summary
 
 
+def _preview_final_preference_summary(
+    preference_summary: dict[str, Any],
+    topic_summary: dict[str, Any],
+) -> dict[str, Any]:
+    counts = dict(topic_summary.get("topic_counts") or {})
+    durations = dict(topic_summary.get("topic_durations") or {})
+    candidates = [
+        (str(topic), int(count or 0), float(durations.get(topic) or 0.0))
+        for topic, count in counts.items()
+        if str(topic or "").strip() and str(topic) != "其他" and int(count or 0) > 0
+    ]
+    if not candidates:
+        return {
+            "status": "missing",
+            "mode": "最终片单统计",
+            "requested": str(preference_summary.get("requested") or "自动"),
+            "detail": "最终片单没有可识别的商品主题。",
+            "source": "final_clips",
+        }
+
+    candidates.sort(key=lambda item: (-item[1], -item[2], item[0]))
+    actual_label, actual_count, actual_duration = candidates[0]
+    previous_label = str(preference_summary.get("used_label") or preference_summary.get("label") or "").strip()
+    result = dict(preference_summary or {})
+    result.update({
+        "status": "final",
+        "mode": "最终片单统计",
+        "label": actual_label,
+        "used_label": actual_label,
+        "final_count": actual_count,
+        "final_duration": round(actual_duration, 3),
+        "source": "final_clips",
+        "detail": f"按最终保留片段统计，主线为{actual_label}。",
+    })
+    if previous_label and previous_label != actual_label:
+        result["ai_selected_label"] = previous_label
+    return result
+
+
 def _supplement_preview_preference(
     raw_clips: list[Any],
     public_clips: list[dict[str, Any]],
@@ -6083,6 +6122,16 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             preference_summary.get("requested", "自动"),
         )
         if effective_topic_summary:
+            preference_summary = _preview_final_preference_summary(preference_summary, effective_topic_summary)
+            final_preference_label = str(preference_summary.get("used_label") or preference_summary.get("label") or "")
+            effective_topic_summary = _preview_effective_topic_coverage(
+                raw_clips,
+                public_clips,
+                final_preference_label,
+                payload.duration,
+                preference_summary.get("requested", "自动"),
+            ) or effective_topic_summary
+            dedup_summary["preference_summary"] = preference_summary
             dedup_summary["topic_coverage_summary"] = effective_topic_summary
         _set_task_progress(task_id, 94, "生成预览列表")
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
@@ -9077,6 +9126,16 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             preference_summary.get("requested", "自动"),
         )
         if effective_topic_summary:
+            preference_summary = _preview_final_preference_summary(preference_summary, effective_topic_summary)
+            final_preference_label = str(preference_summary.get("used_label") or preference_summary.get("label") or "")
+            effective_topic_summary = _preview_effective_topic_coverage(
+                raw_clips,
+                public_clips,
+                final_preference_label,
+                payload.target_duration,
+                preference_summary.get("requested", "自动"),
+            ) or effective_topic_summary
+            dedup_summary["preference_summary"] = preference_summary
             dedup_summary["topic_coverage_summary"] = effective_topic_summary
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(

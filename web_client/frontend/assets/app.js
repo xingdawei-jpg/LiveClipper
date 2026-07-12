@@ -5299,6 +5299,33 @@ function previewPreferenceLabelFromSummary(summary = {}) {
   return "";
 }
 
+function buildFinalPreferenceSummary(summary = {}, topicCoverage = {}) {
+  const counts = topicCoverage.topic_counts || {};
+  const durations = topicCoverage.topic_durations || {};
+  const entries = Object.entries(counts)
+    .filter(([name, count]) => name && name !== "其他" && Number(count) > 0)
+    .sort((left, right) => {
+      const countDiff = Number(right[1]) - Number(left[1]);
+      if (countDiff) return countDiff;
+      const durationDiff = Number(durations[right[0]] || 0) - Number(durations[left[0]] || 0);
+      if (durationDiff) return durationDiff;
+      return String(left[0]).localeCompare(String(right[0]), "zh-CN");
+    });
+  if (!entries.length) return summary || {};
+  const actualLabel = entries[0][0];
+  const previousLabel = summary.used_label || summary.label || "";
+  return {
+    ...(summary || {}),
+    status: "final",
+    mode: "最终片单统计",
+    label: actualLabel,
+    used_label: actualLabel,
+    ai_selected_label: previousLabel && previousLabel !== actualLabel ? previousLabel : undefined,
+    source: "final_clips",
+    detail: `按最终保留片段统计，主线为${actualLabel}。`,
+  };
+}
+
 function previewPreferenceLabel(analysis) {
   return previewPreferenceLabelFromSummary(analysis?.preferenceSummary || {});
 }
@@ -5486,7 +5513,8 @@ function renderManualRepeatTags(clip) {
 function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const clips = (preview?.clips || []).filter((clip) => clip.selected !== false);
   const dedupSummary = preview?.dedup_summary || {};
-  const preferenceSummary = dedupSummary.preference_summary || {};
+  const topicCoverage = dedupSummary.topic_coverage_summary || {};
+  const preferenceSummary = buildFinalPreferenceSummary(dedupSummary.preference_summary || {}, topicCoverage);
   const preferenceLabel = previewPreferenceLabelFromSummary(preferenceSummary);
   const target = Number(preview?.target_duration || $(targetId)?.value || 60);
   const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
@@ -5495,7 +5523,6 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const preferenceEligibleClips = preferenceLabel ? clips.filter((clip) => clipEligibleForPreference(clip)) : [];
   const preferenceHitCount = preferenceEligibleClips.filter((clip) => clipMatchesPreference(clip, preferenceLabel)).length;
   const salesChain = buildSalesChainSummary(clips);
-  const topicCoverage = dedupSummary.topic_coverage_summary || {};
   if (topicCoverage.overconcentrated) {
     warnings.push(`偏好主题占比过高：${Number(topicCoverage.preference_count || 0)}/${Number(topicCoverage.product_count || 0)}，需要补充其他卖点。`);
   }
@@ -5615,8 +5642,13 @@ function renderPreviewSummary(analysis) {
   const preferenceText = preference.used_label
     || preference.label
     || (preference.status === "missing" ? "未生成" : "-");
+  const topicCounts = topicCoverage.topic_counts || {};
   const preferenceProductCount = Number(topicCoverage.product_count || analysis.preferenceEligibleCount || 0);
-  const preferenceCount = Number(topicCoverage.preference_count ?? analysis.preferenceHitCount ?? 0);
+  const preferenceCount = Number(
+    analysis.preferenceLabel
+      ? (topicCounts[analysis.preferenceLabel] ?? topicCoverage.preference_count ?? analysis.preferenceHitCount ?? 0)
+      : 0
+  );
   const preferenceRatio = preferenceProductCount > 0 ? preferenceCount / preferenceProductCount : 0;
   const preferenceHitText = analysis.preferenceLabel
     ? `${preferenceCount}/${preferenceProductCount} · ${(preferenceRatio * 100).toFixed(0)}%`
@@ -5627,9 +5659,8 @@ function renderPreviewSummary(analysis) {
     && (preferenceCount === 0 || topicCoverage.overconcentrated || topicCoverage.underpreferred)
   );
   const preferenceHitTitle = analysis.preferenceLabel
-    ? `本次偏好：${analysis.preferenceLabel}；Product命中：${preferenceCount}/${preferenceProductCount}；目标：${Number(topicCoverage.preference_min || 0)}-${Number(topicCoverage.preference_max || 0)}段`
-    : "未识别到本次偏好标签";
-  const topicCounts = topicCoverage.topic_counts || {};
+    ? `成片主线：${analysis.preferenceLabel}；Product占比：${preferenceCount}/${preferenceProductCount}`
+    : "未识别到成片主线";
   const topicEntries = Object.entries(topicCounts).filter(([name, count]) => name && name !== "其他" && Number(count) > 0);
   const topicCoverageText = topicEntries.length ? `${topicEntries.length}类` : "-";
   const topicCoverageTitle = topicEntries.length
@@ -5659,8 +5690,8 @@ function renderPreviewSummary(analysis) {
       <div><span>已自动处理</span><strong class="is-${analysis.autoRemovedCount ? "warn" : "ok"}">${analysis.autoRemovedCount ? `${analysis.autoRemovedCount} 段` : "无"}</strong></div>
       <div><span>人工检查</span><strong class="is-${analysis.manualCheckCount ? "warn" : "ok"}">${analysis.manualCheckCount ? `${analysis.manualCheckCount} 组` : "无"}</strong></div>
       <div><span>品类</span><strong title="${escapeHtml(categoryTitle)}">${escapeHtml(categoryText)}</strong></div>
-      <div><span>AI偏好</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
-      <div><span>偏好占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
+      <div><span>成片主线</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
+      <div><span>主线占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
       <div><span>主题覆盖</span><strong class="is-${topicCoverageWarn ? "warn" : "ok"}" title="${escapeHtml(topicCoverageTitle)}">${escapeHtml(topicCoverageText)}</strong></div>
       <div><span>成交结构</span><strong class="is-${salesChain.ok ? "ok" : "warn"}" title="${escapeHtml(salesChain.title)}">${escapeHtml(salesChain.label)}</strong></div>
     </div>
