@@ -1,22 +1,22 @@
 {
-  "version": "2026.7.12.8",
-  "latest_version": "2026.7.12.8",
+  "version": "2026.7.12.9",
+  "latest_version": "2026.7.12.9",
   "files": {
-    "app/ai_clipper.py": "79da82507d935767ac0c160afeb2fdaed61a54debc847263f262bcfa992dcab1",
-    "app/cutter_logic.py": "708a75e82ac36826903b7111f1f5794e8a0b0daa45f5427fb75a72192d9c650d",
-    "app/updater.py": "e5a173fd4b3bbc2b3d5e2c2d36450f9dff0c76c63926cf0aa68b87453a8e896c",
-    "web_client/server.py": "aba61dfaacbc15b9f4237055bdee93b3d5e47b9f3cd9451fda16c48ccd8f3dfe",
+    "app/ai_clipper.py": "1bf372b93b81e71bf25c63935abd4f66305ebcaf7302ede2be962a22a0389388",
+    "app/cutter_logic.py": "aca5a7088781b193c633941b6ab04a1ddf3af8f2152434b541cd3d65cbe4612a",
+    "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
+    "web_client/server.py": "dab69e6b94a2a3e265321127b85652892470a6663eb6505541eec80ee811e5a3",
     "web_client/frontend/index.html": "0d695cf4fdcfd6e73f0f209ea5dc1051632c100051e59f19510580931486db0e",
     "web_client/frontend/assets/app.js": "0eca7675a48dc5bd08f055cf2304099afacc0289666bfaa9f3060594e14c9954",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
     "app/config.py": "f34a7101dd2d17b336c90a9c449dee990eb6b97cbfe737787a14f9668d435b58",
     "app/keywords.json": "07374f0489171e4f22a423d714aef91c5124e41a593372daa9ef1e3c553d1292",
-    "app/volcengine_asr.py": "8fb4a78897ab0aad0bff58539414f6134a2b31b7e0dbe65252c09da2a29ed5da",
+    "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "e36e3c4d3ff68b157748e7c14d23e0b22663ebd0531cf06e3b119ebcc3791951"
   },
-  "release_notes": "恢复原预览名称，并新增纯前端最终片段统计：即使后端不返回偏好与主题 summary，也直接从最终保留字幕计算 AI偏好、偏好占比和主题覆盖。",
+  "release_notes": "改进AI选片断句：基于词级时间生成语义段，修复跨段断词、弱开头、悬空结尾与长停顿，提升预览和成片连贯性。",
   "update_url": "",
-  "update_message": "恢复原预览名称，并新增纯前端最终片段统计：即使后端不返回偏好与主题 summary，也直接从最终保留字幕计算 AI偏好、偏好占比和主题覆盖。",
+  "update_message": "改进AI选片断句：基于词级时间生成语义段，修复跨段断词、弱开头、悬空结尾与长停顿，提升预览和成片连贯性。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -28,5 +28,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 16:00:42"
+  "updated_at": "2026-07-12 18:22:54"
 }

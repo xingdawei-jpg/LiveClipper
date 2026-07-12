@@ -9,9 +9,324 @@ import time
 import json
 import uuid
 import subprocess
+import re
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _WORD_TIMING_SCHEMA = "liveclipper.word-timings.v1"
+_SEMANTIC_STRONG_PUNCTUATION = set("。！？!?")
+_SEMANTIC_CLAUSE_PUNCTUATION = set("，,；;：:、")
+_SEMANTIC_BOUNDARY_PUNCTUATION = _SEMANTIC_STRONG_PUNCTUATION | _SEMANTIC_CLAUSE_PUNCTUATION
+_SEMANTIC_IGNORED_PUNCTUATION = set("“”‘’\"'（）()【】[]《》<>…—·-_/\\{}")
+
+
+def _semantic_plain_text(value):
+    text = re.sub(r"^\s*\[V\d+\]\s*", "", str(value or ""), flags=re.IGNORECASE)
+    return "".join(
+        char.lower()
+        for char in text
+        if not char.isspace()
+        and char not in _SEMANTIC_BOUNDARY_PUNCTUATION
+        and char not in _SEMANTIC_IGNORED_PUNCTUATION
+    )
+
+
+def _semantic_punctuation_offsets(text, expected_plain):
+    """Map provider punctuation to spoken-character offsets when alignment is exact."""
+    source = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.IGNORECASE)
+    punctuation = {}
+    plain = []
+    offset = 0
+    for char in source:
+        if char.isspace() or char in _SEMANTIC_IGNORED_PUNCTUATION:
+            continue
+        if char in _SEMANTIC_BOUNDARY_PUNCTUATION:
+            if offset > 0:
+                punctuation[offset] = punctuation.get(offset, "") + char
+            continue
+        plain.append(char.lower())
+        offset += 1
+    if "".join(plain) != expected_plain:
+        return {}
+    return punctuation
+
+
+def _semantic_group_key(segment):
+    marker = str(segment.get("source_marker") or "").strip().upper()
+    source = str(segment.get("source") or "").strip()
+    return marker, source
+
+
+def _semantic_tokens_for_group(segments):
+    tokens = []
+    for segment_order, segment in enumerate(segments or []):
+        if not isinstance(segment, dict):
+            continue
+        clean_words = []
+        for word in segment.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            text = str(word.get("text") or "").strip()
+            try:
+                start = float(word.get("start") or 0)
+                end = float(word.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            if not text or end <= start:
+                continue
+            item = {"text": text, "start": start, "end": end}
+            if word.get("confidence") is not None:
+                item["confidence"] = word.get("confidence")
+            clean_words.append(item)
+        if not clean_words:
+            continue
+
+        expected_plain = "".join(_semantic_plain_text(word["text"]) for word in clean_words)
+        punctuation = _semantic_punctuation_offsets(segment.get("text") or "", expected_plain)
+        spoken_offset = 0
+        for word_order, word in enumerate(clean_words):
+            spoken_offset += len(_semantic_plain_text(word["text"]))
+            token = dict(word)
+            token["_punct_after"] = punctuation.get(spoken_offset, "")
+            token["_segment_order"] = segment_order
+            token["_word_order"] = word_order
+            tokens.append(token)
+
+    tokens.sort(key=lambda item: (float(item["start"]), float(item["end"]), item["_segment_order"], item["_word_order"]))
+    monotonic = []
+    for token in tokens:
+        if monotonic and token["start"] < monotonic[-1]["start"]:
+            continue
+        monotonic.append(token)
+    return monotonic
+
+
+def _semantic_boundary_score(token, next_token, unit_start):
+    punctuation = str(token.get("_punct_after") or "")
+    raw_gap = float(next_token["start"]) - float(token["end"]) if next_token else 10.0
+    gap = max(0.0, raw_gap)
+    duration = float(token["end"]) - float(unit_start)
+    if next_token is not None and raw_gap < 0:
+        return 0, "overlapping_words", gap, duration
+    if any(char in _SEMANTIC_STRONG_PUNCTUATION for char in punctuation):
+        return 100, "strong_punctuation", gap, duration
+    if gap >= 0.65:
+        return 85, "long_pause", gap, duration
+    if any(char in _SEMANTIC_CLAUSE_PUNCTUATION for char in punctuation):
+        return 70 if gap >= 0.18 else 58, "clause_punctuation", gap, duration
+    if gap >= 0.45:
+        return 62, "pause", gap, duration
+    if gap >= 0.28:
+        return 42, "short_pause", gap, duration
+    return 0, "", gap, duration
+
+
+def _semantic_render_words(words):
+    return "".join(str(word.get("text") or "") + str(word.get("_punct_after") or "") for word in words).strip()
+
+
+def _semantic_trim_weak_prefix(words):
+    """Trim only disposable leading connectors, keeping timestamps word-exact."""
+    current = list(words or [])
+    removed = []
+    prefixes = ("然后", "而且", "但是", "因为", "就是", "没错", "对的", "是的")
+    while current:
+        compact = "".join(_semantic_plain_text(word.get("text") or "") for word in current)
+        matched = next((prefix for prefix in prefixes if compact.startswith(prefix)), "")
+        if not matched or len(compact) - len(matched) < 5:
+            break
+        consumed = 0
+        cut_count = 0
+        for word in current:
+            consumed += len(_semantic_plain_text(word.get("text") or ""))
+            cut_count += 1
+            if consumed >= len(matched):
+                break
+        if consumed != len(matched) or cut_count >= len(current):
+            break
+        removed.append(matched)
+        current = current[cut_count:]
+    return current, removed
+
+
+def _semantic_trim_weak_suffix(words):
+    """Remove short dangling tails without estimating a replacement end time."""
+    current = list(words or [])
+    removed = []
+    suffixes = ("但是我", "所以我", "然后我", "但是", "然后", "而且", "因为", "就是", "所以")
+    while current:
+        compact = "".join(_semantic_plain_text(word.get("text") or "") for word in current)
+        matched = next((suffix for suffix in suffixes if compact.endswith(suffix)), "")
+        if not matched or len(compact) - len(matched) < 5:
+            break
+        consumed = 0
+        cut_count = 0
+        for word in reversed(current):
+            consumed += len(_semantic_plain_text(word.get("text") or ""))
+            cut_count += 1
+            if consumed >= len(matched):
+                break
+        if consumed != len(matched) or cut_count >= len(current):
+            break
+        removed.insert(0, matched)
+        current = current[:-cut_count]
+    return current, removed
+
+
+def _semantic_segments_for_group(segments, marker="", source=""):
+    tokens = _semantic_tokens_for_group(segments)
+    if not tokens:
+        return []
+
+    result = []
+    start_index = 0
+    index = 0
+    candidates = []
+    while index < len(tokens):
+        token = tokens[index]
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else None
+        score, reason, gap, duration = _semantic_boundary_score(token, next_token, tokens[start_index]["start"])
+        if score and duration >= 1.2:
+            candidates.append((index, score, reason, duration))
+
+        cut_index = None
+        cut_reason = ""
+        is_last = next_token is None
+        strong_boundary = reason == "strong_punctuation" and duration >= 1.5
+        clear_pause = reason == "long_pause" and duration >= 1.5
+        useful_clause = reason == "clause_punctuation" and duration >= 3.5
+
+        if is_last:
+            cut_index, cut_reason = index, reason or "source_end"
+        elif strong_boundary or clear_pause or useful_clause:
+            cut_index, cut_reason = index, reason
+        elif duration >= 6.2 and candidates:
+            eligible = [candidate for candidate in candidates if candidate[3] >= 1.5]
+            if eligible:
+                cut_index, _, cut_reason, _ = max(
+                    eligible,
+                    key=lambda candidate: candidate[1] - abs(candidate[3] - 4.6) * 5.0,
+                )
+        elif duration >= 8.8:
+            eligible = [candidate for candidate in candidates if candidate[3] >= 1.2]
+            if eligible:
+                cut_index, _, cut_reason, _ = max(
+                    eligible,
+                    key=lambda candidate: candidate[1] - abs(candidate[3] - 5.5) * 3.0,
+                )
+            else:
+                safe_positions = [
+                    probe
+                    for probe in range(start_index, index)
+                    if float(tokens[probe + 1]["start"]) >= float(tokens[probe]["end"])
+                    and float(tokens[probe]["end"]) - float(tokens[start_index]["start"]) >= 3.0
+                ]
+                if safe_positions:
+                    cut_index = min(
+                        safe_positions,
+                        key=lambda probe: abs(
+                            (float(tokens[probe]["end"]) - float(tokens[start_index]["start"])) - 5.5
+                        ),
+                    )
+                    cut_reason = "hard_limit_word_boundary"
+
+        if cut_index is None:
+            index += 1
+            continue
+
+        unit_words = tokens[start_index:cut_index + 1]
+        if unit_words:
+            unit_words, trimmed_prefixes = _semantic_trim_weak_prefix(unit_words)
+            unit_words, trimmed_suffixes = _semantic_trim_weak_suffix(unit_words)
+        if unit_words:
+            public_words = []
+            for word in unit_words:
+                public_word = {key: value for key, value in word.items() if not key.startswith("_")}
+                public_words.append(public_word)
+            rendered_text = _semantic_render_words(unit_words)
+            if trimmed_suffixes:
+                rendered_text = rendered_text.rstrip("，,；;：:、")
+            item = {
+                "start": round(float(unit_words[0]["start"]), 3),
+                "end": round(float(unit_words[-1]["end"]), 3),
+                "text": rendered_text,
+                "words": public_words,
+                "semantic_unit": True,
+                "boundary_reason": cut_reason,
+            }
+            if trimmed_prefixes:
+                item["trimmed_prefix"] = "".join(trimmed_prefixes)
+            if trimmed_suffixes:
+                item["trimmed_suffix"] = "".join(trimmed_suffixes)
+            if marker:
+                item["source_marker"] = marker
+            if source:
+                item["source"] = source
+            result.append(item)
+
+        start_index = cut_index + 1
+        index = start_index
+        candidates = []
+
+    return result
+
+
+def build_semantic_segments(segments, log_fn=None):
+    """Create source-local semantic units using only provider word timestamps."""
+    valid = [segment for segment in (segments or []) if isinstance(segment, dict)]
+    if not valid:
+        return []
+    if all(segment.get("semantic_unit") for segment in valid):
+        return [dict(segment) for segment in valid]
+
+    groups = {}
+    group_order = []
+    for segment in valid:
+        key = _semantic_group_key(segment)
+        if key not in groups:
+            groups[key] = []
+            group_order.append(key)
+        groups[key].append(segment)
+
+    semantic = []
+    for marker, source in group_order:
+        semantic.extend(_semantic_segments_for_group(groups[(marker, source)], marker=marker, source=source))
+    if not semantic:
+        return []
+    if log_fn:
+        long_count = sum(1 for segment in semantic if float(segment["end"]) - float(segment["start"]) > 8.8)
+        log_fn(f"语义断句: {len(valid)} 个原始语音段 -> {len(semantic)} 个词级语义段" + (f"，{long_count} 段保留长句" if long_count else ""))
+    return semantic
+
+
+def _semantic_srt_time(seconds):
+    value = max(0.0, float(seconds or 0.0))
+    total_ms = int(round(value * 1000.0))
+    hours, remainder = divmod(total_ms, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    secs, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+
+def semantic_segments_to_srt(segments):
+    blocks = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start = float(segment.get("start") or 0)
+            end = float(segment.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        text = str(segment.get("text") or "").strip()
+        marker = str(segment.get("source_marker") or "").strip().upper()
+        if marker and not re.match(r"^\[V\d+\]", text, flags=re.IGNORECASE):
+            text = f"[{marker}] {text}"
+        if not text or end <= start:
+            continue
+        blocks.append(
+            f"{len(blocks) + 1}\n{_semantic_srt_time(start)} --> {_semantic_srt_time(end)}\n{text}\n"
+        )
+    return "\n".join(blocks)
 
 
 def word_timing_sidecar_path(srt_path):
@@ -76,7 +391,7 @@ def write_word_timing_sidecar(srt_path, segments, provider="volcengine", log_fn=
     return sidecar
 
 
-def load_word_timing_sidecar(srt_path):
+def load_word_timing_sidecar(srt_path, semantic=False, log_fn=None):
     """Load a sidecar defensively; missing/legacy subtitles simply return []."""
     sidecar = word_timing_sidecar_path(srt_path)
     try:
@@ -84,7 +399,10 @@ def load_word_timing_sidecar(srt_path):
             payload = json.load(handle)
         if payload.get("schema") != _WORD_TIMING_SCHEMA:
             return []
-        return list(payload.get("segments") or [])
+        segments = list(payload.get("segments") or [])
+        if semantic:
+            return build_semantic_segments(segments, log_fn=log_fn) or segments
+        return segments
     except (OSError, ValueError, TypeError, AttributeError):
         return []
 

@@ -2102,7 +2102,13 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _v2_apikey = _cfg2.get("volc_api_key", "")
                     if not _volc_used and all([_v2_tos_ak, _v2_tos_sk]) and (all([_v2_app_id, _v2_token]) or _v2_apikey):
                         _log("启动火山引擎语音识别...")
-                        from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
+                        from volcengine_asr import (
+                            build_semantic_segments,
+                            prepare_volcengine_audio,
+                            semantic_segments_to_srt,
+                            volcengine_asr,
+                            write_word_timing_sidecar,
+                        )
                         import tempfile as _tf2
                         import hashlib as _hl2
                         _temp_dir2 = _os2.path.join(_tf2.gettempdir(), "live_cutter_stt")
@@ -2114,28 +2120,9 @@ def process_video(video_path, srt_path=None, output_path=None,
                         if _audio2 and _os2.path.exists(_audio2):
                             _segs2 = volcengine_asr(_audio2, _v2_app_id, _v2_token, _v2_tos_ak, _v2_tos_sk, bucket=_v2_bucket, region=_cfg2.get("volc_region", "cn-beijing"), log_fn=_log, api_key=_cfg2.get("volc_api_key", "") or None)
                             if _segs2:
-                                # 生成 SRT 文件
-                                _srt_lines = []
-                                for _i2, _seg2 in enumerate(_segs2, 1):
-                                    _st2 = _seg2["start"]
-                                    _et2 = _seg2["end"]
-                                    _txt2 = _seg2["text"].strip()
-                                    # 清理标点符号和语气词
-                                    _txt2 = re.sub(r"[，。！？、；：“”‘’（）《》【】…—·,.!?:;'\"()\[\]{}<>\/\\-]", "", _txt2)
-                                    _txt2 = re.sub(r"^[\u554a\u5462\u55ef\u54e6\u54c8]+|[\u554a\u5462\u55ef\u54e6\u54c8]+$", "", _txt2)
-                                    _txt2 = _txt2.strip()
-                                    if not _txt2:
-                                        continue
-                                    _srt_lines.append(str(_i2))
-                                    _srt_lines.append(
-                                        f"{int(_st2//3600):02d}:{int((_st2%3600)//60):02d}:{int(_st2%60):02d},{int((_st2%1)*1000):03d}"
-                                        f" --> "
-                                        f"{int(_et2//3600):02d}:{int((_et2%3600)//60):02d}:{int(_et2%60):02d},{int((_et2%1)*1000):03d}"
-                                    )
-                                    _srt_lines.append(_txt2)
-                                    _srt_lines.append("")
+                                _semantic2 = build_semantic_segments(_segs2, log_fn=_log) or _segs2
                                 with open(_srt2, "w", encoding="utf-8") as _f2:
-                                    _f2.write("\n".join(_srt_lines))
+                                    _f2.write(semantic_segments_to_srt(_semantic2))
                                 write_word_timing_sidecar(_srt2, _segs2, log_fn=_log)
                                 srt_path = _srt2
                                 auto_srt = True
@@ -2236,7 +2223,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     _word_timings = []
     try:
         from volcengine_asr import load_word_timing_sidecar
-        _word_timings = load_word_timing_sidecar(srt_path)
+        _word_timings = load_word_timing_sidecar(srt_path, semantic=True, log_fn=_log)
         if _word_timings:
             _log(f"AI边界裁剪: 已载入 {sum(len(seg.get('words') or []) for seg in _word_timings)} 个词级时间")
     except Exception as _word_timing_error:
@@ -4646,7 +4633,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _asr_ok = False
             if _asr_enabled:
                 try:
-                    from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
+                    from volcengine_asr import (
+                        build_semantic_segments,
+                        prepare_volcengine_audio,
+                        semantic_segments_to_srt,
+                        volcengine_asr,
+                        write_word_timing_sidecar,
+                    )
                     import hashlib, tempfile, json
                     _td = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
                     os.makedirs(_td, exist_ok=True)
@@ -4664,12 +4657,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                          log_fn=_log,
                                          api_key=_cfg4.get("volc_api_key", "") or None)
                     if srts:
+                        _semantic_srts = build_semantic_segments(srts, log_fn=_log) or srts
                         with open(_sc, "w", encoding="utf-8") as _fw:
-                            for _i_seg, _seg in enumerate(srts):
-                                _st_seg = _seg["start"] if isinstance(_seg, dict) else _seg[1]
-                                _et_seg = _seg["end"] if isinstance(_seg, dict) else _seg[2]
-                                _tx_seg = _seg["text"] if isinstance(_seg, dict) else _seg[0]
-                                _fw.write(f"{_i_seg+1}\n{int(_st_seg//3600):02d}:{int((_st_seg%3600)//60):02d}:{int(_st_seg%60):02d},{int((_st_seg%1)*1000):03d} --> {int(_et_seg//3600):02d}:{int((_et_seg%3600)//60):02d}:{int(_et_seg%60):02d},{int((_et_seg%1)*1000):03d}\n{_tx_seg}\n\n")
+                            _fw.write(semantic_segments_to_srt(_semantic_srts))
                         write_word_timing_sidecar(_sc, srts, log_fn=_log)
                         _log(f"  火山引擎 ASR 成功: {len(srts)} 条")
                         _asr_ok = True
@@ -4731,7 +4721,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _marker = f"V{_vi+1}"
             try:
                 from volcengine_asr import load_word_timing_sidecar
-                for _word_segment in load_word_timing_sidecar(_sc):
+                for _word_segment in load_word_timing_sidecar(_sc, semantic=True, log_fn=_log):
                     _marked_word_segment = dict(_word_segment)
                     _marked_word_segment["source_marker"] = _marker
                     _mix_word_timings.append(_marked_word_segment)

@@ -4112,11 +4112,25 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
     _forced_main_cat = _normalize_forced_category(force_category)
 
-    # 单版本叙事必须让AI看到原始完整句。二次按5秒拆分会把一个句子拆成
-    # 两个编号，导致AI把前后半句当作两个片段，并让预览重复还原同一句。
-    if multi_version:
+    semantic_srt_applied = False
+    if word_timings:
+        try:
+            from volcengine_asr import build_semantic_segments, semantic_segments_to_srt
+            semantic_segments = build_semantic_segments(word_timings)
+            semantic_srt = semantic_segments_to_srt(semantic_segments)
+            if semantic_srt.strip():
+                srt_text = semantic_srt
+                semantic_srt_applied = True
+                _log(f"AI语义断句: 使用 {len(semantic_segments)} 个词级精确语义段")
+        except Exception as semantic_error:
+            _log(f"AI语义断句: 词级语义段不可用，保留原SRT ({semantic_error})")
+
+    # 没有词级时间的旧字幕保留原有兼容路径；有词级语义段时禁止再次按字数估时拆分。
+    if multi_version and not semantic_srt_applied:
         from srt_splitter import split_long_srt_entries
         srt_text = split_long_srt_entries(srt_text, max_duration=5.0, log_fn=_log)
+    elif semantic_srt_applied:
+        _log("AI叙事模式: 使用词级精确语义段，不做机械二次拆句")
     else:
         _log("AI叙事模式: 使用原始完整SRT条目，不做5秒二次拆句")
 

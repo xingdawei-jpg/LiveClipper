@@ -4319,6 +4319,7 @@ def _merge_selected_segments(
             group_last_index >= 0
             and seg_index >= 0
             and seg_index == group_last_index + 1
+            and gap <= 0.65
         )
         missing_index_fallback = (group_last_index < 0 or seg_index < 0) and gap <= 0.35
         if consecutive_sentence or missing_index_fallback:
@@ -5779,7 +5780,12 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
     digest = hashlib.md5(str(video).encode("utf-8", errors="ignore")).hexdigest()[:12]
     audio_path: Path | None = None
     try:
-        from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
+        from volcengine_asr import (
+            build_semantic_segments,
+            prepare_volcengine_audio,
+            volcengine_asr,
+            write_word_timing_sidecar,
+        )
 
         prepared = prepare_volcengine_audio(
             str(video),
@@ -5806,7 +5812,11 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
         )
         if not segments:
             return None
-        srt_text = _segments_to_srt(segments)
+        semantic_segments = build_semantic_segments(
+            segments,
+            log_fn=lambda msg: emit_log("info", msg, scope),
+        ) or segments
+        srt_text = _segments_to_srt(semantic_segments)
         if not srt_text.strip():
             return None
         srt.write_text(srt_text, encoding="utf-8")
@@ -5815,7 +5825,7 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
             segments,
             log_fn=lambda msg: emit_log("info", msg, scope),
         )
-        emit_log("info", f"云端语音识别成功：{len(segments)} 条语音段。", scope)
+        emit_log("info", f"云端语音识别成功：{len(segments)} 条原始语音段，生成 {len(semantic_segments)} 条语义段。", scope)
         return srt
     except Exception as exc:
         emit_log("warning", f"云端语音识别异常: {type(exc).__name__}: {exc}", scope)
