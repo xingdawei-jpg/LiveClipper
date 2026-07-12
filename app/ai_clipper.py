@@ -3973,6 +3973,29 @@ def _director_duration_status(clips, target_duration):
     }
 
 
+def _director_context_boundary_flags(text):
+    value = re.sub(r"\[[vV]\d+\]\s*", "", str(text or "")).strip()
+    compact = re.sub(r"[\s。！？!?；;]+$", "", value)
+    repair_prefixes = (
+        "还要", "还有", "而且", "但是", "所以", "不过", "就是", "然后",
+        "才能", "像这种", "就感觉", "这两根线",
+    )
+    hard_prefixes = (
+        "还要", "还有", "而且", "但是", "所以", "不过", "就是", "然后",
+        "就感觉", "这两根线",
+    )
+    dangling_suffixes = (
+        "而且", "然后", "所以", "但是", "不过", "因为", "还有", "还要", "还",
+        "首先", "这个版呢", "这个女生", "这个版", "这种",
+        "大头含量是", "还有一种人在", "也会", "的话也会", "整个人调性",
+        "有些人他", "属于是一", "已经属于是一", "会", "能", "的话",
+    )
+    starts_for_repair = compact.startswith(repair_prefixes)
+    starts_hard = compact.startswith(hard_prefixes)
+    ends = value.endswith(("，", "、", "：", ",", ":")) or compact.endswith(dangling_suffixes)
+    return starts_for_repair, starts_hard, ends
+
+
 def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
     """Keep only mechanical safety checks; leave narrative decisions to AI."""
     def _log(msg):
@@ -4048,20 +4071,9 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
         warnings.append(f"存在{len(long_products)}段超过12s的Product")
 
     fragment_examples = []
-    continuation_prefixes = (
-        "还要", "还有", "而且", "但是", "因为", "所以", "不过",
-        "就是", "然后", "才能", "包括", "像这种", "这两根线",
-    )
-    dangling_suffixes = (
-        "而且", "然后", "所以", "但是", "不过", "因为", "还有", "还要", "还",
-        "首先", "包括", "这个版呢", "这个女生", "这个版", "这种",
-        "大头含量是", "还有一种人在",
-    )
     for clip_index, clip in enumerate(valid, 1):
         text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
-        compact = re.sub(r"[\s。！？!?；;]+$", "", text)
-        starts_incomplete = compact.startswith(continuation_prefixes)
-        ends_incomplete = text.endswith(("，", "、", "：", ",", ":")) or compact.endswith(dangling_suffixes)
+        _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
         if starts_incomplete or ends_incomplete:
             side = "开头承接前句" if starts_incomplete else "结尾未说完"
             fragment_examples.append(f"第{clip_index}段{side}:{text[:34]}")
@@ -4333,6 +4345,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # reason to discard the whole sentence. Trim only the leading word
             # before hard-auditing for real half-sentence boundaries.
             clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
+            clips = _repair_director_context_edges(clips, cleaned_srt, log_fn)
             if not clips:
                 continue
 
@@ -9700,6 +9713,105 @@ def _restore_director_clip_srt_boundaries(clips, cleaned_srt, log_fn=None):
         after = sum(_clip_duration_value(c) for c in restored)
         _log(f"AI边界验收: 恢复 {fix_count} 处SRT内截断，时长 {before:.1f}s -> {after:.1f}s")
     return restored
+
+
+def _repair_director_context_edges(clips, cleaned_srt, log_fn=None):
+    """Expand only adjacent SRT entries when a selected clip plainly starts/ends mid-thought."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips or not cleaned_srt:
+        return clips
+    entries = _parse_srt_entries_for_hook(cleaned_srt)
+    if not entries:
+        return clips
+
+    def _strip_marker(value):
+        return re.sub(r"\[[vV]\d+\]\s*", "", str(value or "")).strip()
+
+    def _clip_scope(text):
+        marker = re.search(r"\[V\d+\]", str(text or ""), flags=re.I)
+        if not marker:
+            return "", entries
+        tag = marker.group(0).upper()
+        scoped = [entry for entry in entries if tag in str(entry[2]).upper()]
+        return tag, scoped or entries
+
+    def _touched_range(scoped, start, end):
+        touched = []
+        for idx, (s, e, _text) in enumerate(scoped):
+            overlap = max(0.0, min(e, end) - max(s, start))
+            boundary_hit = abs(s - start) < 0.35 or abs(e - end) < 0.35
+            if overlap > 0.05 or boundary_hit:
+                touched.append(idx)
+        if not touched:
+            return None
+        return touched[0], touched[-1]
+
+    repaired = []
+    prev_count = 0
+    next_count = 0
+    for clip in clips:
+        if not isinstance(clip, (list, tuple)) or len(clip) < 6:
+            repaired.append(clip)
+            continue
+        ct, text, start, end, score, dur = clip[:6]
+        rest = tuple(clip[6:])
+        try:
+            start_f = float(start)
+            end_f = float(end)
+        except Exception:
+            repaired.append(clip)
+            continue
+        tag, scoped = _clip_scope(text)
+        touched = _touched_range(scoped, start_f, end_f)
+        if not touched:
+            repaired.append(clip)
+            continue
+        first, last = touched
+        new_first, new_last = first, last
+        new_text = str(text or "")
+
+        needs_prev, _starts_hard, needs_next = _director_context_boundary_flags(new_text)
+        if needs_prev and new_first > 0:
+            ps, pe, _pt = scoped[new_first - 1]
+            if start_f - pe <= 1.6 and end_f - ps <= max(4.0, (end_f - start_f) + 8.0):
+                new_first -= 1
+                prev_count += 1
+
+        for _ in range(2):
+            pieces = [_strip_marker(scoped[idx][2]) for idx in range(new_first, new_last + 1)]
+            candidate_text = "".join(piece for piece in pieces if piece)
+            if tag:
+                candidate_text = f"{tag} {candidate_text}".strip()
+            _needs_prev, _starts_hard, needs_next = _director_context_boundary_flags(candidate_text)
+            if not needs_next or new_last >= len(scoped) - 1:
+                break
+            ns, ne, _nt = scoped[new_last + 1]
+            if ns - end_f > 1.8:
+                break
+            if ne - scoped[new_first][0] > max(8.0, (end_f - start_f) + 10.0):
+                break
+            new_last += 1
+            next_count += 1
+
+        if new_first != first or new_last != last:
+            pieces = [_strip_marker(scoped[idx][2]) for idx in range(new_first, new_last + 1)]
+            new_text = "".join(piece for piece in pieces if piece).strip()
+            if tag:
+                new_text = f"{tag} {new_text}".strip()
+            new_start = float(scoped[new_first][0])
+            new_end = float(scoped[new_last][1])
+            repaired.append((ct, new_text, new_start, new_end, score, max(0.0, new_end - new_start), *rest))
+        else:
+            repaired.append(clip)
+
+    if prev_count or next_count:
+        before = sum(_clip_duration_value(c) for c in clips)
+        after = sum(_clip_duration_value(c) for c in repaired)
+        _log(f"AI语义边界补齐: 前补{prev_count}处，后补{next_count}处，时长 {before:.1f}s -> {after:.1f}s")
+    return repaired
 
 
 def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):
