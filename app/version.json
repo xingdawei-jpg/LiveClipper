@@ -1,6 +1,6 @@
 {
-  "version": "2026.7.12.1",
-  "latest_version": "2026.7.12.1",
+  "version": "2026.7.12.2",
+  "latest_version": "2026.7.12.2",
   "files": {
     "app/ai_clipper.py": "d0ea126c4d2cb511cde02184bc61896b6f798964cc2246777867d7c0a0d6661e",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -36,7 +36,7 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "8eac4b047a668da30409bdbafddb43ab97e3f0cee2f97c9d5377515a387b2ea5",
+    "app/updater.py": "65df8ce45cb23a94e6930081785a11d8acb0d80cb816ddf13a087d5e596a3dee",
     "app/volcengine_asr.py": "8fb4a78897ab0aad0bff58539414f6134a2b31b7e0dbe65252c09da2a29ed5da",
     "web_client/server.py": "a308d9a82c8603fd520a85a34f30983075d686bf7877d402457bf2c85c098598",
     "web_client/frontend/index.html": "1f3217d0f280e121ada2b02c95567160bb87923a0b8e6ba5acab7c1307044131",
@@ -46,10 +46,10 @@
     "web_client/tools/douyin_active_product_probe_poc.py": "8ae3f6953c1db29fa1efa9ad3c057d6b3c664c826610d0b47bf89dfad0e05350",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
   },
-  "release_notes": "升级 AI 导演式选片与主题覆盖逻辑，新增火山 ASR 词级时间边界裁剪；预览中自动锁定价格/链接/321 等风险片段，优化画像影响强度设置与前端展示。",
+  "release_notes": "修复增量更新半升级导致 AI偏好、偏好占比、主题覆盖为空；更新改为全部文件下载校验成功后再写入，并最后切换版本，避免新旧模块混用。",
   "update_url": "",
-  "update_message": "升级 AI 导演式选片与主题覆盖逻辑，新增火山 ASR 词级时间边界裁剪；预览中自动锁定价格/链接/321 等风险片段，优化画像影响强度设置与前端展示。",
+  "update_message": "修复增量更新半升级导致 AI偏好、偏好占比、主题覆盖为空；更新改为全部文件下载校验成功后再写入，并最后切换版本，避免新旧模块混用。",
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 08:59:12"
+  "updated_at": "2026-07-12 09:57:48"
 }

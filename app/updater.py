@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.7.12.1"
+CURRENT_VERSION = "2026.7.12.2"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -369,29 +369,50 @@ def apply_update_headless(version_info):
         }
     files_info = (version_info or {}).get("files", {})
     if files_info:
-        updated = []
+        staged = {}
         failed = []
+        failed_details = {}
         for fname, expected_sha in files_info.items():
             content = _download_file_bytes(fname, expected_sha)
             if content is None:
                 failed.append(fname)
+                failed_details[fname] = "下载失败或文件校验不一致"
                 continue
             actual_sha = hashlib.sha256(content).hexdigest().lower()
             if actual_sha != str(expected_sha).lower():
                 failed.append(fname)
+                failed_details[fname] = "SHA256 校验失败"
                 continue
+            staged[fname] = content
+
+        # Do not create a mixed runtime. The version marker is written only
+        # after every payload has downloaded, verified, and been persisted.
+        if failed:
+            return {
+                "ok": False,
+                "updated": [],
+                "failed": failed,
+                "failed_details": failed_details,
+                "restart_required": False,
+                "version": version_info.get("latest_version") or version_info.get("version") or "",
+            }
+
+        updated = []
+        for fname, content in staged.items():
             try:
                 _write_update_file(fname, content)
                 updated.append(fname)
-            except Exception:
+            except Exception as exc:
                 failed.append(fname)
+                failed_details[fname] = f"写入失败：{exc}"
 
-        if "version.json" not in files_info and "app/version.json" not in files_info:
+        if not failed and "version.json" not in files_info and "app/version.json" not in files_info:
             try:
                 version_bytes = json.dumps(version_info, ensure_ascii=False, indent=2).encode("utf-8")
                 _write_update_file("app/version.json", version_bytes)
-            except Exception:
-                pass
+            except Exception as exc:
+                failed.append("app/version.json")
+                failed_details["app/version.json"] = f"版本标记写入失败：{exc}"
 
         new_ver = version_info.get("latest_version") or version_info.get("version") or ""
         if new_ver and not failed:
@@ -400,7 +421,8 @@ def apply_update_headless(version_info):
             "ok": bool(updated) and not failed,
             "updated": updated,
             "failed": failed,
-            "restart_required": bool(updated),
+            "failed_details": failed_details,
+            "restart_required": bool(updated) and not failed,
             "version": new_ver,
         }
 
@@ -597,21 +619,8 @@ class DownloadDialog(tk.Toplevel):
             return
 
     def _do_incremental_update(self, files_info):
-        """逐文件增量更新：下载app/下变化的文件，校验SHA256后直接替换"""
+        """逐文件增量更新：全部校验成功后再切换版本。"""
         import hashlib as _hl
-
-        # Determine app directory
-        if getattr(sys, 'frozen', False):
-            app_dir = os.path.join(os.path.dirname(sys.executable), "app")
-        else:
-            app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
-            if not os.path.isdir(app_dir):
-                app_dir = os.path.dirname(os.path.abspath(__file__))
-
-        if not os.path.isdir(app_dir):
-            self.on_error("找不到app目录")
-            self.destroy()
-            return
 
         file_list = list(files_info.items())
         total = len(file_list)
@@ -620,20 +629,16 @@ class DownloadDialog(tk.Toplevel):
 
         def update_thread():
             nonlocal success_count, fail_count
+            staged = {}
             for idx, (fname, expected_sha) in enumerate(file_list):
                 if self.cancelled:
                     return
 
-                # Skip version.json itself and non-code files
-                if fname == "version.json":
-                    success_count += 1
-                    continue
-
                 # Update progress
                 pct = (idx / total) * 100
-                self.after(0, lambda p=pct, f=fname: (
+                self.after(0, lambda p=pct, f=fname, current=idx + 1: (
                     self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * p / 100), 20),
-                    self.status_label.config(text=f"({idx+1}/{total}) {f}")
+                    self.status_label.config(text=f"({current}/{total}) {f}")
                 ))
 
                 # Download with Python (multi-source, SHA256 verified)
@@ -647,41 +652,42 @@ class DownloadDialog(tk.Toplevel):
                 if actual_sha.lower() != expected_sha.lower():
                     fail_count += 1
                     continue
-
-                update_dir = _get_update_dir()
-                target_dirs = [update_dir]
-                if app_dir not in target_dirs:
-                    target_dirs.append(app_dir)
-
-                wrote = False
-                for td in target_dirs:
-                    td_path = os.path.join(td, fname)
-                    try:
-                        os.makedirs(os.path.dirname(td_path), exist_ok=True)
-                        with open(td_path, 'wb') as f:
-                            f.write(content)
-                        wrote = True
-                    except Exception:
-                        pass
-
-                if wrote:
-                    success_count += 1
-                else:
-                    fail_count += 1
+                staged[fname] = content
 
             if self.cancelled:
                 return
 
-            try:
-                new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
-                if new_ver:
-                    _set_installed_version(new_ver)
-            except Exception:
-                pass
+            if fail_count == 0:
+                for fname, content in staged.items():
+                    try:
+                        _write_update_file(fname, content)
+                        success_count += 1
+                    except Exception:
+                        fail_count += 1
+
+            # app/version.json is the runtime switch. Write it last so a
+            # partial update can never outrank the bundled complete runtime.
+            if fail_count == 0 and "version.json" not in files_info and "app/version.json" not in files_info:
+                try:
+                    version_bytes = json.dumps(self.version_info, ensure_ascii=False, indent=2).encode("utf-8")
+                    _write_update_file("app/version.json", version_bytes)
+                except Exception:
+                    fail_count += 1
+
+            if fail_count == 0:
+                try:
+                    new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
+                    if new_ver:
+                        _set_installed_version(new_ver)
+                except Exception:
+                    fail_count += 1
 
             try:
                 import shutil
-                for cache_root in {app_dir, _get_update_dir()}:
+                for cache_root in {
+                    os.path.join(_update_root(), "app"),
+                    os.path.join(_update_root(), "web_client"),
+                }:
                     cache_dir = os.path.join(cache_root, "__pycache__")
                     if os.path.isdir(cache_dir):
                         shutil.rmtree(cache_dir)
