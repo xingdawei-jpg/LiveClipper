@@ -3815,7 +3815,7 @@ def _supplement_preview_preference(
 def _clean_preview_filler_prefix(text: Any) -> str:
     marker, body = _preview_text_marker_and_body(text)
     prefixes = [
-        "然后说一下", "好的是的", "是的是的", "说一下", "然后", "而且", "但是", "不过", "其实",
+        "然后说一下", "好的是的", "是的是的", "说一下", "然后", "而且", "但是", "不过", "因为", "其实", "就是", "所以",
         "好的", "是的", "对的", "嗯嗯", "对吧", "是吧", "好吧", "嗯", "啊", "呃", "额", "哦", "噢", "对",
     ]
     changed = True

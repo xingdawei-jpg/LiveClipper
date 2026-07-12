@@ -2932,7 +2932,7 @@ DIRECTOR_SYSTEM_PROMPT = """你是带货短视频的最终剪辑导演。你必�
 2. 每项必须包含 clip_type、srt_indices、focus、reason。srt_indices只能使用输入中真实存在且未标记“不可选”的编号。
 3. 数组顺序就是成片顺序：必须恰好1个Hook且在第一项，恰好1个Close且在最后一项；Close之后不能有任何Product。
 4. 叙事顺序应为：强Hook提出效果或痛点 -> 第二段立即兑现Hook -> 核心效果 -> 原因/细节证据 -> 不同场景或顾虑解除 -> 自然总结。不要按字幕时间排序，要按观众理解顺序排序。
-5. 每个片段必须能独立听懂。srt_indices必须连续，通常1-2条；只有补齐主谓宾或完整句尾时才允许3条。禁止不连续编号，禁止以“而且、然后、所以、但是、还、大头含量是、还有一种人在”等半句开头或结尾。
+5. 每个片段必须能独立听懂。srt_indices必须连续，通常1-2条；只有补齐主谓宾或完整句尾时才允许3条。禁止不连续编号，禁止以“而且、然后、所以、但是、因为、就是、还、大头含量是、还有一种人在”等半句开头或结尾。
 6. 严禁重复同一子主题。同一个显瘦部位、同一种帽子搭配、同一个面料结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
 7. 偏好是主线，不是凑数量。同一偏好下必须选择不同子主题；如果只有一个干净子主题，就只选一个，不得用三段近义表达冒充三段偏好。
 8. 不选直播操作、主播自言自语或现场调度，例如“切个歌、我把包取了、帮我拿一下、看后台、今天没洗头”。不选“我喜欢它两个点、首先、第一点、几个地方”这类报数式铺垫，除非后续所有点都在紧邻片段中完整展开。不选价格、链接、拍码、关注、领券、满减、倒计时和任何标记不可选的字幕。
@@ -8635,7 +8635,7 @@ _WORD_EDGE_PREFIXES = (
     "是不是这种感觉", "是这种感觉", "这种感觉", "来我跟你们讲", "来我跟你们说",
     "你们知道的",
     "来准备好啊准备好", "来准备好啊", "来准备好", "准备好啊", "准备好",
-    "然后", "而且", "没错", "是的", "好的", "好吧", "其实", "就是", "所以",
+    "然后", "而且", "但是", "不过", "因为", "没错", "是的", "好的", "好吧", "其实", "就是", "所以",
     "是因为", "对吧", "是吧", "嗯嗯", "嗯", "呃", "啊",
 )
 _WORD_EDGE_SUFFIXES = (
@@ -8834,7 +8834,10 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
 
     _kw_local_fb = _get_keywords()
     FILLER_WORDS = set(_kw_local_fb["filler_words"])
-    FILLER_WORDS.update({"来准备好", "来准备好啊", "准备好啊", "准备好"})
+    FILLER_WORDS.update({
+        "来准备好", "来准备好啊", "准备好啊", "准备好",
+        "然后", "而且", "但是", "不过", "因为", "其实", "就是", "所以",
+    })
     # 构建按长度降序排列的废话前缀列表(长前缀优先匹配)
     _sorted_filler = sorted(FILLER_WORDS, key=len, reverse=True)
 
@@ -8871,6 +8874,7 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
     prefix_trim_count = 0
     for clip_index, (ct, text, start, end, score, dur, *_) in enumerate(clips):
         new_start = start
+        new_text = text
         # Hook片段也要裁掉开头的废话SRT条目和废话前缀
         # 但不在_fix_clip_boundaries中做前向延伸（保持爆点起始）
         # 例如: "没有了 宝宝 / 来我跟你们讲 / 这套衣服千万不要错过"
@@ -8931,13 +8935,14 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
                 new_dur = end - candidate_start
                 if new_dur >= 2.0:
                     new_start = candidate_start
+                    new_text = _remove_normalized_text_edge(new_text, filler_prefix_len, from_start=True)
                     prefix_trim_count += 1
 
         new_dur = end - new_start
         if new_dur < 2.0:
             trimmed.append((ct, text, start, end, score, dur, *_))
         else:
-            trimmed.append((ct, text, new_start, end, score, new_dur, *_))
+            trimmed.append((ct, new_text, new_start, end, score, new_dur, *_))
 
     if trim_count:
         _log(f"废话裁剪: 跳过 {trim_count} 个整条废话SRT")

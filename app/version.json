@@ -1,22 +1,22 @@
 {
-  "version": "2026.7.12.4",
-  "latest_version": "2026.7.12.4",
+  "version": "2026.7.12.5",
+  "latest_version": "2026.7.12.5",
   "files": {
-    "app/ai_clipper.py": "d0ea126c4d2cb511cde02184bc61896b6f798964cc2246777867d7c0a0d6661e",
+    "app/ai_clipper.py": "e1abb92cdca706833ac81fc88824e3a780ec9f70c26674c4ece87afc466daca2",
     "app/cutter_logic.py": "42af451ab525e229eaa4e2d4b199733f483c9ab9f647b127468e29521264ebb5",
     "app/updater.py": "e5a173fd4b3bbc2b3d5e2c2d36450f9dff0c76c63926cf0aa68b87453a8e896c",
-    "web_client/server.py": "e6bceb7940b77891ce6b011f38560d9039893a86185c7048583634d75e2ab189",
+    "web_client/server.py": "99bb5485cd0db79904e458d147b800c940e418472df04f61ec94d6b54cc286cf",
     "web_client/frontend/index.html": "1f3217d0f280e121ada2b02c95567160bb87923a0b8e6ba5acab7c1307044131",
     "web_client/frontend/assets/app.js": "88c0dc297873f429872987d04c0e3dac6a15fb0a4c531d12a66badc5a25c18e9",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
     "app/config.py": "f34a7101dd2d17b336c90a9c449dee990eb6b97cbfe737787a14f9668d435b58",
-    "app/keywords.json": "80c8dae0cb2e9704de16397e679b953f5025bc88499233c7fcac7e4d033384e2",
+    "app/keywords.json": "07374f0489171e4f22a423d714aef91c5124e41a593372daa9ef1e3c553d1292",
     "app/volcengine_asr.py": "8fb4a78897ab0aad0bff58539414f6134a2b31b7e0dbe65252c09da2a29ed5da",
     "web_client/frontend/assets/styles.css": "e36e3c4d3ff68b157748e7c14d23e0b22663ebd0531cf06e3b119ebcc3791951"
   },
-  "release_notes": "修复三素材混剪中无来源标记片段被错误映射到 V1，来源判断改为文字证据优先，无法确认时安全丢弃，避免预览画面与字幕错配。",
+  "release_notes": "弱开头改为句首边界裁剪：补齐‘而且、但是、因为、就是’等词的词级时间裁剪，并在无词级时间时同步清理文案，不再因弱开头删除整句。",
   "update_url": "",
-  "update_message": "修复三素材混剪中无来源标记片段被错误映射到 V1，来源判断改为文字证据优先，无法确认时安全丢弃，避免预览画面与字幕错配。",
+  "update_message": "弱开头改为句首边界裁剪：补齐‘而且、但是、因为、就是’等词的词级时间裁剪，并在无词级时间时同步清理文案，不再因弱开头删除整句。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -28,5 +28,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 13:03:03"
+  "updated_at": "2026-07-12 13:33:06"
 }
