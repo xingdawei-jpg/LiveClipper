@@ -408,6 +408,41 @@ def _vcodec_args():
         return _final_software_vcodec_args()
 
 
+def _stable_output_fps(fps=None):
+    try:
+        value = float(fps if fps is not None else VIDEO_CONFIG.get("fps", 30))
+    except Exception:
+        value = 30.0
+    return max(1.0, min(120.0, value))
+
+
+def _format_fps_value(fps=None):
+    value = _stable_output_fps(fps)
+    if abs(value - round(value)) < 0.001:
+        return str(int(round(value)))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _stable_video_tail_filter(fps=None):
+    value = _stable_output_fps(fps)
+    # Rebuild video PTS from frame index so joins cannot inherit uneven packet timing.
+    return f"fps={value:.3f}:round=near,settb=AVTB,setpts=N/({value:.6f}*TB),format=yuv420p"
+
+
+def _append_stable_video_tail_filter(vf, fps=None):
+    return _append_filter(vf, _stable_video_tail_filter(fps))
+
+
+def _stable_audio_tail_filter():
+    return "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,asetpts=N/SR/TB"
+
+
+def _stable_cfr_output_args(fps=None):
+    value = _stable_output_fps(fps)
+    timescale = max(1000, int(round(value * 1000)))
+    return ["-r", _format_fps_value(value), "-vsync", "cfr", "-video_track_timescale", str(timescale)]
+
+
 def _smart_crop_no_crop_vf(src_w, src_h, out_w, out_h):
     return "scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d" % (out_w, out_h, out_w, out_h)
 
@@ -1302,8 +1337,8 @@ def _concat_clips_with_light_dissolve(
     filters = []
     for idx, path in enumerate(work_files):
         inputs += ["-i", path]
-        filters.append(f"[{idx}:v]setpts=PTS-STARTPTS,fps=30,format=yuv420p,setsar=1[v{idx}]")
-        filters.append(f"[{idx}:a]asetpts=PTS-STARTPTS,aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}]")
+        filters.append(f"[{idx}:v]{_stable_video_tail_filter(VIDEO_CONFIG['fps'])},setsar=1[v{idx}]")
+        filters.append(f"[{idx}:a]{_stable_audio_tail_filter()},aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}]")
 
     v_label = "v0"
     a_label = "a0"
@@ -1333,11 +1368,16 @@ def _concat_clips_with_light_dissolve(
     if audio_filter:
         filters.append(f"[{map_a}]{audio_filter}[afinal]")
         map_a = "afinal"
+    filters.append(f"[{map_v}]{_stable_video_tail_filter(VIDEO_CONFIG['fps'])},setsar=1[vstable]")
+    map_v = "vstable"
+    filters.append(f"[{map_a}]{_stable_audio_tail_filter()},aformat=sample_fmts=fltp:channel_layouts=stereo[astable]")
+    map_a = "astable"
 
     cmd = [ffmpeg, "-y"] + inputs + [
         "-filter_complex", ";".join(filters),
         "-map", f"[{map_v}]", "-map", f"[{map_a}]",
     ]
+    cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
     cmd += list(video_codec_args or _final_vcodec_args())
     cmd += ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", raw_file]
 
@@ -2648,14 +2688,14 @@ def process_video(video_path, srt_path=None, output_path=None,
                 combined_vf, clip_duration, clip_idx, total_clips,
                 _transition_mode, _transition_duration
             )
+            combined_vf = _append_stable_video_tail_filter(combined_vf, VIDEO_CONFIG["fps"])
             _clip_audio_fade = min(CLIP_AUDIO_FADE_SECONDS, max(0.0, clip_duration / 3))
             _fade_out_start = max(0.0, clip_duration - _clip_audio_fade)
             _audio_filter = (
-                "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0"
+                _stable_audio_tail_filter()
                 if _preview_exact
                 else (
-                    f"atrim=0:{clip_duration:.3f},asetpts=PTS-STARTPTS,"
-                    "aresample=async=1:first_pts=0,"
+                    f"atrim=0:{clip_duration:.3f},{_stable_audio_tail_filter()},"
                     f"afade=t=in:st=0:d={_clip_audio_fade:.3f},"
                     f"afade=t=out:st={_fade_out_start:.3f}:d={_clip_audio_fade:.3f}"
                 )
@@ -2667,7 +2707,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
             cmd += ["-t", f"{clip_duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
-            cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
+            cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
             cmd += _intermediate_vcodec_args()
             cmd += ["-vf", combined_vf]
             cmd += ["-pix_fmt", "yuv420p"]
@@ -2730,7 +2770,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
                     cmd += ["-t", f"{clip_duration:.3f}"]
                     cmd += ["-fflags", "+genpts"]
-                    cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
+                    cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
                     cmd += _sw_args
                     cmd += ["-vf", combined_vf]
                     cmd += ["-pix_fmt", "yuv420p"]
@@ -2922,11 +2962,12 @@ def process_video(video_path, srt_path=None, output_path=None,
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
         # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
-        af = "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.3"
+        af = f"{_stable_audio_tail_filter()},afade=t=in:st=0:d=0.3"
         if dedup["video_filters"]:
             vf = dedup["video_filters"] + "," + vf
         if dedup["audio_filters"]:
             af = dedup["audio_filters"] + "," + af
+        vf = _append_stable_video_tail_filter(vf, cfg["fps"])
 
         # 输出去重参数详情
         applied = ",".join(dedup["applied"]) if dedup["applied"] else "none"
@@ -2996,7 +3037,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             dedup_cmd += ["-vf", vf]
             dedup_cmd += ["-af", af]
         if dedup_cmd is not None:
-            dedup_cmd += ["-r", str(cfg["fps"]), "-vsync", "cfr"]
+            dedup_cmd += _stable_cfr_output_args(cfg["fps"])
             _ve = _get_video_encoder() if not _hw_fallback else None
             _using_hw_encoder = bool(_ve)
             dedup_cmd += _vcodec_args()
@@ -3430,6 +3471,7 @@ def _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size=0.
         "-filter_complex", _pip_fc,
         "-map", "[out_v]", "-map", "0:a",
     ]
+    cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
     cmd += _final_vcodec_args()
     cmd += _final_audio_sync_args()
     cmd += ["-movflags", "+faststart", _norm_output]
@@ -3613,6 +3655,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
         else:
             sub_cmd = [ffmpeg, "-y", "-i", video_path, "-vf", vf_chain]
 
+        sub_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
         sub_cmd += _final_vcodec_args()
         sub_cmd += _final_audio_sync_args()
         sub_cmd += ["-movflags", "+faststart", norm_output]
@@ -4263,6 +4306,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                         f"{_pip_fc};{_drawtext_fc}",
                         "-map", "[out_v]", "-map", "0:a",
                     ]
+                    sub_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
                     sub_cmd += _final_vcodec_args()
                     sub_cmd += _final_audio_sync_args()
                     sub_cmd += ["-movflags", "+faststart", _norm_output]
@@ -4277,6 +4321,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                         f"{_pip_fc};{_drawtext_fc}",
                         "-map", "0:a",
                     ]
+                    sub_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
                     sub_cmd += _final_vcodec_args()
                     sub_cmd += _final_audio_sync_args()
                     sub_cmd += ["-movflags", "+faststart", _norm_output]
@@ -4287,6 +4332,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     ffmpeg, "-y", "-i", video_path,
                     "-vf", vf_chain,
                 ]
+                sub_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
                 sub_cmd += _final_vcodec_args()
                 sub_cmd += _final_audio_sync_args()
                 sub_cmd += ["-movflags", "+faststart", _norm_output]
@@ -5397,14 +5443,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             combined_vf, duration, ci, len(sorted_clips),
             _transition_mode, _transition_duration
         )
+        combined_vf = _append_stable_video_tail_filter(combined_vf, VIDEO_CONFIG["fps"])
         _mix_audio_fade = min(CLIP_AUDIO_FADE_SECONDS, max(0.0, duration / 3))
         _mix_fade_out_start = max(0.0, duration - _mix_audio_fade)
         _mix_audio_filter = (
-            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0"
+            _stable_audio_tail_filter()
             if preview_exact
             else (
-                f"atrim=0:{duration:.3f},asetpts=PTS-STARTPTS,"
-                "aresample=async=1:first_pts=0,"
+                f"atrim=0:{duration:.3f},{_stable_audio_tail_filter()},"
                 f"afade=t=in:st=0:d={_mix_audio_fade:.3f},"
                 f"afade=t=out:st={_mix_fade_out_start:.3f}:d={_mix_audio_fade:.3f}"
             )
@@ -5416,7 +5462,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         # 去掉最后的淡入淡出避免音频被切（原afade去掉）
         # 改用精准截断：提前0.15s开始保证帧对齐
         cmd += ["-fflags", "+genpts"]
-        cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
+        cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
         cmd += _intermediate_vcodec_args()
         cmd += ["-vf", combined_vf]
         cmd += ["-pix_fmt", "yuv420p"]
@@ -5456,7 +5502,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _append_seek_input_args(cmd, vp, start, accurate=preview_exact)
                 cmd += ["-t", f"{duration:.3f}"]
                 cmd += ["-fflags", "+genpts"]
-                cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
+                cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
                 cmd += _sw_args
                 cmd += ["-vf", combined_vf]
                 cmd += ["-pix_fmt", "yuv420p"]
@@ -5562,11 +5608,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     concat_copy_ok = False
     stderr_data = ""
     has_preview_exact_clips = any(bool(item.get("preview_exact")) for item in _mix_cut_maps)
+    fast_copy_concat_enabled = False
 
     if has_preview_exact_clips:
         _log("Concat copy: preview-exact clips detected, using timestamp-normalized concat")
+    elif all(clip_has_video) and all(clip_has_audio) and not fast_copy_concat_enabled:
+        _log("Concat copy: stable mode disabled fast copy, using timestamp-normalized concat")
 
-    if all(clip_has_video) and all(clip_has_audio) and not has_preview_exact_clips:
+    if fast_copy_concat_enabled and all(clip_has_video) and all(clip_has_audio) and not has_preview_exact_clips:
         list_file = os.path.join(tmp, "concat_list.txt")
         with open(list_file, "w", encoding="utf-8") as f:
             for tf in temp_files:
@@ -5610,13 +5659,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             if clip_has_video[i]:
                 v_label = f"vnorm{i}"
                 filter_normalizers.append(
-                    f"[{clip_input_idx}:v]setpts=PTS-STARTPTS,fps={VIDEO_CONFIG['fps']},format=yuv420p,setsar=1[{v_label}]"
+                    f"[{clip_input_idx}:v]{_stable_video_tail_filter(VIDEO_CONFIG['fps'])},setsar=1[{v_label}]"
                 )
                 streams.append(f"[{v_label}]")
             if clip_has_audio[i]:
                 a_label = f"anorm{i}"
                 filter_normalizers.append(
-                    f"[{clip_input_idx}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
+                    f"[{clip_input_idx}:a]{_stable_audio_tail_filter()},aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
                 )
                 streams.append(f"[{a_label}]")
             else:
@@ -5626,7 +5675,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 in_idx += 1
                 a_label = f"anorm{i}"
                 filter_normalizers.append(
-                    f"[{in_idx}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
+                    f"[{in_idx}:a]{_stable_audio_tail_filter()},aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
                 )
                 streams.append(f"[{a_label}]")
             filter_parts.append(streams)
@@ -5655,7 +5704,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if has_a_out or not any(clip_has_audio):
             cmd += ["-map", "[outa]"]
         if has_v_out:
-            cmd += ["-r", str(VIDEO_CONFIG["fps"]), "-vsync", "cfr"]
+            cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
         cmd += _intermediate_vcodec_args()
         cmd += ["-c:a", "aac", raw_concat]
 
@@ -5738,11 +5787,12 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
 
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
-        af = "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.3"
+        af = f"{_stable_audio_tail_filter()},afade=t=in:st=0:d=0.3"
         if dedup.get("video_filters"):
             vf = dedup["video_filters"] + "," + vf
         if dedup.get("audio_filters"):
             af = dedup["audio_filters"] + "," + af
+        vf = _append_stable_video_tail_filter(vf, cfg["fps"])
 
         needs_complex = "aevalsrc" in af or "amix" in af
         _combined_transition_dedup_done = False
@@ -5778,7 +5828,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         else:
             dedup_cmd = [ffmpeg, "-y", "-i", raw_concat]
             dedup_cmd += ["-vf", vf, "-af", af]
-            dedup_cmd += ["-r", str(cfg["fps"]), "-vsync", "cfr"]
+            dedup_cmd += _stable_cfr_output_args(cfg["fps"])
             dedup_cmd += _final_vcodec_args()
             dedup_cmd += ["-c:a", cfg["codec_a"], "-b:a", cfg["bitrate_a"], "-shortest"]
             dedup_cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
