@@ -4373,6 +4373,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # before hard-auditing for real half-sentence boundaries.
             clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
             clips = _repair_director_context_edges(clips, cleaned_srt, log_fn)
+            clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
             clips = _trim_dangling_tail_clauses(clips, word_timings, log_fn)
             if not clips:
                 continue
@@ -9214,7 +9215,13 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
 
         # 第二步：检测片段文本是否以废话前缀开头
         # 如 "我讲上这套的特点啊如果你是早起遛狗..." → 裁掉 "我讲上这套的特点啊"
-        norm_text = re.sub(r'[^\u4e00-\u9fff\w]', '', text.strip())
+        marker_prefix = ""
+        text_for_prefix = str(text or "")
+        marker_match = re.match(r"^(\s*\[[vV]\d+\]\s*)(.*)$", text_for_prefix, re.S)
+        if marker_match:
+            marker_prefix = marker_match.group(1)
+            text_for_prefix = marker_match.group(2)
+        norm_text = re.sub(r'[^\u4e00-\u9fff\w]', '', text_for_prefix.strip())
         filler_prefix_len = 0
         if clip_index not in word_trimmed_indices:
             for fw in _sorted_filler:
@@ -9238,7 +9245,8 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
                 new_dur = end - candidate_start
                 if new_dur >= 2.0:
                     new_start = candidate_start
-                    new_text = _remove_normalized_text_edge(new_text, filler_prefix_len, from_start=True)
+                    trimmed_body = _remove_normalized_text_edge(text_for_prefix, filler_prefix_len, from_start=True)
+                    new_text = marker_prefix + str(trimmed_body).lstrip()
                     prefix_trim_count += 1
 
         new_dur = end - new_start
