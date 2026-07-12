@@ -2319,10 +2319,19 @@ def process_video(video_path, srt_path=None, output_path=None,
             import ai_clipper as _ai_mod; _ai_mod._AI_TARGET_DURATION = _ai_target_duration
             # 动态控制AI输出的片段数量；统一由 ai_clipper 按目标时长推导。
             _ai_mod._AI_CLIP_COUNT = _ai_mod.target_clip_count_text(_ai_target_duration)
+            _effective_force_category = force_category
+            if not _effective_force_category:
+                try:
+                    _filename_category = _ai_mod.infer_category_from_filename(os.path.basename(str(original_video_path)))
+                except Exception:
+                    _filename_category = None
+                if _filename_category:
+                    _effective_force_category = _filename_category
+                    _log(f"自动品类: 文件名强信号 → {_filename_category}")
             ordered_clips = ai_analyze_clips(
                 srt_text,
                 log_fn=_log,
-                force_category=force_category,
+                force_category=_effective_force_category,
                 multi_version=False,
                 focus_hint=_fh,
                 target_duration=_ai_target_duration,

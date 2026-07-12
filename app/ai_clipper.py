@@ -4154,7 +4154,8 @@ def _director_only_duration_short_issue(audit):
     issues = [str(item or "") for item in ((audit or {}).get("issues") or [])]
     if not (audit or {}).get("duration_short") or not issues:
         return False
-    return all("低于目标下限" in item or "至少还需补足" in item for item in issues)
+    allowed_issue_markers = ("低于目标下限", "至少还需补足", "硬合规移除")
+    return all(any(marker in item for marker in allowed_issue_markers) for item in issues)
 
 
 def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec):
@@ -11763,6 +11764,55 @@ PRODUCT_CATEGORIES = {
         "大果", "果径", "个头", "坏果包赔", "破损包赔", "开袋即食", "囤货",
     ],
 }
+
+FILENAME_CATEGORY_KEYWORDS = {
+    "上衣": [
+        "长袖T恤", "短袖T恤", "T恤", "短袖", "长袖", "衬衫", "衬衣", "针织衫",
+        "卫衣", "打底衫", "小衫", "罩衫", "开衫", "背心", "抹胸", "毛衣",
+    ],
+    "裤子": [
+        "阔腿裤", "牛仔裤", "休闲裤", "直筒裤", "工装裤", "打底裤", "运动裤",
+        "西裤", "长裤", "短裤", "九分裤", "小脚裤", "烟管裤", "哈伦裤", "裤子",
+    ],
+    "裙子": [
+        "连衣裙", "半身裙", "百褶裙", "A字裙", "包臀裙", "鱼尾裙", "蛋糕裙",
+        "一步裙", "背心裙", "旗袍裙", "碎花裙", "长裙", "短裙", "纱裙", "裙子",
+    ],
+    "外套": ["风衣", "羽绒服", "大衣", "夹克", "西装外套", "外套", "皮衣", "棉服"],
+    "套装": ["两件套", "三件套", "四件套", "套装", "成套", "整套", "全套"],
+    "鞋子": ["运动鞋", "高跟鞋", "平底鞋", "老爹鞋", "帆布鞋", "凉鞋", "靴子", "单鞋", "鞋子"],
+}
+
+
+def infer_category_from_filename(name):
+    text = re.sub(r"\s+", "", str(name or ""))
+    if not text:
+        return None
+    scores = {}
+    for cat, keywords in FILENAME_CATEGORY_KEYWORDS.items():
+        score = 0.0
+        for kw in keywords:
+            if kw and kw in text:
+                weight = 1.0 + min(2.0, len(kw) / 4.0)
+                if cat == "套装":
+                    weight += 0.7
+                score += weight
+        if score > 0:
+            scores[cat] = score
+    if not scores:
+        return None
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    top_cat, top_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if top_cat == "套装" and top_score >= 1.7:
+        return top_cat
+    if top_score >= 1.45 and (
+        second_score <= 0
+        or top_score >= second_score + 1.2
+        or top_score >= second_score * 1.6
+    ):
+        return top_cat
+    return None
 
 # 品类 → 卖点排序优先级映射
 CATEGORY_FOCUS_ORDER = {
