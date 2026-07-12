@@ -81,7 +81,6 @@ const settingFields = {
   hardware_encoder_enabled: "s-hardware-encoder",
   subtitle_font_size: "s-subtitle-font-size",
   ui_font_size: "s-ui-font-size",
-  style_profile_enabled: "s-style-profile-enabled",
   style_profile_strength: "s-style-profile-strength",
 };
 
@@ -1074,7 +1073,7 @@ function bindPreviewControls() {
     if (row && !event.target.closest("input, button")) {
       event.preventDefault();
       const input = row.querySelector("[data-preview-segment]");
-      if (!input) return;
+      if (!input || input.disabled) return;
       input.checked = !input.checked;
       updatePreviewSegmentSelection(
         Number(row.dataset.previewSegmentParent),
@@ -1935,7 +1934,6 @@ function collectSettings() {
   data.volc_access_token = "";
   data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
   data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
-  data.style_profile_enabled = normalizeBooleanSetting(data.style_profile_enabled, true);
   data.style_profile_strength = normalizeStyleProfileStrength(data.style_profile_strength);
   data.preference_weights = collectPreferenceWeights();
   data.ai_rules = collectAiRules();
@@ -1949,6 +1947,7 @@ async function saveSettings() {
     method: "POST",
     body: JSON.stringify(data),
   });
+  await loadSettings(false);
   toast(result.message || "设置已保存", "success");
 }
 
@@ -2094,13 +2093,12 @@ function renderStyleProfile(profile = {}) {
   const summary = Array.isArray(profile.summary) ? profile.summary : [];
   const latest = Number(profile.latest_at || 0);
   const latestText = latest ? new Date(latest * 1000).toLocaleDateString() : "暂无";
-  const selectionText = profile.selection_enabled === false ? "不参与选片" : "参与选片";
   return `
     <div class="style-profile-card">
       <div class="style-profile-head">
         <div>
           <strong>${escapeHtml(profile.name || "剪辑风格画像")}</strong>
-          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 选片：${escapeHtml(selectionText)} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
+          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
         </div>
         <div class="style-profile-stats">
           <span>成片调整 ${Number(profile.learned_records || 0)}</span>
@@ -2250,7 +2248,7 @@ function buildPreferenceSummaryFromSamples(samples = []) {
     conflicts,
     brief,
     notes: [
-      "这是前端只读摘要；自动推荐会按 AI 学习强度进入软参考和本地兜底。",
+      "这是前端只读摘要；画像会按所选影响强度进入 AI 软参考，选择关闭时只学习不参与选片。",
       "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
     ],
   };
@@ -3962,11 +3960,14 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
     if (segments.length && Array.isArray(segmentValues)) {
       const segmentSet = new Set(normalizedIntegerList(segmentValues));
       segments.forEach((segment) => {
-        segment.selected = segmentSet.has(Number(segment.index));
+        segment.selected = segment.selection_locked === true
+          ? false
+          : segmentSet.has(Number(segment.index));
       });
     } else if (segments.length) {
       segments.forEach((segment) => {
-        if (segment.selected === undefined) segment.selected = true;
+        if (segment.selection_locked === true) segment.selected = false;
+        else if (segment.selected === undefined) segment.selected = true;
       });
     }
     clip.selected = !segments.length || segments.some((segment) => segment.selected !== false);
@@ -4051,7 +4052,8 @@ function syncPreviewClipSelections(scope = "smart") {
     const segments = Array.isArray(clip.segments) ? clip.segments : [];
     segments.forEach((segment) => {
       const key = `${clipIndex}:${Number(segment.index)}`;
-      if (segmentChecked.has(key)) segment.selected = segmentChecked.get(key);
+      if (segment.selection_locked === true) segment.selected = false;
+      else if (segmentChecked.has(key)) segment.selected = segmentChecked.get(key);
       else if (segment.selected === undefined) segment.selected = true;
     });
     const anySegmentSelected = segments.length ? segments.some((segment) => segment.selected !== false) : true;
@@ -4070,7 +4072,7 @@ function updatePreviewClipSelection(index, selected, scope = "smart") {
     clip.selected = selected;
     if (Array.isArray(clip.segments)) {
       clip.segments.forEach((segment) => {
-        segment.selected = selected;
+        segment.selected = segment.selection_locked === true ? false : selected;
       });
     }
     commitPreviewDraft(scope);
@@ -4083,7 +4085,8 @@ function updatePreviewSegmentSelection(index, segmentIndex, selected, scope = "s
   const clip = preview?.clips?.find((item) => Number(item.index) === index);
   if (!clip || !Array.isArray(clip.segments)) return;
   const segment = clip.segments.find((item) => Number(item.index) === segmentIndex);
-  if (segment) segment.selected = selected;
+  if (!segment || segment.selection_locked === true) return;
+  segment.selected = selected;
   clip.selected = clip.segments.some((item) => item.selected !== false);
   commitPreviewDraft(scope);
   refreshPreviewSelectionUi(scope);
@@ -5013,8 +5016,8 @@ function previewClipReasonParts(clip, analysis, { includeRisk = true } = {}) {
   }
   const parts = [];
   const focus = String(clip?.focus || clip?.focus_block || "").trim();
-  if (focus) parts.push(`重点：${focus}`);
-  const tags = classifyClipScoreTags(clip)
+  if (focus && focus !== "其他") parts.push(`重点：${focus}`);
+  const tags = classifyClipScoreTags(clip, analysis)
     .filter((tag) => tag.label && tag.label !== "普通")
     .map((tag) => tag.label);
   if (tags.length) parts.push(`标签：${Array.from(new Set(tags)).slice(0, 4).join("/")}`);
@@ -5100,13 +5103,15 @@ function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
   const segmentCountText = selectedSegmentCountText(clip) || "整段";
   const segmentRows = segments.length ? segments.map((segment) => {
     const checked = segment.selected === false ? "" : "checked";
+    const locked = segment.selection_locked === true;
     const start = Number(segment.start || 0);
     const end = Number(segment.end || start);
     const segmentDuration = Math.max(0, Number(segment.duration || end - start));
-    const segmentTitle = escapeHtml(segment.text || "");
+    const rawTitle = segment.blocked_reason || segment.auto_unselected_reason || segment.text || "";
+    const segmentTitle = escapeHtml(rawTitle);
     return `
-      <label class="clip-segment clip-detail-segment ${segment.selected === false ? "is-unselected" : ""}" title="${segmentTitle}" data-preview-segment-row data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" draggable="false">
-        <input type="checkbox" data-preview-segment data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" ${checked}>
+      <label class="clip-segment clip-detail-segment ${segment.selected === false ? "is-unselected" : ""} ${locked ? "is-locked" : ""}" title="${segmentTitle}" data-preview-segment-row data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" draggable="false">
+        <input type="checkbox" data-preview-segment data-preview-scope="${scope}" data-preview-segment-parent="${Number(clip.index)}" data-preview-segment-index="${Number(segment.index)}" ${checked} ${locked ? "disabled" : ""}>
         <span class="clip-segment-time">${escapeHtml(formatSeconds(start))}-${escapeHtml(formatSeconds(end))}<em>${segmentDuration.toFixed(1)}s</em></span>
         <span class="clip-segment-text">${segmentTitle}</span>
       </label>
@@ -5239,7 +5244,149 @@ function clipTextForScore(clip) {
   return `${clip?.clip_type || ""} ${clip?.focus || ""} ${clip?.focus_block || ""} ${selected || clip?.text || ""}`.toLowerCase();
 }
 
-function classifyClipScoreTags(clip) {
+const previewPreferenceBlocks = [
+  "版型显瘦", "面料质感", "穿着体验", "品质细节", "尺寸长度", "颜色氛围",
+  "场景搭配", "工艺细节", "性价比", "对比优势", "情绪感染", "流行趋势",
+  "紧迫稀缺", "口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法",
+];
+
+const previewPreferenceAliases = {
+  身材痛点: "版型显瘦",
+  版型: "版型显瘦",
+  显瘦: "版型显瘦",
+  面料: "面料质感",
+  质感: "面料质感",
+  颜色: "颜色氛围",
+  色彩: "颜色氛围",
+  场景: "场景搭配",
+  搭配: "场景搭配",
+  工艺: "工艺细节",
+  品质: "品质细节",
+  情绪: "情绪感染",
+  流行: "流行趋势",
+  趋势: "流行趋势",
+  紧迫: "紧迫稀缺",
+  稀缺: "紧迫稀缺",
+  对比: "对比优势",
+  口感: "口感食欲",
+  食欲: "口感食欲",
+  新鲜: "新鲜品质",
+  产地: "产地溯源",
+  溯源: "产地溯源",
+  规格: "规格分量",
+  分量: "规格分量",
+  发货: "发货保鲜",
+  保鲜: "发货保鲜",
+  吃法: "场景吃法",
+};
+
+function normalizePreviewPreferenceLabel(value) {
+  const text = String(value || "").trim();
+  if (!text || ["-", "自动", "默认", "随机偏好", "兜底偏好", "全量选片", "通用卖点", "其他"].includes(text)) return "";
+  if (previewPreferenceAliases[text]) return previewPreferenceAliases[text];
+  const direct = previewPreferenceBlocks.find((block) => text === block || text.includes(block) || block.includes(text));
+  if (direct) return direct;
+  const alias = Object.entries(previewPreferenceAliases).find(([key]) => text.includes(key));
+  return alias ? alias[1] : "";
+}
+
+function previewPreferenceLabelFromSummary(summary = {}) {
+  const candidates = [summary.used_label, summary.label, summary.matched_label, summary.detail];
+  for (const value of candidates) {
+    const label = normalizePreviewPreferenceLabel(value);
+    if (label) return label;
+  }
+  return "";
+}
+
+function previewPreferenceLabel(analysis) {
+  return previewPreferenceLabelFromSummary(analysis?.preferenceSummary || {});
+}
+
+function clipMatchesPreference(clip, preferenceLabel) {
+  const preferred = normalizePreviewPreferenceLabel(preferenceLabel);
+  if (!preferred) return false;
+  const evidencePattern = previewPreferenceEvidencePatterns[preferred];
+  if (evidencePattern) {
+    return evidencePattern.test(selectedPreviewText(clip).toLowerCase());
+  }
+  const focus = normalizePreviewPreferenceLabel(clip?.focus_block || clip?.focus || "");
+  if (focus === preferred) return true;
+  return classifyClipScoreTags(clip)
+    .some((tag) => normalizePreviewPreferenceLabel(tag.label) === preferred);
+}
+
+function clipEligibleForPreference(clip) {
+  const type = String(clip?.clip_type || "").toLowerCase();
+  return clip?.selected !== false && !type.includes("hook") && !type.includes("close") && type !== "call_to_action";
+}
+
+const previewSalesRoleLabels = {
+  hook: "Hook开头",
+  hook_followup: "承接Hook",
+  direct_effect: "直接效果",
+  proof_detail: "证明细节",
+  scene_crowd: "场景人群",
+  objection_resolver: "顾虑解除",
+  natural_close: "自然收尾",
+  weak_fragment: "弱断句",
+  other: "补充卖点",
+};
+
+const previewPreferenceEvidencePatterns = {
+  版型显瘦: /显瘦|遮肉|藏肉|收腰|显高|显腿长|比例|小个子|梨形|苹果型|胯宽|腿粗|大骨架|盖臀|修身|宽松|版型/,
+  面料质感: /面料|材质|手感|触感|亲肤|柔软|垂感|垂坠|透气|冰丝|真丝|纯棉|棉麻|针织|不闷|不透|厚实|薄款/,
+  颜色氛围: /颜色|色系|显白|提气色|抬气色|黄皮|黑色|白色|咖色|复古|高级色|温柔色|氛围感|上镜|亮色/,
+  场景搭配: /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭|出门|出片|拍照/,
+  穿着体验: /舒服|舒适|不勒|不紧绷|自在|轻盈|无感|不卡|不掉|不卷边|活动方便|不束缚|不扎人|凉爽|温暖/,
+  品质细节: /品质|质感|做工|走线|细节|高级感|精致|缝合|刺绣|蕾丝|重工|大牌|专柜/,
+};
+
+function previewSalesRole(clip) {
+  const explicit = String(clip?.sales_role || "").trim();
+  if (explicit && !previewSegments(clip).length) return explicit;
+  const type = String(clip?.clip_type || "").toLowerCase();
+  if (type.includes("hook")) return "hook";
+  if (type.includes("close") || type === "call_to_action") return "natural_close";
+  const focus = normalizePreviewPreferenceLabel(clip?.focus_block || clip?.focus || "");
+  const text = selectedPreviewText(clip).toLowerCase();
+  if (/^(嗯+|啊+|好+|好的|是的|对|然后|而且|但是|不过|其实|就是)/.test(text) || /(然后|而且|但是|不过|所以|因为|就是|对不对|能理解吗|呢|吧|啊|呀)$/.test(text)) {
+    if (text.length < 24) return "weak_fragment";
+  }
+  if (["版型显瘦", "穿着体验", "口感食欲"].includes(focus) || /显瘦|遮肉|显高|显腿长|上身|穿上|效果|显白|好吃|爆汁|口感|试吃/.test(text)) return "direct_effect";
+  if (["面料质感", "品质细节", "工艺细节", "新鲜品质", "产地溯源", "规格分量", "发货保鲜"].includes(focus) || /面料|材质|质感|手感|做工|工艺|细节|品质|新鲜|产地|源头|规格|分量|冷链|包赔/.test(text)) return "proof_detail";
+  if (["场景搭配", "场景吃法", "流行趋势"].includes(focus) || /通勤|上班|约会|日常|出门|旅游|搭配|出片|小个子|微胖|梨形|苹果型|全家|早餐|办公室|送礼/.test(text)) return "scene_crowd";
+  if (["尺寸长度", "对比优势"].includes(focus) || /不挑|不用担心|不会|不显|不胖|不勒|不卡|不闷|不透|不起球|遮肚子|胯宽|腿粗|尺码|码数|身高|体重|放心|安心|不踩雷/.test(text)) return "objection_resolver";
+  if (/推荐|建议|适合|放心|安心|闭眼|值得|自留|复购|老客/.test(text)) return "natural_close";
+  return "other";
+}
+
+function previewSalesRoleLabel(clip) {
+  return clip?.sales_role_label || previewSalesRoleLabels[previewSalesRole(clip)] || "补充卖点";
+}
+
+function buildSalesChainSummary(clips = []) {
+  const roles = clips.map((clip) => previewSalesRole(clip));
+  const has = (names) => names.some((name) => roles.includes(name));
+  const slots = [
+    { key: "hook", label: "Hook", ok: has(["hook"]) },
+    { key: "effect", label: "承接/效果", ok: has(["hook_followup", "direct_effect"]) },
+    { key: "proof", label: "证明", ok: has(["proof_detail"]) },
+    { key: "resolve", label: "顾虑/场景", ok: has(["objection_resolver", "scene_crowd"]) },
+    { key: "close", label: "收尾", ok: has(["natural_close"]) },
+  ];
+  const hit = slots.filter((slot) => slot.ok).length;
+  const missing = slots.filter((slot) => !slot.ok).map((slot) => slot.label);
+  return {
+    hit,
+    total: slots.length,
+    label: `${hit}/${slots.length}`,
+    ok: hit >= 4,
+    title: missing.length ? `缺少：${missing.join("、")}` : "Hook、承接、证明、顾虑/场景、收尾均有覆盖",
+  };
+}
+
+function classifyClipScoreTags(clip, analysis = null) {
   const text = clipTextForScore(clip);
   const tags = [];
   const seen = new Set();
@@ -5255,6 +5402,13 @@ function classifyClipScoreTags(clip) {
     add("开头候选", "strong", "可能承担开头吸引作用");
   } else if (type === "close" || type === "call_to_action" || /收尾|尺码引导|放心拍|建议大家|喜欢的/.test(text)) {
     add("收尾候选", "neutral", "可能承担结尾承接或转化作用");
+  }
+
+  const salesRole = previewSalesRole(clip);
+  const salesLabel = previewSalesRoleLabel(clip);
+  if (salesLabel && salesRole !== "other") {
+    const tone = salesRole === "weak_fragment" ? "warn" : (salesRole === "hook_followup" ? "strong" : "info");
+    add(salesLabel, tone, `成交链路角色：${salesLabel}`);
   }
 
   if (focus && focus !== "其他") {
@@ -5291,7 +5445,7 @@ function classifyClipScoreTags(clip) {
   if (/(\d+(\.\d+)?\s*(元|块|¥|￥))|价格|福利价|到手价|原价|现价|优惠|券|领券|满减|半价|折扣|\d+\s*折/.test(text)) {
     add("疑似价格", "warn", "可能包含价格、折扣或优惠表达");
   }
-  if (/拍下|下单|小黄车|购物车|链接|号链接|上车|挂车|库存|补货|刷新拍/.test(text)) {
+  if (/3\s*2\s*1|三\s*二\s*一|拍下|下单|小黄车|购物车|链接|连结|連結|号链接|上车|挂车|库存|补货|刷新拍/.test(text)) {
     add("疑似下单", "warn", "可能包含下单、链接或库存信息");
   }
   if (/感谢|反馈|评论区|公屏|扣[0-9一二三四五六七八九十]|后台|稍等|等一下|看一下后台|有没有码|欢迎|关注/.test(text)) {
@@ -5299,6 +5453,14 @@ function classifyClipScoreTags(clip) {
   }
   if (/^(嗯+|啊+|好+|对+|是的|然后|这个的话|就是说|那个的话)|然后呢|然后的话|对吧|哈哈|闲聊/.test(text)) {
     add("口头废话", "warn", "可能是口头禅或承接废话");
+  }
+
+  const preferred = previewPreferenceLabel(analysis);
+  if (preferred && clipEligibleForPreference(clip)) {
+    const hit = seen.has(preferred) || normalizePreviewPreferenceLabel(focus) === preferred;
+    tags.unshift(hit
+      ? { label: `偏好命中:${preferred}`, tone: "strong", detail: `该片段命中本次 AI 偏好：${preferred}` }
+      : { label: `偏好未命中:${preferred}`, tone: "warn", detail: `该片段未识别到本次 AI 偏好：${preferred}` });
   }
   return tags.length ? tags : [{ label: "普通", tone: "muted", detail: "未识别到明显标签" }];
 }
@@ -5324,10 +5486,22 @@ function renderManualRepeatTags(clip) {
 function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const clips = (preview?.clips || []).filter((clip) => clip.selected !== false);
   const dedupSummary = preview?.dedup_summary || {};
+  const preferenceSummary = dedupSummary.preference_summary || {};
+  const preferenceLabel = previewPreferenceLabelFromSummary(preferenceSummary);
   const target = Number(preview?.target_duration || $(targetId)?.value || 60);
   const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
   const riskByIndex = new Map();
   const warnings = [];
+  const preferenceEligibleClips = preferenceLabel ? clips.filter((clip) => clipEligibleForPreference(clip)) : [];
+  const preferenceHitCount = preferenceEligibleClips.filter((clip) => clipMatchesPreference(clip, preferenceLabel)).length;
+  const salesChain = buildSalesChainSummary(clips);
+  const topicCoverage = dedupSummary.topic_coverage_summary || {};
+  if (topicCoverage.overconcentrated) {
+    warnings.push(`偏好主题占比过高：${Number(topicCoverage.preference_count || 0)}/${Number(topicCoverage.product_count || 0)}，需要补充其他卖点。`);
+  }
+  if (topicCoverage.undercovered) {
+    warnings.push(`商品主题覆盖不足：当前${Number(topicCoverage.distinct_count || 0)}类，建议至少${Number(topicCoverage.min_distinct || 0)}类。`);
+  }
 
   clips.forEach((clip, index) => {
     const repeatChecks = Array.isArray(clip?.manual_repeat_checks) ? clip.manual_repeat_checks : [];
@@ -5414,7 +5588,12 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     autoRemovedCount: Number(dedupSummary.auto_removed_count || 0),
     manualCheckCount: Number(dedupSummary.manual_check_count || 0),
     categorySummary: dedupSummary.category_summary || {},
-    preferenceSummary: dedupSummary.preference_summary || {},
+    preferenceSummary,
+    preferenceLabel,
+    preferenceEligibleCount: preferenceEligibleClips.length,
+    preferenceHitCount,
+    topicCoverage,
+    salesChain,
   };
 }
 
@@ -5422,6 +5601,7 @@ function renderPreviewSummary(analysis) {
   const diffText = analysis.diff >= 0 ? `+${analysis.diff.toFixed(1)}s` : `${analysis.diff.toFixed(1)}s`;
   const category = analysis.categorySummary || {};
   const preference = analysis.preferenceSummary || {};
+  const topicCoverage = analysis.topicCoverage || {};
   const mainCategory = category.main_category || "-";
   const protectedCategories = Array.isArray(category.protected_categories)
     ? category.protected_categories.filter((item) => item && item !== mainCategory)
@@ -5433,6 +5613,28 @@ function renderPreviewSummary(analysis) {
     ? `${mainCategory}+${protectedCategories.join("/")}`
     : mainCategory;
   const preferenceText = preference.used_label || preference.label || "-";
+  const preferenceProductCount = Number(topicCoverage.product_count || analysis.preferenceEligibleCount || 0);
+  const preferenceCount = Number(topicCoverage.preference_count ?? analysis.preferenceHitCount ?? 0);
+  const preferenceRatio = preferenceProductCount > 0 ? preferenceCount / preferenceProductCount : 0;
+  const preferenceHitText = analysis.preferenceLabel
+    ? `${preferenceCount}/${preferenceProductCount} · ${(preferenceRatio * 100).toFixed(0)}%`
+    : "-";
+  const preferenceHitWarn = Boolean(
+    analysis.preferenceLabel
+    && preferenceProductCount > 0
+    && (preferenceCount === 0 || topicCoverage.overconcentrated || topicCoverage.underpreferred)
+  );
+  const preferenceHitTitle = analysis.preferenceLabel
+    ? `本次偏好：${analysis.preferenceLabel}；Product命中：${preferenceCount}/${preferenceProductCount}；目标：${Number(topicCoverage.preference_min || 0)}-${Number(topicCoverage.preference_max || 0)}段`
+    : "未识别到本次偏好标签";
+  const topicCounts = topicCoverage.topic_counts || {};
+  const topicEntries = Object.entries(topicCounts).filter(([name, count]) => name && name !== "其他" && Number(count) > 0);
+  const topicCoverageText = topicEntries.length ? `${topicEntries.length}类` : "-";
+  const topicCoverageTitle = topicEntries.length
+    ? topicEntries.map(([name, count]) => `${name}${count}段`).join("、")
+    : "未计算商品主题覆盖";
+  const topicCoverageWarn = Boolean(topicCoverage.undercovered || topicCoverage.overconcentrated);
+  const salesChain = analysis.salesChain || { label: "-", ok: false, title: "未计算成交结构" };
   const preferenceTitleParts = [];
   if (preference.mode) preferenceTitleParts.push(preference.mode);
   if (preference.matched_label && preference.matched_label !== preferenceText) {
@@ -5456,6 +5658,9 @@ function renderPreviewSummary(analysis) {
       <div><span>人工检查</span><strong class="is-${analysis.manualCheckCount ? "warn" : "ok"}">${analysis.manualCheckCount ? `${analysis.manualCheckCount} 组` : "无"}</strong></div>
       <div><span>品类</span><strong title="${escapeHtml(categoryTitle)}">${escapeHtml(categoryText)}</strong></div>
       <div><span>AI偏好</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
+      <div><span>偏好占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
+      <div><span>主题覆盖</span><strong class="is-${topicCoverageWarn ? "warn" : "ok"}" title="${escapeHtml(topicCoverageTitle)}">${escapeHtml(topicCoverageText)}</strong></div>
+      <div><span>成交结构</span><strong class="is-${salesChain.ok ? "ok" : "warn"}" title="${escapeHtml(salesChain.title)}">${escapeHtml(salesChain.label)}</strong></div>
     </div>
     ${warningText}
   `;

@@ -1737,7 +1737,7 @@ def _build_cut_report(ordered_clips, success_count, total_clips, output_path, si
         score += 10
     else:
         score += 3
-        report["warnings"].append("缺少收尾(价格/尺码/号召)，建议加上促转化的片段")
+        report["warnings"].append("缺少自然收尾，建议补充尺码建议、场景总结或信任背书片段，避免价格/链接/强促单内容")
 
     report["score"] = min(score, 100)
     return report
@@ -2039,7 +2039,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _v2_apikey = _cfg2.get("volc_api_key", "")
                     if not _volc_used and all([_v2_tos_ak, _v2_tos_sk]) and (all([_v2_app_id, _v2_token]) or _v2_apikey):
                         _log("启动火山引擎语音识别...")
-                        from volcengine_asr import prepare_volcengine_audio, volcengine_asr
+                        from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
                         import tempfile as _tf2
                         import hashlib as _hl2
                         _temp_dir2 = _os2.path.join(_tf2.gettempdir(), "live_cutter_stt")
@@ -2073,6 +2073,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                                     _srt_lines.append("")
                                 with open(_srt2, "w", encoding="utf-8") as _f2:
                                     _f2.write("\n".join(_srt_lines))
+                                write_word_timing_sidecar(_srt2, _segs2, log_fn=_log)
                                 srt_path = _srt2
                                 auto_srt = True
                                 _volc_used = True
@@ -2131,6 +2132,13 @@ def process_video(video_path, srt_path=None, output_path=None,
                 if _cache_path != srt_path:  # 避免自拷贝
                     import shutil as _shutil
                     _shutil.copy2(srt_path, _cache_path)
+                    try:
+                        from volcengine_asr import word_timing_sidecar_path as _word_sidecar_path
+                        _source_words = _word_sidecar_path(srt_path)
+                        if os.path.exists(_source_words):
+                            _shutil.copy2(_source_words, _word_sidecar_path(_cache_path))
+                    except Exception:
+                        pass
                     _log(f"SRT已缓存: {os.path.basename(_cache_path)}")
             except Exception:
                 pass
@@ -2161,6 +2169,14 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
     preference_summary = {}
+    _word_timings = []
+    try:
+        from volcengine_asr import load_word_timing_sidecar
+        _word_timings = load_word_timing_sidecar(srt_path)
+        if _word_timings:
+            _log(f"AI边界裁剪: 已载入 {sum(len(seg.get('words') or []) for seg in _word_timings)} 个词级时间")
+    except Exception as _word_timing_error:
+        _log(f"AI边界裁剪: 词级时间不可用 ({_word_timing_error})")
     if _cancelled():
         _log("已取消。"); return {"ok": False, "error": "cancelled"}
     if ai_is_enabled():
@@ -2176,11 +2192,13 @@ def process_video(video_path, srt_path=None, output_path=None,
             if TARGET_DURATION <= 40:
                 _ai_mod._AI_CLIP_COUNT = "5-8"
             elif TARGET_DURATION >= 100:
-                _ai_mod._AI_CLIP_COUNT = "22-30"
+                _ai_mod._AI_CLIP_COUNT = "12-18"
             elif TARGET_DURATION >= 80:
-                _ai_mod._AI_CLIP_COUNT = "18-24"
-            else:
                 _ai_mod._AI_CLIP_COUNT = "10-15"
+            elif TARGET_DURATION >= 50:
+                _ai_mod._AI_CLIP_COUNT = "8-13"
+            else:
+                _ai_mod._AI_CLIP_COUNT = "6-10"
             ordered_clips = ai_analyze_clips(
                 srt_text,
                 log_fn=_log,
@@ -2190,6 +2208,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 target_duration=TARGET_DURATION,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
+                word_timings=_word_timings,
             )
             try:
                 preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
@@ -2206,6 +2225,25 @@ def process_video(video_path, srt_path=None, output_path=None,
                 ordered_clips = parse_srt_clips(srt_path, log_fn=_log)
     else:
         ordered_clips = parse_srt_clips(srt_path, log_fn=_log)
+    if ordered_clips and ai_is_enabled():
+        try:
+            import ai_clipper as _topic_ai
+            _topic_preference_summary = dict(getattr(_topic_ai, "_LAST_FOCUS_SUMMARY", {}) or {})
+            _topic_preference = str(
+                _topic_preference_summary.get("used_label")
+                or _topic_preference_summary.get("label")
+                or ""
+            )
+            if _topic_preference:
+                _topic_ai._LAST_TOPIC_COVERAGE_SUMMARY = _topic_ai._topic_coverage_summary(
+                    ordered_clips,
+                    _topic_preference,
+                    TARGET_DURATION,
+                    _topic_preference_summary.get("requested", "自动"),
+                )
+            _log("AI叙事模式: 使用AI最终片单和顺序，主题统计仅用于预览展示")
+        except Exception as _topic_balance_error:
+            _log(f"主题统计跳过: {_topic_balance_error}")
     if not ordered_clips:
         _log("未提取到核心片段！")
         if auto_srt and temp_srt:
@@ -2223,9 +2261,11 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 import ai_clipper as _ai_meta
                 _multi_result_cache['category_summary'] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
+                _multi_result_cache['topic_coverage_summary'] = dict(getattr(_ai_meta, "_LAST_TOPIC_COVERAGE_SUMMARY", {}) or {})
             except Exception:
                 pass
             _multi_result_cache['preference_summary'] = dict(preference_summary or {})
+            _multi_result_cache['word_timings'] = list(_word_timings or [])
             # 保存SRT内容
             if srt_path and os.path.exists(srt_path):
                 with open(srt_path, "r", encoding="utf-8") as _f:
@@ -4509,6 +4549,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _log("合并语音文本...")
     merged_srt = ""
     _mix_srt_entries = []
+    _mix_word_timings = []
     for _vi, vp in enumerate(video_list):
         if _cancelled(): return False
         original_vp = original_video_list[_vi] if _vi < len(original_video_list) else vp
@@ -4534,7 +4575,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _asr_ok = False
             if _asr_enabled:
                 try:
-                    from volcengine_asr import prepare_volcengine_audio, volcengine_asr
+                    from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
                     import hashlib, tempfile, json
                     _td = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
                     os.makedirs(_td, exist_ok=True)
@@ -4558,6 +4599,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                 _et_seg = _seg["end"] if isinstance(_seg, dict) else _seg[2]
                                 _tx_seg = _seg["text"] if isinstance(_seg, dict) else _seg[0]
                                 _fw.write(f"{_i_seg+1}\n{int(_st_seg//3600):02d}:{int((_st_seg%3600)//60):02d}:{int(_st_seg%60):02d},{int((_st_seg%1)*1000):03d} --> {int(_et_seg//3600):02d}:{int((_et_seg%3600)//60):02d}:{int(_et_seg%60):02d},{int((_et_seg%1)*1000):03d}\n{_tx_seg}\n\n")
+                        write_word_timing_sidecar(_sc, srts, log_fn=_log)
                         _log(f"  火山引擎 ASR 成功: {len(srts)} 条")
                         _asr_ok = True
                 except Exception as _ve:
@@ -4616,6 +4658,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 pass
             # Add [Vn] marker to text lines
             _marker = f"V{_vi+1}"
+            try:
+                from volcengine_asr import load_word_timing_sidecar
+                for _word_segment in load_word_timing_sidecar(_sc):
+                    _marked_word_segment = dict(_word_segment)
+                    _marked_word_segment["source_marker"] = _marker
+                    _mix_word_timings.append(_marked_word_segment)
+            except Exception:
+                pass
             _out_lines = []
             for _line in _srt_text.split("\n"):
                 import re as _re_line
@@ -4639,11 +4689,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     preference_summary = {}
     _ai_mod._AI_TARGET_DURATION = target_duration
     if target_duration <= 40:
-        _ai_mod._AI_CLIP_COUNT = "8-12"
-    elif target_duration >= 80:
-        _ai_mod._AI_CLIP_COUNT = "18-25"
-    else:
+        _ai_mod._AI_CLIP_COUNT = "5-8"
+    elif target_duration >= 100:
         _ai_mod._AI_CLIP_COUNT = "12-18"
+    elif target_duration >= 80:
+        _ai_mod._AI_CLIP_COUNT = "10-15"
+    elif target_duration >= 50:
+        _ai_mod._AI_CLIP_COUNT = "8-13"
+    else:
+        _ai_mod._AI_CLIP_COUNT = "6-10"
 
     if num_versions and num_versions > 1 and not _clips_only:
         _log(f"混剪多版本: 当前长素材多版本仍在优化，暂按单版本输出（请求 {num_versions} 版）")
@@ -4732,7 +4786,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           focus_hint=focus_hint,
                                           merge_mode=True,
                                           target_duration=target_duration,
-                                          ai_controls=ai_controls)
+                                          ai_controls=ai_controls,
+                                          word_timings=_mix_word_timings)
         try:
             preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
         except Exception:
@@ -5080,9 +5135,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             try:
                 import ai_clipper as _ai_meta
                 _multi_result_cache["category_summary"] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
+                _multi_result_cache["topic_coverage_summary"] = dict(getattr(_ai_meta, "_LAST_TOPIC_COVERAGE_SUMMARY", {}) or {})
             except Exception:
                 pass
             _multi_result_cache["preference_summary"] = dict(preference_summary or {})
+            _multi_result_cache["word_timings"] = list(_mix_word_timings or [])
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": True, "clips_cached": True}
 

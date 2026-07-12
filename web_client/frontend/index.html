@@ -1544,12 +1544,8 @@
                   <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
                   <button class="button button-muted" data-action="clear-ai-feedback">清空学习数据</button>
                 </div>
-                <label class="switch-row">
-                  <span>参与 AI 选片</span>
-                  <input id="s-style-profile-enabled" type="checkbox" checked>
-                </label>
                 <div class="field-row compact">
-                  <label for="s-style-profile-strength">AI 学习强度</label>
+                  <label for="s-style-profile-strength">画像影响强度</label>
                   <select id="s-style-profile-strength">
                     <option value="auto" selected>自动推荐</option>
                     <option value="off">关闭</option>
@@ -1558,7 +1554,7 @@
                     <option value="strong">强</option>
                   </select>
                 </div>
-                <p class="panel-note">关闭后画像仍会继续学习和展示，但不会进入 AI 提示、过滤或排序加权。自动推荐会根据样本数量调节参与强度。</p>
+                <p class="panel-note">选择关闭后，画像仍会继续学习和展示，但不会影响 AI 选片。自动推荐会根据样本数量调节影响强度；轻度仅在候选质量相当时参考。</p>
                 <div class="feedback-summary-box" id="ai-feedback-summary">
                   <p class="panel-note">剪辑风格画像会在积累人工选择后自动生成。</p>
                 </div>
@@ -1812,6 +1808,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260711-batch-history-2" defer></script>
+  <script src="/assets/app.js?v=20260712-style-profile-strength-only" defer></script>
 </body>
 </html>

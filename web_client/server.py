@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -150,7 +151,7 @@ _LIVE_LOCK = threading.Lock()
 LIVE_PROBE_STOP_NOTE = "__liveclipper_stop__"
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
-_AI_PREVIEW_CACHE_SCHEMA = "focus_blocks_v2"
+_AI_PREVIEW_CACHE_SCHEMA = "sales_roles_v9"
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -2684,11 +2685,25 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
         aligned = deepcopy(schedule)
         align_schedule_to_video(aligned, video_values, live_start_for_align, ffmpeg_cmd=_ffmpeg_cmd())
         aligned_min, aligned_max = _schedule_range(aligned)
-        if aligned_min >= -5 and aligned_max <= total + 5:
+        overlap_count = _schedule_overlap_count(aligned, total)
+        if overlap_count:
+            skipped = max(0, len(aligned) - overlap_count)
             label = "直播开始时间" if requested_live_start is not None else "视频文件名"
-            warnings.append(
-                f"排品表时间已按{label}自动对齐：表格范围 {_hms(min_start)}~{_hms(max_end)}，对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}。"
-            )
+            if skipped:
+                warnings.append(
+                    f"排品表已按{label}对齐：可切 {overlap_count} 条时段，会跳过 {skipped} 条不在所选视频范围内的时段；"
+                    f"对齐后范围 {_hms(aligned_min)}~{_hms(aligned_max)}，视频总时长 {_hms(total)}。"
+                )
+            elif aligned_min < -5 or aligned_max > total + 5:
+                warnings.append(
+                    f"排品表已按{label}对齐，边界时段将按视频范围截取："
+                    f"对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}，视频总时长 {_hms(total)}。"
+                )
+            elif aligned_min != min_start or aligned_max != max_end:
+                warnings.append(
+                    f"排品表时间已按{label}自动对齐：表格范围 {_hms(min_start)}~{_hms(max_end)}，"
+                    f"对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}。"
+                )
             return
 
         errors.append(
@@ -2983,6 +2998,25 @@ def _clip_text_focus(clip: Any) -> tuple[str, str, str]:
     return _repair_mojibake_text(clip_type), _repair_mojibake_text(text), _repair_mojibake_text(focus)
 
 
+def _preview_effective_clip_text(clip: Any) -> str:
+    if isinstance(clip, dict):
+        segments = clip.get("segments")
+        if isinstance(segments, list) and segments:
+            selected = [
+                _repair_mojibake_text(seg.get("text") or "").strip()
+                for seg in segments
+                if isinstance(seg, dict) and seg.get("selected") is not False
+            ]
+            selected = [text for text in selected if text]
+            if selected:
+                return " ".join(selected).strip()
+        return _repair_mojibake_text(clip.get("text") or "").strip()
+    try:
+        return _repair_mojibake_text(clip[1] if len(clip) > 1 else "").strip()
+    except Exception:
+        return _repair_mojibake_text(clip).strip()
+
+
 def _repair_mojibake_text(value: Any) -> str:
     text = str(value or "")
     if not text:
@@ -3005,8 +3039,10 @@ def _mojibake_score(text: str) -> int:
 
 
 def _preview_focus_block(clip: Any) -> str:
-    _, text, focus = _clip_text_focus(clip)
-    hay = f"{focus} {text}"
+    _, raw_text, focus = _clip_text_focus(clip)
+    text = _preview_effective_clip_text(clip) or raw_text
+    has_selected_segments = isinstance(clip, dict) and bool(clip.get("segments"))
+    hay = text if has_selected_segments else f"{focus} {text}"
     if any(k in hay for k in ("\u663e\u7626", "\u906e\u8089", "\u85cf\u8089", "\u6536\u8170", "\u663e\u9ad8", "\u6bd4\u4f8b", "\u4fee\u9970", "\u7248\u578b", "\u5ed3\u5f62", "\u526a\u88c1", "\u5bbd\u677e", "\u4fee\u8eab", "\u906e\u80ef", "\u906e\u526f\u4e73", "\u80a9\u578b", "\u62dc\u62dc\u8089")):
         return "\u7248\u578b\u663e\u7626"
     if any(k in hay for k in ("\u9762\u6599", "\u6750\u8d28", "\u624b\u611f", "\u89e6\u611f", "\u5782\u611f", "\u900f\u6c14", "\u4eb2\u80a4", "\u67d4\u8f6f", "\u9488\u7ec7", "\u51b0\u4e1d", "\u771f\u4e1d", "\u68c9\u9ebb", "\u4e0d\u95f7", "\u4e0d\u900f", "\u7af9\u8282\u9ebb")):
@@ -3015,9 +3051,57 @@ def _preview_focus_block(clip: Any) -> str:
         return "\u54c1\u8d28\u7ec6\u8282"
     if any(k in hay for k in ("\u989c\u8272", "\u8272\u7cfb", "\u663e\u767d", "\u63d0\u6c14\u8272", "\u590d\u53e4", "\u9ed1\u8272", "\u767d\u8272", "\u5496\u8272", "\u82b1\u8272", "\u649e\u8272", "\u7126\u7cd6")):
         return "\u989c\u8272\u6c1b\u56f4"
-    if any(k in hay for k in ("\u573a\u666f", "\u901a\u52e4", "\u7ea6\u4f1a", "\u65e5\u5e38", "\u804c\u573a", "\u51fa\u95e8", "\u5ea6\u5047", "\u62cd\u7167", "\u901b\u8857", "\u65c5\u6e38", "\u642d\u914d", "\u53e0\u7a7f", "\u5185\u642d", "\u5916\u7a7f", "\u6210\u5957", "\u5957\u7a7f", "\u6d77\u5c9b", "\u4e91\u5357")):
+    if any(k in hay for k in ("\u573a\u666f", "\u901a\u52e4", "\u7ea6\u4f1a", "\u65e5\u5e38", "\u804c\u573a", "\u51fa\u95e8", "\u5ea6\u5047", "\u653e\u5047", "\u62cd\u7167", "\u51fa\u7247", "\u901b\u8857", "\u65c5\u6e38", "\u642d\u914d", "\u8349\u5e3d", "\u68d2\u7403\u5e3d", "\u53e0\u7a7f", "\u5185\u642d", "\u5916\u7a7f", "\u6210\u5957", "\u5957\u7a7f", "\u6d77\u5c9b", "\u4e91\u5357")):
         return "\u573a\u666f\u642d\u914d"
     return "\u5176\u4ed6"
+
+
+_PREVIEW_SALES_ROLE_LABELS = {
+    "hook": "Hook开头",
+    "hook_followup": "承接Hook",
+    "direct_effect": "直接效果",
+    "proof_detail": "证明细节",
+    "scene_crowd": "场景人群",
+    "objection_resolver": "顾虑解除",
+    "natural_close": "自然收尾",
+    "weak_fragment": "弱断句",
+    "other": "补充卖点",
+}
+
+
+def _preview_sales_role(clip: Any) -> str:
+    clip_type, raw_text, focus = _clip_text_focus(clip)
+    text = _preview_effective_clip_text(clip) or raw_text
+    ctype = clip_type.lower()
+    if "hook" in ctype:
+        return "hook"
+    if "close" in ctype or ctype in ("cta", "call_to_action", "urgency"):
+        return "natural_close"
+
+    compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", text).lower()
+    block = _preview_focus_block(clip)
+    weak_start = compact.startswith(("嗯", "啊", "好", "好的", "是的", "对", "然后", "而且", "但是", "不过", "其实", "就是"))
+    stripped = str(text or "").strip().rstrip("，,。.!！?？、；;：: ")
+    weak_end = stripped.endswith(("然后", "而且", "但是", "不过", "所以", "因为", "就是", "其实", "对不对", "能理解吗", "有没有", "你会觉得", "就感觉", "呢", "吧", "啊", "呀"))
+    if (weak_start or weak_end) and len(compact) < 18:
+        return "weak_fragment"
+    if block in ("版型显瘦", "穿着体验", "口感食欲") or re.search(r"显瘦|遮肉|显高|显腿长|上身|穿上|效果|显白|好吃|爆汁|口感|试吃", compact):
+        return "direct_effect"
+    if block in ("面料质感", "品质细节", "工艺细节", "新鲜品质", "产地溯源", "规格分量", "发货保鲜") or re.search(r"面料|材质|质感|手感|做工|工艺|细节|品质|新鲜|产地|源头|规格|分量|冷链|包赔", compact):
+        return "proof_detail"
+    if block in ("场景搭配", "场景吃法", "流行趋势") or re.search(r"通勤|上班|约会|日常|出门|旅游|搭配|出片|小个子|微胖|梨形|苹果型|全家|早餐|办公室|送礼", compact):
+        return "scene_crowd"
+    if block in ("尺寸长度", "对比优势") or re.search(r"不挑|不用担心|不会|不显|不胖|不勒|不卡|不闷|不透|不起球|遮肚子|胯宽|腿粗|尺码|码数|身高|体重|放心|安心|不踩雷", compact):
+        return "objection_resolver"
+    if re.search(r"推荐|建议|适合|放心|安心|闭眼|值得|自留|复购|老客", compact):
+        return "natural_close"
+    return "other"
+
+
+def _preview_sales_role_label(clip: Any) -> str:
+    return _PREVIEW_SALES_ROLE_LABELS.get(_preview_sales_role(clip), "补充卖点")
+
+
 def _reorder_preview_focus_blocks(clips: list[Any]) -> list[Any]:
     if not clips or len(clips) < 5:
         return clips
@@ -3091,6 +3175,8 @@ def _normalize_preview_final_clips(
     default_source: str = "",
     preferred_category: str = "",
     preferred_focus: str = "",
+    word_timings: list[dict[str, Any]] | None = None,
+    target_duration: int | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Apply the same final-retention cleanup before showing preview rows."""
     original_count = len(clips or [])
@@ -3115,56 +3201,23 @@ def _normalize_preview_final_clips(
     try:
         import ai_clipper as ai_mod
 
+        # Preview must preserve the AI-authored narrative. Only hard safety and
+        # word-timed boundary cleanup are allowed here; no semantic deletion,
+        # topic replacement, Hook promotion, or role-based reordering.
         if hasattr(ai_mod, "_filter_price_and_cta"):
             _step("forbidden_price_filter", lambda items: ai_mod._filter_price_and_cta(items, None))
-        if hasattr(ai_mod, "_filter_hook_product_repeats"):
-            _step("hook_product_repeat_filter", lambda items: ai_mod._filter_hook_product_repeats(items, None))
-        if hasattr(ai_mod, "_dedup_clip_text_overlap"):
-            _step("time_text_dedup", lambda items: ai_mod._dedup_clip_text_overlap(items, None, merge_mode=merge_mode))
-        if hasattr(ai_mod, "_filter_semantic_repeat"):
-            _step("semantic_dedup", lambda items: ai_mod._filter_semantic_repeat(items, None))
-        if srt_text and not merge_mode and hasattr(ai_mod, "_fix_clip_boundaries"):
-            _step("boundary_fix", lambda items: ai_mod._fix_clip_boundaries(items, srt_text, None))
-        if hasattr(ai_mod, "_remove_expanded_overlap_clips"):
-            _step("expanded_overlap_dedup", lambda items: ai_mod._remove_expanded_overlap_clips(items, None))
-        if hasattr(ai_mod, "_reorder_product_focus_blocks"):
-            normalized = list(
-                ai_mod._reorder_product_focus_blocks(
-                    normalized,
+        if srt_text and word_timings and hasattr(ai_mod, "_trim_filler_start"):
+            _step(
+                "word_boundary_trim",
+                lambda items: ai_mod._trim_filler_start(
+                    items,
+                    srt_text,
                     None,
-                    preferred_cat=preferred_category,
-                    preferred_focus=preferred_focus,
-                )
-                or normalized
+                    word_timings=word_timings,
+                ),
             )
-        if srt_text and not merge_mode:
-            try:
-                from cutter_logic import _apply_srt_cut_alignment, _parse_srt_to_segments, _srt_text_for_range
-
-                srt_segments = _parse_srt_to_segments(srt_text)
-                refreshed = []
-                total_clips = len(normalized)
-                for clip_idx, clip in enumerate(normalized):
-                    values = list(_clip_to_tuple(clip, default_source=default_source))
-                    clip_type = values[0] if values else "product"
-                    start = float(values[2] if len(values) > 2 else 0)
-                    end = float(values[3] if len(values) > 3 else start)
-                    start, end, _ = _apply_srt_cut_alignment(clip_type, start, end, srt_segments, clip_idx, total_clips)
-                    values[2] = start
-                    values[3] = end
-                    if len(values) > 5:
-                        values[5] = max(0.0, end - start)
-                    range_text = _srt_text_for_range(srt_segments, start, end)
-                    if range_text:
-                        values[1] = _repair_mojibake_text(range_text)
-                    refreshed.append(tuple(values))
-                normalized = refreshed
-            except Exception as exc:
-                emit_log("warning", f"preview srt text refresh skipped: {exc}", "system")
-        if srt_text and hasattr(ai_mod, "_post_filter_cross_category"):
-            category = str(preferred_category or "").strip()
-            if category and category not in ("自动", "自动检测", "auto"):
-                _step("category_filter", lambda items: ai_mod._post_filter_cross_category(items, srt_text, None, preferred_cat=category))
+        if hasattr(ai_mod, "_filter_price_and_cta"):
+            _step("final_forbidden_price_filter", lambda items: ai_mod._filter_price_and_cta(items, None))
     except Exception as exc:
         emit_log("warning", f"preview cleanup failed: {exc}", "system")
 
@@ -3259,6 +3312,7 @@ def _clip_public(index: int, clip: Any) -> dict[str, Any]:
         end = start
     if duration <= 0:
         duration = max(0.0, end - start)
+    sales_role = _preview_sales_role(clip)
     return {
         "index": index,
         "clip_type": clip_type,
@@ -3269,6 +3323,8 @@ def _clip_public(index: int, clip: Any) -> dict[str, Any]:
         "score": round(score, 2),
         "focus": focus,
         "focus_block": _preview_focus_block(clip),
+        "sales_role": sales_role,
+        "sales_role_label": _PREVIEW_SALES_ROLE_LABELS.get(sales_role, "补充卖点"),
         "source": source,
         "source_name": Path(source).name if source else "",
     }
@@ -3307,13 +3363,17 @@ def _preview_text_marker_and_body(text: Any) -> tuple[str, str]:
 
 
 def _preview_compact_text(text: Any) -> str:
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", _strip_preview_source_marker(text))
+    value = unicodedata.normalize("NFKC", _strip_preview_source_marker(text))
+    for old, new in (("鏈接", "链接"), ("連結", "链接"), ("连结", "链接"), ("連接", "链接"), ("價", "价")):
+        value = value.replace(old, new)
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", value)
 
 
 def _preview_filler_words() -> set[str]:
     fallback = {
         "是的", "对", "对的", "好的", "好", "嗯", "嗯嗯", "啊", "哦", "噢",
         "呃", "额", "好吧", "对吧", "是吧", "没错", "可以", "行",
+        "呀对不对", "对不对", "是不是这种感觉", "来准备好啊", "准备好啊",
     }
     try:
         data = _load_effective_keyword_config()
@@ -3333,6 +3393,10 @@ def _preview_is_pure_filler(text: Any) -> bool:
         return True
     if compact in _preview_filler_words():
         return True
+    if compact in {"呀对不对", "对不对", "是不是这种感觉", "能理解吗", "有没有发现"}:
+        return True
+    if len(compact) <= 4 and compact in {"白开水", "纯白色"}:
+        return True
     filler_chars = set("对嗯啊哦噢呃额哈呀呢嘛啦哇好是的没错可以行")
     return len(compact) <= 4 and set(compact) <= filler_chars
 
@@ -3351,32 +3415,408 @@ def _preview_forbidden_words() -> list[str]:
     return result
 
 
-def _preview_has_forbidden_or_price(text: Any) -> bool:
+def _preview_segment_block_reason(text: Any) -> str:
     clean = _strip_preview_source_marker(text)
     compact = _preview_compact_text(clean)
     if not compact:
-        return False
+        return ""
     try:
         for word in _preview_forbidden_words():
             word_compact = _preview_compact_text(word)
             if word and (word in clean or (word_compact and word_compact in compact)):
-                return True
+                return f"违禁词：{word}"
     except Exception:
         pass
     price_patterns = [
         r"\d{2,4}\s*[元块]",
         r"[到拿]手价?\s*\d",
-        r"原价|现价|秒杀价|福利价|破价|到手价|特价|优惠|折扣|领券|优惠券|消费券|凑单",
-        r"正码正拍|正码|正拍|卡码|往大拍|小黄车|购物车|链接|上车|下单|去拍|赶紧拍",
+        r"原价|现价|价格|秒杀价|福利价|破价|到手价|特价|优惠|折扣|领券|优惠券|消费券|凑单",
+        r"321|三二一|正码正拍|正码|正拍|卡码|往大拍|小黄车|购物车|链接|连结|連結|上车|下单|去拍|赶紧拍",
     ]
-    return any(re.search(pattern, clean) or re.search(pattern, compact) for pattern in price_patterns)
+    if any(re.search(pattern, clean) or re.search(pattern, compact) for pattern in price_patterns):
+        return "价格或行动引导"
+    try:
+        import ai_clipper as ai_mod
+
+        content_risks = ai_mod._content_safety_pattern_matches(clean)
+        if content_risks:
+            return "内容安全：" + "、".join(content_risks[:2])
+        if ai_mod._is_backstage_instruction(clean):
+            return "直播现场调度"
+    except Exception:
+        pass
+    return ""
+
+
+def _preview_has_forbidden_or_price(text: Any) -> bool:
+    return bool(_preview_segment_block_reason(text))
+
+
+def _preview_lock_unsafe_segments(public_clips: list[dict[str, Any]]) -> int:
+    """Keep hard-blocked subtitle units out of preview drafts and final export."""
+    locked = 0
+    for clip in public_clips or []:
+        for segment in list(clip.get("segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            reason = _preview_segment_block_reason(segment.get("text") or "")
+            if not reason:
+                continue
+            if segment.get("selected") is not False or not segment.get("selection_locked"):
+                locked += 1
+            segment["selected"] = False
+            segment["selection_locked"] = True
+            segment["blocked_reason"] = reason
+    return locked
+
+
+def _preview_context_fragment_reason(text: Any) -> str:
+    compact = _preview_compact_text(text)
+    if compact.startswith(("就像你们说", "你们说的", "照你们说", "大家都说")):
+        return "依赖前文的转述句"
+    if compact.startswith(("还是这种", "这种类型", "这个类型", "也可以", "别说了")):
+        return "缺少独立卖点的承接句"
+    action_words = ("是", "有", "做", "穿", "显", "遮", "不", "能", "会", "可", "给", "让", "买", "搭", "选", "用", "看", "拉", "摸")
+    if len(compact) <= 6 and not any(word in compact for word in action_words):
+        return "短碎句，缺少独立卖点"
+    return ""
+
+
+def _preview_trim_context_prefix(text: Any) -> str:
+    marker, body = _preview_text_marker_and_body(text)
+    for prefix in ("就像你们说的", "你们说的", "照你们说", "大家都说"):
+        if not body.startswith(prefix):
+            continue
+        trimmed = body[len(prefix):].lstrip(" ，,。.!！?？、")
+        compact = _preview_compact_text(trimmed)
+        if len(compact) >= 8 and any(word in compact for word in ("穿", "上身", "搭", "出门", "度假", "通勤", "显", "不")):
+            return f"{marker}{trimmed}" if marker else trimmed
+    return str(text or "").strip()
+
+
+def _preview_unselect_context_fragments(public_clips: list[dict[str, Any]]) -> int:
+    removed = 0
+    for clip in public_clips or []:
+        for segment in list(clip.get("segments") or []):
+            if not isinstance(segment, dict) or segment.get("selected") is False:
+                continue
+            trimmed = _preview_trim_context_prefix(segment.get("text") or "")
+            if trimmed != str(segment.get("text") or "").strip():
+                segment["text"] = trimmed
+                segment["trimmed_prefix"] = "移除依赖上文的开头"
+            reason = _preview_context_fragment_reason(segment.get("text") or "")
+            if not reason:
+                continue
+            segment["selected"] = False
+            segment["auto_unselected_reason"] = reason
+            removed += 1
+    return removed
+
+
+def _preview_selected_text(clip: dict[str, Any]) -> str:
+    return " ".join(
+        str(segment.get("text") or "").strip()
+        for segment in list(clip.get("segments") or [])
+        if isinstance(segment, dict) and segment.get("selected") is not False
+    ).strip()
+
+
+def _preview_subtopic_signature(clip: dict[str, Any]) -> str:
+    text = _preview_compact_text(_preview_selected_text(clip))
+    clip_type = str(clip.get("clip_type") or "").lower()
+    if "close" in clip_type and any(word in text for word in ("尺码", "码", "体重", "身高", "斤")):
+        return "收尾:尺码"
+    block = _preview_focus_block(clip)
+    if block == "场景搭配":
+        if any(word in text for word in ("度假", "放假", "旅游", "海边", "云南", "泰兰德", "旅行")):
+            return "场景搭配:度假旅行"
+        if any(word in text for word in ("草帽", "棒球帽", "编织帽", "搭包")):
+            return "场景搭配:配饰搭配"
+        if any(word in text for word in ("通勤", "上班", "职场", "办公室")):
+            return "场景搭配:通勤"
+    if block == "版型显瘦":
+        if any(word in text for word in ("肩", "肩线", "肩膀", "往里挖")):
+            return "版型显瘦:肩线"
+        if any(word in text for word in ("拜拜肉", "胳膊", "手臂")):
+            return "版型显瘦:手臂"
+        if any(word in text for word in ("显瘦", "遮肉", "藏肉", "正面", "侧面")):
+            return "版型显瘦:泛化效果"
+    if block == "面料质感":
+        if any(word in text for word in ("不透", "透到", "透肤")):
+            return "面料质感:防透"
+        if any(word in text for word in ("柔软", "不扎", "舒服", "细")):
+            return "面料质感:亲肤"
+    if block in ("品质细节", "工艺细节") and any(word in text for word in ("拼接", "拼色", "色牢度", "掉色", "串色")):
+        return "工艺细节:拼接色牢度"
+    return ""
+
+
+def _preview_clip_strength(clip: dict[str, Any]) -> float:
+    text = _preview_compact_text(_preview_selected_text(clip))
+    clip_type = str(clip.get("clip_type") or "").lower()
+    score = min(24.0, len(text) / 2.5)
+    if "hook" in clip_type:
+        score += 30.0
+    if any(word in text for word in ("面料", "材质", "工艺", "拼接", "色牢度", "不透", "肩线", "剪裁")):
+        score += 12.0
+    if any(word in text for word in ("s码", "m码", "l码", "xl", "斤", "身高", "体重")):
+        score += 16.0
+    return score
+
+
+def _preview_unselect_intra_clip_repeated_subtopics(public_clips: list[dict[str, Any]], max_duration: float = 10.0) -> int:
+    """Do not let adjacent subtitle units repeat one selling subtopic for too long."""
+    removed = 0
+    for clip in public_clips or []:
+        seen_duration: dict[str, float] = {}
+        for segment in list(clip.get("segments") or []):
+            if not isinstance(segment, dict) or segment.get("selected") is False:
+                continue
+            probe = dict(clip)
+            probe["segments"] = [segment]
+            signature = _preview_subtopic_signature(probe)
+            if not signature:
+                continue
+            duration = max(0.0, float(segment.get("duration") or 0.0))
+            previous_duration = seen_duration.get(signature, 0.0)
+            if previous_duration > 0 and previous_duration + duration > max_duration:
+                segment["selected"] = False
+                segment["auto_unselected_reason"] = f"同一子主题已保留{previous_duration:.1f}s，移除重复延展"
+                removed += 1
+                continue
+            seen_duration[signature] = previous_duration + duration
+    return removed
+
+
+def _preview_unselect_repeated_subtopics(public_clips: list[dict[str, Any]]) -> int:
+    """Prefer one self-contained evidence unit over repeated slogan variants."""
+    kept: dict[str, dict[str, Any]] = {}
+    removed = 0
+    for clip in public_clips or []:
+        if clip.get("selected") is False or not _preview_selected_text(clip):
+            continue
+        signature = _preview_subtopic_signature(clip)
+        if not signature:
+            continue
+        clip_type = str(clip.get("clip_type") or "").lower()
+        if signature == "版型显瘦:泛化效果" and any(key.startswith("版型显瘦:") for key in kept):
+            for segment in list(clip.get("segments") or []):
+                if isinstance(segment, dict) and segment.get("selected") is not False:
+                    segment["selected"] = False
+                    segment["auto_unselected_reason"] = "与已有版型证据重复的泛化效果"
+                    removed += 1
+            clip["selected"] = False
+            continue
+        previous = kept.get(signature)
+        if previous is None:
+            kept[signature] = clip
+            continue
+        previous_type = str(previous.get("clip_type") or "").lower()
+        replace_previous = (
+            signature == "收尾:尺码"
+            and "hook" not in previous_type
+            and _preview_clip_strength(clip) > _preview_clip_strength(previous)
+        )
+        target = previous if replace_previous else clip
+        reason = f"重复子主题：{signature}"
+        for segment in list(target.get("segments") or []):
+            if isinstance(segment, dict) and segment.get("selected") is not False:
+                segment["selected"] = False
+                segment["auto_unselected_reason"] = reason
+                removed += 1
+        target["selected"] = False
+        if replace_previous:
+            kept[signature] = clip
+    return removed
+
+
+def _preview_quality_summary(public_clips: list[dict[str, Any]]) -> dict[str, Any]:
+    blocked: dict[str, int] = {}
+    auto_removed: dict[str, int] = {}
+    for clip in public_clips or []:
+        for segment in list(clip.get("segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            if segment.get("selection_locked"):
+                reason = str(segment.get("blocked_reason") or "内容安全")
+                blocked[reason] = blocked.get(reason, 0) + 1
+            elif segment.get("selected") is False and segment.get("auto_unselected_reason"):
+                reason = str(segment.get("auto_unselected_reason"))
+                auto_removed[reason] = auto_removed.get(reason, 0) + 1
+    return {
+        "preview_locked_segments": sum(blocked.values()),
+        "preview_auto_unselected_segments": sum(auto_removed.values()),
+        "preview_locked_reason_counts": blocked,
+        "preview_auto_unselected_reason_counts": auto_removed,
+    }
+
+
+def _preview_effective_clip_tuples(raw_clips: list[Any], public_clips: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """Use the exact selected subtitle units for preview-side topic reporting."""
+    effective: list[tuple[Any, ...]] = []
+    raw_values = list(raw_clips or [])
+    for index, public_clip in enumerate(public_clips or []):
+        raw_clip = raw_values[index] if index < len(raw_values) else public_clip
+        selected = [
+            segment for segment in list(public_clip.get("segments") or [])
+            if isinstance(segment, dict) and segment.get("selected") is not False
+        ]
+        if not selected:
+            continue
+        text = " ".join(str(segment.get("text") or "").strip() for segment in selected).strip()
+        if not text:
+            continue
+        values = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
+        while len(values) < 8:
+            values.append("")
+        marker = str(public_clip.get("source_marker") or "").strip().upper()
+        values[1] = f"[{marker}] {text}" if marker else text
+        start = min(_preview_segment_start(segment) for segment in selected)
+        end = max(_preview_segment_end(segment) for segment in selected)
+        values[2] = start
+        values[3] = end
+        values[5] = max(0.0, end - start)
+        if not values[7]:
+            values[7] = str(public_clip.get("source") or "")
+        effective.append(tuple(values))
+    return effective
+
+
+def _preview_effective_topic_coverage(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+    preferred_focus: str,
+    target_duration: int | None,
+    requested: str = "自动",
+) -> dict[str, Any]:
+    try:
+        import ai_clipper as ai_mod
+
+        return dict(
+            ai_mod._topic_coverage_summary(
+                _preview_effective_clip_tuples(raw_clips, public_clips),
+                preferred_focus,
+                target_duration or 60,
+                requested,
+            ) or {}
+        )
+    except Exception:
+        return {}
+
+
+def _supplement_preview_preference(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+    srt_text: str,
+    preferred_focus: str,
+    target_duration: int | None,
+    *,
+    sources: list[Any] | None = None,
+    merge_mode: bool = False,
+    word_timings: list[dict[str, Any]] | None = None,
+) -> int:
+    """Backfill a missing preference only with a safe, standalone SRT unit."""
+    if not srt_text or not preferred_focus:
+        return 0
+    try:
+        import ai_clipper as ai_mod
+        from cutter_logic import _parse_srt_to_segments
+    except Exception:
+        return 0
+
+    preferred_topic = ai_mod._focus_label_to_block(preferred_focus) or str(preferred_focus or "").strip()
+    if not preferred_topic:
+        return 0
+    coverage = _preview_effective_topic_coverage(raw_clips, public_clips, preferred_focus, target_duration)
+    missing = max(0, int(coverage.get("preference_min", 0)) - int(coverage.get("preference_count", 0)))
+    if not missing:
+        return 0
+
+    entries = list(_parse_srt_to_segments(srt_text) or [])
+    source_list = [str(value) for value in list(sources or []) if str(value or "").strip()]
+    existing_signatures = {
+        _preview_subtopic_signature(clip)
+        for clip in public_clips
+        if clip.get("selected") is not False and _preview_selected_text(clip)
+    }
+    existing_ranges = [
+        (
+            str(clip.get("source") or ""),
+            _preview_segment_start(segment),
+            _preview_segment_end(segment),
+        )
+        for clip in public_clips
+        for segment in list(clip.get("segments") or [])
+        if isinstance(segment, dict) and segment.get("selected") is not False
+    ]
+    candidates: list[tuple[float, tuple[Any, ...]]] = []
+    for entry in entries:
+        try:
+            start = float(entry.get("start") or 0)
+            end = float(entry.get("end") or start)
+        except Exception:
+            continue
+        duration = max(0.0, end - start)
+        text = _repair_mojibake_text(entry.get("text") or "").strip()
+        compact = _preview_compact_text(text)
+        if duration < 2.2 or duration > 10.0 or len(compact) < 12:
+            continue
+        if ai_mod._is_safety_blocked_text(text) or ai_mod._is_backstage_instruction(text):
+            continue
+        topic = ai_mod._clip_primary_topic(("product", text, start, end, 42.0, duration, preferred_topic))
+        if topic != preferred_topic:
+            continue
+        marker = _preview_source_marker(text)
+        source = ""
+        if marker and marker[1:].isdigit() and int(marker[1:]) <= len(source_list):
+            source = source_list[int(marker[1:]) - 1]
+        if merge_mode and not source:
+            continue
+        if any(
+            (not source or not old_source or source == old_source) and start < old_end and end > old_start
+            for old_source, old_start, old_end in existing_ranges
+        ):
+            continue
+        evidence = ai_mod._topic_evidence_scores(("product", text, start, end, 42.0, duration, preferred_topic)).get(topic, 0.0)
+        quality = evidence * 8.0 + min(16.0, len(compact) / 3.0) + min(10.0, duration)
+        candidates.append((quality, ("product", text, start, end, 42.0, duration, preferred_topic, source)))
+
+    added = 0
+    for _quality, candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
+        candidate_public = _preview_public_clips(
+            [candidate],
+            srt_text,
+            sources=source_list,
+            merge_mode=merge_mode,
+            word_timings=word_timings,
+        )
+        if not candidate_public:
+            continue
+        public = candidate_public[0]
+        if public.get("selected") is False or not _preview_selected_text(public):
+            continue
+        signature = _preview_subtopic_signature(public)
+        if signature and signature in existing_signatures:
+            continue
+        raw_clips.append(candidate)
+        public["index"] = len(public_clips)
+        public_clips.append(public)
+        if signature:
+            existing_signatures.add(signature)
+        for segment in list(public.get("segments") or []):
+            if isinstance(segment, dict) and segment.get("selected") is not False:
+                existing_ranges.append((str(public.get("source") or ""), _preview_segment_start(segment), _preview_segment_end(segment)))
+        added += 1
+        if added >= missing:
+            break
+    return added
 
 
 def _clean_preview_filler_prefix(text: Any) -> str:
     marker, body = _preview_text_marker_and_body(text)
     prefixes = [
-        "好的是的", "是的是的", "好的", "是的", "对的", "嗯嗯",
-        "对吧", "是吧", "好吧", "嗯", "啊", "呃", "额", "哦", "噢", "对",
+        "然后说一下", "好的是的", "是的是的", "说一下", "然后", "而且", "但是", "不过", "其实",
+        "好的", "是的", "对的", "嗯嗯", "对吧", "是吧", "好吧", "嗯", "啊", "呃", "额", "哦", "噢", "对",
     ]
     changed = True
     while changed:
@@ -3522,6 +3962,7 @@ def _preview_segments_for_clip(
     public_clip: dict[str, Any],
     srt_segments: list[dict[str, Any]],
     expected_marker: str = "",
+    word_timings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     try:
         start = float(public_clip.get("start") or 0)
@@ -3530,6 +3971,59 @@ def _preview_segments_for_clip(
         start, end = 0.0, 0.0
     marker = str(expected_marker or _preview_expected_source_marker(public_clip)).strip().upper()
     pieces: list[dict[str, Any]] = []
+    if end > start and word_timings:
+        for word_segment in word_timings:
+            if not isinstance(word_segment, dict):
+                continue
+            segment_marker = str(word_segment.get("source_marker") or "").strip().upper()
+            if marker and segment_marker != marker:
+                continue
+            if not marker and segment_marker:
+                continue
+            selected_words = []
+            for word in word_segment.get("words") or []:
+                if not isinstance(word, dict):
+                    continue
+                try:
+                    word_start = float(word.get("start") or 0)
+                    word_end = float(word.get("end") or word_start)
+                except (TypeError, ValueError):
+                    continue
+                midpoint = (word_start + word_end) / 2.0
+                if start - 0.02 <= midpoint <= end + 0.02 and word_end > word_start:
+                    selected_words.append((word_start, word_end, str(word.get("text") or "")))
+            if not selected_words:
+                continue
+            text = _clean_preview_filler_prefix("".join(item[2] for item in selected_words).strip())
+            if not text or _preview_is_pure_filler(text):
+                continue
+            piece_start = max(start, selected_words[0][0])
+            piece_end = min(end, selected_words[-1][1])
+            pieces.append({
+                "index": len(pieces),
+                "start": round(piece_start, 3),
+                "end": round(piece_end, 3),
+                "duration": round(max(0.0, piece_end - piece_start), 3),
+                "text": text,
+                "selected": not _preview_has_forbidden_or_price(text),
+                "word_timed": True,
+            })
+        if pieces:
+            weak_tail_segments = {
+                "反正就是不显白怎么说呢", "是的为什么", "为什么", "对不对", "能理解吗",
+                "知道吧", "对吧", "是吧",
+                "然后", "而且",
+            }
+            for piece in reversed(pieces):
+                if piece.get("selected") is False:
+                    continue
+                compact = _preview_compact_text(piece.get("text") or "")
+                if compact in weak_tail_segments:
+                    piece["selected"] = False
+                    piece["weak_edge"] = True
+                    continue
+                break
+            return _sort_and_reindex_preview_segments(pieces)
     if end > start:
         boundary_slack = 0.65
         for seg in srt_segments or []:
@@ -3648,12 +4142,26 @@ def _preview_unselect_duplicate_segments(public_clips: list[dict[str, Any]]) -> 
     return {"preview_duplicate_segments_removed": removed_segments, "preview_duplicate_clips_unselected": removed_clips}
 
 
+def _refresh_preview_clip_sales_metadata(public_clips: list[dict[str, Any]]) -> None:
+    for clip in public_clips or []:
+        if not isinstance(clip, dict):
+            continue
+        segments = list(clip.get("segments") or [])
+        if segments and not any(seg.get("selected") is not False for seg in segments if isinstance(seg, dict)):
+            clip["selected"] = False
+        clip["focus_block"] = _preview_focus_block(clip)
+        sales_role = _preview_sales_role(clip)
+        clip["sales_role"] = sales_role
+        clip["sales_role_label"] = _PREVIEW_SALES_ROLE_LABELS.get(sales_role, "补充卖点")
+
+
 def _preview_public_clips(
     clips: list[Any],
     srt_text: str = "",
     *,
     sources: list[Any] | None = None,
     merge_mode: bool = False,
+    word_timings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     srt_segments: list[dict[str, Any]] = []
     if srt_text:
@@ -3669,9 +4177,42 @@ def _preview_public_clips(
         expected_marker = _preview_expected_source_marker(clip, source_list) if merge_mode else ""
         if expected_marker:
             clip["source_marker"] = expected_marker
-        clip["segments"] = _preview_segments_for_clip(clip, srt_segments, expected_marker)
-    _preview_unselect_duplicate_segments(public_clips)
+        clip["segments"] = _preview_segments_for_clip(
+            clip,
+            srt_segments,
+            expected_marker,
+            word_timings=word_timings,
+        )
+    _preview_lock_unsafe_segments(public_clips)
+    _refresh_preview_clip_sales_metadata(public_clips)
     return public_clips
+
+
+def _drop_unusable_preview_clips(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+) -> tuple[list[Any], list[dict[str, Any]], int]:
+    kept_raw: list[Any] = []
+    kept_public: list[dict[str, Any]] = []
+    removed = 0
+    for raw_clip, public_clip in zip(raw_clips or [], public_clips or []):
+        segments = list(public_clip.get("segments") or [])
+        has_selected = any(
+            segment.get("selected") is not False and _preview_compact_text(segment.get("text") or "")
+            for segment in segments
+            if isinstance(segment, dict)
+        )
+        if public_clip.get("selected") is False or not has_selected:
+            removed += 1
+            continue
+        public_clip["index"] = len(kept_public)
+        kept_raw.append(raw_clip)
+        kept_public.append(public_clip)
+
+    for index, public_clip in enumerate(kept_public):
+        public_clip["index"] = index
+    _refresh_preview_clip_sales_metadata(kept_public)
+    return kept_raw, kept_public, removed
 
 
 def _merge_selected_segments(
@@ -3684,7 +4225,10 @@ def _merge_selected_segments(
         selected = [seg for seg in segments if seg.get("selected") is not False]
     else:
         wanted = {int(value) for value in segment_indices if isinstance(value, int) or str(value).lstrip("-").isdigit()}
-        selected = [seg for seg in segments if int(seg.get("index", -1)) in wanted]
+        selected = [
+            seg for seg in segments
+            if int(seg.get("index", -1)) in wanted and not seg.get("selection_locked")
+        ]
     if not selected:
         return []
     selected.sort(key=lambda seg: (_preview_segment_index(seg), _preview_segment_start(seg), _preview_segment_end(seg)))
@@ -4322,20 +4866,8 @@ def _preview_feedback_configured_strength() -> str:
         return "auto"
 
 
-def _preview_feedback_selection_enabled_value(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in {"0", "false", "off", "no", "disabled", "关闭", "关", "否"}
-    if value is None:
-        return True
-    return bool(value)
-
-
 def _preview_feedback_selection_enabled() -> bool:
-    try:
-        settings = _load_settings()
-        return _preview_feedback_selection_enabled_value(settings.get("style_profile_enabled", True))
-    except Exception:
-        return True
+    return _preview_feedback_configured_strength() != "off"
 
 
 def _preview_feedback_learning_status(
@@ -4630,7 +5162,7 @@ def _preview_feedback_preference_summary() -> dict[str, Any]:
 
     confidence = _preview_feedback_confidence(total_samples)
     notes = [
-        "这是只读摘要；自动推荐会按 AI 学习强度进入软参考和本地兜底。",
+        "这是只读摘要；画像会按所选影响强度进入 AI 软参考，选择关闭时只学习不参与选片。",
         "1-2 次样本只作为观察，建议累计到 3 次以上再作为稳定偏好。",
         "断句、闲聊、环境干扰、库存催促属于结构性风险，偶尔被保留也不会直接变成喜欢规则。",
     ]
@@ -5178,7 +5710,7 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
     digest = hashlib.md5(str(video).encode("utf-8", errors="ignore")).hexdigest()[:12]
     audio_path: Path | None = None
     try:
-        from volcengine_asr import prepare_volcengine_audio, volcengine_asr
+        from volcengine_asr import prepare_volcengine_audio, volcengine_asr, write_word_timing_sidecar
 
         prepared = prepare_volcengine_audio(
             str(video),
@@ -5209,6 +5741,11 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
         if not srt_text.strip():
             return None
         srt.write_text(srt_text, encoding="utf-8")
+        write_word_timing_sidecar(
+            srt,
+            segments,
+            log_fn=lambda msg: emit_log("info", msg, scope),
+        )
         emit_log("info", f"云端语音识别成功：{len(segments)} 条语音段。", scope)
         return srt
     except Exception as exc:
@@ -5454,6 +5991,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             mix_sources = [str(path) for path in paths]
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
         preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
+        topic_coverage_summary = dict(cutter_mod._multi_result_cache.get("topic_coverage_summary") or {})
+        word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -5461,14 +6000,62 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             merge_mode=True,
             preferred_category=preferred_category,
             preferred_focus=str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+            word_timings=word_timings,
+            target_duration=payload.duration,
         )
         raw_clips = _attach_mix_sources_to_preview_clips(raw_clips, mix_sources)
+        try:
+            import ai_clipper as _topic_ai
+            topic_coverage_summary = dict(
+                _topic_ai._topic_coverage_summary(
+                    raw_clips,
+                    str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+                    payload.duration,
+                    preference_summary.get("requested", "自动"),
+                )
+                or {}
+            )
+        except Exception:
+            pass
         if category_summary:
             dedup_summary["category_summary"] = category_summary
         if preference_summary:
             dedup_summary["preference_summary"] = preference_summary
+        if topic_coverage_summary:
+            dedup_summary["topic_coverage_summary"] = topic_coverage_summary
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
-        public_clips = _preview_public_clips(raw_clips, srt_text, sources=mix_sources, merge_mode=True)
+        public_clips = _preview_public_clips(
+            raw_clips,
+            srt_text,
+            sources=mix_sources,
+            merge_mode=True,
+            word_timings=word_timings,
+        )
+        raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
+        if unusable_removed:
+            dedup_summary["unusable_preview_clips_removed"] = unusable_removed
+        dedup_summary["narrative_owner"] = "ai"
+        dedup_summary["preference_supplemented"] = 0
+        emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
+        preview_quality = _preview_quality_summary(public_clips)
+        if preview_quality["preview_locked_segments"] or preview_quality["preview_auto_unselected_segments"]:
+            dedup_summary.update(preview_quality)
+            emit_log(
+                "info",
+                "预览子句清理: "
+                f"锁定{preview_quality['preview_locked_segments']}句安全内容，"
+                f"自动取消{preview_quality['preview_auto_unselected_segments']}句重复/残句。",
+                scope,
+            )
+        effective_topic_summary = _preview_effective_topic_coverage(
+            raw_clips,
+            public_clips,
+            str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+            payload.duration,
+            preference_summary.get("requested", "自动"),
+        )
+        if effective_topic_summary:
+            dedup_summary["topic_coverage_summary"] = effective_topic_summary
         _set_task_progress(task_id, 94, "生成预览列表")
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
@@ -8407,6 +8994,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
         preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
+        topic_coverage_summary = dict(cutter_mod._multi_result_cache.get("topic_coverage_summary") or {})
+        word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -8414,13 +9003,55 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             default_source=str(video),
             preferred_category=preferred_category,
             preferred_focus=str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+            word_timings=word_timings,
+            target_duration=payload.target_duration,
         )
+        try:
+            import ai_clipper as _topic_ai
+            topic_coverage_summary = dict(
+                _topic_ai._topic_coverage_summary(
+                    raw_clips,
+                    str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+                    payload.target_duration,
+                    preference_summary.get("requested", "自动"),
+                )
+                or {}
+            )
+        except Exception:
+            pass
         if category_summary:
             dedup_summary["category_summary"] = category_summary
         if preference_summary:
             dedup_summary["preference_summary"] = preference_summary
+        if topic_coverage_summary:
+            dedup_summary["topic_coverage_summary"] = topic_coverage_summary
         _set_task_progress(task_id, 94, "生成预览列表")
-        public_clips = _preview_public_clips(raw_clips, srt_text)
+        public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
+        raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
+        if unusable_removed:
+            dedup_summary["unusable_preview_clips_removed"] = unusable_removed
+        dedup_summary["narrative_owner"] = "ai"
+        dedup_summary["preference_supplemented"] = 0
+        emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
+        preview_quality = _preview_quality_summary(public_clips)
+        if preview_quality["preview_locked_segments"] or preview_quality["preview_auto_unselected_segments"]:
+            dedup_summary.update(preview_quality)
+            emit_log(
+                "info",
+                "预览子句清理: "
+                f"锁定{preview_quality['preview_locked_segments']}句安全内容，"
+                f"自动取消{preview_quality['preview_auto_unselected_segments']}句重复/残句。",
+                scope,
+            )
+        effective_topic_summary = _preview_effective_topic_coverage(
+            raw_clips,
+            public_clips,
+            str(preference_summary.get("used_label") or preference_summary.get("label") or ""),
+            payload.target_duration,
+            preference_summary.get("requested", "自动"),
+        )
+        if effective_topic_summary:
+            dedup_summary["topic_coverage_summary"] = effective_topic_summary
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
             preview_id,
@@ -8786,6 +9417,9 @@ def get_settings() -> dict[str, Any]:
 @app.post("/api/settings")
 def save_settings(payload: SettingsPayload) -> dict[str, Any]:
     data = payload.model_dump()
+    provided_fields = set(getattr(payload, "model_fields_set", set()) or set())
+    if "style_profile_enabled" not in provided_fields:
+        data.pop("style_profile_enabled", None)
     if _save_settings(data):
         emit_log("success", "设置已保存。", "settings")
         return {"ok": True, "message": "设置已保存"}

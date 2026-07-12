@@ -11,6 +11,82 @@ import uuid
 import subprocess
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_WORD_TIMING_SCHEMA = "liveclipper.word-timings.v1"
+
+
+def word_timing_sidecar_path(srt_path):
+    """Return the word-timing sidecar path for an SRT file."""
+    base, _ = os.path.splitext(os.fspath(srt_path))
+    return base + ".words.json"
+
+
+def write_word_timing_sidecar(srt_path, segments, provider="volcengine", log_fn=None):
+    """Persist normalized word timings without changing the compatible SRT."""
+    clean_segments = []
+    word_count = 0
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        clean_words = []
+        for word in segment.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            text = str(word.get("text") or "").strip()
+            try:
+                start = float(word.get("start") or 0)
+                end = float(word.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            if not text or end <= start:
+                continue
+            item = {"text": text, "start": round(start, 3), "end": round(end, 3)}
+            try:
+                confidence = word.get("confidence")
+                if confidence is not None:
+                    item["confidence"] = round(float(confidence), 4)
+            except (TypeError, ValueError):
+                pass
+            clean_words.append(item)
+        if not clean_words:
+            continue
+        clean_segments.append({
+            "start": round(float(segment.get("start") or clean_words[0]["start"]), 3),
+            "end": round(float(segment.get("end") or clean_words[-1]["end"]), 3),
+            "text": str(segment.get("text") or "").strip(),
+            "words": clean_words,
+        })
+        word_count += len(clean_words)
+    if not clean_segments:
+        return None
+
+    sidecar = word_timing_sidecar_path(srt_path)
+    payload = {
+        "schema": _WORD_TIMING_SCHEMA,
+        "provider": provider,
+        "word_count": word_count,
+        "segments": clean_segments,
+    }
+    temp_path = sidecar + ".tmp"
+    os.makedirs(os.path.dirname(os.path.abspath(sidecar)), exist_ok=True)
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(temp_path, sidecar)
+    if log_fn:
+        log_fn(f"词级时间已保存: {word_count} 词 ({os.path.basename(sidecar)})")
+    return sidecar
+
+
+def load_word_timing_sidecar(srt_path):
+    """Load a sidecar defensively; missing/legacy subtitles simply return []."""
+    sidecar = word_timing_sidecar_path(srt_path)
+    try:
+        with open(sidecar, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        if payload.get("schema") != _WORD_TIMING_SCHEMA:
+            return []
+        return list(payload.get("segments") or [])
+    except (OSError, ValueError, TypeError, AttributeError):
+        return []
 
 # PyInstaller 打包后 certifi 路径可能指向已删除的临时目录，
 # 尝试多个可能的位置找到 cacert.pem
@@ -596,6 +672,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
             utterances = result.get("utterances", [])
 
             segments = []
+            word_count = 0
             for utt in utterances:
                 text = utt.get("text", "").strip()
                 if not text:
@@ -604,9 +681,24 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
                 utt_end = utt.get("end_time", 0) / 1000.0
                 if utt_end <= utt_start:
                     continue
-                segments.append({"start": utt_start, "end": utt_end, "text": text})
+                words = []
+                for raw_word in utt.get("words") or []:
+                    word_text = str(raw_word.get("text") or "").strip()
+                    try:
+                        word_start = float(raw_word.get("start_time", 0)) / 1000.0
+                        word_end = float(raw_word.get("end_time", 0)) / 1000.0
+                    except (TypeError, ValueError):
+                        continue
+                    if not word_text or word_end <= word_start:
+                        continue
+                    word = {"text": word_text, "start": word_start, "end": word_end}
+                    if raw_word.get("confidence") is not None:
+                        word["confidence"] = raw_word.get("confidence")
+                    words.append(word)
+                word_count += len(words)
+                segments.append({"start": utt_start, "end": utt_end, "text": text, "words": words})
 
-            _log(f"volcengine_asr: 解析得到 {len(segments)} 条语音段")
+            _log(f"volcengine_asr: 解析得到 {len(segments)} 条语音段, {word_count} 个词级时间")
             _cleanup_tos(_tos_client, bucket, obj_key, _log)
             return segments if segments else None
 
