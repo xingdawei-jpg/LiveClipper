@@ -2232,6 +2232,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
     preference_summary = {}
+    analysis_metadata = {}
     _word_timings = []
     try:
         from volcengine_asr import load_word_timing_sidecar
@@ -2274,8 +2275,10 @@ def process_video(video_path, srt_path=None, output_path=None,
                 word_timings=_word_timings,
             )
             try:
-                preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
+                analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
+                preference_summary = dict(analysis_metadata.get("preference_summary") or {})
             except Exception:
+                analysis_metadata = {}
                 preference_summary = {}
             if not ordered_clips:
                 _log("AI 选片为空，启动兜底逻辑...")
@@ -2291,19 +2294,22 @@ def process_video(video_path, srt_path=None, output_path=None,
     if ordered_clips and ai_is_enabled():
         try:
             import ai_clipper as _topic_ai
-            _topic_preference_summary = dict(getattr(_topic_ai, "_LAST_FOCUS_SUMMARY", {}) or {})
+            _topic_preference_summary = dict(
+                (_topic_ai.get_last_analysis_metadata() or {}).get("preference_summary") or {}
+            )
             _topic_preference = str(
                 _topic_preference_summary.get("used_label")
                 or _topic_preference_summary.get("label")
                 or ""
             )
             if _topic_preference:
-                _topic_ai._LAST_TOPIC_COVERAGE_SUMMARY = _topic_ai._topic_coverage_summary(
+                _topic_ai._set_last_topic_coverage_summary(_topic_ai._topic_coverage_summary(
                     ordered_clips,
                     _topic_preference,
                     TARGET_DURATION,
                     _topic_preference_summary.get("requested", "自动"),
-                )
+                ))
+            analysis_metadata = dict(_topic_ai.get_last_analysis_metadata() or analysis_metadata or {})
             _log("AI叙事模式: 使用AI最终片单和顺序，主题统计仅用于预览展示")
         except Exception as _topic_balance_error:
             _log(f"主题统计跳过: {_topic_balance_error}")
@@ -2323,11 +2329,13 @@ def process_video(video_path, srt_path=None, output_path=None,
             _multi_result_cache['srt_path'] = srt_path
             try:
                 import ai_clipper as _ai_meta
-                _multi_result_cache['category_summary'] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
-                _multi_result_cache['topic_coverage_summary'] = dict(getattr(_ai_meta, "_LAST_TOPIC_COVERAGE_SUMMARY", {}) or {})
+                analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
                 pass
-            _multi_result_cache['preference_summary'] = dict(preference_summary or {})
+            _multi_result_cache['analysis_metadata'] = dict(analysis_metadata or {})
+            _multi_result_cache['category_summary'] = dict(analysis_metadata.get('category_summary') or {})
+            _multi_result_cache['topic_coverage_summary'] = dict(analysis_metadata.get('topic_coverage_summary') or {})
+            _multi_result_cache['preference_summary'] = dict(analysis_metadata.get('preference_summary') or preference_summary or {})
             _multi_result_cache['word_timings'] = list(_word_timings or [])
             # 保存SRT内容
             if srt_path and os.path.exists(srt_path):
@@ -4750,6 +4758,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # 传递时长设置到 AI 模块
     import ai_clipper as _ai_mod
     preference_summary = {}
+    analysis_metadata = {}
     _ai_mod._AI_TARGET_DURATION = target_duration
     if target_duration <= 40:
         _ai_mod._AI_CLIP_COUNT = "5-8"
@@ -4852,8 +4861,10 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           ai_controls=ai_controls,
                                           word_timings=_mix_word_timings)
         try:
-            preference_summary = dict(getattr(_ai_mod, "_LAST_FOCUS_SUMMARY", {}) or {})
+            analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
+            preference_summary = dict(analysis_metadata.get("preference_summary") or {})
         except Exception:
+            analysis_metadata = {}
             preference_summary = {}
     except Exception as e:
         _log(f"AI 选片失败: {e}"); import traceback; _log(traceback.format_exc())
@@ -5170,11 +5181,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _multi_result_cache["srt_text"] = merged_srt
             try:
                 import ai_clipper as _ai_meta
-                _multi_result_cache["category_summary"] = dict(getattr(_ai_meta, "_LAST_CATEGORY_FILTER_SUMMARY", {}) or {})
-                _multi_result_cache["topic_coverage_summary"] = dict(getattr(_ai_meta, "_LAST_TOPIC_COVERAGE_SUMMARY", {}) or {})
+                analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
                 pass
-            _multi_result_cache["preference_summary"] = dict(preference_summary or {})
+            _multi_result_cache["analysis_metadata"] = dict(analysis_metadata or {})
+            _multi_result_cache["category_summary"] = dict(analysis_metadata.get("category_summary") or {})
+            _multi_result_cache["topic_coverage_summary"] = dict(analysis_metadata.get("topic_coverage_summary") or {})
+            _multi_result_cache["preference_summary"] = dict(analysis_metadata.get("preference_summary") or preference_summary or {})
             _multi_result_cache["word_timings"] = list(_mix_word_timings or [])
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": True, "clips_cached": True}

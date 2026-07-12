@@ -15,11 +15,69 @@ _LAST_FOCUS_SUMMARY = {}
 _LAST_TOPIC_COVERAGE_SUMMARY = {}
 import os
 import sys
+from contextvars import ContextVar
 import ssl
 import urllib.request
 import urllib.error
 import re
 import unicodedata
+
+
+_ANALYSIS_METADATA_CONTEXT = ContextVar("liveclipper_analysis_metadata", default=None)
+
+
+def _begin_analysis_metadata():
+    global _LAST_CATEGORY_FILTER_SUMMARY, _LAST_FOCUS_SUMMARY, _LAST_TOPIC_COVERAGE_SUMMARY
+    metadata = {
+        "category_summary": {},
+        "preference_summary": {},
+        "topic_coverage_summary": {},
+    }
+    _ANALYSIS_METADATA_CONTEXT.set(metadata)
+    _LAST_CATEGORY_FILTER_SUMMARY = metadata["category_summary"]
+    _LAST_FOCUS_SUMMARY = metadata["preference_summary"]
+    _LAST_TOPIC_COVERAGE_SUMMARY = metadata["topic_coverage_summary"]
+    return metadata
+
+
+def _analysis_metadata_context():
+    metadata = _ANALYSIS_METADATA_CONTEXT.get()
+    if not isinstance(metadata, dict):
+        metadata = _begin_analysis_metadata()
+    return metadata
+
+
+def _set_last_category_summary(summary):
+    global _LAST_CATEGORY_FILTER_SUMMARY
+    value = dict(summary or {})
+    _LAST_CATEGORY_FILTER_SUMMARY = value
+    _analysis_metadata_context()["category_summary"] = value
+    return value
+
+
+def _set_last_focus_summary(summary):
+    global _LAST_FOCUS_SUMMARY
+    value = dict(summary or {})
+    _LAST_FOCUS_SUMMARY = value
+    _analysis_metadata_context()["preference_summary"] = value
+    return value
+
+
+def _set_last_topic_coverage_summary(summary):
+    global _LAST_TOPIC_COVERAGE_SUMMARY
+    value = dict(summary or {})
+    _LAST_TOPIC_COVERAGE_SUMMARY = value
+    _analysis_metadata_context()["topic_coverage_summary"] = value
+    return value
+
+
+def get_last_analysis_metadata():
+    metadata = _analysis_metadata_context()
+    return {
+        "category_summary": dict(metadata.get("category_summary") or {}),
+        "preference_summary": dict(metadata.get("preference_summary") or {}),
+        "topic_coverage_summary": dict(metadata.get("topic_coverage_summary") or {}),
+    }
 
 from ai_model_config import (
     DEEPSEEK_DEFAULT_BASE_URL,
@@ -910,7 +968,7 @@ def _preference_target_bounds(target_duration, requested="自动"):
 
 
 def _preferred_focus_quota(target_duration):
-    requested = (globals().get("_LAST_FOCUS_SUMMARY") or {}).get("requested", "自动")
+    requested = get_last_analysis_metadata()["preference_summary"].get("requested", "自动")
     return _preference_target_bounds(target_duration, requested)[0]
 
 
@@ -1039,7 +1097,7 @@ def _topic_coverage_summary(clips, preferred_focus="", target_duration=None, req
         topic = _clip_primary_topic(clip)
         counts[topic] = counts.get(topic, 0) + 1
         durations[topic] = durations.get(topic, 0.0) + _topic_clip_duration(clip)
-    requested = requested if requested is not None else (globals().get("_LAST_FOCUS_SUMMARY") or {}).get("requested", "自动")
+    requested = requested if requested is not None else get_last_analysis_metadata()["preference_summary"].get("requested", "自动")
     pref_min, pref_max = _preference_target_bounds(target_duration or _AI_TARGET_DURATION, requested)
     product_count = len(products)
     preference_count = int(counts.get(preferred_topic, 0)) if preferred_topic else 0
@@ -2160,7 +2218,7 @@ def _normalize_focus_label(value):
 
 
 def _current_focus_used_label():
-    summary = globals().get("_LAST_FOCUS_SUMMARY") or {}
+    summary = get_last_analysis_metadata()["preference_summary"]
     if not isinstance(summary, dict):
         return ""
     label = summary.get("used_label") or summary.get("label") or summary.get("matched_label") or ""
@@ -3397,7 +3455,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         if log_fn: log_fn(msg)
 
     global _LAST_CATEGORY_FILTER_SUMMARY
-    _LAST_CATEGORY_FILTER_SUMMARY = {}
+    _set_last_category_summary({})
     forced_main_cat = _normalize_forced_category(force_category)
 
     # ============================================================
@@ -3669,7 +3727,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         if forced_main_cat:
             _log(f"  用户指定主品类={forced_main_cat}(词库未命中，保留全部字幕并按该品类提示词处理)")
             filtered_srt = _filter_srt_by_food_product(cleaned_srt, _log) if _is_food_fresh_category(forced_main_cat) else cleaned_srt
-            _LAST_CATEGORY_FILTER_SUMMARY = {
+            _set_last_category_summary({
                 "main_category": forced_main_cat,
                 "protected_categories": [forced_main_cat],
                 "original_segments": len(seg_info),
@@ -3678,9 +3736,9 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
                 "preview_removed": 0,
                 "cross_category_removed": 0,
                 "forced_without_keyword_hit": True,
-            }
+            })
             if _LAST_FOOD_PRODUCT_FILTER_SUMMARY:
-                _LAST_CATEGORY_FILTER_SUMMARY["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
+                _analysis_metadata_context()["category_summary"]["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
             return filtered_srt, forced_main_cat
         _log("  无法识别主品类，保留全部")
         return cleaned_srt, None
@@ -3774,7 +3832,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         kept += 1
 
     _log(f"品类过滤: 最终主品类={main_cat}({final_scores[main_cat]}分)，严格移除 {removed} 个片段(预告{preview_removed}+纯跨品类{match_removed})，保留 {kept} 个")
-    _LAST_CATEGORY_FILTER_SUMMARY = {
+    _set_last_category_summary({
         "main_category": main_cat,
         "protected_categories": sorted(protected_cats),
         "original_segments": len(seg_info),
@@ -3782,7 +3840,7 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
         "removed_segments": removed,
         "preview_removed": preview_removed,
         "cross_category_removed": match_removed,
-    }
+    })
 
     # ============================================================
     # 6. 跨品类合法性校验(第二道防线)
@@ -3844,16 +3902,16 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
 
     if orphan_removed > 0:
         _log(f"品类合法性校验: 移除 {orphan_removed} 个孤立跨品类片段，保留 {legal_match_kept} 个合法搭配片段")
-        _LAST_CATEGORY_FILTER_SUMMARY["orphan_removed"] = orphan_removed
+        _analysis_metadata_context()["category_summary"]["orphan_removed"] = orphan_removed
     else:
         _log(f"品类合法性校验: 无突兀跨品类内容")
-        _LAST_CATEGORY_FILTER_SUMMARY["orphan_removed"] = 0
+        _analysis_metadata_context()["category_summary"]["orphan_removed"] = 0
 
     legal_srt = "\n".join(legal_lines)
     if _is_food_fresh_category(main_cat):
         legal_srt = _filter_srt_by_food_product(legal_srt, _log)
         if _LAST_FOOD_PRODUCT_FILTER_SUMMARY:
-            _LAST_CATEGORY_FILTER_SUMMARY["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
+            _analysis_metadata_context()["category_summary"]["food_product_summary"] = dict(_LAST_FOOD_PRODUCT_FILTER_SUMMARY)
 
     return legal_srt, main_cat
 
@@ -4034,8 +4092,9 @@ def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec):
 
 def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False, focus_hint=None, hook_candidates_hint=None, merge_mode=False, target_duration=60, ai_controls=None, record_history=True, word_timings=None):
     global _AI_TARGET_DURATION, _LAST_FOCUS_SUMMARY, _LAST_TOPIC_COVERAGE_SUMMARY
+    _begin_analysis_metadata()
     _AI_TARGET_DURATION = target_duration
-    _LAST_TOPIC_COVERAGE_SUMMARY = {}
+    _set_last_topic_coverage_summary({})
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -4194,10 +4253,10 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             continue
         if _director_mode:
             if not _director_focus_summary:
-                _director_focus_summary = dict(_LAST_FOCUS_SUMMARY or {})
+                _director_focus_summary = dict(get_last_analysis_metadata()["preference_summary"] or {})
                 _director_focus_hint = _current_focus_used_label() or focus_hint
             elif _director_focus_summary:
-                _LAST_FOCUS_SUMMARY = dict(_director_focus_summary)
+                _set_last_focus_summary(_director_focus_summary)
 
             clips, _director_audit = _director_hard_audit(
                 clips,
@@ -4241,12 +4300,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     + "；".join(_director_audit.get("issues") or [])
                     + "；保留完整句和AI顺序，不再本地改写"
                 )
-            _LAST_TOPIC_COVERAGE_SUMMARY = _topic_coverage_summary(
+            _director_topic_summary = _topic_coverage_summary(
                 clips,
                 _current_focus_used_label(),
                 _AI_TARGET_DURATION,
-                (_LAST_FOCUS_SUMMARY or {}).get("requested", "自动"),
+                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
             )
+            _set_last_topic_coverage_summary(_director_topic_summary)
             _record_history_if_needed(clips)
             _log(
                 f"AI叙事编排完成: {len(clips)}段/{sum(_clip_duration_value(c) for c in clips):.1f}s，"
@@ -4254,7 +4314,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             )
             return clips
         _active_preference = _current_focus_used_label()
-        _attempt_focus_summary = dict(_LAST_FOCUS_SUMMARY or {})
+        _attempt_focus_summary = dict(get_last_analysis_metadata()["preference_summary"] or {})
         _preference_quota, _preference_max = _preference_target_bounds(
             _AI_TARGET_DURATION,
             _attempt_focus_summary.get("requested", "自动"),
@@ -4290,7 +4350,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 extra_instruction=_preference_instruction,
                 main_category=_cross_cat_preferred,
             )
-            _LAST_FOCUS_SUMMARY = dict(_attempt_focus_summary)
+            _set_last_focus_summary(_attempt_focus_summary)
             _preferred_block = _focus_label_to_block(_active_preference)
             _preference_supplement = [
                 _retag_clip_type(item, "product")
@@ -4353,7 +4413,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         extra_instruction=_coverage_instruction,
                         main_category=_cross_cat_preferred,
                     )
-                    _LAST_FOCUS_SUMMARY = dict(_attempt_focus_summary)
+                    _set_last_focus_summary(_attempt_focus_summary)
                     _topic_result = [_retag_clip_type(item, "product") for item in (_topic_result or [])]
                     _topic_result = _filter_price_and_cta(_topic_result, None)
                     _topic_result = _filter_host_interaction(_topic_result, None)
@@ -4406,7 +4466,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 "不要重复已有片段。仅输出新增片段JSON数组。】"
             )
             _supplement = _call_ai(api_key, base_url, model, cleaned_srt, _log, focus_hint=_supplement_focus, srt_entries=_indexed_srt_entries, hook_candidates_hint=hook_candidates_hint, ai_controls=ai_controls, recent_history_hint=_recent_history_hint, extra_instruction=_extra_hint, main_category=_cross_cat_preferred)
-            _LAST_FOCUS_SUMMARY = dict(_attempt_focus_summary)
+            _set_last_focus_summary(_attempt_focus_summary)
             if _supplement:
                 _added_supplement = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _supplement_limit)
                 _log(f"AI: 补选{_added_supplement}段，补选后共{len(clips)}段")
@@ -4562,7 +4622,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     extra_instruction=_extra_hint,
                     main_category=_cross_cat_preferred,
                 )
-                _LAST_FOCUS_SUMMARY = dict(_attempt_focus_summary)
+                _set_last_focus_summary(_attempt_focus_summary)
                 _added_final = _append_unique_supplement_clips(clips, _supplement, _AI_TARGET_DURATION, _need_count)
                 if _added_final:
                     _log(f"目标补选: 后处理后补入 {_added_final} 段，{_final_total:.1f}s -> {sum(_clip_duration_value(c) for c in clips):.1f}s")
@@ -4651,25 +4711,26 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     )
                     clips = _filter_price_and_cta(clips, log_fn)
                     clips = _filter_context_damaged_clips(clips, cleaned_srt, log_fn)
-            _LAST_TOPIC_COVERAGE_SUMMARY = _topic_coverage_summary(
+            _attempt_topic_summary = _topic_coverage_summary(
                 clips,
                 _active_preference,
                 _AI_TARGET_DURATION,
                 _attempt_focus_summary.get("requested", "自动"),
             )
+            _set_last_topic_coverage_summary(_attempt_topic_summary)
             _available_non_preference = _available_topic_support(_indexed_srt_entries, _active_preference)
             _coverage_actionable = bool(
-                _LAST_TOPIC_COVERAGE_SUMMARY.get("overconcentrated")
-                or _LAST_TOPIC_COVERAGE_SUMMARY.get("underpreferred")
-                or (_LAST_TOPIC_COVERAGE_SUMMARY.get("undercovered") and _available_non_preference)
+                _attempt_topic_summary.get("overconcentrated")
+                or _attempt_topic_summary.get("underpreferred")
+                or (_attempt_topic_summary.get("undercovered") and _available_non_preference)
             )
             if _coverage_actionable and attempt < 4:
                 _log(
                     "AI: 主题覆盖未通过，"
-                    f"偏好{_LAST_TOPIC_COVERAGE_SUMMARY.get('preference_count', 0)}/"
-                    f"{_LAST_TOPIC_COVERAGE_SUMMARY.get('product_count', 0)}，"
-                    f"主题{_LAST_TOPIC_COVERAGE_SUMMARY.get('distinct_count', 0)}/"
-                    f"{_LAST_TOPIC_COVERAGE_SUMMARY.get('min_distinct', 0)}，继续重试..."
+                    f"偏好{_attempt_topic_summary.get('preference_count', 0)}/"
+                    f"{_attempt_topic_summary.get('product_count', 0)}，"
+                    f"主题{_attempt_topic_summary.get('distinct_count', 0)}/"
+                    f"{_attempt_topic_summary.get('min_distinct', 0)}，继续重试..."
                 )
                 continue
             _record_history_if_needed(clips)
@@ -4679,13 +4740,14 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     if _director_mode:
         if _director_fallback_clips:
             if _director_focus_summary:
-                _LAST_FOCUS_SUMMARY = dict(_director_focus_summary)
-            _LAST_TOPIC_COVERAGE_SUMMARY = _topic_coverage_summary(
+                _set_last_focus_summary(_director_focus_summary)
+            _fallback_topic_summary = _topic_coverage_summary(
                 _director_fallback_clips,
                 _current_focus_used_label(),
                 _AI_TARGET_DURATION,
-                (_LAST_FOCUS_SUMMARY or {}).get("requested", "自动"),
+                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
             )
+            _set_last_topic_coverage_summary(_fallback_topic_summary)
             _record_history_if_needed(_director_fallback_clips)
             _log("AI整体修复未返回可用片单，保留首次安全骨架，不启动本地补片")
             return _director_fallback_clips
@@ -4799,11 +4861,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         clips = _enforce_target_duration_limit(clips, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_active_profile)
         clips = _filter_price_and_cta(clips, log_fn)
         clips = _filter_context_damaged_clips(clips, cleaned_srt, log_fn)
-        _LAST_TOPIC_COVERAGE_SUMMARY = _topic_coverage_summary(
+        _set_last_topic_coverage_summary(_topic_coverage_summary(
             clips,
             _current_focus_used_label(),
             _AI_TARGET_DURATION,
-        )
+        ))
         _record_history_if_needed(clips)
         return clips
 
@@ -4834,11 +4896,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         relaxed = _enforce_target_duration_limit(relaxed, _AI_TARGET_DURATION, log_fn, feedback_profile=_feedback_active_profile)
         relaxed = _filter_price_and_cta(relaxed, log_fn)
         relaxed = _filter_context_damaged_clips(relaxed, cleaned_srt, log_fn)
-        _LAST_TOPIC_COVERAGE_SUMMARY = _topic_coverage_summary(
+        _set_last_topic_coverage_summary(_topic_coverage_summary(
             relaxed,
             _current_focus_used_label(),
             _AI_TARGET_DURATION,
-        )
+        ))
         _record_history_if_needed(relaxed)
     return relaxed if relaxed else []
 
@@ -5454,7 +5516,6 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         return best_label or text
 
     def _remember_focus_summary(mode, label, detail="", requested=None, score=None, matched_label=None, switched_from=None, error=None):
-        global _LAST_FOCUS_SUMMARY
         used_label = _resolve_focus_used_label(label, detail)
         summary = {
             "mode": str(mode or "").strip(),
@@ -5471,7 +5532,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             summary["switched_from"] = str(switched_from).strip()
         if error:
             summary["error"] = str(error).strip()
-        _LAST_FOCUS_SUMMARY = summary
+        _set_last_focus_summary(summary)
 
     focus_hint = _normalize_focus_label(focus_hint)
     _remember_focus_summary("待定", focus_hint or "自动", requested=focus_hint or "自动")
@@ -5882,7 +5943,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _active_preference = _current_focus_used_label()
     _preference_quota_prompt = ""
     if not _skip_focus and _preference_quota_supported(_active_preference):
-        _preference_request = (globals().get("_LAST_FOCUS_SUMMARY") or {}).get("requested", "自动")
+        _preference_request = get_last_analysis_metadata()["preference_summary"].get("requested", "自动")
         _preference_quota, _preference_max = _preference_target_bounds(
             _AI_TARGET_DURATION,
             _preference_request,
@@ -6417,6 +6478,8 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
     """多版本AI选片：1次AI调用直接出3个独立叙事方案，减少2/3成本和时间
     返回: {"versions": [{angle, clips}, ...]}
     """
+    _begin_analysis_metadata()
+
     def _log(msg):
         if log_fn: log_fn(msg)
 

@@ -5612,13 +5612,15 @@ function renderPreviewSummary(analysis) {
   const categoryText = protectedCategories.length
     ? `${mainCategory}+${protectedCategories.join("/")}`
     : mainCategory;
-  const preferenceText = preference.used_label || preference.label || "-";
+  const preferenceText = preference.used_label
+    || preference.label
+    || (preference.status === "missing" ? "未生成" : "-");
   const preferenceProductCount = Number(topicCoverage.product_count || analysis.preferenceEligibleCount || 0);
   const preferenceCount = Number(topicCoverage.preference_count ?? analysis.preferenceHitCount ?? 0);
   const preferenceRatio = preferenceProductCount > 0 ? preferenceCount / preferenceProductCount : 0;
   const preferenceHitText = analysis.preferenceLabel
     ? `${preferenceCount}/${preferenceProductCount} · ${(preferenceRatio * 100).toFixed(0)}%`
-    : "-";
+    : (preference.status === "missing" ? "未计算" : "-");
   const preferenceHitWarn = Boolean(
     analysis.preferenceLabel
     && preferenceProductCount > 0

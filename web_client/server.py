@@ -151,7 +151,7 @@ _LIVE_LOCK = threading.Lock()
 LIVE_PROBE_STOP_NOTE = "__liveclipper_stop__"
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
-_AI_PREVIEW_CACHE_SCHEMA = "sales_roles_v9"
+_AI_PREVIEW_CACHE_SCHEMA = "sales_roles_v10_task_metadata"
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -3704,6 +3704,36 @@ def _preview_effective_topic_coverage(
         return {}
 
 
+def _preview_analysis_summaries(cache: dict[str, Any], requested_focus: Any = "") -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    metadata = dict(cache.get("analysis_metadata") or {})
+    category_summary = dict(metadata.get("category_summary") or cache.get("category_summary") or {})
+    preference_summary = dict(metadata.get("preference_summary") or cache.get("preference_summary") or {})
+    topic_summary = dict(metadata.get("topic_coverage_summary") or cache.get("topic_coverage_summary") or {})
+
+    requested = str(requested_focus or preference_summary.get("requested") or "自动").strip() or "自动"
+    automatic_focus_values = {"自动", "自动检测", "auto", "auto detect", "automatic"}
+    if preference_summary:
+        preference_summary.setdefault("status", "ok")
+        preference_summary.setdefault("requested", requested)
+    elif requested.lower() not in automatic_focus_values:
+        preference_summary = {
+            "status": "recovered",
+            "mode": "指定偏好",
+            "requested": requested,
+            "label": requested,
+            "used_label": requested,
+            "detail": "已从本次预览设置恢复指定偏好。",
+        }
+    else:
+        preference_summary = {
+            "status": "missing",
+            "mode": "未生成",
+            "requested": "自动",
+            "detail": "本次 AI 调用未返回偏好元数据。",
+        }
+    return category_summary, preference_summary, topic_summary
+
+
 def _supplement_preview_preference(
     raw_clips: list[Any],
     public_clips: list[dict[str, Any]],
@@ -5989,9 +6019,10 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         mix_sources = [str(source) for source in list(cutter_mod._multi_result_cache.get("sources") or []) if str(source or "").strip()]
         if not mix_sources:
             mix_sources = [str(path) for path in paths]
-        category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
-        preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
-        topic_coverage_summary = dict(cutter_mod._multi_result_cache.get("topic_coverage_summary") or {})
+        category_summary, preference_summary, topic_coverage_summary = _preview_analysis_summaries(
+            cutter_mod._multi_result_cache,
+            payload.focus_hint,
+        )
         word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
@@ -6017,12 +6048,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             )
         except Exception:
             pass
-        if category_summary:
-            dedup_summary["category_summary"] = category_summary
-        if preference_summary:
-            dedup_summary["preference_summary"] = preference_summary
-        if topic_coverage_summary:
-            dedup_summary["topic_coverage_summary"] = topic_coverage_summary
+        dedup_summary["category_summary"] = category_summary
+        dedup_summary["preference_summary"] = preference_summary
+        dedup_summary["topic_coverage_summary"] = topic_coverage_summary
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         public_clips = _preview_public_clips(
             raw_clips,
@@ -8992,9 +9020,10 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             raise RuntimeError("AI 没有选到可预览片段。")
         resolved_srt = str(cutter_mod._multi_result_cache.get("srt_path") or srt_path or video.with_suffix(".srt"))
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
-        category_summary = dict(cutter_mod._multi_result_cache.get("category_summary") or {})
-        preference_summary = dict(cutter_mod._multi_result_cache.get("preference_summary") or {})
-        topic_coverage_summary = dict(cutter_mod._multi_result_cache.get("topic_coverage_summary") or {})
+        category_summary, preference_summary, topic_coverage_summary = _preview_analysis_summaries(
+            cutter_mod._multi_result_cache,
+            payload.focus_hint,
+        )
         word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
         preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
         raw_clips, dedup_summary = _normalize_preview_final_clips(
@@ -9019,12 +9048,9 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             )
         except Exception:
             pass
-        if category_summary:
-            dedup_summary["category_summary"] = category_summary
-        if preference_summary:
-            dedup_summary["preference_summary"] = preference_summary
-        if topic_coverage_summary:
-            dedup_summary["topic_coverage_summary"] = topic_coverage_summary
+        dedup_summary["category_summary"] = category_summary
+        dedup_summary["preference_summary"] = preference_summary
+        dedup_summary["topic_coverage_summary"] = topic_coverage_summary
         _set_task_progress(task_id, 94, "生成预览列表")
         public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
