@@ -9179,6 +9179,7 @@ def runtime() -> dict[str, Any]:
         "user_data_custom": not _path_same(_get_user_data_dir(), _default_user_data_dir()),
         "license_public_key_suffix": public_key_suffix,
         "supports_web_incremental_updates": _safe_web_incremental_supported(),
+        "runtime_integrity": _runtime_integrity_summary(),
         "mode": "local-web-client",
     }
 
@@ -9221,6 +9222,33 @@ def _safe_web_incremental_supported() -> bool:
     return True
 
 
+def _runtime_integrity_summary() -> dict[str, Any]:
+    try:
+        manifest = json.loads((APP_DIR / "version.json").read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {"ok": False, "checked": 0, "mismatched": ["app/version.json"]}
+    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    targets = list(manifest.get("integrity_files") or [])
+    mismatched: list[str] = []
+    for name in targets:
+        if name.startswith("app/"):
+            path = APP_DIR / name.removeprefix("app/")
+        elif name.startswith("web_client/"):
+            path = WEB_DIR / name.removeprefix("web_client/")
+        else:
+            continue
+        try:
+            data = path.read_bytes()
+            if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
+                data = data.replace(b"\r\n", b"\n")
+            actual = hashlib.sha256(data).hexdigest().lower()
+        except Exception:
+            actual = ""
+        if actual != str(files.get(name) or "").lower():
+            mismatched.append(name)
+    return {"ok": not mismatched, "checked": len(targets), "mismatched": mismatched}
+
+
 @app.get("/api/update/check")
 def check_update_api() -> dict[str, Any]:
     try:
@@ -9238,6 +9266,8 @@ def check_update_api() -> dict[str, Any]:
             "has_package": bool(info.get("update_url") or info.get("download_url")),
             "requires_full_package_note": info.get("requires_full_package_note") or "",
             "supports_web_incremental_updates": _safe_web_incremental_supported(),
+            "repair_required": bool(info.get("repair_required", False)),
+            "integrity_mismatches": list(info.get("integrity_mismatches") or []),
         }
         return {"ok": True, "update_available": True, "update": public_info}
     except Exception as exc:

@@ -31,7 +31,7 @@ GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
 # 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.7.12.2"
+CURRENT_VERSION = "2026.7.12.3"
 
 def init_installed_version():
     """First-launch: create .installed_version from version.json if not exists.
@@ -234,10 +234,15 @@ def check_update():
         remote_ver = data.get("latest_version", data.get("version", ""))
         if not remote_ver:
             continue
-        if not is_newer(remote_ver, local_ver):
-            continue
-        # Found a newer version!
-        return data
+        if is_newer(remote_ver, local_ver):
+            return data
+        if parse_version(remote_ver) == parse_version(local_ver):
+            mismatches = _manifest_integrity_mismatches(data)
+            if mismatches:
+                repair = dict(data)
+                repair["repair_required"] = True
+                repair["integrity_mismatches"] = mismatches
+                return repair
 
     return None
 
@@ -355,6 +360,40 @@ def _write_update_file(relative_path, content):
     with open(target, "wb") as f:
         f.write(content)
     return target
+
+
+def _active_runtime_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _manifest_local_path(relative_path):
+    normalized = _manifest_target_path(relative_path)
+    return os.path.join(_active_runtime_root(), *normalized.split("/"))
+
+
+def _normalized_file_sha256(path):
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        if os.path.splitext(path)[1].lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
+            data = data.replace(b"\r\n", b"\n")
+        return hashlib.sha256(data).hexdigest().lower()
+    except Exception:
+        return ""
+
+
+def _manifest_integrity_mismatches(version_info):
+    files = (version_info or {}).get("files") or {}
+    targets = list((version_info or {}).get("integrity_files") or files.keys())
+    mismatches = []
+    for name in targets:
+        expected = str(files.get(name) or "").lower()
+        if not expected:
+            continue
+        actual = _normalized_file_sha256(_manifest_local_path(name))
+        if actual != expected:
+            mismatches.append(name)
+    return mismatches
 
 
 def apply_update_headless(version_info):

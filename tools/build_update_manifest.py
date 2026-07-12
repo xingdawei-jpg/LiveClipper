@@ -46,6 +46,23 @@ WEB_FILES = [
     WEB_DIR / "tools" / "douyin_chrome_live_poc.py",
 ]
 
+INTEGRITY_FILES = [
+    "app/ai_clipper.py",
+    "app/cutter_logic.py",
+    "app/updater.py",
+    "web_client/server.py",
+    "web_client/frontend/index.html",
+    "web_client/frontend/assets/app.js",
+]
+
+RECOVERY_FILES = INTEGRITY_FILES + [
+    "app/ai_model_config.py",
+    "app/config.py",
+    "app/keywords.json",
+    "app/volcengine_asr.py",
+    "web_client/frontend/assets/styles.css",
+]
+
 
 TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js"}
 
@@ -80,13 +97,19 @@ def _app_files() -> list[Path]:
     return result
 
 
-def build_manifest(version: str, release_notes: str, force_update: bool = False) -> dict:
+def build_manifest(version: str, release_notes: str, force_update: bool = False, recovery: bool = False) -> dict:
     files: dict[str, str] = {}
-    for path in _app_files():
-        files[f"app/{path.name}"] = _sha256(path)
-    for path in WEB_FILES:
-        if path.exists():
-            files[path.relative_to(ROOT).as_posix()] = _sha256(path)
+    if recovery:
+        for relative in RECOVERY_FILES:
+            path = ROOT / relative
+            if path.exists():
+                files[relative] = _sha256(path)
+    else:
+        for path in _app_files():
+            files[f"app/{path.name}"] = _sha256(path)
+        for path in WEB_FILES:
+            if path.exists():
+                files[path.relative_to(ROOT).as_posix()] = _sha256(path)
     return {
         "version": version,
         "latest_version": version,
@@ -94,6 +117,8 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
         "release_notes": release_notes,
         "update_url": "",
         "update_message": release_notes,
+        "integrity_files": [name for name in INTEGRITY_FILES if name in files],
+        "recovery_update": bool(recovery),
         "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
         "force_update": bool(force_update),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -105,6 +130,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--recovery", action="store_true", help="Publish only the critical runtime recovery set.")
     parser.add_argument("--check", action="store_true", help="Do not write; fail if manifest differs.")
     args = parser.parse_args()
 
@@ -115,7 +141,7 @@ def main() -> int:
             current_updated_at = current_manifest.get("updated_at")
         except Exception:
             current_updated_at = None
-        manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+        manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force, args.recovery)
         if current_updated_at:
             manifest["updated_at"] = current_updated_at
         text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -124,7 +150,7 @@ def main() -> int:
             return 1
         print("app/version.json is up to date.")
         return 0
-    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force, args.recovery)
     text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     VERSION_FILE.write_text(text, encoding="utf-8")
     print(f"wrote {VERSION_FILE}")
