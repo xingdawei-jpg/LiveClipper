@@ -3493,8 +3493,13 @@ def _filter_srt_by_main_product(cleaned_srt, log_fn, force_category=None):
     # 搭配触发词(搭配+品类 → 该品类不计分)
     MATCH_WORDS = ["搭","配","搭配","配着穿","搭什么","配什么","同款","一套","两件套"]
 
-    # 下款预告词(预告+品类 → 该品类全程排除)
-    NEXT_PREVIEW = ["下一个开","接下来开","过款","下一款","马上开","下个","接下来","下一个","过下","看下"]
+    # 下款预告词(明确预告+品类 → 该品类全程排除)。不能用“看下/接下来”
+    # 这类泛动词，否则“你看下这个领口”会被误判成下一款预告。
+    NEXT_PREVIEW = [
+        "下一个开", "接下来开", "过款", "过下款", "过下一款", "下一款",
+        "马上开", "下个款", "下一个款", "下一件", "下一条", "下一套",
+        "看下一款", "看下一个款",
+    ]
 
     def _next_preview_reason(text: str, cats_found: list[str]) -> str:
         """Detect next-product transition lines such as '裤子马上来/没开/还有裤子呢'."""
@@ -4346,6 +4351,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # before hard-auditing for real half-sentence boundaries.
             clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
             clips = _repair_director_context_edges(clips, cleaned_srt, log_fn)
+            clips = _trim_dangling_tail_clauses(clips, word_timings, log_fn)
             if not clips:
                 continue
 
@@ -8989,6 +8995,80 @@ def _trim_word_level_filler_edges(clips, word_timings, log_fn=None):
             f"中后段闲聊 {tail_noise_count} 处"
         )
     return result, changed
+
+
+_DANGLING_TAIL_CLAUSE_WORDS = (
+    "它", "他", "她", "这个", "这款", "这件", "这个款", "这种", "那种",
+    "你看", "然后", "而且", "但是", "不过", "所以", "因为", "就是",
+)
+_DANGLING_TAIL_CLAUSE_RE = re.compile(
+    r"[，,、：:]\s*(?P<tail>"
+    + "|".join(re.escape(word) for word in sorted(_DANGLING_TAIL_CLAUSE_WORDS, key=len, reverse=True))
+    + r")\s*[，,、：:]?\s*$"
+)
+
+
+def _tail_boundary_from_tokens(tokens, tail_norm):
+    tail_norm = _word_edge_norm(tail_norm)
+    if not tokens or not tail_norm:
+        return None
+    combined = ""
+    boundary = None
+    for token in reversed(tokens):
+        norm = _word_edge_norm(token.get("norm") or token.get("text"))
+        if not norm:
+            continue
+        combined = norm + combined
+        if not tail_norm.endswith(combined):
+            break
+        boundary = float(token["start"])
+        if combined == tail_norm:
+            return boundary
+    return None
+
+
+def _trim_dangling_tail_clauses(clips, word_timings, log_fn=None):
+    """Trim tiny dangling clause openers after punctuation, e.g. '领口不变形，它'."""
+    if not clips or not word_timings:
+        return clips
+    result = []
+    trim_count = 0
+    for clip in clips:
+        if not isinstance(clip, (list, tuple)) or len(clip) < 6:
+            result.append(clip)
+            continue
+        ct, text, start, end, score, dur = clip[:6]
+        rest = tuple(clip[6:])
+        raw_text = str(text or "")
+        marker_match = re.match(r"^(\s*\[(V\d+)\]\s*)", raw_text, flags=re.I)
+        marker_prefix = marker_match.group(1) if marker_match else ""
+        marker = marker_match.group(2).upper() if marker_match else ""
+        body = raw_text[marker_match.end():] if marker_match else raw_text
+        match = _DANGLING_TAIL_CLAUSE_RE.search(body.rstrip())
+        if not match:
+            result.append(clip)
+            continue
+        try:
+            start_f = float(start)
+            end_f = float(end)
+        except (TypeError, ValueError):
+            result.append(clip)
+            continue
+        tokens = _word_timing_tokens(word_timings, start_f, end_f, marker)
+        boundary = _tail_boundary_from_tokens(tokens, match.group("tail"))
+        if boundary is None or boundary - start_f < 1.5:
+            result.append(clip)
+            continue
+        trimmed_body = body[:match.start()].rstrip(" ，,、：:；;")
+        if len(_word_edge_norm(trimmed_body)) < 6:
+            result.append(clip)
+            continue
+        new_text = f"{marker_prefix}{trimmed_body}".strip()
+        result.append((ct, new_text, start_f, boundary, score, max(0.0, boundary - start_f), *rest))
+        trim_count += 1
+    if trim_count and log_fn:
+        log_fn(f"词级弱尾裁剪: 裁掉 {trim_count} 个片段结尾的孤立承接词")
+    return result
 
 
 def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
