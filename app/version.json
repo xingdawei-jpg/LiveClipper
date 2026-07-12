@@ -1,11 +1,11 @@
 {
-  "version": "2026.7.13.5",
-  "latest_version": "2026.7.13.5",
+  "version": "2026.7.13.6",
+  "latest_version": "2026.7.13.6",
   "files": {
-    "app/ai_clipper.py": "e755e1b91d4615cb5e81a7d0aed73865bed92ad69971e8602e5592c628736330",
+    "app/ai_clipper.py": "9107356b22633a0fc9290961b2bd55b33ff4ea589ec6f798829c7558f7b3c163",
     "app/cutter_logic.py": "5e0a5ccde52ad73ab19755e46f75d93a533e947552093376ade125401dcaf787",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
-    "web_client/server.py": "2eaab37cb6e918ca40f60de760e1880104312bf25a2c177326741f83e0856050",
+    "web_client/server.py": "0b554fb47f18e76d4005d96bd444616874d719a57ba55054db35817ac5993fde",
     "web_client/frontend/index.html": "4ab638a37d4240df46e1b6daf7a3b2f670aac9870badac6a7d2d2b3829a21789",
     "web_client/frontend/assets/app.js": "4c64d7a7e8ad3df0076bfe4016cf9451b3ce60cbda8196201a4254cd2281a813",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
@@ -16,9 +16,9 @@
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "433dcf8f24648b9ee85f5efb627a754f7fad185b99553bc2bcba3566980b0be5"
   },
-  "release_notes": "修复 AI 预览被弱开头卡死：片段带有内部素材标记时，也能裁掉‘然后/而且/但是/因为/就是’等开头口癖；语义边界修复后再次清理弱开头，避免完整句被误判为半句。",
+  "release_notes": "修复批量智能成片遇到单个失败后停止：单视频失败会明确跳过并继续处理后续素材；同时修复 AI 片单中少量价格/CTA片段被硬过滤后，剩余片单已安全却仍被误判失败的问题。",
   "update_url": "",
-  "update_message": "修复 AI 预览被弱开头卡死：片段带有内部素材标记时，也能裁掉‘然后/而且/但是/因为/就是’等开头口癖；语义边界修复后再次清理弱开头，避免完整句被误判为半句。",
+  "update_message": "修复批量智能成片遇到单个失败后停止：单视频失败会明确跳过并继续处理后续素材；同时修复 AI 片单中少量价格/CTA片段被硬过滤后，剩余片单已安全却仍被误判失败的问题。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-13 02:02:22"
+  "updated_at": "2026-07-13 02:13:51"
 }

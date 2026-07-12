@@ -8911,8 +8911,17 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     return
                 failures.append(f"{video.name}: {video_exc}")
                 _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"跳过失败 {index}/{total_videos}: {video.name}")
-                _set_task(task_id, batch_failed=len(failures))
+                next_current = index + 1 if index < total_videos else 0
+                _set_task(
+                    task_id,
+                    status="running",
+                    batch_failed=len(failures),
+                    batch_current=next_current,
+                    batch_label="" if next_current == 0 else f"等待处理 {next_current}/{total_videos}",
+                    message=f"已跳过失败 {index}/{total_videos}: {video.name}",
+                )
                 emit_log("error", f"[{index}/{total_videos}] 智能成片失败，已跳过继续下一个：{video.name}，{video_exc}", "smart-cut")
+                continue
 
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", "smart-cut")

@@ -4158,6 +4158,11 @@ def _director_only_duration_short_issue(audit):
     return all(any(marker in item for marker in allowed_issue_markers) for item in issues)
 
 
+def _director_fatal_issues(audit):
+    issues = [str(item or "") for item in ((audit or {}).get("issues") or [])]
+    return [item for item in issues if "硬合规移除" not in item]
+
+
 def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec):
     skeleton = []
     for idx, clip in enumerate(clips or [], 1):
@@ -4385,7 +4390,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 log_fn,
             )
             _director_hard_issues = list(_director_audit.get("issues") or [])
-            _director_has_hard_issue = bool(_director_hard_issues or _director_audit.get("duration_short"))
+            _director_fatal = _director_fatal_issues(_director_audit)
+            _director_has_hard_issue = bool(_director_fatal or _director_audit.get("duration_short"))
             if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
             if clips and _director_only_duration_short_issue(_director_audit):
@@ -4395,13 +4401,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     _director_short_fallback_clips = list(clips)
                     _director_short_fallback_total = _short_total
             if (
-                _director_audit.get("needs_repair")
+                _director_fatal
                 and not _director_narrative_repair_used
                 and attempt + 1 < _max_attempts
             ):
                 _director_narrative_repair_used = True
                 _director_stage = "整体叙事修复"
-                _review_issues = list(_director_hard_issues)
+                _review_issues = list(_director_fatal)
                 if not _review_issues:
                     _review_issues = [
                         "请修复硬质检指出的问题，只替换问题片段，保留完整语义、Hook首段和Close末段"
@@ -4445,8 +4451,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 continue
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
-            if _director_audit.get("issues"):
-                _remaining_issues = list(_director_audit.get("issues") or [])
+            _remaining_issues = _director_fatal_issues(_director_audit)
+            if _remaining_issues:
                 if attempt + 1 < _max_attempts:
                     _director_stage = "叙事质检重试"
                     _director_repair = _director_repair_instruction(
