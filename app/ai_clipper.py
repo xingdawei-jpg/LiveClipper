@@ -4268,7 +4268,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _srt_entries_times.append(_es)
     srt_max_end = max(_srt_entries_times) + 0.5 if _srt_entries_times else None
 
-    # 单版本：AI负责最终叙事，只允许首次编排 + 一次整体修复。
+    # 单版本：AI负责最终叙事；通过硬质检即返回，只把硬问题交回AI整体修复。
     # 多版本素材池沿用旧流程，因为它只选候选素材，不直接决定成片顺序。
     # 计算目标片段数（用于检查AI是否选够），与 UI 时长档位共用同一套规则。
     _target_min_clips, _target_max_clips = _target_clip_count_range(_AI_TARGET_DURATION)
@@ -4361,16 +4361,21 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _hook_cap_sec,
                 log_fn,
             )
-            if clips and not _director_fallback_clips:
+            _director_hard_issues = list(_director_audit.get("issues") or [])
+            _director_has_hard_issue = bool(_director_hard_issues or _director_audit.get("duration_short"))
+            if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
-            if not _director_narrative_repair_used and attempt + 1 < _max_attempts:
+            if (
+                _director_audit.get("needs_repair")
+                and not _director_narrative_repair_used
+                and attempt + 1 < _max_attempts
+            ):
                 _director_narrative_repair_used = True
-                _director_stage = "整体叙事修复" if _director_audit.get("needs_repair") else "AI叙事终审"
-                _review_issues = list(_director_audit.get("issues") or [])
+                _director_stage = "整体叙事修复"
+                _review_issues = list(_director_hard_issues)
                 if not _review_issues:
                     _review_issues = [
-                        "请做最终叙事终审：逐段比较实际语义，删除同一部位、同一帽子/场景、"
-                        "同一面料结论的重复表达，去掉主播闲聊和现场动作，并确认Close自然收束"
+                        "请修复硬质检指出的问题，只替换问题片段，保留完整语义、Hook首段和Close末段"
                     ]
                 _director_repair = _director_repair_instruction(
                     clips,
@@ -4378,14 +4383,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     _AI_TARGET_DURATION,
                     _hook_cap_sec,
                 )
-                if _director_audit.get("needs_repair"):
-                    _log(
-                        "AI叙事质检: "
-                        + "；".join(_director_audit.get("issues") or [])
-                        + "，交回AI整体修复，不做本地删补或重排"
-                    )
-                else:
-                    _log("AI叙事初稿完成，交由AI终审语义重复、闲聊、承接和收尾")
+                _log(
+                    "AI叙事质检: "
+                    + "；".join(_review_issues)
+                    + "，交回AI整体修复，不做本地删补或重排"
+                )
                 continue
             if not clips:
                 continue
@@ -4875,12 +4877,19 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     if _director_mode:
         if _director_fallback_clips:
             _fallback_duration = _director_duration_status(_director_fallback_clips, _AI_TARGET_DURATION)
+            _set_last_topic_coverage_summary(_topic_coverage_summary(
+                _director_fallback_clips,
+                _current_focus_used_label(),
+                _AI_TARGET_DURATION,
+                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
+            ))
+            _record_history_if_needed(_director_fallback_clips)
             _log(
-                f"AI整体修复未返回合格片单，拒绝返回首次安全骨架"
+                f"AI整体修复未返回更优片单，使用最佳合格片单"
                 f"（{len(_director_fallback_clips)}段/{_fallback_duration['total']:.1f}s，"
                 f"目标下限{_fallback_duration['low']:.0f}s）"
             )
-            return []
+            return _director_fallback_clips
         _log("AI两次编排均未返回可用片单")
         return []
 
