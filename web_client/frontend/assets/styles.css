@@ -607,12 +607,39 @@ h2 {
   margin-top: 8px;
 }
 
+#page-mix .mix-group-tools {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+#page-mix .mix-group-tools .button {
+  min-height: 28px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
 .mix-group-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   min-height: 28px;
   margin-top: 8px;
+}
+
+#page-mix .mix-group-list {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-height: 24px;
+  max-height: 30px;
+  margin-top: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
 }
 
 .mix-group-list.is-empty {
@@ -661,11 +688,21 @@ h2 {
 }
 
 .smart-grid {
-  --top-config-row-height: 94px;
-  --top-workbench-height: 310px;
+  --top-config-row-height: 102px;
+  --top-workbench-height: 334px;
   grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
   grid-template-rows: repeat(3, var(--top-config-row-height));
   align-items: start;
+}
+
+#page-mix .mix-group-chip {
+  min-height: 24px;
+  gap: 4px;
+  padding: 2px 7px;
+}
+
+#page-mix .mix-group-chip span {
+  max-width: 150px;
 }
 
 .two-column-grid {
@@ -1040,6 +1077,7 @@ h2 {
 .material-panel .video-picker-card-compact {
   flex: 1 1 auto;
   min-height: 116px;
+  margin: 8px 14px 0;
   padding: 6px;
   overflow: hidden;
 }
@@ -1051,15 +1089,34 @@ h2 {
 
 .material-panel .panel-actions {
   flex: 0 0 auto;
+  gap: 6px;
+  margin: 8px 14px 10px;
   padding-top: 6px;
+}
+
+.material-panel .panel-actions .button {
+  min-height: 32px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.material-panel .panel-actions .button-primary {
+  min-width: 112px;
 }
 
 .material-panel > .field-row {
   flex: 0 0 auto;
   grid-template-columns: 72px minmax(0, 1fr);
   gap: 8px;
-  margin-top: 6px;
-  margin-bottom: 4px;
+  margin: 6px 14px 0;
+}
+
+#page-mix .material-panel > .mix-group-tools {
+  margin: 6px 14px 0;
+}
+
+#page-mix .material-panel > .mix-group-list {
+  margin: 4px 14px 0;
 }
 
 .material-panel > .field-row label {

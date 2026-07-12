@@ -1,12 +1,12 @@
 {
-  "version": "2026.7.12.11",
-  "latest_version": "2026.7.12.11",
+  "version": "2026.7.12.12",
+  "latest_version": "2026.7.12.12",
   "files": {
     "app/ai_clipper.py": "02fe30e075800e02b2735e108818ae4e197ee41fd4a7f15897053a031bdbc597",
     "app/cutter_logic.py": "450c6d4b42cdae369b30dc8cd686bf2bc4e9d184b8ae1ed734e5e842c7eaeb56",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
     "web_client/server.py": "ef2588dea91a0e4e47c09ec4d42fc5ed86793eff8d22b881bae7fe134deb3b89",
-    "web_client/frontend/index.html": "525a73f549a7daf0c42767dc8ca8f0ea9cdb311b36fc6e2328dd4eaa87d74661",
+    "web_client/frontend/index.html": "1b2a18feb3e53f454f96dc76ba57ea1633a0d13f4dbc8ac67b4ddf3657688dfb",
     "web_client/frontend/assets/app.js": "4c64d7a7e8ad3df0076bfe4016cf9451b3ce60cbda8196201a4254cd2281a813",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc",
@@ -14,11 +14,11 @@
     "app/config.py": "f34a7101dd2d17b336c90a9c449dee990eb6b97cbfe737787a14f9668d435b58",
     "app/keywords.json": "07374f0489171e4f22a423d714aef91c5124e41a593372daa9ef1e3c553d1292",
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
-    "web_client/frontend/assets/styles.css": "7d7cfcf305f32ef43f2614d84bb3771c0a1c5bb106016c73b4909570d51c8451"
+    "web_client/frontend/assets/styles.css": "433dcf8f24648b9ee85f5efb627a754f7fad185b99553bc2bcba3566980b0be5"
   },
-  "release_notes": "修复抖音商品探针在旧内置脚本路径下遇到特殊字符日志仍可能崩溃；强制探针子进程使用 UTF-8 替换输出。",
+  "release_notes": "修复混剪素材卡片布局：压缩分组按钮和素材操作区间距，避免混剪页面上方卡片撑高、挤压内容。",
   "update_url": "",
-  "update_message": "修复抖音商品探针在旧内置脚本路径下遇到特殊字符日志仍可能崩溃；强制探针子进程使用 UTF-8 替换输出。",
+  "update_message": "修复混剪素材卡片布局：压缩分组按钮和素材操作区间距，避免混剪页面上方卡片撑高、挤压内容。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 22:05:46"
+  "updated_at": "2026-07-12 22:37:00"
 }
