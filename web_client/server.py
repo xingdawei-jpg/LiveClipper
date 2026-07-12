@@ -1117,9 +1117,14 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
         cleaned.append(path)
 
     total = len(cleaned) or int(task.get("result_count") or 0) or 1
-    batch_total = max(total, int(task.get("batch_total") or 0))
+    task_batch_total = int(task.get("batch_total") or 0)
+    batch_total = max(1, task_batch_total or total)
     batch_done = max(0, min(batch_total, int(task.get("batch_done") or total)))
     batch_failed = max(0, int(task.get("batch_failed") or 0))
+    raw_batch_succeeded = task.get("batch_succeeded")
+    if raw_batch_succeeded is None:
+        raw_batch_succeeded = max(0, batch_done - batch_failed)
+    batch_succeeded = max(0, min(batch_total, int(raw_batch_succeeded)))
     created_at = float(task.get("finished_at") or task.get("started_at") or time.time())
     records: list[dict[str, Any]] = []
     for index, path in enumerate(cleaned, start=1):
@@ -1136,6 +1141,7 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
                 "total": total,
                 "batch_total": batch_total,
                 "batch_done": batch_done,
+                "batch_succeeded": batch_succeeded,
                 "batch_failed": batch_failed,
                 "exists": Path(path).exists(),
             }
@@ -1776,6 +1782,7 @@ def _new_task(scope: str, title: str) -> str:
             "error": "",
             "batch_total": 0,
             "batch_done": 0,
+            "batch_succeeded": 0,
             "batch_current": 0,
             "batch_failed": 0,
             "batch_label": "",
@@ -1835,9 +1842,9 @@ def _set_task(task_id: str, **updates: Any) -> None:
 
 
 _BATCH_PROGRESS_RE = re.compile(
-    r"(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*/\s*(\d+)(?:\s*[:：]\s*(.+))?"
+    r"^(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*/\s*(\d+)(?:\s*[:：]\s*(.+))?$"
 )
-_BATCH_SUCCESS_RE = re.compile(r"成功\s*(\d+)\s*/\s*(\d+)")
+_BATCH_SUCCESS_RE = re.compile(r"^成功\s*(\d+)\s*/\s*(\d+)(?:\s*个)?$")
 
 
 def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
@@ -1980,10 +1987,16 @@ def _is_fatal_ai_log(message: str) -> bool:
     return any(token in lower or token in text for token in fatal_tokens)
 
 
-def _task_log_fn(task_id: str, scope: str, base: float = 10, span: float = 80):
+def _task_log_fn(
+    task_id: str,
+    scope: str,
+    base: float = 10,
+    span: float = 80,
+    recoverable_errors: bool = False,
+):
     def _log(message: str) -> None:
         if _is_fatal_ai_log(message):
-            emit_log("error", message, scope)
+            emit_log("warning" if recoverable_errors else "error", message, scope)
             return
         emit_log("info", message, scope)
         stage = _task_progress_from_log(message)
@@ -7179,7 +7192,15 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
         if not videos:
             raise ValueError("请先添加视频。")
         total_videos = max(1, len(videos))
-        _set_task(task_id, batch_total=total_videos, batch_done=0, batch_current=1 if total_videos > 1 else 0, batch_failed=0, batch_label="")
+        _set_task(
+            task_id,
+            batch_total=total_videos,
+            batch_done=0,
+            batch_succeeded=0,
+            batch_current=1 if total_videos > 1 else 0,
+            batch_failed=0,
+            batch_label="",
+        )
         _set_task_progress(task_id, 8, f"准备处理 {total_videos} 个视频")
         base_dir = _default_output_dir(videos[0], payload.output_dir, "dedup_output")
         emit_log("info", f"开始批量二创消重，共 {len(videos)} 个视频。", scope)
@@ -8830,6 +8851,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
 
         outputs: list[str] = []
         failures: list[str] = []
+        succeeded_videos = 0
 
         for index, video in enumerate(paths, start=1):
             if _is_task_cancelled(task_id):
@@ -8837,6 +8859,17 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 return
             file_base = 10 + ((index - 1) / total_videos) * 82
             file_span = 82 / total_videos
+            _set_task(
+                task_id,
+                status="running",
+                batch_total=total_videos,
+                batch_done=index - 1,
+                batch_succeeded=succeeded_videos,
+                batch_current=index,
+                batch_failed=len(failures),
+                batch_label=video.name,
+                message=f"处理 {index}/{total_videos}: {video.name}",
+            )
             try:
                 if not video.exists():
                     raise FileNotFoundError(f"视频不存在：{video}")
@@ -8860,7 +8893,13 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     dedup_audio_options=payload.audio,
                     transition_options=payload.transition,
                     subtitle_overlay=payload.subtitle_overlay,
-                    log_fn=_task_log_fn(task_id, "smart-cut", base=file_base + 4, span=max(12, file_span * 0.90)),
+                    log_fn=_task_log_fn(
+                        task_id,
+                        "smart-cut",
+                        base=file_base + 4,
+                        span=max(12, file_span * 0.90),
+                        recoverable_errors=total_videos > 1,
+                    ),
                     cancel_event=_task_cancel_event(task_id),
                     force_category=None if payload.category in ("", "自动检测") else payload.category,
                     pip_path=pip_path,
@@ -8901,10 +8940,30 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 if not produced_outputs:
                     raise RuntimeError(f"{video.name} 未生成输出文件。")
                 outputs.extend(produced_outputs)
-                _archive_used_pip(used_pip_file, "smart-cut")
+                succeeded_videos += 1
+                try:
+                    _archive_used_pip(used_pip_file, "smart-cut")
+                except Exception as archive_exc:
+                    emit_log("warning", f"{video.name} 已成片，但画中画素材归档失败：{archive_exc}", "smart-cut")
                 _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"完成 {index}/{total_videos}: {video.name}")
-                emit_log("success", f"处理完成: {video.name}", "smart-cut")
-                _consume_trial("智能成片", scope="smart-cut")
+                _set_task(
+                    task_id,
+                    status="running",
+                    batch_total=total_videos,
+                    batch_done=index,
+                    batch_succeeded=succeeded_videos,
+                    batch_current=index + 1 if index < total_videos else 0,
+                    batch_failed=len(failures),
+                    batch_label="" if index >= total_videos else f"等待处理 {index + 1}/{total_videos}",
+                )
+                if total_videos > 1:
+                    emit_log("info", f"[{index}/{total_videos}] 当前素材已完成，继续处理队列：{video.name}", "smart-cut")
+                else:
+                    emit_log("success", f"处理完成: {video.name}", "smart-cut")
+                try:
+                    _consume_trial("智能成片", scope="smart-cut")
+                except Exception as trial_exc:
+                    emit_log("warning", f"{video.name} 已成片，但使用记录保存失败：{trial_exc}", "smart-cut")
             except Exception as video_exc:
                 if _is_task_cancelled(task_id):
                     emit_log("warning", "任务已停止。", "smart-cut")
@@ -8915,12 +8974,15 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                 _set_task(
                     task_id,
                     status="running",
+                    batch_total=total_videos,
+                    batch_done=index,
+                    batch_succeeded=succeeded_videos,
                     batch_failed=len(failures),
                     batch_current=next_current,
                     batch_label="" if next_current == 0 else f"等待处理 {next_current}/{total_videos}",
                     message=f"已跳过失败 {index}/{total_videos}: {video.name}",
                 )
-                emit_log("error", f"[{index}/{total_videos}] 智能成片失败，已跳过继续下一个：{video.name}，{video_exc}", "smart-cut")
+                emit_log("warning", f"[{index}/{total_videos}] 当前素材失败，已跳过并继续下一个：{video.name}，{video_exc}", "smart-cut")
                 continue
 
         if _is_task_cancelled(task_id):
@@ -8938,15 +9000,16 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             output=outputs[0] if outputs else "",
             outputs=outputs,
             result_count=len(outputs),
-            message=f"智能成片完成：成功 {len(outputs)}/{total_videos} 个",
+            message=f"智能成片完成：成功 {succeeded_videos}/{total_videos} 个",
             batch_total=total_videos,
-            batch_done=len(outputs),
+            batch_done=total_videos,
+            batch_succeeded=succeeded_videos,
             batch_current=0,
             batch_failed=len(failures),
             batch_label="",
         )
         if failures:
-            emit_log("warning", f"智能成片批量完成：成功 {len(outputs)}/{total_videos} 个，失败 {len(failures)} 个。", "smart-cut")
+            emit_log("warning", f"智能成片批量完成：成功 {succeeded_videos}/{total_videos} 个，失败 {len(failures)} 个。", "smart-cut")
         else:
             emit_log("success", f"智能成片任务完成，输出 {len(outputs)} 个文件。", "smart-cut")
     except Exception as exc:

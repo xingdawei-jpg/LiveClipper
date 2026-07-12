@@ -1284,15 +1284,20 @@ function batchNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function formatBatchProgress({ total, done = 0, current = 0, failed = 0, label = "", status = "" } = {}) {
+function formatBatchProgress({ total, done = 0, succeeded = null, current = 0, failed = 0, label = "", status = "" } = {}) {
   const safeTotal = Math.max(0, Math.floor(batchNumber(total)));
   if (safeTotal <= 1) return null;
   const safeFailed = Math.max(0, Math.floor(batchNumber(failed)));
   const safeDone = Math.max(0, Math.min(safeTotal, Math.floor(batchNumber(done))));
+  const parsedSucceeded = succeeded == null ? Number.NaN : Number(succeeded);
+  const fallbackSucceeded = status === "completed" ? safeDone : Math.max(0, safeDone - safeFailed);
+  const safeSucceeded = Number.isFinite(parsedSucceeded)
+    ? Math.max(0, Math.min(safeTotal, Math.floor(parsedSucceeded)))
+    : fallbackSucceeded;
   const safeCurrent = Math.max(0, Math.min(safeTotal, Math.floor(batchNumber(current))));
   const cleanLabel = String(label || "").trim();
   const finishedWithFailures = status === "completed" && safeFailed > 0;
-  const mainText = finishedWithFailures ? `成功 ${safeDone}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`;
+  const mainText = finishedWithFailures ? `成功 ${safeSucceeded}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`;
   const parts = [mainText];
   if (!["completed", "failed", "cancelled"].includes(status) && safeCurrent > 0 && safeDone < safeTotal) {
     parts.push(`正在第 ${safeCurrent} 个`);
@@ -1305,14 +1310,33 @@ function formatBatchProgress({ total, done = 0, current = 0, failed = 0, label =
   return {
     total: safeTotal,
     done: safeDone,
+    succeeded: safeSucceeded,
     current: safeCurrent,
     failed: safeFailed,
     status,
     label: cleanLabel,
     text: parts.join(" · "),
-    shortText: finishedWithFailures ? `成功 ${safeDone}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`,
+    shortText: finishedWithFailures ? `成功 ${safeSucceeded}/${safeTotal}` : `已完成 ${safeDone}/${safeTotal}`,
     title: titleParts.join(" · "),
   };
+}
+
+function hasBatchProgress(batch) {
+  return Number(batch?.total || 0) > 1;
+}
+
+function batchHeaderText(batch) {
+  const total = Math.max(1, Math.floor(batchNumber(batch?.total, 1)));
+  const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch?.done))));
+  const succeeded = Math.max(0, Math.min(total, Math.floor(batchNumber(batch?.succeeded, done))));
+  const current = Math.max(0, Math.min(total, Math.floor(batchNumber(batch?.current))));
+  const failed = Math.max(0, Math.floor(batchNumber(batch?.failed)));
+  const status = String(batch?.status || "");
+  if (!["completed", "failed", "cancelled"].includes(status) && current > 0 && done < total) {
+    return `第 ${current}/${total} 个`;
+  }
+  if (status === "completed" && failed > 0) return `成功 ${succeeded}/${total}`;
+  return `已完成 ${done}/${total}`;
 }
 
 function setLegacyBatchProgress(scope, values = {}) {
@@ -1335,6 +1359,7 @@ function batchProgressFromTask(task) {
   const structured = formatBatchProgress({
     total: task.batch_total,
     done: task.batch_done,
+    succeeded: task.batch_succeeded,
     current: task.batch_current,
     failed: task.batch_failed,
     label: task.batch_label,
@@ -1345,6 +1370,7 @@ function batchProgressFromTask(task) {
     return formatBatchProgress({
       total: structured.total,
       done: Math.max(batchNumber(structured.done), batchNumber(inferred.done)),
+      succeeded: Math.max(batchNumber(structured.succeeded), batchNumber(inferred.succeeded)),
       current: batchNumber(inferred.current) || batchNumber(structured.current),
       failed: Math.max(batchNumber(structured.failed), batchNumber(inferred.failed)),
       label: inferred.label || structured.label,
@@ -1376,7 +1402,8 @@ function batchProgressFromOutputHistory(scope) {
   const indexedDone = new Set(related.map((item) => Number(item.index || 0)).filter((value) => value > 0)).size;
   const done = Math.max(recordedDone, indexedDone);
   const failed = Math.max(...related.map((item) => batchNumber(item.batch_failed)), 0);
-  return formatBatchProgress({ total, done, failed, status: "completed" });
+  const succeeded = Math.max(...related.map((item) => batchNumber(item.batch_succeeded)), Math.max(0, done - failed));
+  return formatBatchProgress({ total, done, succeeded, failed, status: "completed" });
 }
 
 function progressFromTask(task) {
@@ -1415,16 +1442,21 @@ function progressFromTask(task) {
 }
 
 function batchProgressFromText(text, status = "") {
-  const value = String(text || "");
-  const success = value.match(/成功\s*(\d+)\s*\/\s*(\d+)/);
+  const value = String(text || "").trim();
+  const success = value.match(/^(?:智能成片(?:批量)?完成[：:]\s*)?成功\s*(\d+)\s*\/\s*(\d+)(?:\s*个)?[。.]?$/);
   if (success) {
+    const succeeded = Number(success[1]);
+    const total = Number(success[2]);
     return formatBatchProgress({
-      done: Number(success[1]),
-      total: Number(success[2]),
+      done: status === "completed" ? total : succeeded,
+      succeeded,
+      failed: Math.max(0, total - succeeded),
+      total,
       status: status || "completed",
     });
   }
-  const match = value.match(/(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*\/\s*(\d+)(?:\s*[:：]\s*([^。；\n]+))?/) || value.match(/\[(\d+)\s*\/\s*(\d+)\]/);
+  const match = value.match(/^(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*\/\s*(\d+)(?:\s*[:：]\s*([^。；\n]+))?$/)
+    || value.match(/^\[(\d+)\s*\/\s*(\d+)\]\s*(?:开始处理|当前素材|智能成片|批量)/);
   if (!match) return null;
   const hasAction = match.length > 3;
   const action = hasAction ? match[1] : "处理";
@@ -1678,14 +1710,12 @@ function renderRunSummary(scope) {
   if (ring) ring.className = `run-summary-ring is-${totalProgress.status || "idle"}`;
   if (ratioEl) ratioEl.textContent = totalProgress.text;
   if (batchHeader) {
-    const showBatch = Number(batch?.total || 0) > 1;
+    const showBatch = hasBatchProgress(batch);
     batchHeader.hidden = !showBatch;
     const batchRatio = batchHeader.querySelector("[data-run-summary-batch-ratio]");
     if (batchRatio && showBatch) {
-      const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
-      const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
-      batchRatio.textContent = `已完成 ${done}/${total}`;
-      batchHeader.title = batch.title || `共 ${total} 个，已完成 ${done} 个`;
+      batchRatio.textContent = batchHeaderText(batch);
+      batchHeader.title = batch.title || batch.text || batchHeaderText(batch);
     } else {
       batchHeader.title = "";
     }
@@ -1714,12 +1744,26 @@ function updateProgressFromLog(scope, item = {}) {
   const level = String(item.level || "info").toLowerCase();
   const text = [item.message, item.raw].filter(Boolean).join(" ");
   if (!scope || !text) return;
+  const activeTask = newestTask(scopedProgressTasks(state.latestTasks || [], scope)
+    .filter((task) => ["queued", "running"].includes(task.status)));
 
   if (level === "error") {
+    if (activeTask) {
+      updateLogProgressBar(scope, {
+        ...progressFromTask(activeTask),
+        label: "当前素材失败，批量继续",
+        status: "running",
+      });
+      return;
+    }
     updateLogProgressBar(scope, { label: "处理失败", percent: 100, status: "failed", batch: batchProgressFromText(text, "failed") });
     return;
   }
   if (level === "success" || /任务完成|成片完成|混剪完成|预览完成|处理完成|成功|已生成/.test(text)) {
+    if (activeTask) {
+      updateLogProgressBar(scope, progressFromTask(activeTask));
+      return;
+    }
     updateLogProgressBar(scope, { label: "已完成", percent: 100, status: "completed", batch: batchProgressFromText(text, "completed") });
     return;
   }
@@ -1751,10 +1795,15 @@ function inferProgressStage(text) {
 function updateLogProgressBar(scope, progress) {
   const el = document.querySelector(`[data-log-progress="${scope}"]`);
   if (!el) return;
+  const previous = state.progressByScope[scope] || {};
   const legacyBatch = state.legacyBatchProgress[scope];
+  const incomingBatch = hasBatchProgress(progress?.batch) ? progress.batch : null;
+  const preservedBatch = hasBatchProgress(previous?.batch) ? previous.batch : null;
+  const fallbackBatch = hasBatchProgress(legacyBatch) ? legacyBatch : null;
+  const sameTask = Boolean(progress?.taskId && previous?.taskId && progress.taskId === previous.taskId);
   const effectiveProgress = {
     ...progress,
-    batch: Number(progress?.batch?.total || 0) > 1 ? progress.batch : (legacyBatch || progress?.batch || null),
+    batch: incomingBatch || fallbackBatch || (sameTask ? preservedBatch : null),
   };
   const percent = Math.max(0, Math.min(100, Math.round(Number(effectiveProgress.percent) || 0)));
   const status = effectiveProgress.status || "idle";

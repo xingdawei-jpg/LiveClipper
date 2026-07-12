@@ -1,24 +1,24 @@
 {
-  "version": "2026.7.13.6",
-  "latest_version": "2026.7.13.6",
+  "version": "2026.7.13.7",
+  "latest_version": "2026.7.13.7",
   "files": {
     "app/ai_clipper.py": "9107356b22633a0fc9290961b2bd55b33ff4ea589ec6f798829c7558f7b3c163",
     "app/cutter_logic.py": "5e0a5ccde52ad73ab19755e46f75d93a533e947552093376ade125401dcaf787",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
-    "web_client/server.py": "0b554fb47f18e76d4005d96bd444616874d719a57ba55054db35817ac5993fde",
-    "web_client/frontend/index.html": "4ab638a37d4240df46e1b6daf7a3b2f670aac9870badac6a7d2d2b3829a21789",
-    "web_client/frontend/assets/app.js": "4c64d7a7e8ad3df0076bfe4016cf9451b3ce60cbda8196201a4254cd2281a813",
+    "web_client/server.py": "e810524e7fc4fa1143046d6430f789861388316b179f00ea2faf8eb37bead454",
+    "web_client/frontend/index.html": "1b3c0e51243145dc696733c419ba60b2b872561ef58b73113538a109d659d472",
+    "web_client/frontend/assets/app.js": "3eadfbf53d5efacaa8de13e21337ad5e41fcb4e2cc35ceea70598b1124883ad4",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
     "app/config.py": "f34a7101dd2d17b336c90a9c449dee990eb6b97cbfe737787a14f9668d435b58",
     "app/keywords.json": "07374f0489171e4f22a423d714aef91c5124e41a593372daa9ef1e3c553d1292",
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
-    "web_client/frontend/assets/styles.css": "433dcf8f24648b9ee85f5efb627a754f7fad185b99553bc2bcba3566980b0be5"
+    "web_client/frontend/assets/styles.css": "8e86b816271b7a564c2b93cb2bd261c5f8a39ab890c4ddf097dd7f2e2dbee741"
   },
-  "release_notes": "修复批量智能成片遇到单个失败后停止：单视频失败会明确跳过并继续处理后续素材；同时修复 AI 片单中少量价格/CTA片段被硬过滤后，剩余片单已安全却仍被误判失败的问题。",
+  "release_notes": "修复批量智能成片失败续跑和进度误判：单个素材失败只记为警告并继续后续素材；内部片段进度不再覆盖批量序号；分离已处理、成功、失败计数；已生成文件不再因画中画归档或使用记录异常被误判失败；同步优化批量进度与素材列表显示。",
   "update_url": "",
-  "update_message": "修复批量智能成片遇到单个失败后停止：单视频失败会明确跳过并继续处理后续素材；同时修复 AI 片单中少量价格/CTA片段被硬过滤后，剩余片单已安全却仍被误判失败的问题。",
+  "update_message": "修复批量智能成片失败续跑和进度误判：单个素材失败只记为警告并继续后续素材；内部片段进度不再覆盖批量序号；分离已处理、成功、失败计数；已生成文件不再因画中画归档或使用记录异常被误判失败；同步优化批量进度与素材列表显示。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-13 02:13:51"
+  "updated_at": "2026-07-13 02:47:29"
 }
