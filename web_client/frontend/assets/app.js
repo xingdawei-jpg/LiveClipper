@@ -5299,6 +5299,85 @@ function previewPreferenceLabelFromSummary(summary = {}) {
   return "";
 }
 
+const finalClipTopicRules = [
+  ["版型显瘦", ["显瘦", "遮肉", "藏肉", "收腰", "显高", "显腿长", "比例", "版型", "廓形", "剪裁", "修身", "宽松", "遮胯", "遮肚", "肩宽", "胯宽", "小个子", "梨形", "拜拜肉", "盖臀", "盖胯"]],
+  ["面料质感", ["面料", "材质", "莱赛尔", "天丝", "氨纶", "弹力", "聚酯纤维", "纯棉", "棉麻", "针织", "冰丝", "真丝", "垂感", "垂坠", "高织", "薄纱", "克重"]],
+  ["穿着体验", ["舒服", "舒适", "亲肤", "柔软", "冰凉", "凉感", "裸肤", "裸感", "透气", "不闷", "不热", "不勒", "不卡", "不紧绷", "轻盈", "自在", "不透", "活动方便"]],
+  ["品质细节", ["品质", "质感", "做工", "走线", "高级感", "精致", "质检", "不起球", "不褪色", "不变形", "色牢度"]],
+  ["颜色氛围", ["颜色", "色系", "显白", "提亮", "气色", "肤色", "黄皮", "黑皮", "绿色", "白色", "黑色", "藏青", "藏蓝", "亮色", "彩色", "米白", "冷白", "复古色", "氛围感"]],
+  ["场景搭配", ["通勤", "上班", "约会", "日常", "出门", "旅游", "度假", "放假", "聚会", "职场", "搭配", "内搭", "外穿", "单穿", "叠穿", "百搭", "拍照", "出片"]],
+  ["尺寸长度", ["衣长", "袖长", "长度", "短款", "中长款", "盖住", "遮住", "到脚踝", "九分", "七分"]],
+  ["工艺细节", ["工艺", "拼接", "包边", "锁边", "加固", "扣子", "纽扣", "亨利扣", "领口", "U领", "圆领", "V领", "口袋", "里衬", "定染", "固色"]],
+  ["对比优势", ["买不到", "外面没有", "不一样", "独特", "独家", "全网无同款", "比外面", "比市面", "同品质", "没有第二家", "原创"]],
+  ["口感食欲", ["好吃", "鲜甜", "脆甜", "爆汁", "多汁", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "试吃"]],
+  ["新鲜品质", ["新鲜", "鲜活", "现摘", "现采", "现捕", "当天发", "鲜度", "饱满", "坏果包赔"]],
+  ["产地溯源", ["产地", "原产地", "源头", "基地", "果园", "农场", "直采", "溯源", "产区"]],
+  ["规格分量", ["规格", "净含量", "净重", "重量", "斤装", "箱装", "袋装", "盒装", "果径", "分量"]],
+  ["发货保鲜", ["发货", "现发", "冷链", "冰袋", "保温箱", "保鲜", "锁鲜", "冷冻", "冷藏"]],
+  ["场景吃法", ["早餐", "夜宵", "下午茶", "办公室", "全家", "聚餐", "煲汤", "下饭", "即食", "囤货", "送礼"]],
+];
+
+function classifyFinalClipTopic(clip) {
+  const text = String(selectedPreviewText(clip) || "").replace(/\s+/g, "").toLowerCase();
+  let bestTopic = "其他";
+  let bestScore = 0;
+  finalClipTopicRules.forEach(([topic, words]) => {
+    let score = 0;
+    words.forEach((word) => {
+      let offset = 0;
+      while (word && (offset = text.indexOf(String(word).toLowerCase(), offset)) >= 0) {
+        score += String(word).length >= 3 ? 1.4 : 1;
+        offset += String(word).length;
+      }
+    });
+    if (score > bestScore) {
+      bestTopic = topic;
+      bestScore = score;
+    }
+  });
+  return bestTopic;
+}
+
+function buildFinalTopicCoverageFromClips(clips = []) {
+  const products = clips.filter((clip) => clipEligibleForPreference(clip));
+  const topicCounts = {};
+  const topicDurations = {};
+  products.forEach((clip) => {
+    const topic = classifyFinalClipTopic(clip);
+    topicCounts[topic] = Number(topicCounts[topic] || 0) + 1;
+    topicDurations[topic] = Number(topicDurations[topic] || 0) + effectiveClipDuration(clip);
+  });
+  const distinctTopics = Object.keys(topicCounts).filter((topic) => topic !== "其他" && Number(topicCounts[topic]) > 0);
+  const minDistinct = products.length >= 5 ? 3 : products.length >= 3 ? 2 : products.length ? 1 : 0;
+  return {
+    source: "final_clips_client",
+    product_count: products.length,
+    topic_counts: topicCounts,
+    topic_durations: Object.fromEntries(Object.entries(topicDurations).map(([key, value]) => [key, Number(value.toFixed(3))])),
+    distinct_topics: distinctTopics,
+    distinct_count: distinctTopics.length,
+    min_distinct: minDistinct,
+    undercovered: distinctTopics.length < minDistinct,
+  };
+}
+
+function applyFinalPreferenceToCoverage(topicCoverage = {}, preferenceLabel = "") {
+  const counts = topicCoverage.topic_counts || {};
+  const durations = topicCoverage.topic_durations || {};
+  const productCount = Number(topicCoverage.product_count || 0);
+  const preferenceCount = Number(counts[preferenceLabel] || 0);
+  const totalDuration = Object.values(durations).reduce((sum, value) => sum + Number(value || 0), 0);
+  const preferenceDuration = Number(durations[preferenceLabel] || 0);
+  return {
+    ...topicCoverage,
+    preferred_topic: preferenceLabel,
+    preference_count: preferenceCount,
+    preference_ratio: productCount ? preferenceCount / productCount : 0,
+    preference_duration_ratio: totalDuration ? preferenceDuration / totalDuration : 0,
+    overconcentrated: Boolean(productCount && preferenceCount / productCount > 0.55),
+  };
+}
+
 function buildFinalPreferenceSummary(summary = {}, topicCoverage = {}) {
   const counts = topicCoverage.topic_counts || {};
   const durations = topicCoverage.topic_durations || {};
@@ -5513,9 +5592,13 @@ function renderManualRepeatTags(clip) {
 function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const clips = (preview?.clips || []).filter((clip) => clip.selected !== false);
   const dedupSummary = preview?.dedup_summary || {};
-  const topicCoverage = dedupSummary.topic_coverage_summary || {};
+  const clientTopicCoverage = buildFinalTopicCoverageFromClips(clips);
+  let topicCoverage = clientTopicCoverage.product_count
+    ? clientTopicCoverage
+    : (dedupSummary.topic_coverage_summary || {});
   const preferenceSummary = buildFinalPreferenceSummary(dedupSummary.preference_summary || {}, topicCoverage);
   const preferenceLabel = previewPreferenceLabelFromSummary(preferenceSummary);
+  topicCoverage = applyFinalPreferenceToCoverage(topicCoverage, preferenceLabel);
   const target = Number(preview?.target_duration || $(targetId)?.value || 60);
   const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
   const riskByIndex = new Map();
@@ -5659,8 +5742,8 @@ function renderPreviewSummary(analysis) {
     && (preferenceCount === 0 || topicCoverage.overconcentrated || topicCoverage.underpreferred)
   );
   const preferenceHitTitle = analysis.preferenceLabel
-    ? `成片主线：${analysis.preferenceLabel}；Product占比：${preferenceCount}/${preferenceProductCount}`
-    : "未识别到成片主线";
+    ? `AI偏好：${analysis.preferenceLabel}；最终Product命中：${preferenceCount}/${preferenceProductCount}`
+    : "未识别到AI偏好";
   const topicEntries = Object.entries(topicCounts).filter(([name, count]) => name && name !== "其他" && Number(count) > 0);
   const topicCoverageText = topicEntries.length ? `${topicEntries.length}类` : "-";
   const topicCoverageTitle = topicEntries.length
@@ -5690,8 +5773,8 @@ function renderPreviewSummary(analysis) {
       <div><span>已自动处理</span><strong class="is-${analysis.autoRemovedCount ? "warn" : "ok"}">${analysis.autoRemovedCount ? `${analysis.autoRemovedCount} 段` : "无"}</strong></div>
       <div><span>人工检查</span><strong class="is-${analysis.manualCheckCount ? "warn" : "ok"}">${analysis.manualCheckCount ? `${analysis.manualCheckCount} 组` : "无"}</strong></div>
       <div><span>品类</span><strong title="${escapeHtml(categoryTitle)}">${escapeHtml(categoryText)}</strong></div>
-      <div><span>成片主线</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
-      <div><span>主线占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
+      <div><span>AI偏好</span><strong title="${escapeHtml(preferenceTitle)}">${escapeHtml(preferenceText)}</strong></div>
+      <div><span>偏好占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
       <div><span>主题覆盖</span><strong class="is-${topicCoverageWarn ? "warn" : "ok"}" title="${escapeHtml(topicCoverageTitle)}">${escapeHtml(topicCoverageText)}</strong></div>
       <div><span>成交结构</span><strong class="is-${salesChain.ok ? "ok" : "warn"}" title="${escapeHtml(salesChain.title)}">${escapeHtml(salesChain.label)}</strong></div>
     </div>
