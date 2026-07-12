@@ -8846,6 +8846,8 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         if not paths:
             raise ValueError("请至少填写一个视频文件路径。")
         total_videos = max(1, len(paths))
+        if total_videos > 1:
+            emit_log("info", f"批量容错已启用：共 {total_videos} 个素材，单个失败将自动跳过并继续。", "smart-cut")
         _set_task(task_id, batch_total=total_videos, batch_done=0, batch_current=1 if total_videos > 1 else 0, batch_failed=0, batch_label="")
         _set_task_progress(task_id, 8, f"校验 {total_videos} 个素材")
 
@@ -9447,14 +9449,32 @@ def _schedule_client_restart(delay: float = 1.5) -> bool:
 
     def _restart() -> None:
         time.sleep(delay)
+        helper_started = False
         try:
             flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
             )
+            executable_ps = str(executable).replace("'", "''")
+            workdir_ps = str(executable.parent).replace("'", "''")
+            restart_script = (
+                f"$old = Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
+                "if ($old) { $old.WaitForExit() }; "
+                "Start-Sleep -Milliseconds 350; "
+                f"Start-Process -FilePath '{executable_ps}' "
+                f"-WorkingDirectory '{workdir_ps}' -WindowStyle Hidden"
+            )
             subprocess.Popen(
-                [str(executable)],
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    restart_script,
+                ],
                 cwd=str(executable.parent),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -9462,9 +9482,10 @@ def _schedule_client_restart(delay: float = 1.5) -> bool:
                 close_fds=True,
                 creationflags=flags,
             )
+            helper_started = True
         except Exception as exc:
             emit_log("error", f"自动重启失败：{exc}", "settings")
-        finally:
+        if helper_started:
             time.sleep(0.2)
             os._exit(0)
 

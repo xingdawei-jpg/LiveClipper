@@ -1,11 +1,11 @@
 {
-  "version": "2026.7.13.7",
-  "latest_version": "2026.7.13.7",
+  "version": "2026.7.13.8",
+  "latest_version": "2026.7.13.8",
   "files": {
     "app/ai_clipper.py": "9107356b22633a0fc9290961b2bd55b33ff4ea589ec6f798829c7558f7b3c163",
     "app/cutter_logic.py": "5e0a5ccde52ad73ab19755e46f75d93a533e947552093376ade125401dcaf787",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
-    "web_client/server.py": "e810524e7fc4fa1143046d6430f789861388316b179f00ea2faf8eb37bead454",
+    "web_client/server.py": "0786c06fdc556380b504bb7195c088623b1e3a717b7ffcedb20cc06867ddcc19",
     "web_client/frontend/index.html": "1b3c0e51243145dc696733c419ba60b2b872561ef58b73113538a109d659d472",
     "web_client/frontend/assets/app.js": "3eadfbf53d5efacaa8de13e21337ad5e41fcb4e2cc35ceea70598b1124883ad4",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
@@ -16,9 +16,9 @@
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "8e86b816271b7a564c2b93cb2bd261c5f8a39ab890c4ddf097dd7f2e2dbee741"
   },
-  "release_notes": "修复批量智能成片失败续跑和进度误判：单个素材失败只记为警告并继续后续素材；内部片段进度不再覆盖批量序号；分离已处理、成功、失败计数；已生成文件不再因画中画归档或使用记录异常被误判失败；同步优化批量进度与素材列表显示。",
+  "release_notes": "修复增量更新后仍运行旧后端的问题：自动重启改为等待旧进程彻底退出、端口释放后再启动新客户端；智能成片批量任务增加明确的容错启用日志，便于确认单个失败会自动跳过并继续。",
   "update_url": "",
-  "update_message": "修复批量智能成片失败续跑和进度误判：单个素材失败只记为警告并继续后续素材；内部片段进度不再覆盖批量序号；分离已处理、成功、失败计数；已生成文件不再因画中画归档或使用记录异常被误判失败；同步优化批量进度与素材列表显示。",
+  "update_message": "修复增量更新后仍运行旧后端的问题：自动重启改为等待旧进程彻底退出、端口释放后再启动新客户端；智能成片批量任务增加明确的容错启用日志，便于确认单个失败会自动跳过并继续。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-13 02:47:29"
+  "updated_at": "2026-07-13 06:37:09"
 }
