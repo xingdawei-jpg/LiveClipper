@@ -927,6 +927,33 @@ def _multi_version_target_bounds(target_duration):
     return max(lower_floor, target - tolerance), target + tolerance
 
 
+def _target_clip_count_range(target_duration):
+    try:
+        target = int(target_duration or 60)
+    except Exception:
+        target = 60
+    if target <= 20:
+        return 3, 5
+    if target <= 30:
+        return 5, 8
+    if target <= 40:
+        return 6, 10
+    if target <= 60:
+        return 9, 14
+    if target <= 90:
+        return 13, 20
+    if target <= 130:
+        return 18, 26
+    min_count = max(18, (target + 6) // 7)
+    max_count = max(min_count + 4, (target + 4) // 5)
+    return min_count, max_count
+
+
+def target_clip_count_text(target_duration):
+    low, high = _target_clip_count_range(target_duration)
+    return f"{low}-{high}"
+
+
 def _target_duration_rule_text(target_duration):
     low, high = _multi_version_target_bounds(target_duration)
     return (
@@ -2994,7 +3021,7 @@ DIRECTOR_SYSTEM_PROMPT = """你是带货短视频的最终剪辑导演。你必�
 6. 严禁重复同一子主题。同一个显瘦部位、同一种帽子搭配、同一个面料结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
 7. 偏好是主线，不是凑数量。同一偏好下必须选择不同子主题；如果只有一个干净子主题，就只选一个，不得用三段近义表达冒充三段偏好。
 8. 不选直播操作、主播自言自语或现场调度，例如“切个歌、我把包取了、帮我拿一下、看后台、今天没洗头”。不选“我喜欢它两个点、首先、第一点、几个地方”这类报数式铺垫，除非后续所有点都在紧邻片段中完整展开。不选价格、链接、拍码、关注、领券、满减、倒计时和任何标记不可选的字幕。
-9. 目标时长约__TARGET__秒，建议控制在__LOW__-__HIGH__秒，但叙事完整和不重复优先于凑时长。安全内容不足时可以更短，绝不能用残句和重复内容填满。
+9. 目标时长约__TARGET__秒，必须尽量控制在__LOW__-__HIGH__秒；低于__LOW__秒会被判定为未完成片单。安全内容不足时可以略短，但不能只输出半成品；继续寻找不同卖点、不同场景、不同顾虑解除的完整片段来补足，绝不能用残句和重复内容填满。
 
 输出前在心里把所有选中字幕按数组顺序连读一遍，并逐项确认：Hook后有兑现、相邻段不重复、每句首尾完整、Close确实是最后一句。发现问题后先修改，再输出JSON。"""
 
@@ -3927,6 +3954,25 @@ def _director_clip_source_key(clip):
     return marker.group(0).upper() if marker else ""
 
 
+def _director_duration_status(clips, target_duration):
+    try:
+        target = float(target_duration or 60)
+    except Exception:
+        target = 60.0
+    low, high = _multi_version_target_bounds(target)
+    total = sum(_clip_duration_value(clip) for clip in clips or [])
+    gap = max(0.0, float(low) - float(total))
+    severe_gap = max(3.0, target * 0.08)
+    return {
+        "total": float(total),
+        "low": float(low),
+        "high": float(high),
+        "gap": float(gap),
+        "severe_gap": float(severe_gap),
+        "short": gap > severe_gap,
+    }
+
+
 def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
     """Keep only mechanical safety checks; leave narrative decisions to AI."""
     def _log(msg):
@@ -4003,11 +4049,13 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
 
     fragment_examples = []
     continuation_prefixes = (
-        "还要", "还有", "就感觉", "这两根线",
+        "还要", "还有", "而且", "但是", "因为", "所以", "不过",
+        "就是", "然后", "才能", "包括", "像这种", "这两根线",
     )
     dangling_suffixes = (
         "而且", "然后", "所以", "但是", "不过", "因为", "还有", "还要", "还",
-        "首先", "大头含量是", "还有一种人在",
+        "首先", "包括", "这个版呢", "这个女生", "这个版", "这种",
+        "大头含量是", "还有一种人在",
     )
     for clip_index, clip in enumerate(valid, 1):
         text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
@@ -4024,10 +4072,15 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
             + "）"
         )
 
-    total_duration = sum(_clip_duration_value(clip) for clip in valid)
-    low, high = _multi_version_target_bounds(target_duration)
+    duration_status = _director_duration_status(valid, target_duration)
+    total_duration = duration_status["total"]
+    low, high = duration_status["low"], duration_status["high"]
     if total_duration < low:
-        warnings.append(f"总时长{total_duration:.1f}s低于{low:.0f}s")
+        duration_message = f"总时长{total_duration:.1f}s低于目标下限{low:.0f}s"
+        if duration_status["short"]:
+            issues.append(f"{duration_message}，至少还需补足约{duration_status['gap']:.0f}s的不同卖点完整片段")
+        else:
+            warnings.append(duration_message)
     elif total_duration > high:
         warnings.append(f"总时长{total_duration:.1f}s超过{high:.0f}s")
 
@@ -4060,6 +4113,10 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
         "needs_repair": bool(issues),
         "hard_removed": hard_removed,
         "total_duration": total_duration,
+        "duration_short": bool(duration_status["short"]),
+        "duration_low": low,
+        "duration_high": high,
+        "duration_gap": duration_status["gap"],
         "warnings": warnings,
     }
 
@@ -4196,12 +4253,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
 
     # 单版本：AI负责最终叙事，只允许首次编排 + 一次整体修复。
     # 多版本素材池沿用旧流程，因为它只选候选素材，不直接决定成片顺序。
-    # 计算目标片段数（用于检查AI是否选够）
-    _target_min_clips = 8
-    if _AI_TARGET_DURATION >= 100: _target_min_clips = 22
-    elif _AI_TARGET_DURATION >= 80: _target_min_clips = 18
-    elif _AI_TARGET_DURATION >= 50: _target_min_clips = 14
-    elif _AI_TARGET_DURATION >= 30: _target_min_clips = 8
+    # 计算目标片段数（用于检查AI是否选够），与 UI 时长档位共用同一套规则。
+    _target_min_clips, _target_max_clips = _target_clip_count_range(_AI_TARGET_DURATION)
 
     best_clips = []
     best_clips_key = None
@@ -4272,6 +4325,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             elif _director_focus_summary:
                 _set_last_focus_summary(_director_focus_summary)
 
+            # Director mode keeps narrative decisions with AI. Here we only
+            # restore clips cut inside a single SRT timestamp; no local
+            # completion, insertion, merging, or story reordering.
+            clips = _restore_director_clip_srt_boundaries(clips, cleaned_srt, log_fn)
+            if not clips:
+                continue
+
             clips, _director_audit = _director_hard_audit(
                 clips,
                 _AI_TARGET_DURATION,
@@ -4306,14 +4366,52 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 continue
             if not clips:
                 continue
+            if _director_audit.get("duration_short"):
+                _duration_issue = list(_director_audit.get("issues") or [
+                    f"总时长{_director_audit.get('total_duration', 0):.1f}s低于目标下限{_director_audit.get('duration_low', 0):.0f}s"
+                ])
+                if attempt + 1 < _max_attempts:
+                    _director_stage = "时长不足重试"
+                    _director_repair = _director_repair_instruction(
+                        clips,
+                        _duration_issue,
+                        _AI_TARGET_DURATION,
+                        _hook_cap_sec,
+                    )
+                    _log(
+                        "AI叙事质检: "
+                        + "；".join(_duration_issue)
+                        + "，交回AI补足完整卖点片段，不做本地插片"
+                    )
+                    continue
+                _log(
+                    f"AI叙事质检: 片单仅{_director_audit.get('total_duration', 0):.1f}s，"
+                    f"低于目标下限{_director_audit.get('duration_low', 0):.0f}s，拒绝作为成功结果"
+                )
+                continue
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
             if _director_audit.get("issues"):
+                _remaining_issues = list(_director_audit.get("issues") or [])
+                if attempt + 1 < _max_attempts:
+                    _director_stage = "叙事质检重试"
+                    _director_repair = _director_repair_instruction(
+                        clips,
+                        _remaining_issues,
+                        _AI_TARGET_DURATION,
+                        _hook_cap_sec,
+                    )
+                    _log(
+                        "AI叙事修复仍未通过: "
+                        + "；".join(_remaining_issues)
+                        + "，继续交回AI修复，不做本地删补或重排"
+                    )
+                    continue
                 _log(
-                    "AI叙事修复仍有提示: "
-                    + "；".join(_director_audit.get("issues") or [])
-                    + "；保留完整句和AI顺序，不再本地改写"
+                    "AI叙事质检未通过，拒绝返回半成品: "
+                    + "；".join(_remaining_issues)
                 )
+                continue
             _director_topic_summary = _topic_coverage_summary(
                 clips,
                 _current_focus_used_label(),
@@ -4753,18 +4851,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
 
     if _director_mode:
         if _director_fallback_clips:
-            if _director_focus_summary:
-                _set_last_focus_summary(_director_focus_summary)
-            _fallback_topic_summary = _topic_coverage_summary(
-                _director_fallback_clips,
-                _current_focus_used_label(),
-                _AI_TARGET_DURATION,
-                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
+            _fallback_duration = _director_duration_status(_director_fallback_clips, _AI_TARGET_DURATION)
+            _log(
+                f"AI整体修复未返回合格片单，拒绝返回首次安全骨架"
+                f"（{len(_director_fallback_clips)}段/{_fallback_duration['total']:.1f}s，"
+                f"目标下限{_fallback_duration['low']:.0f}s）"
             )
-            _set_last_topic_coverage_summary(_fallback_topic_summary)
-            _record_history_if_needed(_director_fallback_clips)
-            _log("AI整体修复未返回可用片单，保留首次安全骨架，不启动本地补片")
-            return _director_fallback_clips
+            return []
         _log("AI两次编排均未返回可用片单")
         return []
 
@@ -5867,27 +5960,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _product_rule = "★多版本选片：选择12-18个Product片段★ 覆盖不同卖点角度（版型/面料/功能/风格/品质/对比/上身效果/搭配建议/场景种草），每个角度至少2个片段，同一角度有不同表达也要选。素材越丰富，3个版本的内容越充实。"
         _close_rule = "★多版本选片：选择3-5个Close片段★ 不同促单方式（紧迫感/闭眼入/尺码引导/信任强化/场景收尾）各选1-2个。"
     else:
-        # 使用调用方设置的 _AI_CLIP_COUNT
-        _min_pieces = 8  # 默认兜底值
-        if _AI_CLIP_COUNT and _AI_CLIP_COUNT != "10-15":
-            _clip_range = _AI_CLIP_COUNT
-            _min_pieces = int(_AI_CLIP_COUNT.split("-")[0])
-            _total_rule = f"通常选择{_AI_CLIP_COUNT}个片段，以叙事完整和不重复为准；{_target_rule}"
-        elif _AI_TARGET_DURATION <= 40:
-            _clip_range = "5-8"
-            _total_rule = _target_rule
-        elif _AI_TARGET_DURATION >= 100:
-            _clip_range = "12-18"
-            _total_rule = _target_rule
-        elif _AI_TARGET_DURATION >= 80:
-            _clip_range = "10-15"
-            _total_rule = _target_rule
-        elif _AI_TARGET_DURATION >= 50:
-            _clip_range = "8-13"
-            _total_rule = _target_rule
-        else:
-            _clip_range = "6-10"
-            _total_rule = _target_rule
+        # 使用统一的目标时长 -> 片段数量规则，避免不同入口写死不同档位。
+        _clip_min, _clip_max = _target_clip_count_range(_AI_TARGET_DURATION)
+        _clip_range = f"{_clip_min}-{_clip_max}"
+        _min_pieces = _clip_min
+        _total_rule = f"通常选择{_clip_range}个片段，以叙事完整和不重复为准；{_target_rule}"
         # ★★★ 关键：同步 _AI_CLIP_COUNT，否则 prompt 替换的永远是默认值 ★★★
         _AI_CLIP_COUNT = _clip_range
         _dedup_rule = '★绝对禁止重复同一卖点★ 字幕中主播会重复讲同一个卖点(如"面料好"说了3遍)，你必须只选每个卖点的最佳版本，严禁选两段内容相似的片段'
@@ -9544,6 +9621,81 @@ def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=20.0
     if split_count:
         _log(f"长片段拆分: 拆分 {split_count} 个过长片段，{len(clips)} -> {len(result)}")
     return result
+
+
+def _restore_director_clip_srt_boundaries(clips, cleaned_srt, log_fn=None):
+    """Only restore timestamps cut inside one SRT entry; keep AI order and choices."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if not clips or not cleaned_srt:
+        return clips
+    entries = _parse_srt_entries_for_hook(cleaned_srt)
+    if not entries:
+        return clips
+
+    restored = []
+    fix_count = 0
+    for clip in clips:
+        if not isinstance(clip, (list, tuple)) or len(clip) < 6:
+            restored.append(clip)
+            continue
+        try:
+            start = float(clip[2])
+            end = float(clip[3])
+        except Exception:
+            restored.append(clip)
+            continue
+
+        text = str(clip[1] or "")
+        marker = re.search(r"\[V\d+\]", text)
+        scoped_entries = entries
+        if marker:
+            scoped = [entry for entry in entries if marker.group(0) in entry[2]]
+            if scoped:
+                scoped_entries = scoped
+
+        new_start = start
+        new_end = end
+        max_end = max(e for _, e, _ in scoped_entries) + 0.5
+        if new_end > max_end:
+            new_end = max_end
+            new_start = min(new_start, new_end - 1.0)
+            fix_count += 1
+
+        for s, e, _ in scoped_entries:
+            if abs(s - start) < 0.3:
+                break
+            if s < start < e:
+                if start - s <= 3.0:
+                    new_start = s
+                    fix_count += 1
+                break
+
+        for s, e, _ in scoped_entries:
+            if abs(e - end) < 0.3:
+                break
+            if s < end < e:
+                if e - end <= 8.0:
+                    new_end = e
+                    fix_count += 1
+                break
+
+        if new_end - new_start < 0.5:
+            restored.append(tuple(clip))
+            continue
+        values = list(clip)
+        values[2] = new_start
+        values[3] = new_end
+        values[5] = max(0.0, new_end - new_start)
+        restored.append(tuple(values))
+
+    if fix_count:
+        before = sum(_clip_duration_value(c) for c in clips)
+        after = sum(_clip_duration_value(c) for c in restored)
+        _log(f"AI边界验收: 恢复 {fix_count} 处SRT内截断，时长 {before:.1f}s -> {after:.1f}s")
+    return restored
 
 
 def _fix_clip_boundaries(clips, cleaned_srt, log_fn=None):

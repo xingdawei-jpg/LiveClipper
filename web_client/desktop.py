@@ -30,7 +30,12 @@ else:
 
 def _repair_tool_stdio() -> None:
     for name, fd, mode in (("stdin", 0, "r"), ("stdout", 1, "w"), ("stderr", 2, "w")):
-        if getattr(sys, name, None) is not None:
+        existing = getattr(sys, name, None)
+        if existing is not None:
+            try:
+                existing.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
             continue
         try:
             stream = os.fdopen(os.dup(fd), mode, encoding="utf-8", errors="replace", buffering=1)

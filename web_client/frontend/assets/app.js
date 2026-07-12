@@ -11,6 +11,7 @@ const state = {
   pipPoolRequestSeq: {},
   keywordConfig: {},
   progressByScope: {},
+  legacyBatchProgress: {},
   mixGroups: [],
   activeMixGroupIndex: null,
   previewDrafts: {},
@@ -648,6 +649,7 @@ function bindActions() {
       if (action === "preview-video-split") await previewVideoSplit();
       if (action === "feature-submit") await submitFeature(target.dataset.feature);
       if (action === "reset-dedup") resetDedupDefaults();
+      if (action === "toggle-dedup-detail") toggleDedupDetail(target.dataset.prefix);
       if (action === "add-live-room") addLiveRoom();
       if (action === "live-switch-tab") setLiveRecTab(target.dataset.tab || "rooms");
       if (action === "live-status-filter") setLiveRoomFilter(target.dataset.status || "all");
@@ -1313,6 +1315,21 @@ function formatBatchProgress({ total, done = 0, current = 0, failed = 0, label =
   };
 }
 
+function setLegacyBatchProgress(scope, values = {}) {
+  const batch = formatBatchProgress(values);
+  if (batch) state.legacyBatchProgress[scope] = batch;
+  else delete state.legacyBatchProgress[scope];
+  const previous = state.progressByScope[scope] || {};
+  updateLogProgressBar(scope, {
+    ...previous,
+    label: values.labelText || previous.label || "批量处理中",
+    percent: Number.isFinite(Number(values.percent)) ? Number(values.percent) : (previous.percent || 0),
+    status: values.status || previous.status || "running",
+    batch,
+  });
+  return batch;
+}
+
 function batchProgressFromTask(task) {
   if (!task) return null;
   const structured = formatBatchProgress({
@@ -1734,10 +1751,15 @@ function inferProgressStage(text) {
 function updateLogProgressBar(scope, progress) {
   const el = document.querySelector(`[data-log-progress="${scope}"]`);
   if (!el) return;
-  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
-  const status = progress.status || "idle";
-  const label = progress.label || "等待任务";
-  state.progressByScope[scope] = { ...progress, percent, label, status };
+  const legacyBatch = state.legacyBatchProgress[scope];
+  const effectiveProgress = {
+    ...progress,
+    batch: Number(progress?.batch?.total || 0) > 1 ? progress.batch : (legacyBatch || progress?.batch || null),
+  };
+  const percent = Math.max(0, Math.min(100, Math.round(Number(effectiveProgress.percent) || 0)));
+  const status = effectiveProgress.status || "idle";
+  const label = effectiveProgress.label || "等待任务";
+  state.progressByScope[scope] = { ...effectiveProgress, percent, label, status };
 
   el.className = `log-progress is-${status}`;
   const labelEl = el.querySelector(".log-progress-label");
@@ -3497,10 +3519,11 @@ function collectPipPayload(prefix) {
   const pipPath = $(`${prefix}-pip-path`)?.value.trim() || "";
   const pipFolder = $(`${prefix}-pip-folder`)?.value.trim() || "";
   const useAutoPip = mode === "auto";
+  const useAssetPip = mode === "asset";
   return {
-    pip_enabled: useAutoPip || Boolean(pipPath || pipFolder),
-    pip_path: useAutoPip ? "auto" : pipPath,
-    pip_folder: pipFolder,
+    pip_enabled: useAutoPip || (useAssetPip && Boolean(pipPath || pipFolder)),
+    pip_path: useAutoPip ? "auto" : (useAssetPip ? pipPath : ""),
+    pip_folder: useAssetPip ? pipFolder : "",
     pip_size: Number($(`${prefix}-pip-size`)?.value || 0.15),
     pip_opacity: Number($(`${prefix}-pip-opacity`)?.value || 0.03),
     pip_pos: $(`${prefix}-pip-pos`)?.value || "右下",
@@ -3552,8 +3575,23 @@ function collectTransitionPayload(prefix) {
 
 function refreshDedupCustomVisibility(prefix) {
   const panel = document.querySelector(`[data-dedup-custom-panel="${prefix}"]`);
+  const entry = document.querySelector(`[data-dedup-custom-entry="${prefix}"]`);
+  const button = entry?.querySelector("[data-action='toggle-dedup-detail']");
   if (!panel) return;
-  panel.classList.toggle("is-hidden", normalizeDedupPresetValue($(`${prefix}-dedup`)?.value) !== "custom");
+  const isCustom = normalizeDedupPresetValue($(`${prefix}-dedup`)?.value) === "custom";
+  panel.classList.toggle("is-hidden", !isCustom);
+  entry?.classList.toggle("is-hidden", !isCustom);
+  if (!isCustom) panel.classList.remove("is-open");
+  if (button) button.textContent = panel.classList.contains("is-open") ? "收起设置" : "详细设置";
+}
+
+function toggleDedupDetail(prefix) {
+  const panel = document.querySelector(`[data-dedup-custom-panel="${prefix}"]`);
+  if (!panel) return;
+  const isCustom = normalizeDedupPresetValue($(`${prefix}-dedup`)?.value) === "custom";
+  if (!isCustom) return;
+  panel.classList.toggle("is-open");
+  refreshDedupCustomVisibility(prefix);
 }
 
 function bindDedupCustomControls() {
@@ -4412,6 +4450,7 @@ function mixSingleGroupPayload(basePayload, group) {
 }
 
 async function submitMixBatch(payload, groups) {
+  delete state.legacyBatchProgress.mix;
   let batchPreflightOk = false;
   try {
     await runPreflight("mix-batch", payload, "mix");
@@ -4458,25 +4497,64 @@ async function submitMixBatchLegacyQueue(basePayload, groups) {
   });
 
   const completed = [];
+  const totalGroups = cleanGroups.length;
+  setLegacyBatchProgress("mix", {
+    total: totalGroups,
+    done: 0,
+    current: 1,
+    status: "running",
+    labelText: "批量混剪",
+    percent: 0,
+  });
   for (let index = 0; index < cleanGroups.length; index += 1) {
     const group = cleanGroups[index];
     const singlePayload = mixSingleGroupPayload(basePayload, group);
+    setLegacyBatchProgress("mix", {
+      total: totalGroups,
+      done: index,
+      current: index + 1,
+      status: "running",
+      label: group.name,
+      labelText: `批量混剪 ${index + 1}/${totalGroups}`,
+      percent: Math.round((index / totalGroups) * 100),
+    });
     appendLog("mix", {
       time: new Date().toLocaleTimeString(),
       level: "info",
       message: `兼容模式提交第 ${index + 1}/${cleanGroups.length} 组：${group.name}`,
     });
-    const result = await api("/api/mix/start", {
-      method: "POST",
-      body: JSON.stringify(singlePayload),
-    });
-    refreshTasks();
-    const task = await waitForTaskComplete(result.task_id, "mix");
-    if (task.status !== "completed") {
-      const reason = task.error || task.message || "任务未完成";
-      throw new Error(`第 ${index + 1} 组混剪失败：${reason}`);
+    try {
+      const result = await api("/api/mix/start", {
+        method: "POST",
+        body: JSON.stringify(singlePayload),
+      });
+      refreshTasks();
+      const task = await waitForTaskComplete(result.task_id, "mix");
+      if (task.status !== "completed") {
+        const reason = task.error || task.message || "任务未完成";
+        throw new Error(`第 ${index + 1} 组混剪失败：${reason}`);
+      }
+      completed.push(task.output || task.outputs?.[0] || group.name);
+      setLegacyBatchProgress("mix", {
+        total: totalGroups,
+        done: index + 1,
+        current: index + 1 < totalGroups ? index + 2 : 0,
+        status: index + 1 === totalGroups ? "completed" : "running",
+        labelText: index + 1 === totalGroups ? "批量混剪完成" : "批量混剪",
+        percent: Math.round(((index + 1) / totalGroups) * 100),
+      });
+    } catch (error) {
+      setLegacyBatchProgress("mix", {
+        total: totalGroups,
+        done: completed.length,
+        current: 0,
+        failed: 1,
+        status: "failed",
+        labelText: "批量混剪失败",
+        percent: Math.round((completed.length / totalGroups) * 100),
+      });
+      throw error;
     }
-    completed.push(task.output || task.outputs?.[0] || group.name);
   }
 
   toast(`兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组`, "success");
@@ -5600,7 +5678,9 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const preferenceLabel = previewPreferenceLabelFromSummary(preferenceSummary);
   topicCoverage = applyFinalPreferenceToCoverage(topicCoverage, preferenceLabel);
   const target = Number(preview?.target_duration || $(targetId)?.value || 60);
-  const total = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+  const durationSpeedFactor = Math.max(0.1, Number(dedupSummary.duration_speed_factor || preview?.duration_speed_factor || 1) || 1);
+  const rawTotal = clips.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+  const total = rawTotal / durationSpeedFactor;
   const riskByIndex = new Map();
   const warnings = [];
   const preferenceEligibleClips = preferenceLabel ? clips.filter((clip) => clipEligibleForPreference(clip)) : [];
@@ -5689,6 +5769,8 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     clips,
     target,
     total,
+    rawTotal,
+    durationSpeedFactor,
     diff,
     status,
     statusText,
@@ -5765,10 +5847,13 @@ function renderPreviewSummary(analysis) {
   const warningText = analysis.warnings.length
     ? `<div class="preview-warnings">${analysis.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`
     : `<div class="preview-warnings is-ok"><span>未发现明显时间戳风险。</span></div>`;
+  const totalTitle = Math.abs(Number(analysis.durationSpeedFactor || 1) - 1) > 0.01
+    ? `原片合计 ${Number(analysis.rawTotal || 0).toFixed(1)}s，按预计变速 ${Number(analysis.durationSpeedFactor || 1).toFixed(2)}x 折算`
+    : "按选中片段时长统计";
   return `
     <div class="clip-preview-summary">
       <div><span>已选片段</span><strong>${analysis.clips.length}</strong></div>
-      <div><span>总时长</span><strong>${analysis.total.toFixed(1)}s</strong></div>
+      <div><span>预计成片</span><strong title="${escapeHtml(totalTitle)}">${analysis.total.toFixed(1)}s</strong></div>
       <div><span>目标差值</span><strong class="is-${analysis.status}">${diffText}</strong></div>
       <div><span>已自动处理</span><strong class="is-${analysis.autoRemovedCount ? "warn" : "ok"}">${analysis.autoRemovedCount ? `${analysis.autoRemovedCount} 段` : "无"}</strong></div>
       <div><span>人工检查</span><strong class="is-${analysis.manualCheckCount ? "warn" : "ok"}">${analysis.manualCheckCount ? `${analysis.manualCheckCount} 组` : "无"}</strong></div>
@@ -6022,6 +6107,20 @@ function normalizeLiveRoom(room = {}) {
   return { name, url, platform, product_naming_mode };
 }
 
+function normalizeLiveRooms(rooms = []) {
+  const normalized = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(rooms) ? rooms : []) {
+    const room = normalizeLiveRoom(raw);
+    if (!room) continue;
+    const key = `${room.platform.toLowerCase()}|${room.url.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(room);
+  }
+  return normalized;
+}
+
 function liveNormalizeNamingMode(value) {
   return String(value || "").trim() === "product_name" ? "product_name" : "product_id";
 }
@@ -6031,21 +6130,58 @@ function liveNamingModeLabel(value) {
 }
 
 function loadLiveRooms() {
+  let localRooms = [];
   try {
     const raw = localStorage.getItem(liveRoomsStorageKey);
     const rooms = JSON.parse(raw || "[]");
-    state.liveRooms = Array.isArray(rooms) ? rooms.map(normalizeLiveRoom).filter(Boolean) : [];
+    localRooms = normalizeLiveRooms(rooms);
   } catch {
-    state.liveRooms = [];
+    localRooms = [];
   }
+  state.liveRooms = localRooms;
   renderLiveRooms();
+  loadLiveRoomsFromServer(Boolean(localRooms.length));
+}
+
+async function loadLiveRoomsFromServer(hasLocalRooms = false) {
+  try {
+    const result = await api("/api/live-rec/rooms");
+    const remoteRooms = normalizeLiveRooms(result.rooms || []);
+    if (!hasLocalRooms && remoteRooms.length) {
+      state.liveRooms = remoteRooms;
+      persistLiveRoomsLocal();
+      renderLiveRooms();
+      return;
+    }
+    if (hasLocalRooms) {
+      saveLiveRoomsToServer();
+    }
+  } catch (error) {
+    console.warn("Failed to load live room cache", error);
+  }
 }
 
 function saveLiveRooms() {
+  persistLiveRoomsLocal();
+  saveLiveRoomsToServer();
+}
+
+function persistLiveRoomsLocal() {
   try {
     localStorage.setItem(liveRoomsStorageKey, JSON.stringify(state.liveRooms || []));
   } catch {
     // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+async function saveLiveRoomsToServer() {
+  try {
+    await api("/api/live-rec/rooms", {
+      method: "POST",
+      body: JSON.stringify({ rooms: normalizeLiveRooms(state.liveRooms || []) }),
+    });
+  } catch (error) {
+    console.warn("Failed to save live room cache", error);
   }
 }
 

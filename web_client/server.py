@@ -1270,6 +1270,60 @@ def _save_preferences(data: dict[str, Any]) -> None:
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _live_rooms_file() -> Path:
+    return _safe_user_child("live_rooms.json")
+
+
+def _normalize_live_room_cache_item(room: Any) -> dict[str, Any] | None:
+    if not isinstance(room, dict):
+        return None
+    name = str(room.get("name") or "").strip()
+    url = str(room.get("url") or "").strip()
+    if not name or not url:
+        return None
+    platform = str(room.get("platform") or "抖音").strip() or "抖音"
+    naming = str(room.get("product_naming_mode") or room.get("productNamingMode") or room.get("naming_mode") or "").strip()
+    return {
+        "name": name,
+        "url": url,
+        "platform": platform,
+        "product_naming_mode": "product_name" if naming == "product_name" else "product_id",
+    }
+
+
+def _normalize_live_rooms_cache(rooms: Any) -> list[dict[str, Any]]:
+    if not isinstance(rooms, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in rooms:
+        room = _normalize_live_room_cache_item(raw)
+        if not room:
+            continue
+        key = f"{room['platform'].lower()}|{room['url'].lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(room)
+    return normalized
+
+
+def _load_live_rooms_cache() -> list[dict[str, Any]]:
+    data = _read_json_file(_live_rooms_file())
+    return _normalize_live_rooms_cache(data.get("rooms") if isinstance(data, dict) else [])
+
+
+def _save_live_rooms_cache(rooms: list[dict[str, Any]]) -> None:
+    _write_json_file(
+        _live_rooms_file(),
+        {
+            "version": 1,
+            "updated_at": time.time(),
+            "rooms": _normalize_live_rooms_cache(rooms),
+        },
+    )
+
+
 def _cache_file(name: str) -> Path:
     target = _safe_user_child("cache", name)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1684,6 +1738,10 @@ class LiveRecPayload(BaseModel):
     product_switch_confirm_seconds: int = Field(default=8, ge=0, le=120)
     product_head_seconds: int = Field(default=10, ge=0, le=300)
     product_tail_seconds: int = Field(default=20, ge=0, le=300)
+
+
+class LiveRoomsPayload(BaseModel):
+    rooms: list[dict[str, Any]] = Field(default_factory=list)
 
 
 TOOLS_DIR = REPO_ROOT / "tools"
@@ -6040,6 +6098,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             [str(p) for p in paths],
             output_path=preview_output,
             dedup_preset=payload.dedup_preset,
+            dedup_video_options=payload.video,
+            dedup_audio_options=payload.audio,
+            transition_options=payload.transition,
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=66),
             cancel_event=_task_cancel_event(task_id),
@@ -6113,6 +6174,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
+        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.target_duration)
+        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.target_duration)
+        dedup_summary["duration_speed_factor"] = cutter_mod._multi_result_cache.get("duration_speed_factor", 1.0)
         emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
         preview_quality = _preview_quality_summary(public_clips)
         if preview_quality["preview_locked_segments"] or preview_quality["preview_auto_unselected_segments"]:
@@ -9057,6 +9121,9 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             srt_path=srt_path,
             output_path=preview_output,
             dedup_preset=payload.dedup_preset,
+            dedup_video_options=payload.video,
+            dedup_audio_options=payload.audio,
+            transition_options=payload.transition,
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=66),
             cancel_event=_task_cancel_event(task_id),
@@ -9117,6 +9184,9 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
+        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.duration)
+        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.duration)
+        dedup_summary["duration_speed_factor"] = cutter_mod._multi_result_cache.get("duration_speed_factor", 1.0)
         emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
         preview_quality = _preview_quality_summary(public_clips)
         if preview_quality["preview_locked_segments"] or preview_quality["preview_auto_unselected_segments"]:
@@ -9562,6 +9632,18 @@ def save_preferences(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid preferences")
     _save_preferences(payload)
     return {"ok": True}
+
+
+@app.get("/api/live-rec/rooms")
+def get_live_rooms() -> dict[str, Any]:
+    return {"ok": True, "rooms": _load_live_rooms_cache()}
+
+
+@app.post("/api/live-rec/rooms")
+def save_live_rooms(payload: LiveRoomsPayload) -> dict[str, Any]:
+    rooms = _normalize_live_rooms_cache(payload.rooms)
+    _save_live_rooms_cache(rooms)
+    return {"ok": True, "rooms": rooms}
 
 
 @app.get("/api/ai-feedback/stats")

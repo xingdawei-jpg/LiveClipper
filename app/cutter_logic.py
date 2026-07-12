@@ -826,6 +826,32 @@ def _num_option(data, key, default=0):
         return float(default)
 
 
+def _planned_output_speed_factor(dedup_preset="medium", video_options=None):
+    preset = _normalize_dedup_preset(dedup_preset)
+    if preset == "none":
+        return 1.0
+    if preset == "custom":
+        if _bool_option(video_options, "speed"):
+            return max(0.5, min(2.0, _num_option(video_options, "speed_value", 100) / 100))
+        return 1.0
+    try:
+        speed_cfg = DEDUP_CONFIG.get("variable_speed", {})
+        if speed_cfg.get("enabled"):
+            return max(0.5, min(2.0, float(speed_cfg.get("fallback_speed") or 1.15)))
+    except Exception:
+        pass
+    return 1.0
+
+
+def _ai_target_duration_for_final_duration(target_duration, dedup_preset="medium", video_options=None):
+    try:
+        target = float(target_duration or 60)
+    except Exception:
+        target = 60.0
+    speed = _planned_output_speed_factor(dedup_preset, video_options)
+    return max(10, int(round(target * speed))), speed
+
+
 def _append_filter(base, extra):
     base = (base or "").strip()
     extra = (extra or "").strip()
@@ -901,9 +927,11 @@ def _custom_frame_structure_filter(video_options=None, source_fps=30.0):
         fps = float(source_fps or 30.0)
     except Exception:
         fps = 30.0
-    factor = {"light": 0.997, "medium": 0.991, "heavy": 0.985}.get(level, 0.991)
-    target_fps = max(15.0, min(60.0, fps * factor))
-    return f"fps=fps={target_fps:.3f}:round=near", f"frame_structure({level},{target_fps:.2f}fps)"
+    # The final encoder already emits CFR at the configured source rate. Lowering
+    # FPS here and forcing it back later duplicates frames and causes visible
+    # periodic stalls, especially around clip boundaries.
+    target_fps = max(15.0, min(60.0, fps))
+    return f"fps=fps={target_fps:.3f}:round=near", f"frame_structure({level},stable-{target_fps:.2f}fps)"
 
 
 def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None):
@@ -1936,6 +1964,16 @@ def process_video(video_path, srt_path=None, output_path=None,
     TARGET_DURATION = target_duration
     TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
     _log(f"目标时长: {target_duration}秒 (容差{max(5, target_duration // 6)}秒)")
+    _ai_target_duration, _planned_speed_factor = _ai_target_duration_for_final_duration(
+        target_duration,
+        dedup_preset,
+        dedup_video_options,
+    )
+    if abs(_planned_speed_factor - 1.0) > 0.01:
+        _log(
+            f"AI选片时长折算: 成片目标{target_duration}s × 预计变速{_planned_speed_factor:.2f}x "
+            f"→ AI按原片约{_ai_target_duration}s选片"
+        )
     if _transition_mode == "fade":
         _log(f"片段转场: 画面淡入淡出 {_transition_duration:.2f}s，音频保持短防爆音")
     import time as _time, json as _json
@@ -2238,25 +2276,16 @@ def process_video(video_path, srt_path=None, output_path=None,
                 srt_text = f.read()
             # 单版本：focus_hint传给AI（"自动"=随机偏好，指定=用指定偏好）
             _fh = focus_hint if focus_hint and focus_hint != "自动" else None
-            import ai_clipper as _ai_mod; _ai_mod._AI_TARGET_DURATION = TARGET_DURATION
-            # 动态控制AI输出的片段数量
-            if TARGET_DURATION <= 40:
-                _ai_mod._AI_CLIP_COUNT = "5-8"
-            elif TARGET_DURATION >= 100:
-                _ai_mod._AI_CLIP_COUNT = "12-18"
-            elif TARGET_DURATION >= 80:
-                _ai_mod._AI_CLIP_COUNT = "10-15"
-            elif TARGET_DURATION >= 50:
-                _ai_mod._AI_CLIP_COUNT = "8-13"
-            else:
-                _ai_mod._AI_CLIP_COUNT = "6-10"
+            import ai_clipper as _ai_mod; _ai_mod._AI_TARGET_DURATION = _ai_target_duration
+            # 动态控制AI输出的片段数量；统一由 ai_clipper 按目标时长推导。
+            _ai_mod._AI_CLIP_COUNT = _ai_mod.target_clip_count_text(_ai_target_duration)
             ordered_clips = ai_analyze_clips(
                 srt_text,
                 log_fn=_log,
                 force_category=force_category,
                 multi_version=False,
                 focus_hint=_fh,
-                target_duration=TARGET_DURATION,
+                target_duration=_ai_target_duration,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
@@ -2324,6 +2353,9 @@ def process_video(video_path, srt_path=None, output_path=None,
             _multi_result_cache['topic_coverage_summary'] = dict(analysis_metadata.get('topic_coverage_summary') or {})
             _multi_result_cache['preference_summary'] = dict(analysis_metadata.get('preference_summary') or preference_summary or {})
             _multi_result_cache['word_timings'] = list(_word_timings or [])
+            _multi_result_cache['requested_target_duration'] = target_duration
+            _multi_result_cache['ai_target_duration'] = _ai_target_duration
+            _multi_result_cache['duration_speed_factor'] = _planned_speed_factor
             # 保存SRT内容
             if srt_path and os.path.exists(srt_path):
                 with open(srt_path, "r", encoding="utf-8") as _f:
@@ -4749,17 +4781,18 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     import ai_clipper as _ai_mod
     preference_summary = {}
     analysis_metadata = {}
-    _ai_mod._AI_TARGET_DURATION = target_duration
-    if target_duration <= 40:
-        _ai_mod._AI_CLIP_COUNT = "5-8"
-    elif target_duration >= 100:
-        _ai_mod._AI_CLIP_COUNT = "12-18"
-    elif target_duration >= 80:
-        _ai_mod._AI_CLIP_COUNT = "10-15"
-    elif target_duration >= 50:
-        _ai_mod._AI_CLIP_COUNT = "8-13"
-    else:
-        _ai_mod._AI_CLIP_COUNT = "6-10"
+    _ai_target_duration, _planned_speed_factor = _ai_target_duration_for_final_duration(
+        target_duration,
+        dedup_preset,
+        dedup_video_options,
+    )
+    if abs(_planned_speed_factor - 1.0) > 0.01:
+        _log(
+            f"AI选片时长折算: 成片目标{target_duration}s × 预计变速{_planned_speed_factor:.2f}x "
+            f"→ AI按原片约{_ai_target_duration}s选片"
+        )
+    _ai_mod._AI_TARGET_DURATION = _ai_target_duration
+    _ai_mod._AI_CLIP_COUNT = _ai_mod.target_clip_count_text(_ai_target_duration)
 
     if num_versions and num_versions > 1 and not _clips_only:
         _log(f"混剪多版本: 当前长素材多版本仍在优化，暂按单版本输出（请求 {num_versions} 版）")
@@ -4776,7 +4809,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 focus_hint=focus_hint,
                 num_versions=num_versions,
                 ai_controls=ai_controls,
-                target_duration=target_duration,
+                target_duration=_ai_target_duration,
             )
             versions_data = list((multi_result or {}).get("versions") or [])
         except Exception as e:
@@ -4847,7 +4880,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           force_category=force_category,
                                           focus_hint=focus_hint,
                                           merge_mode=True,
-                                          target_duration=target_duration,
+                                          target_duration=_ai_target_duration,
                                           ai_controls=ai_controls,
                                           word_timings=_mix_word_timings)
         try:
@@ -5089,73 +5122,38 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         })
         tc += 1
 
-    if len(video_list) > 1 and len({c["source"] for c in all_clips_meta}) <= 1:
+    if len(video_list) > 1 and all_clips_meta and len({c["source"] for c in all_clips_meta}) <= 1:
         used_sources = {c["source"] for c in all_clips_meta}
-        used_keys = {
-            (c["source"], round(float(c.get("start", 0)), 1), round(float(c.get("end", 0)), 1))
-            for c in all_clips_meta
-        }
-        added = 0
-        for src_idx, vp in enumerate(video_list):
-            if vp in used_sources:
-                continue
-            candidates = []
-            rejected_balance = {}
-            for entry in _mix_srt_entries:
-                if int(entry.get("source_idx", -1)) != src_idx:
-                    continue
-                _start = float(entry.get("start", 0))
-                _end = float(entry.get("end", _start))
-                _duration = max(0.0, _end - _start)
-                _text = str(entry.get("text", "") or "").strip()
-                _ok, _reason, _quality_score = _mix_source_balance_candidate_quality(_text, _duration)
-                if not _ok:
-                    rejected_balance[_reason] = rejected_balance.get(_reason, 0) + 1
-                    continue
-                entry = dict(entry)
-                entry["_source_balance_score"] = _quality_score
-                entry["_source_balance_reason"] = _reason
-                candidates.append(entry)
-            candidates.sort(
-                key=lambda entry: (
-                    float(entry.get("_source_balance_score", 0)),
-                    min(12.0, max(0.0, float(entry.get("end", 0)) - float(entry.get("start", 0)))),
-                    len(_norm_mix_text(entry.get("text", ""))),
-                ),
-                reverse=True,
-            )
-            if not candidates:
-                detail = "、".join(f"{reason}{count}" for reason, count in sorted(rejected_balance.items(), key=lambda item: -item[1])[:4])
-                _log(f"混剪来源均衡: V{src_idx+1} 未找到合格补片" + (f"（跳过: {detail}）" if detail else ""))
-                continue
-            for entry in candidates:
-                start = float(entry.get("start", 0))
-                end = float(entry.get("end", start))
-                duration = max(0.0, end - start)
-                text = str(entry.get("text", "") or "").strip()
-                key = (vp, round(start, 1), round(end, 1))
-                if key in used_keys or duration < 2.0 or not _norm_mix_text(text):
-                    continue
-                all_clips_meta.append({
-                    "idx": tc,
-                    "type": "product",
-                    "text": f"[V{src_idx+1}] {text}",
-                    "start": start,
-                    "end": end,
-                    "score": 70,
-                    "duration": duration,
-                    "source": vp,
-                    "source_balance": True,
-                })
-                used_sources.add(vp)
-                used_keys.add(key)
-                tc += 1
-                added += 1
-                _log(f"混剪来源均衡: AI 只命中单一素材，已从 V{src_idx+1} 补入 {start:.1f}-{end:.1f}s（{entry.get('_source_balance_reason', '卖点')}）")
-                break
-        if added:
-            _log(f"混剪来源均衡: 补入 {added} 个素材来源片段")
-            all_clips_meta = _mix_reclose_after_source_balance(all_clips_meta)
+        missing_sources = [
+            f"V{src_idx + 1}"
+            for src_idx, vp in enumerate(video_list)
+            if vp not in used_sources
+        ]
+        suffix = f"；未命中 {'、'.join(missing_sources)}" if missing_sources else ""
+        _log(
+            "混剪来源均衡: AI只命中单一素材，已保留AI原叙事，"
+            "不再由程序补片或重排"
+            + suffix
+        )
+
+    _mapped_total = _mix_meta_total(all_clips_meta)
+    try:
+        _mapped_low, _mapped_high = _ai_mod._multi_version_target_bounds(_ai_target_duration)
+    except Exception:
+        try:
+            _target_seconds = float(_ai_target_duration or target_duration or 60)
+        except Exception:
+            _target_seconds = 60.0
+        _mapped_low = max(25.0, _target_seconds - max(5.0, _target_seconds / 6.0))
+        _mapped_high = _target_seconds + max(5.0, _target_seconds / 6.0)
+    _short_gap = max(3.0, float(_ai_target_duration or target_duration or 60) * 0.08)
+    if _mapped_total + _short_gap < float(_mapped_low):
+        _duration_error = (
+            f"AI选片时长不足: {len(all_clips_meta)}段/{_mapped_total:.1f}s，"
+            f"低于目标下限{float(_mapped_low):.0f}s，拒绝输出半成品"
+        )
+        _log(_duration_error)
+        raise RuntimeError(_duration_error)
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
 
@@ -5179,6 +5177,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _multi_result_cache["topic_coverage_summary"] = dict(analysis_metadata.get("topic_coverage_summary") or {})
             _multi_result_cache["preference_summary"] = dict(analysis_metadata.get("preference_summary") or preference_summary or {})
             _multi_result_cache["word_timings"] = list(_mix_word_timings or [])
+            _multi_result_cache["requested_target_duration"] = target_duration
+            _multi_result_cache["ai_target_duration"] = _ai_target_duration
+            _multi_result_cache["duration_speed_factor"] = _planned_speed_factor
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": True, "clips_cached": True}
 

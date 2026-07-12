@@ -53,6 +53,8 @@ INTEGRITY_FILES = [
     "web_client/server.py",
     "web_client/frontend/index.html",
     "web_client/frontend/assets/app.js",
+    "web_client/tools/douyin_active_product_probe_poc.py",
+    "web_client/tools/douyin_chrome_live_poc.py",
 ]
 
 RECOVERY_FILES = INTEGRITY_FILES + [
@@ -61,6 +63,8 @@ RECOVERY_FILES = INTEGRITY_FILES + [
     "app/keywords.json",
     "app/volcengine_asr.py",
     "web_client/frontend/assets/styles.css",
+    "web_client/tools/douyin_active_product_probe_poc.py",
+    "web_client/tools/douyin_chrome_live_poc.py",
 ]
 
 

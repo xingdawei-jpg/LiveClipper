@@ -596,6 +596,14 @@ def log(message: str) -> None:
     try:
         print(line, flush=True)
         return
+    except UnicodeEncodeError:
+        try:
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            safe_line = line.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            print(safe_line, flush=True)
+            return
+        except Exception:
+            pass
     except (BrokenPipeError, OSError, ValueError):
         pass
     fallback = os.environ.get("LIVECLIPPER_TOOL_STDIO_FALLBACK_LOG", "").strip()
