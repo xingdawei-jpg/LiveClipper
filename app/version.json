@@ -1,8 +1,8 @@
 {
-  "version": "2026.7.13.2",
-  "latest_version": "2026.7.13.2",
+  "version": "2026.7.13.3",
+  "latest_version": "2026.7.13.3",
   "files": {
-    "app/ai_clipper.py": "af79f8782d284ea0349f09dc3dbe9f2f1537f5395558a3d0e958a4f9c3fbbc37",
+    "app/ai_clipper.py": "706c2450fd10d3249ddb3082a70cd8c9925e166fee176c391c35094b946a10f8",
     "app/cutter_logic.py": "2c52c9670b969edf175a5be9fe85a2d3cad824effd420060c825c9052e98b935",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
     "web_client/server.py": "2eaab37cb6e918ca40f60de760e1880104312bf25a2c177326741f83e0856050",
@@ -16,9 +16,9 @@
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "433dcf8f24648b9ee85f5efb627a754f7fad185b99553bc2bcba3566980b0be5"
   },
-  "release_notes": "修复混剪 AI 选片时好时坏：Hook略超、单段略长、总时长略超等提示级问题不再触发反复重试并误判失败；仅半句、违禁、结构错误和严重时长不足会交回AI修复。",
+  "release_notes": "修复短素材 AI 预览反复失败：当清洗后有效安全内容不足目标时长，但 AI 已返回完整安全片段时，返回最佳 AI 短片单并明确提示，不再误报未返回合格片单。",
   "update_url": "",
-  "update_message": "修复混剪 AI 选片时好时坏：Hook略超、单段略长、总时长略超等提示级问题不再触发反复重试并误判失败；仅半句、违禁、结构错误和严重时长不足会交回AI修复。",
+  "update_message": "修复短素材 AI 预览反复失败：当清洗后有效安全内容不足目标时长，但 AI 已返回完整安全片段时，返回最佳 AI 短片单并明确提示，不再误报未返回合格片单。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-13 01:27:17"
+  "updated_at": "2026-07-13 01:43:46"
 }

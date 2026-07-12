@@ -4138,6 +4138,25 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
     }
 
 
+def _director_short_fallback_floor(target_duration):
+    try:
+        target = float(target_duration or 60)
+    except Exception:
+        target = 60.0
+    if target <= 20:
+        return max(8.0, target * 0.45)
+    if target <= 30:
+        return 12.0
+    return max(20.0, target * 0.45)
+
+
+def _director_only_duration_short_issue(audit):
+    issues = [str(item or "") for item in ((audit or {}).get("issues") or [])]
+    if not (audit or {}).get("duration_short") or not issues:
+        return False
+    return all("低于目标下限" in item or "至少还需补足" in item for item in issues)
+
+
 def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec):
     skeleton = []
     for idx, clip in enumerate(clips or [], 1):
@@ -4281,6 +4300,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_focus_hint = focus_hint
     _director_focus_summary = {}
     _director_fallback_clips = []
+    _director_short_fallback_clips = []
+    _director_short_fallback_total = 0.0
     _director_stage = "首次完整编排"
     _director_format_retry_used = False
     _director_narrative_repair_used = False
@@ -4365,6 +4386,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _director_has_hard_issue = bool(_director_hard_issues or _director_audit.get("duration_short"))
             if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
+            if clips and _director_only_duration_short_issue(_director_audit):
+                _short_total = float(_director_audit.get("total_duration") or 0.0)
+                _short_floor = _director_short_fallback_floor(_AI_TARGET_DURATION)
+                if _short_total >= _short_floor and _short_total > _director_short_fallback_total:
+                    _director_short_fallback_clips = list(clips)
+                    _director_short_fallback_total = _short_total
             if (
                 _director_audit.get("needs_repair")
                 and not _director_narrative_repair_used
@@ -4890,7 +4917,22 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 f"目标下限{_fallback_duration['low']:.0f}s）"
             )
             return _director_fallback_clips
-        _log("AI两次编排均未返回可用片单")
+        if _director_short_fallback_clips:
+            _fallback_duration = _director_duration_status(_director_short_fallback_clips, _AI_TARGET_DURATION)
+            _set_last_topic_coverage_summary(_topic_coverage_summary(
+                _director_short_fallback_clips,
+                _current_focus_used_label(),
+                _AI_TARGET_DURATION,
+                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
+            ))
+            _record_history_if_needed(_director_short_fallback_clips)
+            _log(
+                "AI有效内容不足目标时长，使用最佳AI短片单"
+                f"（{len(_director_short_fallback_clips)}段/{_fallback_duration['total']:.1f}s，"
+                f"目标下限{_fallback_duration['low']:.0f}s）；未使用关键词兜底"
+            )
+            return _director_short_fallback_clips
+        _log("AI编排未返回可用片单")
         return []
 
     # 用最好的结果(不硬拒绝)
