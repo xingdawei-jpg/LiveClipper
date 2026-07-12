@@ -143,6 +143,69 @@ def _clip_preview_exact(clip):
     return any(isinstance(item, dict) and item.get("preview_exact") for item in clip)
 
 
+def _infer_mix_source_idx_from_srt(text, start, end, srt_entries):
+    """Resolve a markerless mix clip only when its words identify one source."""
+    import difflib
+
+    def _normalized(value):
+        value = re.sub(r"\[V\d+\]\s*", "", str(value or ""), flags=re.I).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+    clip_text = _normalized(text)
+    if not clip_text or not srt_entries:
+        return -1
+
+    clip_start = float(start)
+    clip_end = float(end)
+    clip_mid = (clip_start + clip_end) / 2.0
+    best_by_source = {}
+    for entry in srt_entries:
+        entry_text = _normalized(entry.get("text", ""))
+        if not entry_text:
+            continue
+        ratio = difflib.SequenceMatcher(None, clip_text, entry_text).ratio()
+        contained = entry_text in clip_text or clip_text in entry_text
+        if contained:
+            ratio = max(ratio, 0.96)
+        # Every source starts at zero, so matching timestamps cannot identify a
+        # source by themselves. Require meaningful text evidence first.
+        if ratio < 0.45:
+            continue
+
+        entry_start = float(entry.get("start", 0))
+        entry_end = float(entry.get("end", entry_start))
+        overlap = max(0.0, min(clip_end, entry_end) - max(clip_start, entry_start))
+        shorter_duration = max(0.2, min(clip_end - clip_start, entry_end - entry_start))
+        time_score = min(0.08, overlap / shorter_duration * 0.08) if overlap > 0 else 0.0
+        mid_diff = abs(clip_mid - ((entry_start + entry_end) / 2.0))
+        if mid_diff <= 1.5:
+            time_score += 0.04
+        score = ratio + time_score
+        source_idx = int(entry.get("source_idx", -1))
+        if source_idx < 0:
+            continue
+        previous = best_by_source.get(source_idx)
+        candidate = (score, ratio, contained)
+        if previous is None or candidate[0] > previous[0]:
+            best_by_source[source_idx] = candidate
+
+    ranked = sorted(
+        ((score, ratio, contained, source_idx) for source_idx, (score, ratio, contained) in best_by_source.items()),
+        reverse=True,
+    )
+    if not ranked:
+        return -1
+    best_score, best_ratio, best_contained, best_idx = ranked[0]
+    if best_ratio < 0.45:
+        return -1
+    if len(ranked) > 1:
+        next_score, _next_ratio, next_contained, _next_idx = ranked[1]
+        clearly_stronger_containment = best_contained and not next_contained
+        if best_score - next_score < 0.08 and not clearly_stronger_containment:
+            return -1
+    return best_idx
+
+
 def _get_video_encoder():
     global _hw_encoder_checked, _hw_encoder
     if not _hw_encoder_checked:
@@ -4862,37 +4925,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         return True, "+".join(matched_groups[:3]), score
 
     def _infer_source_idx_from_srt(txt, start, end):
-        import difflib
-        norm_clip = _norm_mix_text(txt)
-        if not norm_clip or not _mix_srt_entries:
-            return -1
-        clip_mid = (float(start) + float(end)) / 2.0
-        best_score = 0.0
-        best_idx = -1
-        for entry in _mix_srt_entries:
-            ent_start = float(entry.get("start", 0))
-            ent_end = float(entry.get("end", ent_start))
-            ent_text = entry.get("text", "")
-            norm_entry = _norm_mix_text(ent_text)
-            if not norm_entry:
-                continue
-            overlap = max(0.0, min(float(end), ent_end) - max(float(start), ent_start))
-            ent_mid = (ent_start + ent_end) / 2.0
-            mid_diff = abs(clip_mid - ent_mid)
-            ratio = difflib.SequenceMatcher(None, norm_clip, norm_entry).ratio()
-            if norm_entry in norm_clip or norm_clip in norm_entry:
-                ratio = max(ratio, 0.96)
-            score = ratio
-            if overlap > 0:
-                score += 0.55
-            if mid_diff <= 1.5:
-                score += 0.25
-            elif mid_diff > max(12.0, (float(end) - float(start)) + 6.0):
-                score -= 0.25
-            if score > best_score:
-                best_score = score
-                best_idx = int(entry.get("source_idx", -1))
-        return best_idx if best_score >= 0.55 else -1
+        return _infer_mix_source_idx_from_srt(txt, start, end, _mix_srt_entries)
 
     def _source_path_key(value):
         raw = str(value or "").strip().strip('"')
@@ -5041,8 +5074,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             if _src_idx >= 0:
                 _log(f"Source map: 片段缺少[Vn]标记，已按SRT匹配到 V{_src_idx+1} ({start:.1f}-{end:.1f}s)")
         if _src_idx < 0:
-            _src_idx = 0
-            _log(f"Source map: 片段缺少[Vn]标记且无法匹配，暂按 V1 处理 ({start:.1f}-{end:.1f}s)")
+            _log(
+                f"Source map: 丢弃无法确认素材来源的片段，避免 V1 画面与字幕错配 "
+                f"({start:.1f}-{end:.1f}s | {_strip_mix_marker(text)[:36]})"
+            )
+            continue
         vp = video_list[_src_idx]
         all_clips_meta.append({
             "idx": tc, "type": c_type, "text": text,

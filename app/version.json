@@ -1,9 +1,9 @@
 {
-  "version": "2026.7.12.3",
-  "latest_version": "2026.7.12.3",
+  "version": "2026.7.12.4",
+  "latest_version": "2026.7.12.4",
   "files": {
     "app/ai_clipper.py": "d0ea126c4d2cb511cde02184bc61896b6f798964cc2246777867d7c0a0d6661e",
-    "app/cutter_logic.py": "1d4023d96a4492f33b5b41fcc7b6a9481fb9ee4fdb6602aa8accbe90f6464af4",
+    "app/cutter_logic.py": "42af451ab525e229eaa4e2d4b199733f483c9ab9f647b127468e29521264ebb5",
     "app/updater.py": "e5a173fd4b3bbc2b3d5e2c2d36450f9dff0c76c63926cf0aa68b87453a8e896c",
     "web_client/server.py": "e6bceb7940b77891ce6b011f38560d9039893a86185c7048583634d75e2ab189",
     "web_client/frontend/index.html": "1f3217d0f280e121ada2b02c95567160bb87923a0b8e6ba5acab7c1307044131",
@@ -14,9 +14,9 @@
     "app/volcengine_asr.py": "8fb4a78897ab0aad0bff58539414f6134a2b31b7e0dbe65252c09da2a29ed5da",
     "web_client/frontend/assets/styles.css": "e36e3c4d3ff68b157748e7c14d23e0b22663ebd0531cf06e3b119ebcc3791951"
   },
-  "release_notes": "修复 2026.7.12.2 部分更新后仍加载旧预览模块；恢复更新仅重下 AI 与预览关键文件，并加入同版本完整性自检和 runtime_integrity 诊断。",
+  "release_notes": "修复三素材混剪中无来源标记片段被错误映射到 V1，来源判断改为文字证据优先，无法确认时安全丢弃，避免预览画面与字幕错配。",
   "update_url": "",
-  "update_message": "修复 2026.7.12.2 部分更新后仍加载旧预览模块；恢复更新仅重下 AI 与预览关键文件，并加入同版本完整性自检和 runtime_integrity 诊断。",
+  "update_message": "修复三素材混剪中无来源标记片段被错误映射到 V1，来源判断改为文字证据优先，无法确认时安全丢弃，避免预览画面与字幕错配。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -28,5 +28,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 10:42:35"
+  "updated_at": "2026-07-12 13:03:03"
 }
