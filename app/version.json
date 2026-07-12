@@ -1,12 +1,12 @@
 {
-  "version": "2026.7.12.12",
-  "latest_version": "2026.7.12.12",
+  "version": "2026.7.12.14",
+  "latest_version": "2026.7.12.14",
   "files": {
-    "app/ai_clipper.py": "02fe30e075800e02b2735e108818ae4e197ee41fd4a7f15897053a031bdbc597",
-    "app/cutter_logic.py": "450c6d4b42cdae369b30dc8cd686bf2bc4e9d184b8ae1ed734e5e842c7eaeb56",
+    "app/ai_clipper.py": "8f98e15d029062edd88fb2ff31862a96353a7ccea88207f0bfb6e657ecb5d0ad",
+    "app/cutter_logic.py": "b295f8b73f31a8d8472e072318b066a09b7e0218b09f586396c046ed76ae9266",
     "app/updater.py": "b86420b096f360971b80cb03c7959926f06723ee406a684f11f06085664fc921",
-    "web_client/server.py": "ef2588dea91a0e4e47c09ec4d42fc5ed86793eff8d22b881bae7fe134deb3b89",
-    "web_client/frontend/index.html": "1b2a18feb3e53f454f96dc76ba57ea1633a0d13f4dbc8ac67b4ddf3657688dfb",
+    "web_client/server.py": "2eaab37cb6e918ca40f60de760e1880104312bf25a2c177326741f83e0856050",
+    "web_client/frontend/index.html": "4ab638a37d4240df46e1b6daf7a3b2f670aac9870badac6a7d2d2b3829a21789",
     "web_client/frontend/assets/app.js": "4c64d7a7e8ad3df0076bfe4016cf9451b3ce60cbda8196201a4254cd2281a813",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
     "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc",
@@ -16,9 +16,9 @@
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b",
     "web_client/frontend/assets/styles.css": "433dcf8f24648b9ee85f5efb627a754f7fad185b99553bc2bcba3566980b0be5"
   },
-  "release_notes": "修复混剪素材卡片布局：压缩分组按钮和素材操作区间距，避免混剪页面上方卡片撑高、挤压内容。",
+  "release_notes": "修复智能选片预览 target_duration 字段错误；AI 选片失败时不再进入关键词兜底；导演模式先裁掉弱开头词再做半句质检。",
   "update_url": "",
-  "update_message": "修复混剪素材卡片布局：压缩分组按钮和素材操作区间距，避免混剪页面上方卡片撑高、挤压内容。",
+  "update_message": "修复智能选片预览 target_duration 字段错误；AI 选片失败时不再进入关键词兜底；导演模式先裁掉弱开头词再做半句质检。",
   "integrity_files": [
     "app/ai_clipper.py",
     "app/cutter_logic.py",
@@ -32,5 +32,5 @@
   "recovery_update": true,
   "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
   "force_update": false,
-  "updated_at": "2026-07-12 22:37:00"
+  "updated_at": "2026-07-12 23:03:44"
 }

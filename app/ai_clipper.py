@@ -4329,6 +4329,10 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             # restore clips cut inside a single SRT timestamp; no local
             # completion, insertion, merging, or story reordering.
             clips = _restore_director_clip_srt_boundaries(clips, cleaned_srt, log_fn)
+            # Weak openers such as "然后/而且/但是" are boundary noise, not a
+            # reason to discard the whole sentence. Trim only the leading word
+            # before hard-auditing for real half-sentence boundaries.
+            clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
             if not clips:
                 continue
 

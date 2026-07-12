@@ -2297,14 +2297,10 @@ def process_video(video_path, srt_path=None, output_path=None,
                 analysis_metadata = {}
                 preference_summary = {}
             if not ordered_clips:
-                _log("AI 选片为空，启动兜底逻辑...")
-                ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
+                raise RuntimeError("AI未返回合格片单，已停止，避免关键词兜底生成低质量预览/成片")
         except Exception as e:
-            _log(f"AI 调用失败: {e}，启动兜底逻辑...")
-            try:
-                ordered_clips = fallback_clips(srt_path, log_fn=_log, force_category=force_category)
-            except Exception:
-                ordered_clips = parse_srt_clips(srt_path, log_fn=_log)
+            _log(f"AI 选片失败: {e}")
+            raise
     else:
         ordered_clips = parse_srt_clips(srt_path, log_fn=_log)
     if ordered_clips and ai_is_enabled():

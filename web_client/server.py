@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -133,6 +133,19 @@ from ai_model_config import (
 
 
 app = FastAPI(title="LiveClipper Web Client", version="0.1.0")
+
+
+@app.middleware("http")
+async def _frontend_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path in {"", "/"} or path.endswith("/index.html") or re.search(r"/assets/.+\.(?:js|css)$", path):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 _LOGS: deque[dict[str, Any]] = deque(maxlen=1500)
@@ -6174,8 +6187,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
-        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.target_duration)
-        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.target_duration)
+        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.duration)
+        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.duration)
         dedup_summary["duration_speed_factor"] = cutter_mod._multi_result_cache.get("duration_speed_factor", 1.0)
         emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
         preview_quality = _preview_quality_summary(public_clips)
@@ -9188,8 +9201,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
-        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.duration)
-        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.duration)
+        dedup_summary["requested_target_duration"] = cutter_mod._multi_result_cache.get("requested_target_duration", payload.target_duration)
+        dedup_summary["ai_target_duration"] = cutter_mod._multi_result_cache.get("ai_target_duration", payload.target_duration)
         dedup_summary["duration_speed_factor"] = cutter_mod._multi_result_cache.get("duration_speed_factor", 1.0)
         emit_log("info", "AI叙事模式: 预览保持AI原始顺序，不做主题补片或角色重排。", scope)
         preview_quality = _preview_quality_summary(public_clips)
