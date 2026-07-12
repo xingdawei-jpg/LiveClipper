@@ -101,7 +101,13 @@ def _app_files() -> list[Path]:
     return result
 
 
-def build_manifest(version: str, release_notes: str, force_update: bool = False, recovery: bool = False) -> dict:
+def build_manifest(
+    version: str,
+    release_notes: str,
+    force_update: bool = False,
+    recovery: bool = False,
+    requires_full_package: bool = False,
+) -> dict:
     files: dict[str, str] = {}
     if recovery:
         for relative in RECOVERY_FILES:
@@ -123,6 +129,7 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False,
         "update_message": release_notes,
         "integrity_files": [name for name in INTEGRITY_FILES if name in files],
         "recovery_update": bool(recovery),
+        "requires_full_package": bool(requires_full_package),
         "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
         "force_update": bool(force_update),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -134,6 +141,7 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--requires-full-package", action="store_true")
     parser.add_argument("--recovery", action="store_true", help="Publish only the critical runtime recovery set.")
     parser.add_argument("--check", action="store_true", help="Do not write; fail if manifest differs.")
     args = parser.parse_args()
@@ -145,7 +153,13 @@ def main() -> int:
             current_updated_at = current_manifest.get("updated_at")
         except Exception:
             current_updated_at = None
-        manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force, args.recovery)
+        manifest = build_manifest(
+            args.version,
+            args.notes or f"v{args.version} update",
+            args.force,
+            args.recovery,
+            args.requires_full_package,
+        )
         if current_updated_at:
             manifest["updated_at"] = current_updated_at
         text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -154,7 +168,13 @@ def main() -> int:
             return 1
         print("app/version.json is up to date.")
         return 0
-    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force, args.recovery)
+    manifest = build_manifest(
+        args.version,
+        args.notes or f"v{args.version} update",
+        args.force,
+        args.recovery,
+        args.requires_full_package,
+    )
     text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
     VERSION_FILE.write_text(text, encoding="utf-8")
     print(f"wrote {VERSION_FILE}")

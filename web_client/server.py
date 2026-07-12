@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -194,6 +195,7 @@ _UPDATE_STATE: dict[str, Any] = {
     "last_result": None,
 }
 _UPDATE_LOCK = threading.Lock()
+_RUNTIME_UPDATER_MODULE: Any = None
 
 
 def _now() -> str:
@@ -9436,6 +9438,8 @@ def runtime() -> dict[str, Any]:
         "license_public_key_suffix": public_key_suffix,
         "supports_web_incremental_updates": _safe_web_incremental_supported(),
         "runtime_integrity": _runtime_integrity_summary(),
+        "server_module_file": str(Path(__file__).resolve()),
+        "batch_resilience_version": 2,
         "mode": "local-web-client",
     }
 
@@ -9524,13 +9528,31 @@ def _runtime_integrity_summary() -> dict[str, Any]:
     return {"ok": not mismatched, "checked": len(targets), "mismatched": mismatched}
 
 
+def _runtime_updater_module():
+    global _RUNTIME_UPDATER_MODULE
+    updater_path = (APP_DIR / "updater.py").resolve()
+    current = _RUNTIME_UPDATER_MODULE
+    if current is not None and Path(str(getattr(current, "__file__", ""))).resolve() == updater_path:
+        return current
+    if not updater_path.exists():
+        raise RuntimeError(f"未找到运行时更新器：{updater_path}")
+    module_name = "_liveclipper_runtime_updater"
+    spec = importlib.util.spec_from_file_location(module_name, updater_path)
+    if not spec or not spec.loader:
+        raise RuntimeError(f"无法加载运行时更新器：{updater_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _RUNTIME_UPDATER_MODULE = module
+    return module
+
+
 @app.get("/api/update/check")
 def check_update_api() -> dict[str, Any]:
     try:
-        from updater import check_update, init_installed_version
-
-        init_installed_version()
-        info = check_update()
+        updater = _runtime_updater_module()
+        updater.init_installed_version()
+        info = updater.check_update()
         if not info:
             return {"ok": True, "update_available": False, "current_version": _load_version()}
         public_info = {
@@ -9539,6 +9561,7 @@ def check_update_api() -> dict[str, Any]:
             "force_update": bool(info.get("force_update", False)),
             "file_count": len(info.get("files") or {}),
             "has_package": bool(info.get("update_url") or info.get("download_url")),
+            "requires_full_package": bool(info.get("requires_full_package", False)),
             "requires_full_package_note": info.get("requires_full_package_note") or "",
             "supports_web_incremental_updates": _safe_web_incremental_supported(),
             "repair_required": bool(info.get("repair_required", False)),
@@ -9558,14 +9581,13 @@ def apply_update_api() -> dict[str, Any]:
         _UPDATE_STATE["last_result"] = None
 
     try:
-        from updater import apply_update_headless, check_update, init_installed_version
-
-        init_installed_version()
-        info = check_update()
+        updater = _runtime_updater_module()
+        updater.init_installed_version()
+        info = updater.check_update()
         if not info:
             result = {"ok": True, "updated": [], "restart_required": False, "msg": "当前已经是最新版本"}
         else:
-            result = apply_update_headless(info)
+            result = updater.apply_update_headless(info)
             if result.get("ok"):
                 if result.get("restart_required"):
                     result["auto_restart"] = _schedule_client_restart()
