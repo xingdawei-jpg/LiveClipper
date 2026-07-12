@@ -8029,7 +8029,11 @@ def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_
     if min_stream_quality:
         cmd += ["--min-stream-quality", min_stream_quality]
     env = os.environ.copy()
-    env.setdefault("PYTHONIOENCODING", "utf-8")
+    # The packaged probe is launched through the frozen desktop executable.
+    # Force child stdio to tolerate Chinese Windows consoles and page titles
+    # containing characters such as U+2022, even if an older bundled probe is used.
+    env["PYTHONIOENCODING"] = "utf-8:replace"
+    env["PYTHONUTF8"] = "1"
     env["LIVECLIPPER_TOOL_STDIO_FALLBACK_LOG"] = str(room_dir / f"{_safe_stem(name)}_active_probe_stdio.log")
     _set_task_progress(task_id, 24, "启动抖音商品时间线探针")
     emit_log("info", "使用 active_product_probe 录制：只接受当前讲解商品强信号，货架列表仅用于补全。", scope)
