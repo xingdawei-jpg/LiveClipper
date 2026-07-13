@@ -1,18 +1,18 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "awaiting-external-distribution",
+  "channel_status": "hold",
   "version": "2026.7.14.1",
   "latest_version": "2026.7.14.1",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
   "minimum_launcher_version": "1.0.0",
   "minimum_updater_version": "1.1.0",
-  "update_strategy": "verified-version-delta-with-full-fallback",
-  "supports_incremental_updates": true,
-  "requires_full_package": false,
-  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
-  "release_notes": "修复缓存清理遗漏：安全清理直播浏览器模型与缓存并保留登录；限制缓存增长；修复数据迁移复制垃圾和更新备份长期残留。",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "Automatic update is paused while rollback diagnostics are reviewed.",
+  "release_notes": "Automatic update is paused while rollback diagnostics are reviewed.",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
@@ -23,25 +23,11 @@
     "size": 579319938,
     "filename": "LiveClipperWeb_2026.7.14.1_full_v3_20260714.zip"
   },
-  "patches": [
-    {
-      "format": "liveclipper-version-delta-v1",
-      "from_version": "2026.7.13.13",
-      "to_version": "2026.7.14.1",
-      "source_layout_version": 3,
-      "target_layout_version": 3,
-      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.1/LiveClipperPatch_2026.7.13.13_to_2026.7.14.1_v3.zip",
-      "sha256": "E994E74DD1AC9119BE03CD9B915B330FDEFF69A78DCAB355338E3ABBAD446B96",
-      "size": 17270744,
-      "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.1_v3.zip",
-      "runtime_payload_files": 5,
-      "stable_payload_files": 0
-    }
-  ],
-  "published_at": "2026-07-14 01:48:22",
+  "patches": [],
+  "published_at": "2026-07-14 07:47:03",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "EB8LKdCT87WZqL23ujbD4IuRPWH2aXe7OMKYTQOExrWoaYg4tE3WXeCeyNx3b4FSbtQYXCmTZNLGrOQoqL/BBg=="
+    "value": "m8K4mmpZI11F7z2CtD3FO6GSG/2EfVEmPqsuF6AGhIaDNWXVqLctICuBNjH6DafKpslQg4UDSEjaNFYc9kvPBQ=="
   }
 }
