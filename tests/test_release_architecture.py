@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,47 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertIsNotNone(updater._select_delta_patch(info, "2026.7.13.11"))
         self.assertIsNone(updater._select_delta_patch(info, "2026.7.13.10"))
         self.assertFalse(updater.delta_runtime_supported())
+
+    def test_old_updater_version_forces_full_package_route(self) -> None:
+        updater = _load_updater()
+        release = {
+            "version": "2026.7.13.14",
+            "minimum_updater_version": "1.1.0",
+            "patches": [
+                {
+                    "format": updater.DELTA_FORMAT,
+                    "from_version": "2026.7.13.13",
+                    "to_version": "2026.7.13.14",
+                    "url": "https://example.invalid/patch.zip",
+                    "sha256": "a" * 64,
+                    "size": 123,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            install_root = Path(temp)
+            install_manifest = install_root / updater.INSTALL_MANIFEST
+            install_manifest.write_text(
+                '{"updater_version":"1.0.0"}',
+                encoding="utf-8",
+            )
+            with (
+                patch.object(updater, "_install_root", return_value=install_root),
+                patch.object(updater, "delta_runtime_supported", return_value=True),
+            ):
+                old_route = updater._with_update_route(dict(release), "2026.7.13.13")
+                self.assertTrue(old_route["requires_full_package"])
+                self.assertFalse(old_route["supports_incremental_updates"])
+                install_manifest.write_text(
+                    '{"updater_version":"1.1.0"}',
+                    encoding="utf-8",
+                )
+                current_route = updater._with_update_route(
+                    dict(release),
+                    "2026.7.13.13",
+                )
+                self.assertFalse(current_route["requires_full_package"])
+                self.assertTrue(current_route["supports_incremental_updates"])
 
     def test_unmatched_update_falls_back_to_full_package(self) -> None:
         updater = _load_updater()

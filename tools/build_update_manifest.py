@@ -107,7 +107,7 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
         "requires_full_package": False,
         "requires_full_package_note": "没有匹配当前版本的签名补丁或安装完整性异常时，才需要完整包。",
         "minimum_launcher_version": "1.0.0",
-        "minimum_updater_version": "1.0.0",
+        "minimum_updater_version": "1.1.0",
         "release_page_url": RELEASE_PAGE_URL,
         "package_url": "",
         "package_sha256": "",

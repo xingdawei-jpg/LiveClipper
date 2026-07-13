@@ -29,6 +29,7 @@ RUNTIME_LAYOUT_VERSION = 3
 DELTA_FORMAT = "liveclipper-version-delta-v1"
 UPDATE_AGENT_RELATIVE = Path("updater") / "LiveClipperUpdater.exe"
 UPDATE_PUBLIC_KEY_RELATIVE = Path("updater") / "release_update_public_key.pem"
+INSTALL_MANIFEST = "install_manifest.json"
 
 
 def _runtime_root() -> Path:
@@ -113,6 +114,22 @@ def parse_version(version_str: Any) -> tuple[int, ...]:
 
 def is_newer(remote_version: Any, local_version: Any) -> bool:
     return parse_version(remote_version) > parse_version(local_version)
+
+
+def _installed_updater_version() -> str:
+    try:
+        data = json.loads(
+            (_install_root() / INSTALL_MANIFEST).read_text(encoding="utf-8-sig")
+        )
+        return str(data.get("updater_version") or "")
+    except Exception:
+        return ""
+
+
+def _updater_meets_minimum(info: dict[str, Any]) -> bool:
+    required = str(info.get("minimum_updater_version") or "1.0.0")
+    installed = _installed_updater_version()
+    return bool(installed and parse_version(installed) >= parse_version(required))
 
 
 def init_installed_version() -> str:
@@ -203,6 +220,7 @@ def _normalize_release(data: dict[str, Any]) -> dict[str, Any]:
     result["schema_version"] = int(result.get("schema_version") or 1)
     result.setdefault("update_strategy", "verified-version-delta")
     result.setdefault("requires_full_package", False)
+    result.setdefault("minimum_updater_version", "1.0.0")
     result.setdefault("release_page_url", DEFAULT_RELEASE_PAGE)
     result.setdefault(
         "requires_full_package_note",
@@ -280,7 +298,11 @@ def _manifest_integrity_mismatches(manifest: dict[str, Any]) -> list[str]:
 
 def _with_update_route(release: dict[str, Any], local_version: str) -> dict[str, Any]:
     patch = _select_delta_patch(release, local_version)
-    supported = bool(patch and delta_runtime_supported())
+    supported = bool(
+        patch
+        and delta_runtime_supported()
+        and _updater_meets_minimum(release)
+    )
     release["selected_patch"] = patch
     release["supports_incremental_updates"] = supported
     release["requires_full_package"] = not supported
@@ -403,6 +425,8 @@ def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]
         return _full_package_result(info)
     if not delta_runtime_supported():
         return _full_package_result(info, "当前客户端不是 Runtime V3，请使用架构桥接包完成本次升级。")
+    if not _updater_meets_minimum(info):
+        return _full_package_result(info, "当前更新器版本过旧，请安装一次完整包后再使用增量更新。")
 
     target_version = _manifest_version(info)
     download_root = _download_root(target_version)
@@ -432,6 +456,7 @@ def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]
             "--expected-patch-sha256",
             str(patch["sha256"]),
             "--non-interactive",
+            "--show-progress",
         ],
         cwd=str(download_root),
         stdin=subprocess.DEVNULL,
@@ -450,7 +475,7 @@ def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]
         "patch_size": int(patch["size"]),
         "updated": [],
         "failed": [],
-        "msg": "增量包已验证，客户端即将退出并切换到新版本。",
+        "msg": "增量包已验证，客户端即将退出；更新进度窗口会持续显示，完成后自动启动新版本。",
     }
 
 

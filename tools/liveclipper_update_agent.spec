@@ -22,6 +22,7 @@ a = Analysis(
         "tkinter",
         "tkinter.filedialog",
         "tkinter.messagebox",
+        "tkinter.ttk",
     ],
     excludes=[
         "numpy",

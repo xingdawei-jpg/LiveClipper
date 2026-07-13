@@ -63,17 +63,21 @@ does not write program files or activate a version.
 The updater runs from a temporary copy after the business runtime exits. It:
 
 1. verifies the outer patch hash and signed patch manifest;
-2. verifies the exact source version and layout;
-3. constructs a new immutable version directory;
-4. hard-links unchanged files when possible and copies them otherwise;
-5. extracts and verifies changed payload files;
-6. verifies every target runtime file;
-7. updates stable launcher/updater files and the signed install manifest with
-   backup and rollback;
-8. atomically writes current.json with pending=true;
-9. starts the stable launcher.
+2. verifies the exact source version, layout, and signed source manifest;
+3. validates that every target-manifest change has a matching payload file;
+4. constructs a new immutable version directory;
+5. hard-links unchanged files only when signed source and target metadata are
+   identical, without rereading the same NTFS file object;
+6. hashes every changed payload and every copy fallback before activation;
+7. records durable progress and shows a visible progress window;
+8. updates stable launcher/updater files with a per-file rollback journal;
+9. verifies the signed install manifest and stable-file result;
+10. atomically writes current.json with pending=true and starts the launcher.
 
 It never patches an active version in place.
+
+A stable launcher or updater change requires a new full-package baseline. A
+normal V3 delta never replaces the updater that is currently executing.
 
 ## 4. Release trust
 
@@ -167,6 +171,9 @@ version has passed health confirmation.
 - update-engine and runtime-layout versions;
 - signed-delta capability;
 - bundled resource integrity;
-- ignored legacy AppData overlays.
+- ignored legacy AppData overlays;
+- installed launcher and updater versions;
+- the minimum updater version required by the release channel;
+- durable update progress under LocalAppData.
 
 Support decisions use these fields rather than a displayed version alone.

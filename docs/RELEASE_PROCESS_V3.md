@@ -44,10 +44,13 @@ not a valid automatic-update URL.
 11. For a V2 source, build the embedded bridge with tools/build_bridge_exe.py.
 12. Exercise bridge, normal delta, interruption, tamper, and rollback tests.
 13. Run one patch with the updater executable from the exact published source
-    ZIP, not only the Python-level updater tests.
-14. Upload package and patch assets, then verify their remote hashes.
-15. Generate and sign release/stable.json.
-16. Publish the signed channel last.
+    ZIP, not only the Python-level updater tests. Record elapsed time, durable
+    progress, final pointer state, and first-launch health.
+14. Reject a release if the reference-device patch exceeds 60 seconds, shows no
+    visible progress, or rereads unchanged hard-linked runtime files.
+15. Upload package and patch assets, then verify their remote hashes.
+16. Generate and sign release/stable.json.
+17. Publish the signed channel last.
 
 Publishing the channel before all referenced assets are remotely verifiable is
 forbidden.
@@ -61,6 +64,11 @@ A release is accepted only when:
 - the runtime contains no loose business Python duplicates;
 - runtime and install signatures verify with the committed public key;
 - every runtime and stable file matches its signed manifest;
+- every omitted runtime payload has identical signed source/target metadata;
+- changed payloads and copy fallbacks are hash-verified;
+- the installed updater meets the channel minimum updater version;
+- update progress remains visible from process exit through pointer activation;
+- partial stable-file replacement restores every completed replacement;
 - a clean extracted package starts and reports runtime_layout_version=3;
 - /api/runtime reports the expected active directory and version;
 - polluted legacy AppData code directories remain ignored;
@@ -107,3 +115,7 @@ Do not lower the remote version. For a runtime regression:
 
 User-data migrations remain backward compatible for one retained release or
 provide their own transactional backup and restore procedure.
+
+When the launcher or updater binary changes, publish a new full package and make
+that package the next incremental baseline. Do not attempt to replace a running
+stable updater through a normal V3-to-V3 delta.

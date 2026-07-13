@@ -6,16 +6,19 @@ import argparse
 import ctypes
 import json
 import os
+import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 APP_IMPORT_DIR = Path(__file__).resolve().parents[1] / "app"
 if APP_IMPORT_DIR.is_dir() and str(APP_IMPORT_DIR) not in sys.path:
@@ -38,6 +41,7 @@ INSTALL_MANIFEST = "install_manifest.json"
 STATE_FILE = "current.json"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,79}$")
+ProgressCallback = Callable[[int, str], None]
 
 
 class UpdateError(RuntimeError):
@@ -65,13 +69,15 @@ def _safe_relative_path(value: Any) -> str:
 
 def _target_path(root: Path, relative: str) -> Path:
     safe = _safe_relative_path(relative)
-    root = root.resolve()
-    target = (root / Path(*PurePosixPath(safe).parts)).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise UpdateError(f"path escapes root: {relative}") from exc
+    root = Path(os.path.abspath(root))
+    target = root / Path(*PurePosixPath(safe).parts)
+    if os.path.commonpath((str(root), str(target))) != str(root):
+        raise UpdateError(f"path escapes root: {relative}")
     return target
+
+
+def _manifest_path(root: Path, validated_relative: str) -> Path:
+    return root / Path(*PurePosixPath(validated_relative).parts)
 
 
 def _data_root() -> Path:
@@ -88,6 +94,11 @@ def _write_log(message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+
+
+def _emit_progress(callback: ProgressCallback | None, percent: int, message: str) -> None:
+    if callback is not None:
+        callback(max(0, min(100, int(percent))), message)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -262,22 +273,31 @@ def _detect_source(
     return 2, install_root.resolve(), None, None
 
 
-def _verify_file(path: Path, meta: dict[str, Any], label: str) -> None:
-    if not path.is_file():
-        raise UpdateError(f"{label} is missing: {path.name}")
+def _verify_file_size(path: Path, meta: dict[str, Any], label: str) -> None:
+    try:
+        file_stat = path.stat()
+    except OSError as exc:
+        raise UpdateError(f"{label} is missing: {path.name}") from exc
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise UpdateError(f"{label} is not a regular file: {path.name}")
     expected_size = meta.get("size")
-    if expected_size is None or path.stat().st_size != int(expected_size):
+    if expected_size is None or file_stat.st_size != int(expected_size):
         raise UpdateError(f"{label} size mismatch: {path.name}")
+
+
+def _verify_file(path: Path, meta: dict[str, Any], label: str) -> None:
+    _verify_file_size(path, meta, label)
     if sha256_file(path) != str(meta.get("sha256") or "").lower():
         raise UpdateError(f"{label} hash mismatch: {path.name}")
 
 
-def _copy_or_link(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+def _copy_or_link(source: Path, destination: Path) -> bool:
     try:
         os.link(source, destination)
+        return True
     except OSError:
         shutil.copy2(source, destination)
+        return False
 
 
 def _extract_member(
@@ -304,20 +324,41 @@ def _construct_runtime(
     runtime_manifest: dict[str, Any],
     public_key: Path,
     payload: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
+    progress_start: int = 10,
+    progress_end: int = 80,
+    verify_reused: bool = False,
 ) -> None:
     version = _safe_version(runtime_manifest.get("version"))
     files = _validate_runtime_manifest(runtime_manifest, public_key, version)
     destination.mkdir(parents=True, exist_ok=False)
-    for relative, meta in files.items():
-        target = _target_path(destination, relative)
+    source_root = source_root.resolve()
+    destination = destination.resolve()
+    created_parents: set[Path] = set()
+    total = max(1, len(files))
+    last_percent = -1
+    _emit_progress(progress, progress_start, f"正在建立版本 {version}（0/{len(files)}）")
+    for index, (relative, meta) in enumerate(files.items(), start=1):
+        target = _manifest_path(destination, relative)
+        parent = target.parent
+        if parent not in created_parents:
+            parent.mkdir(parents=True, exist_ok=True)
+            created_parents.add(parent)
         payload_meta = payload.get(relative)
         if payload_meta:
             _extract_member(archive, payload_meta.get("archive"), target, payload_meta)
         else:
-            source = _target_path(source_root, relative)
-            _verify_file(source, meta, "source runtime file")
-            _copy_or_link(source, target)
-        _verify_file(target, meta, "constructed runtime file")
+            source = _manifest_path(source_root, relative)
+            hard_linked = _copy_or_link(source, target)
+            if verify_reused or not hard_linked:
+                _verify_file(target, meta, "constructed runtime file")
+            else:
+                _verify_file_size(target, meta, "reused runtime file")
+        percent = progress_start + round((progress_end - progress_start) * index / total)
+        if percent != last_percent:
+            _emit_progress(progress, percent, f"正在建立版本 {version}（{index}/{len(files)}）")
+            last_percent = percent
     _atomic_write_json(destination / RUNTIME_MANIFEST, runtime_manifest)
 
 
@@ -328,8 +369,9 @@ def _verify_runtime_directory(
 ) -> None:
     version = _safe_version(runtime_manifest.get("version"))
     files = _validate_runtime_manifest(runtime_manifest, public_key, version)
+    runtime_root = runtime_root.resolve()
     for relative, meta in files.items():
-        _verify_file(_target_path(runtime_root, relative), meta, "target runtime file")
+        _verify_file(_manifest_path(runtime_root, relative), meta, "target runtime file")
 
 
 def _stage_stable_files(
@@ -351,8 +393,10 @@ def _apply_stable_files(
     staging: Path,
     stable_payload: dict[str, Any],
     backup: Path,
+    operations: list[tuple[str, bool]] | None = None,
 ) -> list[tuple[str, bool]]:
-    operations: list[tuple[str, bool]] = []
+    if operations is None:
+        operations = []
     for relative, meta in stable_payload.items():
         destination = _target_path(install_root, relative)
         staged = _target_path(staging, relative)
@@ -414,6 +458,28 @@ def _install_version_directory(
     return final
 
 
+def _validate_runtime_plan(
+    source_files: dict[str, dict[str, Any]],
+    target_files: dict[str, dict[str, Any]],
+    payload: dict[str, Any],
+) -> None:
+    for relative, payload_meta in payload.items():
+        target_meta = target_files.get(relative)
+        if target_meta is None:
+            raise UpdateError(f"patch payload is not in target manifest: {relative}")
+        normalized_payload = {
+            "sha256": str(payload_meta.get("sha256") or "").lower(),
+            "size": int(payload_meta.get("size") or 0),
+        }
+        if normalized_payload != target_meta:
+            raise UpdateError(f"patch payload does not match target manifest: {relative}")
+    for relative, target_meta in target_files.items():
+        if relative in payload:
+            continue
+        if source_files.get(relative) != target_meta:
+            raise UpdateError(f"patch omits changed runtime file: {relative}")
+
+
 def apply_patch(
     patch_path: Path,
     install_root: Path,
@@ -421,13 +487,17 @@ def apply_patch(
     *,
     expected_patch_sha256: str = "",
     launch_after: bool = True,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     patch_path = patch_path.resolve()
     install_root = install_root.resolve()
+    _emit_progress(progress, 1, "正在校验更新包")
+    patch_sha256 = sha256_file(patch_path)
     if expected_patch_sha256:
-        if sha256_file(patch_path) != expected_patch_sha256.strip().lower():
+        if patch_sha256 != expected_patch_sha256.strip().lower():
             raise UpdateError("patch archive SHA256 mismatch")
     manifest = _load_patch(patch_path, public_key)
+    _emit_progress(progress, 5, "更新包签名校验通过")
     from_version = _safe_version(manifest.get("from_version"))
     to_version = _safe_version(manifest.get("to_version"))
     source_layout, source_root, local_source_manifest, old_state = _detect_source(
@@ -437,13 +507,20 @@ def apply_patch(
     )
     if source_layout != int(manifest.get("source_layout_version") or 0):
         raise UpdateError("patch source layout mismatch")
+    _emit_progress(progress, 8, "当前版本校验通过")
 
     source_manifest = manifest.get("source_runtime_manifest")
     target_manifest = manifest.get("target_runtime_manifest")
     if not isinstance(source_manifest, dict) or not isinstance(target_manifest, dict):
         raise UpdateError("patch runtime manifests are missing")
-    _validate_runtime_manifest(source_manifest, public_key, from_version)
-    _validate_runtime_manifest(target_manifest, public_key, to_version)
+    source_files = _validate_runtime_manifest(source_manifest, public_key, from_version)
+    target_files = _validate_runtime_manifest(target_manifest, public_key, to_version)
+    runtime_payload = manifest.get("runtime_payload") or {}
+    _validate_runtime_plan(
+        source_files,
+        target_files,
+        runtime_payload,
+    )
     target_install_manifest = manifest.get("target_install_manifest")
     if not isinstance(target_install_manifest, dict):
         raise UpdateError("patch install manifest is missing")
@@ -485,6 +562,10 @@ def apply_patch(
                     source_manifest,
                     public_key,
                     {},
+                    progress=progress,
+                    progress_start=10,
+                    progress_end=35,
+                    verify_reused=True,
                 )
                 _install_version_directory(
                     versions_root,
@@ -499,7 +580,10 @@ def apply_patch(
                 runtime_staging,
                 target_manifest,
                 public_key,
-                manifest.get("runtime_payload") or {},
+                runtime_payload,
+                progress=progress,
+                progress_start=35 if source_layout == 2 else 10,
+                progress_end=80,
             )
             target_root = _install_version_directory(
                 versions_root,
@@ -508,7 +592,7 @@ def apply_patch(
                 target_manifest,
                 public_key,
             )
-            _verify_runtime_directory(target_root, target_manifest, public_key)
+            _emit_progress(progress, 82, "新版本目录已建立")
             _stage_stable_files(
                 archive,
                 stable_staging,
@@ -523,11 +607,13 @@ def apply_patch(
             effective_stable_payload = dict(manifest.get("stable_payload") or {})
             effective_stable_payload[INSTALL_MANIFEST] = install_manifest_meta
 
-        stable_operations = _apply_stable_files(
+        _emit_progress(progress, 86, "正在更新稳定启动组件")
+        _apply_stable_files(
             install_root,
             stable_staging,
             effective_stable_payload,
             backup,
+            stable_operations,
         )
         _verify_stable_result(
             install_root,
@@ -537,6 +623,7 @@ def apply_patch(
         verify_manifest(installed_manifest, public_key)
         if canonical_manifest_bytes(installed_manifest) != canonical_manifest_bytes(target_install_manifest):
             raise UpdateError("installed manifest does not match patch")
+        _emit_progress(progress, 94, "安装完整性校验通过")
         state = {
             "schema_version": 1,
             "runtime_layout_version": 3,
@@ -549,6 +636,7 @@ def apply_patch(
         }
         _atomic_write_json(state_path, state)
         state_switched = True
+        _emit_progress(progress, 98, "版本切换完成，正在启动")
 
         launcher = install_root / DEFAULT_ENTRYPOINT
         if launch_after:
@@ -573,7 +661,7 @@ def apply_patch(
             "target_layout_version": 3,
             "target_runtime": str(target_root),
             "pending_health_confirmation": True,
-            "patch_sha256": sha256_file(patch_path),
+            "patch_sha256": patch_sha256,
             "runtime_payload_files": len(manifest.get("runtime_payload") or {}),
             "stable_payload_files": len(manifest.get("stable_payload") or {}),
         }
@@ -582,6 +670,7 @@ def apply_patch(
             f"staged {from_version} -> {to_version}; "
             f"runtime_files={result['runtime_payload_files']} stable_files={result['stable_payload_files']}"
         )
+        _emit_progress(progress, 100, "更新完成，正在启动新版本")
         return result
     except Exception:
         if state_switched:
@@ -667,6 +756,153 @@ def _show_message(title: str, message: str, error: bool = False) -> None:
         print(message, file=sys.stderr if error else sys.stdout)
 
 
+def _write_update_status(status: str, percent: int, message: str) -> None:
+    try:
+        _atomic_write_json(
+            _data_root() / "update_status.json",
+            {
+                "schema_version": 1,
+                "status": status,
+                "percent": max(0, min(100, int(percent))),
+                "message": str(message),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _make_progress_callback(
+    events: queue.Queue[tuple[str, Any]] | None = None,
+) -> ProgressCallback:
+    state = {"saved": -100, "logged": -100}
+
+    def callback(percent: int, message: str) -> None:
+        percent = max(0, min(100, int(percent)))
+        if events is not None:
+            events.put(("progress", (percent, message)))
+        if percent in {0, 100} or percent - state["saved"] >= 5:
+            _write_update_status("running", percent, message)
+            state["saved"] = percent
+        if percent in {0, 100} or percent - state["logged"] >= 10:
+            _write_log(f"progress {percent}%: {message}")
+            state["logged"] = percent
+
+    return callback
+
+
+def _execute_update(
+    args: argparse.Namespace,
+    patch: Path,
+    install_root: Path,
+    public_key: Path,
+    events: queue.Queue[tuple[str, Any]] | None = None,
+) -> dict[str, Any]:
+    progress = _make_progress_callback(events)
+    try:
+        progress(0, "正在等待 LiveClipper 安全退出")
+        _wait_for_process(args.wait_pid)
+        result = apply_patch(
+            patch,
+            install_root,
+            public_key,
+            expected_patch_sha256=args.expected_patch_sha256,
+            launch_after=not args.no_launch,
+            progress=progress,
+        )
+        _write_update_status("complete", 100, "更新完成，正在启动新版本")
+        if events is not None:
+            events.put(("done", result))
+        return result
+    except Exception as exc:
+        message = f"更新失败：{exc}"
+        _write_update_status("failed", 0, message)
+        if events is not None:
+            events.put(("error", message))
+        raise
+
+
+def _run_progress_window(
+    args: argparse.Namespace,
+    patch: Path,
+    install_root: Path,
+    public_key: Path,
+) -> int:
+    import tkinter as tk
+    from tkinter import ttk
+
+    events: queue.Queue[tuple[str, Any]] = queue.Queue()
+    outcome = {"finished": False, "code": 1}
+    window = tk.Tk()
+    window.title("LiveClipper 正在更新")
+    window.geometry("520x210")
+    window.resizable(False, False)
+    try:
+        window.attributes("-topmost", True)
+        window.after(1500, lambda: window.attributes("-topmost", False))
+    except Exception:
+        pass
+
+    frame = ttk.Frame(window, padding=20)
+    frame.pack(fill="both", expand=True)
+    title_var = tk.StringVar(value="正在准备更新")
+    detail_var = tk.StringVar(value="请保持电脑开机，更新完成后软件会自动启动")
+    percent_var = tk.StringVar(value="0%")
+    ttk.Label(frame, textvariable=title_var, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="w")
+    ttk.Label(frame, textvariable=detail_var, wraplength=470).pack(anchor="w", pady=(10, 14))
+    progress_bar = ttk.Progressbar(frame, maximum=100, mode="determinate")
+    progress_bar.pack(fill="x")
+    ttk.Label(frame, textvariable=percent_var).pack(anchor="e", pady=(4, 8))
+    close_button = ttk.Button(frame, text="关闭", command=window.destroy, state="disabled")
+    close_button.pack(anchor="e")
+
+    def on_close() -> None:
+        if outcome["finished"]:
+            window.destroy()
+        else:
+            window.bell()
+            detail_var.set("更新仍在进行，请等待完成后自动启动软件")
+
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+    def worker() -> None:
+        try:
+            _execute_update(args, patch, install_root, public_key, events)
+        except Exception:
+            pass
+
+    def poll_events() -> None:
+        try:
+            while True:
+                kind, payload = events.get_nowait()
+                if kind == "progress":
+                    percent, message = payload
+                    progress_bar["value"] = percent
+                    percent_var.set(f"{percent}%")
+                    detail_var.set(str(message))
+                elif kind == "done":
+                    outcome.update(finished=True, code=0)
+                    progress_bar["value"] = 100
+                    percent_var.set("100%")
+                    title_var.set("更新完成")
+                    detail_var.set("正在启动新版本")
+                    window.after(1800, window.destroy)
+                elif kind == "error":
+                    outcome.update(finished=True, code=1)
+                    title_var.set("更新未完成")
+                    detail_var.set(str(payload))
+                    close_button.configure(state="normal")
+        except queue.Empty:
+            pass
+        if window.winfo_exists() and not outcome["finished"]:
+            window.after(100, poll_events)
+
+    threading.Thread(target=worker, name="LiveClipperUpdateWorker", daemon=True).start()
+    window.after(100, poll_events)
+    window.mainloop()
+    return int(outcome["code"])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply a signed LiveClipper version update.")
     parser.add_argument("--patch", default="")
@@ -676,23 +912,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-patch-sha256", default="")
     parser.add_argument("--no-launch", action="store_true")
     parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--show-progress", action="store_true")
     args = parser.parse_args(argv)
     try:
         patch, install_root = _interactive_paths(args)
         public_key = _public_key_path(args.public_key, install_root)
+        if args.show_progress:
+            try:
+                return _run_progress_window(args, patch, install_root, public_key)
+            except Exception as exc:
+                _write_log(f"progress window unavailable, continuing headless: {exc}")
         if not args.non_interactive:
             _show_message(
                 "LiveClipper 架构升级",
                 "即将验证补丁并建立新的版本目录。设置、授权、素材和缓存不会被修改。",
             )
-        _wait_for_process(args.wait_pid)
-        result = apply_patch(
-            patch,
-            install_root,
-            public_key,
-            expected_patch_sha256=args.expected_patch_sha256,
-            launch_after=not args.no_launch,
-        )
+        result = _execute_update(args, patch, install_root, public_key)
         if not args.non_interactive:
             _show_message(
                 "LiveClipper 升级已启动",

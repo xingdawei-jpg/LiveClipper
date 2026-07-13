@@ -23,6 +23,8 @@ from release_signing import sha256_file, sign_manifest
 RUNTIME_MANIFEST_FORMAT = "liveclipper-runtime-manifest-v1"
 INSTALL_MANIFEST_FORMAT = "liveclipper-install-manifest-v1"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
+LAUNCHER_VERSION = "1.0.0"
+UPDATER_VERSION = "1.1.0"
 RUNTIME_MANIFEST = "runtime_manifest.json"
 INSTALL_MANIFEST = "install_manifest.json"
 
@@ -127,8 +129,8 @@ def build_install_manifest(
         "format": INSTALL_MANIFEST_FORMAT,
         "runtime_layout_version": 3,
         "initial_version": version,
-        "launcher_version": "1.0.0",
-        "updater_version": "1.0.0",
+        "launcher_version": LAUNCHER_VERSION,
+        "updater_version": UPDATER_VERSION,
         "files": files,
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }

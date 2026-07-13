@@ -347,6 +347,157 @@ class RuntimeV3UpdateTests(unittest.TestCase):
             with self.assertRaises(liveclipper_update_agent.UpdateError):
                 liveclipper_update_agent._load_patch(patch_path, self.public_key)
 
+    def test_runtime_construction_reuses_hardlinks_without_rehashing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            source = base / "source"
+            destination = base / "destination"
+            source.mkdir()
+            files = {
+                "LiveClipperWeb.exe": b"runtime",
+                "_internal/shared.bin": b"shared-data",
+            }
+            manifest_files: dict[str, dict[str, object]] = {}
+            for relative, content in files.items():
+                path = source / Path(*relative.split("/"))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                manifest_files[relative] = {
+                    "sha256": sha256_file(path),
+                    "size": path.stat().st_size,
+                }
+            manifest = sign_manifest(
+                {
+                    "schema_version": 3,
+                    "format": liveclipper_update_agent.RUNTIME_MANIFEST_FORMAT,
+                    "runtime_layout_version": 3,
+                    "version": "2026.7.13.13",
+                    "entrypoint": "LiveClipperWeb.exe",
+                    "files": manifest_files,
+                },
+                self.private_key,
+            )
+            archive_path = base / "empty.zip"
+            with zipfile.ZipFile(archive_path, "w"):
+                pass
+            progress: list[int] = []
+            with (
+                zipfile.ZipFile(archive_path) as archive,
+                patch.object(
+                    liveclipper_update_agent,
+                    "sha256_file",
+                    wraps=sha256_file,
+                ) as mocked_hash,
+            ):
+                liveclipper_update_agent._construct_runtime(
+                    archive,
+                    source,
+                    destination,
+                    manifest,
+                    self.public_key,
+                    {},
+                    progress=lambda percent, _message: progress.append(percent),
+                )
+            self.assertEqual(mocked_hash.call_count, 0)
+            for relative in files:
+                self.assertTrue(
+                    os.path.samefile(
+                        source / Path(*relative.split("/")),
+                        destination / Path(*relative.split("/")),
+                    )
+                )
+
+            fallback_destination = base / "fallback-destination"
+            with (
+                zipfile.ZipFile(archive_path) as archive,
+                patch.object(
+                    liveclipper_update_agent.os,
+                    "link",
+                    side_effect=OSError("hard links unavailable"),
+                ),
+                patch.object(
+                    liveclipper_update_agent,
+                    "sha256_file",
+                    wraps=sha256_file,
+                ) as fallback_hash,
+            ):
+                liveclipper_update_agent._construct_runtime(
+                    archive,
+                    source,
+                    fallback_destination,
+                    manifest,
+                    self.public_key,
+                    {},
+                )
+            self.assertEqual(fallback_hash.call_count, len(files))
+            self.assertEqual(progress[-1], 80)
+            self.assertEqual(progress, sorted(progress))
+
+    def test_runtime_plan_rejects_missing_or_mismatched_payload(self) -> None:
+        source_files = {"runtime.bin": {"sha256": "1" * 64, "size": 10}}
+        target_files = {"runtime.bin": {"sha256": "2" * 64, "size": 12}}
+        with self.assertRaisesRegex(liveclipper_update_agent.UpdateError, "omits changed"):
+            liveclipper_update_agent._validate_runtime_plan(source_files, target_files, {})
+        with self.assertRaisesRegex(liveclipper_update_agent.UpdateError, "does not match"):
+            liveclipper_update_agent._validate_runtime_plan(
+                source_files,
+                target_files,
+                {"runtime.bin": {"sha256": "1" * 64, "size": 10}},
+            )
+        liveclipper_update_agent._validate_runtime_plan(
+            source_files,
+            target_files,
+            {"runtime.bin": {"sha256": "2" * 64, "size": 12}},
+        )
+
+    def test_partial_stable_update_can_restore_completed_replacements(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            install_root = base / "install"
+            staging = base / "staging"
+            backup = base / "backup"
+            for root in (install_root, staging, backup):
+                root.mkdir()
+            payload: dict[str, dict[str, object]] = {}
+            for relative in ("stable-one.bin", "stable-two.bin"):
+                (install_root / relative).write_bytes(f"old-{relative}".encode())
+                staged = staging / relative
+                staged.write_bytes(f"new-{relative}".encode())
+                payload[relative] = {
+                    "sha256": sha256_file(staged),
+                    "size": staged.stat().st_size,
+                }
+
+            replacements = 0
+
+            def fail_second_replace(source: Path, destination: Path, timeout: float = 90.0) -> None:
+                nonlocal replacements
+                replacements += 1
+                if replacements == 2:
+                    raise liveclipper_update_agent.UpdateError("simulated stable replacement failure")
+                os.replace(source, destination)
+
+            operations: list[tuple[str, bool]] = []
+            with (
+                patch.object(
+                    liveclipper_update_agent,
+                    "_replace_with_retry",
+                    side_effect=fail_second_replace,
+                ),
+                self.assertRaisesRegex(liveclipper_update_agent.UpdateError, "simulated"),
+            ):
+                liveclipper_update_agent._apply_stable_files(
+                    install_root,
+                    staging,
+                    payload,
+                    backup,
+                    operations,
+                )
+            liveclipper_update_agent._restore_stable_files(install_root, backup, operations)
+            self.assertEqual(operations, [("stable-one.bin", True)])
+            self.assertEqual((install_root / "stable-one.bin").read_bytes(), b"old-stable-one.bin")
+            self.assertEqual((install_root / "stable-two.bin").read_bytes(), b"old-stable-two.bin")
+
     @unittest.skipUnless(os.name == "nt", "launcher rollback test uses a Windows executable")
     def test_pending_runtime_without_health_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

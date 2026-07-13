@@ -90,6 +90,8 @@ def main() -> int:
         "latest_version": version,
         "runtime_layout_version": 3,
         "minimum_runtime_layout_version": 2,
+        "minimum_launcher_version": str(runtime.get("minimum_launcher_version") or "1.0.0"),
+        "minimum_updater_version": str(runtime.get("minimum_updater_version") or "1.0.0"),
         "update_strategy": "verified-version-delta-with-full-fallback",
         "supports_incremental_updates": True,
         "requires_full_package": False,
