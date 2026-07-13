@@ -36,6 +36,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
         )
         self.assertTrue(manifest["supports_incremental_updates"])
         self.assertFalse(manifest["requires_full_package"])
+        self.assertEqual(manifest["minimum_updater_version"], "1.1.0")
         self.assertEqual(manifest["files"], {})
         self.assertIn("app/release_update_public_key.pem", manifest["runtime_files"])
 
