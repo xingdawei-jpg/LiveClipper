@@ -1,23 +1,24 @@
 {
   "schema_version": 2,
   "channel": "stable",
-  "version": "2026.7.13.11",
-  "latest_version": "2026.7.13.11",
+  "channel_status": "awaiting-external-distribution",
+  "version": "2026.7.13.10",
+  "latest_version": "2026.7.13.10",
   "runtime_layout_version": 2,
   "minimum_runtime_layout_version": 2,
   "update_strategy": "full-package",
   "supports_incremental_updates": false,
   "requires_full_package": true,
-  "requires_full_package_note": "本版本采用整包升级。程序代码不会再写入用户数据目录，请下载完整包后替换旧程序。",
-  "release_notes": "AI选片稳定性升级：首轮由AI完成完整叙事编排，时长不足时仅按AI扩展计划增量补入完整卖点，时长过长时仅按AI精简优先级整段删除；混剪增加有效素材来源覆盖约束；区分AI时长契约未达标与素材安全内容不足，减少因偏好变化导致的偶发失败。",
+  "requires_full_package_note": "Full-package distribution is managed externally; program-file incremental updates are disabled.",
+  "release_notes": "Stable channel remains at 2026.7.13.10 until the external full-package download is published.",
   "force_update": false,
-  "release_page_url": "https://github.com/xingdawei-jpg/LiveClipper/releases/tag/v2026.7.13.11",
+  "release_page_url": "",
   "package": {
     "format": "zip",
-    "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.13.11/LiveClipperWeb_2026.7.13.11_full_20260713.zip",
-    "sha256": "CB52DF03FF22428A83A16D73FD2D48998935343B995F4DD90CB16D49A9EC95C0",
-    "size": 551837150,
-    "filename": "LiveClipperWeb_2026.7.13.11_full_20260713.zip"
+    "url": "",
+    "sha256": "7F02C8E47211EF2CDECA8353A575859C94A9794BD713E4BF8FBA9001A416EA12",
+    "size": 551779519,
+    "filename": "LiveClipperWeb_2026.7.13.10_full_20260713.zip"
   },
-  "published_at": "2026-07-13 18:26:59"
+  "published_at": "2026-07-13 08:52:26"
 }
