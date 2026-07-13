@@ -1,4 +1,4 @@
-"""Build the immutable runtime manifest stored in app/version.json."""
+"""Build the immutable Runtime V3 manifest stored in app/version.json."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ APP_DIR = ROOT / "app"
 WEB_DIR = ROOT / "web_client"
 VERSION_FILE = APP_DIR / "version.json"
 RELEASE_PAGE_URL = "https://github.com/xingdawei-jpg/LiveClipper/releases/latest"
-RUNTIME_LAYOUT_VERSION = 2
+RUNTIME_LAYOUT_VERSION = 3
 
 APP_SKIP = {
     ".installed_version",
@@ -37,6 +37,7 @@ APP_SKIP = {
 RUNTIME_FILES = [
     APP_DIR / "keywords.json",
     APP_DIR / "license_public_key.txt",
+    APP_DIR / "release_update_public_key.pem",
     WEB_DIR / "frontend" / "index.html",
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
@@ -49,11 +50,19 @@ SOURCE_FILES = [
     WEB_DIR / "desktop.py",
     WEB_DIR / "server.py",
     WEB_DIR / "liveclipper_web.spec",
+    APP_DIR / "release_signing.py",
     ROOT / "tools" / "build_update_manifest.py",
     ROOT / "tools" / "build_release_channel.py",
+    ROOT / "tools" / "build_v3_package.py",
+    ROOT / "tools" / "build_delta_package.py",
+    ROOT / "tools" / "build_bridge_exe.py",
+    ROOT / "tools" / "liveclipper_launcher.py",
+    ROOT / "tools" / "liveclipper_launcher.spec",
+    ROOT / "tools" / "liveclipper_update_agent.py",
+    ROOT / "tools" / "liveclipper_update_agent.spec",
 ]
 
-TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js", ".spec"}
+TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js", ".spec", ".pem"}
 
 
 def _manifest_bytes(path: Path) -> bytes:
@@ -74,7 +83,7 @@ def _source_files() -> list[Path]:
             continue
         if ".bak" in path.name:
             continue
-        if path.suffix.lower() in {".py", ".json", ".txt"}:
+        if path.suffix.lower() in {".py", ".json", ".txt", ".pem"}:
             result.append(path)
     return list(dict.fromkeys(path for path in result if path.exists()))
 
@@ -87,21 +96,23 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
     runtime_files = _hash_map(RUNTIME_FILES)
     source_files = _hash_map(_source_files())
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "runtime_layout_version": RUNTIME_LAYOUT_VERSION,
         "build_id": version,
         "version": version,
         "latest_version": version,
-        "update_strategy": "full-package",
-        "supports_incremental_updates": False,
-        "requires_full_package": True,
-        "requires_full_package_note": "本版本采用整包升级。程序代码不会再写入用户数据目录，请下载完整包后替换旧程序。",
+        "update_strategy": "verified-version-delta-with-full-fallback",
+        "update_engine_version": 3,
+        "supports_incremental_updates": True,
+        "requires_full_package": False,
+        "requires_full_package_note": "没有匹配当前版本的签名补丁或安装完整性异常时，才需要完整包。",
+        "minimum_launcher_version": "1.0.0",
+        "minimum_updater_version": "1.0.0",
         "release_page_url": RELEASE_PAGE_URL,
         "package_url": "",
         "package_sha256": "",
         "package_size": 0,
-        # Kept empty deliberately: legacy clients treat this field as files to
-        # copy into AppData. Runtime v2 never publishes program-file deltas.
+        # Legacy clients must never treat the runtime provenance map as AppData files.
         "files": {},
         "runtime_files": runtime_files,
         "integrity_files": list(runtime_files),
@@ -115,7 +126,7 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the LiveClipper runtime manifest.")
+    parser = argparse.ArgumentParser(description="Build the LiveClipper Runtime V3 manifest.")
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
     parser.add_argument("--force", action="store_true")
@@ -134,7 +145,10 @@ def main() -> int:
         print("app/version.json is up to date.")
         return 0
 
-    VERSION_FILE.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    VERSION_FILE.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(f"wrote {VERSION_FILE}")
     print(f"runtime_files={len(manifest['runtime_files'])} source_files={len(manifest['source_files'])}")
     return 0

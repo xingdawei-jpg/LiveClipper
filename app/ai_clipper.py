@@ -48,6 +48,7 @@ def _begin_analysis_metadata():
         "selection_manifest": {},
         "selection_request": {},
         "selection_result": {},
+        "source_contract": {},
     }
     _ANALYSIS_METADATA_CONTEXT.set(metadata)
     _LAST_CATEGORY_FILTER_SUMMARY = metadata["category_summary"]
@@ -110,6 +111,7 @@ def get_last_analysis_metadata():
         "selection_manifest": dict(metadata.get("selection_manifest") or {}),
         "selection_request": dict(metadata.get("selection_request") or {}),
         "selection_result": dict(metadata.get("selection_result") or {}),
+        "source_contract": dict(metadata.get("source_contract") or {}),
     }
 
 
@@ -4197,18 +4199,175 @@ def _director_safe_candidate_inventory(srt_entries):
     return inventory
 
 
-def _director_missing_sources(clips, required_sources):
-    required = {
-        str(source or "").strip().upper()
+def _director_source_requirements(required_sources):
+    if isinstance(required_sources, dict):
+        result = {}
+        for source, count in required_sources.items():
+            key = str(source or "").strip().upper()
+            if not key:
+                continue
+            try:
+                minimum = max(1, int(count or 1))
+            except (TypeError, ValueError):
+                minimum = 1
+            result[key] = minimum
+        return result
+    return {
+        str(source or "").strip().upper(): 1
         for source in (required_sources or set())
         if str(source or "").strip()
     }
-    selected = {
-        _director_clip_source_key(clip).strip().upper()
-        for clip in (clips or [])
-        if _director_clip_source_key(clip).strip()
+
+
+def _director_source_counts(clips):
+    counts = {}
+    for clip in clips or []:
+        source = _director_clip_source_key(clip).strip().upper()
+        if source:
+            counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _director_source_deficits(clips, required_sources):
+    requirements = _director_source_requirements(required_sources)
+    selected = _director_source_counts(clips)
+    return {
+        source: minimum - selected.get(source, 0)
+        for source, minimum in requirements.items()
+        if selected.get(source, 0) < minimum
     }
-    return sorted(required - selected)
+
+
+def _director_missing_sources(clips, required_sources):
+    return sorted(_director_source_deficits(clips, required_sources))
+
+
+def _director_interleave_prompt_lines(indexed_lines, srt_entries, chunk_size=10):
+    """Interleave source blocks for model attention without changing candidate IDs."""
+    lines = list(indexed_lines or [])
+    entries = list(srt_entries or [])
+    if len(lines) != len(entries) or len(lines) < 2:
+        return lines
+    try:
+        chunk_size = max(1, int(chunk_size or 10))
+    except (TypeError, ValueError):
+        chunk_size = 10
+
+    groups = {}
+    source_order = []
+    for line, entry in zip(lines, entries):
+        text = entry[2] if isinstance(entry, (list, tuple)) and len(entry) > 2 else ""
+        source = _director_candidate_source(text) or "__OTHER__"
+        if source not in groups:
+            groups[source] = []
+            source_order.append(source)
+        groups[source].append(line)
+
+    marked_sources = [source for source in source_order if source != "__OTHER__"]
+    if len(marked_sources) <= 1:
+        return lines
+
+    positions = {source: 0 for source in source_order}
+    result = []
+    while True:
+        added = 0
+        for source in source_order:
+            start = positions[source]
+            batch = groups[source][start:start + chunk_size]
+            if not batch:
+                continue
+            result.extend(batch)
+            positions[source] += len(batch)
+            added += len(batch)
+        if not added:
+            break
+    return result
+
+
+def _director_source_distribution_summary(clips, required_sources):
+    requirements = _director_source_requirements(required_sources)
+    counts = _director_source_counts(clips)
+    durations = {}
+    sequence = []
+    for clip in clips or []:
+        source = _director_clip_source_key(clip).strip().upper()
+        if not source:
+            continue
+        sequence.append(source)
+        durations[source] = durations.get(source, 0.0) + _clip_duration_value(clip)
+
+    source_count = len(requirements)
+    share_cap = 0.65 if source_count == 2 else 0.55 if source_count == 3 else 0.45
+    run_cap = 5 if source_count == 2 else 4
+    total_count = sum(counts.get(source, 0) for source in requirements)
+    dominant_source = ""
+    dominant_count = 0
+    if total_count:
+        dominant_source, dominant_count = max(
+            ((source, counts.get(source, 0)) for source in requirements),
+            key=lambda item: item[1],
+        )
+    dominant_share = dominant_count / total_count if total_count else 0.0
+
+    longest_source = ""
+    longest_run = 0
+    current_source = ""
+    current_run = 0
+    for source in sequence:
+        if source == current_source:
+            current_run += 1
+        else:
+            current_source = source
+            current_run = 1
+        if current_run > longest_run:
+            longest_source = source
+            longest_run = current_run
+
+    rich_contract = bool(source_count > 1 and requirements and all(value >= 2 for value in requirements.values()))
+    issues = []
+    if rich_contract and dominant_share > share_cap + 1e-9:
+        issues.append(
+            f"{dominant_source.strip('[]')}占{dominant_share:.0%}，超过{share_cap:.0%}"
+        )
+    if rich_contract and longest_run > run_cap:
+        issues.append(
+            f"{longest_source.strip('[]')}连续{longest_run}段，超过{run_cap}段"
+        )
+    return {
+        "counts": dict(sorted(counts.items())),
+        "durations": {source: round(duration, 1) for source, duration in sorted(durations.items())},
+        "dominant_source": dominant_source,
+        "dominant_share": round(dominant_share, 4),
+        "share_cap": share_cap,
+        "longest_source": longest_source,
+        "longest_run": longest_run,
+        "run_cap": run_cap,
+        "issues": issues,
+        "balanced": not issues and not _director_missing_sources(clips, requirements),
+    }
+
+
+def _director_source_distribution_repair_instruction(summary, required_sources):
+    requirements = _director_source_requirements(required_sources)
+    counts = dict(summary.get("counts") or {})
+    count_text = "、".join(
+        f"{source.strip('[]')}={counts.get(source, 0)}段"
+        for source in sorted(requirements)
+    )
+    quota_text = "、".join(
+        f"{source.strip('[]')}至少{minimum}段"
+        for source, minimum in sorted(requirements.items())
+    )
+    return (
+        "【混剪来源分布修复】上一次片单虽然覆盖了各来源，但分布不合格："
+        + count_text
+        + "；"
+        + "、".join(summary.get("issues") or [])
+        + "。必须从头重新编排完整clips，不能只在开头或结尾补几段凑配额。"
+        + f"硬要求：{quota_text}；任一来源不超过{float(summary.get('share_cap') or 0.55):.0%}；"
+        + f"同一来源连续不超过{int(summary.get('run_cap') or 4)}段。"
+        + "来源切换放在卖点阶段的自然边界，每个来源至少分布到开头、中段、结尾中的两个阶段。】"
+    )
 
 
 def _apply_ai_expansion_plan(
@@ -5078,11 +5237,16 @@ def _call_director_expand_selection(
         if required_sources
         else sorted(available_sources - selected_sources) if merge_mode else []
     )
+    source_deficits = _director_source_deficits(items, required_sources)
     source_rule = ""
     if missing_sources:
+        deficit_text = "、".join(
+            f"{source.strip('[]')}还需{source_deficits.get(source, 1)}段"
+            for source in missing_sources
+        )
         source_rule = (
-            f"这是混剪，当前片单尚未使用来源{','.join(source.strip('[]') for source in missing_sources)}；"
-            "如果这些来源有能自然承接的安全候选，优先把它们放入扩展计划，但不得牺牲语义完整和品类一致。"
+            f"这是混剪，当前片单尚未使用来源{','.join(source.strip('[]') for source in missing_sources)}，或这些来源已使用但仍未达到配额；具体缺口为{deficit_text}；"
+            "必须优先从这些来源选择能自然承接的安全完整候选放入扩展计划，但不得牺牲语义完整和品类一致。"
         )
 
     system_prompt = (
@@ -5226,7 +5390,18 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             if semantic_srt.strip():
                 srt_text = semantic_srt
                 semantic_srt_applied = True
-                _log(f"AI语义断句: 使用 {len(semantic_segments)} 个词级精确语义段")
+                _word_level_count = sum(
+                    1 for segment in semantic_segments
+                    if (segment.get("words") or segment.get("timing_precision") == "word")
+                )
+                _srt_fallback_count = len(semantic_segments) - _word_level_count
+                if _srt_fallback_count:
+                    _log(
+                        f"AI语义断句: 混合使用 {_word_level_count} 个词级语义段 + "
+                        f"{_srt_fallback_count} 个SRT时间段，全部素材均保留"
+                    )
+                else:
+                    _log(f"AI语义断句: 使用 {len(semantic_segments)} 个词级精确语义段")
         except Exception as semantic_error:
             _log(f"AI语义断句: 词级语义段不可用，保留原SRT ({semantic_error})")
 
@@ -5320,9 +5495,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_stage = "首次完整编排"
     _director_format_retry_used = False
     _director_narrative_repair_used = False
+    _director_source_repair_used = False
     _director_trim_source_clips = None
     _director_expand_source_clips = None
-    _max_attempts = 2 if _director_mode else 5
+    # Director mode has a bounded three-call budget. This leaves room for a
+    # final AI-anchored expansion when a complete plan and one repair still
+    # miss the duration contract, without returning to the old five-call loop.
+    _max_attempts = 3 if _director_mode else 5
     _indexed_srt_entries = _build_ai_srt_entry_index(cleaned_srt)
     _director_call_entries = _indexed_srt_entries
     _director_candidate_count = len(_indexed_srt_entries)
@@ -5332,19 +5511,58 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         for item in _director_safe_inventory
     )
     _source_candidate_counts = {}
+    _source_candidate_durations = {}
     for _candidate in _director_safe_inventory:
         _source = str(_candidate.get("source") or "").strip().upper()
         if _source:
             _source_candidate_counts[_source] = _source_candidate_counts.get(_source, 0) + 1
+            _source_candidate_durations[_source] = (
+                _source_candidate_durations.get(_source, 0.0)
+                + float(_candidate.get("duration_sec") or 0.0)
+            )
+    _eligible_sources = {
+        source
+        for source, count in _source_candidate_counts.items()
+        if merge_mode and count >= 2 and _source_candidate_durations.get(source, 0.0) >= 5.0
+    }
+    _can_require_two_per_source = bool(
+        1 < len(_eligible_sources) <= 4
+        and _duration_contract.source_min >= len(_eligible_sources) * 6.0
+    )
     _director_required_sources = {
-        source for source, count in _source_candidate_counts.items()
-        if merge_mode and count >= 2
+        source: (
+            2
+            if _can_require_two_per_source
+            and _source_candidate_counts.get(source, 0) >= 4
+            and _source_candidate_durations.get(source, 0.0) >= 12.0
+            else 1
+        )
+        for source in _eligible_sources
     }
     if len(_director_required_sources) > 1:
+        _analysis_metadata["source_contract"] = {
+            "candidate_counts": dict(sorted(_source_candidate_counts.items())),
+            "candidate_durations": {
+                source: round(duration, 1)
+                for source, duration in sorted(_source_candidate_durations.items())
+            },
+            "required_counts": dict(sorted(_director_required_sources.items())),
+        }
+        _log(
+            "混剪来源候选: "
+            + "、".join(
+                f"{source.strip('[]')}={_source_candidate_counts[source]}条/"
+                f"{_source_candidate_durations.get(source, 0.0):.1f}s"
+                for source in sorted(_director_required_sources)
+            )
+        )
         _log(
             "混剪来源合同: "
-            + "、".join(source.strip("[]") for source in sorted(_director_required_sources))
-            + " 各至少1段"
+            + "、".join(
+                f"{source.strip('[]')}至少{minimum}段"
+                for source, minimum in sorted(_director_required_sources.items())
+            )
+            + "；由AI统一编排，不做机械轮播"
         )
     _log(f"AI: 构建SRT条目索引 {len(_indexed_srt_entries)} 条")
     for attempt in range(_max_attempts):
@@ -5393,6 +5611,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 main_category=_cross_cat_preferred,
                 duration_contract=_duration_contract,
                 merge_mode=merge_mode,
+                required_sources=_director_required_sources,
             )
         if not clips:
             if _director_mode:
@@ -5609,9 +5828,16 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _director_required_sources,
             )
             if _director_missing_sources_now:
+                _source_deficits_now = _director_source_deficits(
+                    clips,
+                    _director_required_sources,
+                )
                 _source_issue = (
-                    "混剪来源覆盖不足:缺少"
-                    + "、".join(source.strip("[]") for source in _director_missing_sources_now)
+                    "混剪来源配额不足:"
+                    + "、".join(
+                        f"{source.strip('[]')}还需{_source_deficits_now.get(source, 1)}段"
+                        for source in _director_missing_sources_now
+                    )
                 )
                 _director_last_audit = dict(_director_audit or {})
                 _director_last_audit["issues"] = list(
@@ -5626,6 +5852,31 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     continue
                 _log(f"AI叙事质检未通过: {_source_issue}")
                 continue
+            _source_distribution = _director_source_distribution_summary(
+                clips,
+                _director_required_sources,
+            )
+            if merge_mode and _source_distribution.get("issues"):
+                _source_issue = "混剪来源分布失衡:" + "、".join(
+                    _source_distribution.get("issues") or []
+                )
+                _director_last_audit = dict(_director_audit or {})
+                _director_last_audit["issues"] = list(
+                    _director_last_audit.get("issues") or []
+                ) + [_source_issue]
+                if not _director_source_repair_used and attempt + 1 < _max_attempts:
+                    _director_source_repair_used = True
+                    _director_stage = "混剪来源整体重编"
+                    _director_call_entries = _indexed_srt_entries
+                    _director_trim_source_clips = None
+                    _director_expand_source_clips = None
+                    _director_repair = _director_source_distribution_repair_instruction(
+                        _source_distribution,
+                        _director_required_sources,
+                    )
+                    _log(f"AI叙事质检: {_source_issue}，交回AI完整重编片单，不由程序插片或重排")
+                    continue
+                _log(f"AI叙事提示: {_source_issue}；AI重编后仍未完全均衡，保留可用叙事避免任务失败")
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
             _remaining_issues = _director_fatal_issues(_director_audit)
@@ -5658,6 +5909,26 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
             )
             _set_last_topic_coverage_summary(_director_topic_summary)
+            if merge_mode:
+                _selected_source_counts = _director_source_counts(clips)
+                _source_distribution = _director_source_distribution_summary(
+                    clips,
+                    _director_required_sources,
+                )
+                _source_contract_summary = dict(_analysis_metadata.get("source_contract") or {})
+                _source_contract_summary["selected_counts"] = dict(sorted(_selected_source_counts.items()))
+                _source_contract_summary["distribution"] = _source_distribution
+                _source_contract_summary["balanced"] = bool(_source_distribution.get("balanced"))
+                _analysis_metadata["source_contract"] = _source_contract_summary
+                if _selected_source_counts:
+                    _log(
+                        "混剪来源成片分布: "
+                        + "、".join(
+                            f"{source.strip('[]')}={count}段"
+                            for source, count in sorted(_selected_source_counts.items())
+                        )
+                        + f"；最长连续同源{int(_source_distribution.get('longest_run') or 0)}段"
+                    )
             _record_history_if_needed(clips)
             _selection_manifest = SelectionManifest.from_clips(
                 clips,
@@ -6899,7 +7170,7 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=5.0, focus_hint
     return clips
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False, required_sources=None):
     def _log(msg):
         if log_fn: log_fn(msg)
     main_category = _normalize_forced_category(main_category) or main_category
@@ -7019,6 +7290,13 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] [不可选：含违禁词、价格/CTA或直播操作]")
             else:
                 _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] {et}")
+        if merge_mode:
+            _interleaved_lines = _director_interleave_prompt_lines(
+                _indexed_lines, srt_entries, chunk_size=10
+            )
+            if _interleaved_lines != _indexed_lines:
+                _indexed_lines = _interleaved_lines
+                _log("AI: 混剪候选按来源每10条交错展示，候选编号和时间戳保持不变")
         indexed_transcript = chr(10).join(_indexed_lines)
         # 追加用户自定义细节关键词（注入到AI prompt末尾，高优先级关注）
         if _detail_kw_prompt:
@@ -7118,10 +7396,13 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _director_repair_mode = bool(
         extra_instruction and "【整体叙事修复】" in str(extra_instruction)
     )
+    _source_distribution_repair_mode = bool(
+        extra_instruction and "【混剪来源分布修复】" in str(extra_instruction)
+    )
 
     # 单版本叙事优先稳定；定向修复进一步降温，避免第二次调用改写已合格骨架。
     import random
-    temperature = 0.1 if _director_repair_mode else (
+    temperature = 0.1 if (_director_repair_mode or _source_distribution_repair_mode) else (
         round(random.uniform(0.35, 0.55), 2) if _skip_focus else 0.2
     )
     _log(f"AI: temperature={temperature}")
@@ -7416,13 +7697,24 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         for _entry_start, _entry_end, entry_text in (srt_entries or [])
         if _director_candidate_source(entry_text)
     })
+    _source_requirements = _director_source_requirements(required_sources)
+    if not _source_requirements:
+        _source_requirements = {source: 1 for source in _source_labels}
     _merge_source_rule = ""
-    if merge_mode and len(_source_labels) > 1:
+    if merge_mode and len(_source_requirements) > 1:
+        _source_count = len(_source_requirements)
+        _source_share_cap = 65 if _source_count == 2 else 55 if _source_count == 3 else 45
+        _source_run_cap = 5 if _source_count == 2 else 4
         _merge_source_rule = (
-            "\n★混剪来源合同★ 当前候选包含"
-            + "、".join(_source_labels)
-            + "。每个具备安全、完整、同品类候选的来源至少进入1个Product；"
-            "优先让不同来源分别承担效果、证据、场景等不同叙事职责，不得全片只用一个来源。\n"
+            "\n★混剪来源合同★ 当前合格来源的最低片段配额为："
+            + "、".join(
+                f"{source.strip('[]')}至少{minimum}段"
+                for source, minimum in sorted(_source_requirements.items())
+            )
+            + "。这是来源覆盖底线，不是机械轮播或平均切换；先让不同来源共同承担效果、证据、场景、顾虑解除等叙事职责，再统一编排成一条自然故事。"
+            f"候选充足时，任一来源尽量不超过全片片段数的{_source_share_cap}%；同一来源连续不得超过{_source_run_cap}段，"
+            "只有同一卖点必须由相邻两三句共同说完整时才可连续。每个合格来源应分布在开头、中段、结尾中的至少两个阶段，禁止把某个来源集中堆在一整段或只放到结尾凑数。"
+            "来源切换应放在卖点或叙事阶段的自然边界，不得逐句机械轮换；也不得为凑配额选择残句、跨品类、价格CTA或低质量重复内容。\n"
         )
     if _is_food_fresh_category(main_category):
         _priority_line = "- 优先选受众代入强的卖点(口感食欲>新鲜品质>产地溯源>规格分量>发货保鲜>场景吃法)"
@@ -7494,7 +7786,38 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 字幕条目:
 {indexed_transcript}"""
 
-    if _director_repair_mode:
+    if _source_distribution_repair_mode:
+        user_msg = f"""这是一次混剪来源分布的完整重编，不是在旧片单两端补素材。你仍是最终叙事负责人，必须从全部候选中重新输出一条自然、完整、可直接成片的故事。
+
+{extra_instruction}
+{_category_context_prompt}
+{_merge_source_rule}
+本轮指定偏好：{_active_preference or focus or '全量选片'}
+{_preference_quota_prompt}
+{_hook_focus_rule}
+{_hook_hint}
+
+重编规则：
+1. 只有1个Hook且位于首段；第2段必须直接兑现Hook；只有1个Close且位于末段，Close后不能再有Product。
+2. 来源均衡必须服从自然叙事：在效果、证据、场景、顾虑解除等阶段边界切换来源，不得逐句机械轮播，也不得把某个来源集中成连续长段。
+3. 通常选择{_clip_range}个片段，{_total_rule}；逐项相加候选秒数，落在目标范围内。
+4. 每个片段优先1个编号；只有补齐完整语义时可选2-3个连续编号。不得编造、跳号、重叠，不得选择标为不可选的条目。
+5. {_dedup_rule}
+6. {_hook_rule}
+7. {_product_rule}
+8. {_close_rule}
+{_ai_rules_prompt}
+
+只输出一个JSON对象，不要解释，不要Markdown。clips必须是全新的完整有序片单；expansion_plan提供4-8个未被clips使用的完整Product备用片。
+clips每项格式：
+{{"clip_type":"hook|product|close","srt_indices":[1],"focus":"实际卖点主题","reason":"本段叙事作用","trim_priority":0}}
+expansion_plan每项格式：
+{{"priority":1,"after_srt_indices":[1],"after_order":1,"srt_indices":[2],"focus":"备用主题","reason":"补片作用"}}
+Hook、第2段、Close的trim_priority必须为0；其他Product从1开始填写不重复的正整数，数字越小越先删。
+
+全部候选：
+{indexed_transcript}"""
+    elif _director_repair_mode:
         user_msg = f"""这是一次定向片单修复，不是重新自由策划。必须解决检查项，不能原样返回旧骨架。
 
 {extra_instruction}

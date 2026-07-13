@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _load_updater():
     path = ROOT / "app" / "updater.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location("liveclipper_test_updater", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -23,21 +25,47 @@ def _load_updater():
 
 
 class ReleaseArchitectureTests(unittest.TestCase):
-    def test_manifest_disables_legacy_file_updates(self) -> None:
+    def test_manifest_declares_runtime_v3(self) -> None:
         manifest = json.loads((ROOT / "app" / "version.json").read_text(encoding="utf-8-sig"))
-        self.assertEqual(manifest["schema_version"], 2)
-        self.assertEqual(manifest["runtime_layout_version"], 2)
-        self.assertEqual(manifest["update_strategy"], "full-package")
-        self.assertFalse(manifest["supports_incremental_updates"])
-        self.assertTrue(manifest["requires_full_package"])
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["runtime_layout_version"], 3)
+        self.assertEqual(
+            manifest["update_strategy"],
+            "verified-version-delta-with-full-fallback",
+        )
+        self.assertTrue(manifest["supports_incremental_updates"])
+        self.assertFalse(manifest["requires_full_package"])
         self.assertEqual(manifest["files"], {})
-        self.assertTrue(manifest["runtime_files"])
+        self.assertIn("app/release_update_public_key.pem", manifest["runtime_files"])
 
-    def test_updater_never_applies_program_files(self) -> None:
+    def test_updater_requires_an_exact_signed_patch_route(self) -> None:
         updater = _load_updater()
         self.assertFalse(hasattr(updater, "_write_update_file"))
+        info = {
+            "version": "2026.7.13.12",
+            "patches": [
+                {
+                    "format": updater.DELTA_FORMAT,
+                    "from_version": "2026.7.13.11",
+                    "to_version": "2026.7.13.12",
+                    "url": "https://example.invalid/patch.zip",
+                    "sha256": "a" * 64,
+                    "size": 123,
+                }
+            ],
+        }
+        self.assertIsNotNone(updater._select_delta_patch(info, "2026.7.13.11"))
+        self.assertIsNone(updater._select_delta_patch(info, "2026.7.13.10"))
+        self.assertFalse(updater.delta_runtime_supported())
+
+    def test_unmatched_update_falls_back_to_full_package(self) -> None:
+        updater = _load_updater()
         result = updater.apply_update_headless(
-            {"version": "9999.1.1", "release_page_url": "https://example.invalid/release"}
+            {
+                "version": "9999.1.1",
+                "release_page_url": "https://example.invalid/release",
+                "patches": [],
+            }
         )
         self.assertFalse(result["ok"])
         self.assertTrue(result["full_package_required"])
@@ -58,7 +86,8 @@ class ReleaseArchitectureTests(unittest.TestCase):
                 bundle = Path(temp)
                 (bundle / "app").mkdir()
                 (bundle / "app" / "version.json").write_text(
-                    '{"version":"2030.1.2.3"}', encoding="utf-8"
+                    '{"version":"2030.1.2.3"}',
+                    encoding="utf-8",
                 )
                 os.environ["LIVECLIPPER_BUNDLE_DIR"] = str(bundle)
                 self.assertEqual(updater._get_installed_version(), "2030.1.2.3")
@@ -76,7 +105,10 @@ class ReleaseArchitectureTests(unittest.TestCase):
             legacy_app.mkdir(parents=True)
             legacy_web.mkdir(parents=True)
             (legacy_app / "version.json").write_text('{"version":"9999.1.1"}', encoding="utf-8")
-            (legacy_app / "cutter_logic.py").write_text("raise RuntimeError('legacy code loaded')", encoding="utf-8")
+            (legacy_app / "cutter_logic.py").write_text(
+                "raise RuntimeError('legacy code loaded')",
+                encoding="utf-8",
+            )
             (legacy_web / "index.html").write_text("legacy", encoding="utf-8")
 
             env = os.environ.copy()
@@ -91,7 +123,8 @@ class ReleaseArchitectureTests(unittest.TestCase):
                     f"sys.path.insert(0,{str(ROOT / 'web_client')!r});"
                     "import server;"
                     "print(json.dumps({'app':str(server.APP_DIR),'web':str(server.WEB_DIR),"
-                    "'source':server.CODE_SOURCE,'legacy':server._legacy_runtime_overlays_present()}))"
+                    "'source':server.CODE_SOURCE,'legacy':server._legacy_runtime_overlays_present(),"
+                    "'delta':server._safe_web_incremental_supported()}))"
                 ),
             ]
             completed = subprocess.run(
@@ -108,6 +141,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
             self.assertEqual(Path(runtime["web"]).resolve(), (ROOT / "web_client").resolve())
             self.assertEqual(runtime["source"], "source")
             self.assertTrue(runtime["legacy"])
+            self.assertFalse(runtime["delta"])
 
     def test_bootstrap_has_no_appdata_code_loader(self) -> None:
         desktop = (ROOT / "web_client" / "desktop.py").read_text(encoding="utf-8")
@@ -116,6 +150,10 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertNotIn("_updated_server_path", desktop)
         self.assertNotIn("USER_UPDATE_ROOT", server)
         self.assertNotIn("LiveClipper', 'app", launcher)
+        launcher_tool = (ROOT / "tools" / "liveclipper_launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("LIVECLIPPER_INSTALL_ROOT", launcher_tool)
 
 
 if __name__ == "__main__":

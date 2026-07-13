@@ -77,7 +77,7 @@ def _app_datas():
             continue
         if name.endswith(skip_suffixes):
             continue
-        if name.endswith(".json") or name == "license_public_key.txt":
+        if name.endswith((".json", ".pem")) or name == "license_public_key.txt":
             datas.append((path, "app"))
     return datas
 
@@ -130,6 +130,7 @@ a = Analysis(
     hiddenimports=[
         "server",
         "updater",
+        "release_signing",
         "fastapi",
         "uvicorn",
         "starlette",

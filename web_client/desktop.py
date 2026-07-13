@@ -16,7 +16,7 @@ import uvicorn
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
-RUNTIME_LAYOUT_VERSION = 2
+RUNTIME_LAYOUT_VERSION = 3
 LEGACY_RUNTIME_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 
 if getattr(sys, "frozen", False):
@@ -136,6 +136,57 @@ def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
                 return True
         time.sleep(0.25)
     return False
+
+
+def _report_launcher_health(port: int) -> bool:
+    token = str(os.environ.get("LIVECLIPPER_HEALTH_TOKEN") or "").strip()
+    destination_text = str(os.environ.get("LIVECLIPPER_HEALTH_FILE") or "").strip()
+    expected_version = str(os.environ.get("LIVECLIPPER_ACTIVE_VERSION") or "").strip()
+    if not token or not destination_text or not expected_version:
+        return False
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/runtime",
+            timeout=4,
+        ) as response:
+            runtime = json.loads(response.read().decode("utf-8-sig"))
+        integrity = runtime.get("runtime_integrity") if isinstance(runtime, dict) else {}
+        healthy = bool(
+            isinstance(runtime, dict)
+            and runtime.get("version") == expected_version
+            and int(runtime.get("runtime_layout_version") or 0) == RUNTIME_LAYOUT_VERSION
+            and runtime.get("code_source") == "bundled"
+            and isinstance(integrity, dict)
+            and integrity.get("ok") is True
+        )
+        if not healthy:
+            return False
+        data_root = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or Path.home()
+        ) / "LiveClipper" / "launcher_health"
+        data_root = data_root.resolve()
+        destination = Path(destination_text).resolve()
+        destination.relative_to(data_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
+        receipt = {
+            "token": token,
+            "version": expected_version,
+            "runtime_integrity_ok": True,
+            "pid": os.getpid(),
+            "port": port,
+            "reported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        temporary.write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+        return True
+    except Exception:
+        return False
 
 
 def _show_startup_error(port: int) -> None:
@@ -317,6 +368,12 @@ def main() -> None:
         server.should_exit = True
         _show_startup_error(port)
         return
+
+    if os.environ.get("LIVECLIPPER_HEALTH_TOKEN"):
+        if _report_launcher_health(port):
+            emit_log("info", "Runtime V3 启动健康确认已提交。", "system")
+        else:
+            emit_log("error", "Runtime V3 启动健康确认失败，将由启动器回滚。", "system")
 
     if not _has_webview2_runtime():
         _show_webview2_error(url)

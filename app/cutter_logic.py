@@ -207,6 +207,46 @@ def _infer_mix_source_idx_from_srt(text, start, end, srt_entries):
     return best_idx
 
 
+def _mix_semantic_segments_for_source(srt_entries, word_segments, marker, source):
+    """Keep every mix source visible when only some sources have word timing sidecars."""
+    marker = str(marker or "").strip().upper()
+    source = str(source or "").strip()
+    result = []
+    for segment in word_segments or []:
+        if not isinstance(segment, dict):
+            continue
+        item = dict(segment)
+        item["source_marker"] = marker
+        item["source"] = source
+        item["timing_precision"] = "word"
+        result.append(item)
+    if result:
+        return result
+
+    for segment in srt_entries or []:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start = float(segment.get("start") or 0)
+            end = float(segment.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        text = str(segment.get("text") or "").strip()
+        if not text or end <= start:
+            continue
+        result.append({
+            "start": start,
+            "end": end,
+            "text": text,
+            "words": [],
+            "semantic_unit": True,
+            "source_marker": marker,
+            "source": source,
+            "timing_precision": "srt",
+        })
+    return result
+
+
 def _get_video_encoder():
     global _hw_encoder_checked, _hw_encoder
     if not _hw_encoder_checked:
@@ -5035,28 +5075,54 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if os.path.exists(_sc):
             with open(_sc, "r", encoding="utf-8", errors="replace") as f:
                 _srt_text = f.read()
+            _source_srt_entries = []
             try:
                 _subs, _ = open_srt(_sc)
                 for _sub in _subs:
-                    _mix_srt_entries.append({
+                    _source_entry = {
                         "source_idx": _vi,
                         "source": vp,
                         "start": float(_time_to_seconds(_sub.start)),
                         "end": float(_time_to_seconds(_sub.end)),
                         "text": _sub.text,
-                    })
+                    }
+                    _source_srt_entries.append(_source_entry)
+                    _mix_srt_entries.append(_source_entry)
             except Exception:
-                pass
+                for _segment in _parse_srt_to_segments(_srt_text):
+                    _source_entry = {
+                        "source_idx": _vi,
+                        "source": vp,
+                        "start": float(_segment.get("start") or 0),
+                        "end": float(_segment.get("end") or 0),
+                        "text": str(_segment.get("text") or ""),
+                    }
+                    _source_srt_entries.append(_source_entry)
+                    _mix_srt_entries.append(_source_entry)
             # Add [Vn] marker to text lines
             _marker = f"V{_vi+1}"
+            _source_word_segments = []
             try:
                 from volcengine_asr import load_word_timing_sidecar
-                for _word_segment in load_word_timing_sidecar(_sc, semantic=True, log_fn=_log):
-                    _marked_word_segment = dict(_word_segment)
-                    _marked_word_segment["source_marker"] = _marker
-                    _mix_word_timings.append(_marked_word_segment)
+                _source_word_segments = list(
+                    load_word_timing_sidecar(_sc, semantic=True, log_fn=_log) or []
+                )
             except Exception:
-                pass
+                _source_word_segments = []
+            _source_semantic_segments = _mix_semantic_segments_for_source(
+                _source_srt_entries,
+                _source_word_segments,
+                _marker,
+                vp,
+            )
+            _mix_word_timings.extend(_source_semantic_segments)
+            if _source_word_segments:
+                _log(f"混剪候选源 {_marker}: 词级语义段 {len(_source_semantic_segments)} 条")
+            else:
+                _log(
+                    f"混剪候选源 {_marker}: 无词级时间，使用 SRT 时间段 "
+                    f"{len(_source_semantic_segments)} 条，素材仍参与AI选片"
+                )
             _out_lines = []
             for _line in _srt_text.split("\n"):
                 import re as _re_line

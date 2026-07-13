@@ -202,6 +202,14 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         self.assertEqual([clip[1] for clip in trimmed], ["开场", "承接开场", "核心证据", "自然收尾"])
 
+    def test_analysis_metadata_exposes_mix_source_contract(self) -> None:
+        metadata = ai_clipper._begin_analysis_metadata()
+        metadata["source_contract"] = {"required_counts": {"[V1]": 2, "[V2]": 2}}
+
+        public_metadata = ai_clipper.get_last_analysis_metadata()
+
+        self.assertEqual(public_metadata["source_contract"]["required_counts"]["[V1]"], 2)
+
     def test_parsed_trim_priorities_can_close_duration_without_second_ai_call(self) -> None:
         ai_clipper._begin_analysis_metadata()
         entries = [
@@ -644,6 +652,97 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             ai_clipper._director_missing_sources(expanded, {"[V1]", "[V2]"}),
             [],
         )
+
+    def test_partial_word_sidecars_keep_every_mix_source(self) -> None:
+        from volcengine_asr import build_semantic_segments, semantic_segments_to_srt
+
+        v1_srt = [{"start": 0.0, "end": 4.0, "text": "这件上衣肩线很利落。"}]
+        v2_words = [{
+            "start": 1.0,
+            "end": 5.0,
+            "text": "这个面料轻薄透气。",
+            "words": [
+                {"text": "这个面料", "start": 1.0, "end": 2.5},
+                {"text": "轻薄透气", "start": 2.6, "end": 5.0},
+            ],
+            "semantic_unit": True,
+        }]
+        mixed = (
+            cutter_logic._mix_semantic_segments_for_source(v1_srt, [], "V1", "one.mp4")
+            + cutter_logic._mix_semantic_segments_for_source([], v2_words, "V2", "two.mp4")
+        )
+        semantic = build_semantic_segments(mixed)
+        rendered = semantic_segments_to_srt(semantic)
+
+        self.assertEqual(len(semantic), 2)
+        self.assertIn("[V1]", rendered)
+        self.assertIn("[V2]", rendered)
+        self.assertEqual(semantic[0]["timing_precision"], "srt")
+        self.assertEqual(semantic[1]["timing_precision"], "word")
+
+    def test_source_contract_supports_natural_minimum_quotas(self) -> None:
+        clips = [
+            ("hook", "[V1]这件衣服很显瘦。", 0.0, 4.0, 50, 4.0, "版型"),
+            ("product", "[V2]面料轻薄透气。", 4.0, 9.0, 50, 5.0, "面料"),
+            ("product", "[V2]通勤搭配很利落。", 9.0, 14.0, 50, 5.0, "场景"),
+        ]
+        requirements = {"[V1]": 2, "[V2]": 2}
+
+        self.assertEqual(
+            ai_clipper._director_source_deficits(clips, requirements),
+            {"[V1]": 1},
+        )
+        self.assertEqual(
+            ai_clipper._director_missing_sources(clips, requirements),
+            ["[V1]"],
+        )
+
+    def test_mix_prompt_interleaves_sources_without_changing_candidate_ids(self) -> None:
+        entries = [
+            (0.0, 1.0, "[V1]一"),
+            (1.0, 2.0, "[V1]二"),
+            (2.0, 3.0, "[V2]三"),
+            (3.0, 4.0, "[V2]四"),
+            (4.0, 5.0, "[V3]五"),
+            (5.0, 6.0, "[V3]六"),
+        ]
+        lines = [f"[#{index:02d}]" for index in range(1, 7)]
+
+        result = ai_clipper._director_interleave_prompt_lines(lines, entries, chunk_size=1)
+
+        self.assertEqual(result, ["[#01]", "[#03]", "[#05]", "[#02]", "[#04]", "[#06]"])
+        self.assertCountEqual(result, lines)
+
+    def test_mix_distribution_detects_dominance_and_long_same_source_run(self) -> None:
+        clips = [
+            ("product", f"[V1]卖点{index}", float(index), float(index + 1), 50, 1.0, "卖点")
+            for index in range(24)
+        ]
+        clips += [
+            ("product", "[V2]面料", 30.0, 31.0, 50, 1.0, "面料"),
+            ("product", "[V2]场景", 31.0, 32.0, 50, 1.0, "场景"),
+            ("product", "[V3]版型", 32.0, 33.0, 50, 1.0, "版型"),
+            ("product", "[V3]工艺", 33.0, 34.0, 50, 1.0, "工艺"),
+        ]
+        summary = ai_clipper._director_source_distribution_summary(
+            clips, {"[V1]": 2, "[V2]": 2, "[V3]": 2}
+        )
+
+        self.assertFalse(summary["balanced"])
+        self.assertTrue(any("超过55%" in issue for issue in summary["issues"]))
+        self.assertTrue(any("连续24段" in issue for issue in summary["issues"]))
+
+    def test_mix_distribution_accepts_natural_interleaving(self) -> None:
+        clips = []
+        for index in range(4):
+            for source in ("V1", "V2", "V3"):
+                clips.append(("product", f"[{source}]卖点{index}", 0.0, 1.0, 50, 1.0, "卖点"))
+        summary = ai_clipper._director_source_distribution_summary(
+            clips, {"[V1]": 2, "[V2]": 2, "[V3]": 2}
+        )
+        self.assertTrue(summary["balanced"])
+        self.assertEqual(summary["issues"], [])
+
     def test_expansion_plan_rejects_forbidden_candidate_and_uses_next_ai_choice(self) -> None:
         entries = [
             (0.0, 4.0, "这件上衣穿上很显精神。"),

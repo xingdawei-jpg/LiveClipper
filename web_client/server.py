@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 
-RUNTIME_LAYOUT_VERSION = 2
+RUNTIME_LAYOUT_VERSION = 3
 USER_DATA_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 ENV_BUNDLE_DIR = Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve() if os.environ.get("LIVECLIPPER_BUNDLE_DIR") else None
@@ -6266,6 +6266,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         dedup_summary["category_summary"] = category_summary
         dedup_summary["preference_summary"] = preference_summary
         dedup_summary["topic_coverage_summary"] = topic_coverage_summary
+        dedup_summary["source_contract"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("source_contract") or {}
+        )
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         public_clips = _preview_public_clips(
             raw_clips,
@@ -9527,6 +9530,49 @@ def index() -> FileResponse:
     return FileResponse(str(FRONTEND_DIR / "index.html"))
 
 
+def _runtime_v3_diagnostics() -> dict[str, Any]:
+    install_root_text = str(os.environ.get("LIVECLIPPER_INSTALL_ROOT") or "").strip()
+    install_root = Path(install_root_text).resolve() if install_root_text else None
+    state: dict[str, Any] = {}
+    install_manifest: dict[str, Any] = {}
+    if install_root:
+        try:
+            state = json.loads((install_root / "current.json").read_text(encoding="utf-8-sig"))
+        except Exception:
+            state = {}
+        try:
+            install_manifest = json.loads(
+                (install_root / "install_manifest.json").read_text(encoding="utf-8-sig")
+            )
+        except Exception:
+            install_manifest = {}
+    return {
+        "install_root": str(install_root) if install_root else "",
+        "active_runtime_dir": (
+            str(Path(sys.executable).resolve().parent)
+            if getattr(sys, "frozen", False)
+            else str(REPO_ROOT)
+        ),
+        "active_version": str(
+            os.environ.get("LIVECLIPPER_ACTIVE_VERSION")
+            or state.get("current_version")
+            or _load_version()
+        ),
+        "previous_version": str(state.get("previous_version") or ""),
+        "update_pending_health": bool(state.get("pending", False)),
+        "launcher_version": str(
+            os.environ.get("LIVECLIPPER_LAUNCHER_VERSION")
+            or install_manifest.get("launcher_version")
+            or ""
+        ),
+        "updater_version": str(install_manifest.get("updater_version") or ""),
+        "version_pointer_valid": bool(
+            install_root
+            and int(state.get("runtime_layout_version") or 0) == RUNTIME_LAYOUT_VERSION
+        ),
+    }
+
+
 @app.get("/api/runtime")
 def runtime() -> dict[str, Any]:
     public_key_suffix = ""
@@ -9537,6 +9583,8 @@ def runtime() -> dict[str, Any]:
         public_key_suffix = public_key[-8:] if public_key else ""
     except Exception:
         public_key_suffix = ""
+    update_supported = _safe_web_incremental_supported()
+    v3 = _runtime_v3_diagnostics()
     return {
         "version": _load_version(),
         "repo_root": str(REPO_ROOT),
@@ -9547,9 +9595,15 @@ def runtime() -> dict[str, Any]:
         "user_data_location_file": str(_user_data_location_file()),
         "user_data_custom": not _path_same(_get_user_data_dir(), _default_user_data_dir()),
         "license_public_key_suffix": public_key_suffix,
-        "supports_web_incremental_updates": _safe_web_incremental_supported(),
-        "update_strategy": "full-package",
+        "supports_web_incremental_updates": update_supported,
+        "update_strategy": (
+            "verified-version-delta-with-full-fallback"
+            if update_supported
+            else "full-package"
+        ),
+        "update_engine_version": 3,
         "runtime_layout_version": RUNTIME_LAYOUT_VERSION,
+        **v3,
         "code_source": CODE_SOURCE,
         "legacy_runtime_overlays_present": _legacy_runtime_overlays_present(),
         "legacy_runtime_overlays_ignored": True,
@@ -9613,8 +9667,23 @@ def _schedule_client_restart(delay: float = 1.5) -> bool:
     return True
 
 
+def _schedule_client_exit_for_update(delay: float = 1.2) -> bool:
+    if not getattr(sys, "frozen", False):
+        return False
+
+    def _exit() -> None:
+        time.sleep(delay)
+        os._exit(0)
+
+    threading.Thread(target=_exit, daemon=True).start()
+    return True
+
+
 def _safe_web_incremental_supported() -> bool:
-    return False
+    try:
+        return bool(_runtime_updater_module().delta_runtime_supported())
+    except Exception:
+        return False
 
 
 def _runtime_integrity_summary() -> dict[str, Any]:
@@ -9642,7 +9711,7 @@ def _runtime_integrity_summary() -> dict[str, Any]:
         for path in paths:
             try:
                 data = path.read_bytes()
-                if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
+                if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js", ".pem"}:
                     data = data.replace(b"\r\n", b"\n")
                 if hashlib.sha256(data).hexdigest().lower() == expected:
                     matched = True
@@ -9673,11 +9742,21 @@ def check_update_api() -> dict[str, Any]:
         info = updater.check_update()
         if not info:
             return {"ok": True, "update_available": False, "current_version": _load_version()}
+        selected_patch = (
+            info.get("selected_patch")
+            if isinstance(info.get("selected_patch"), dict)
+            else {}
+        )
+        patch_file_count = int(
+            selected_patch.get("runtime_payload_files")
+            or selected_patch.get("file_count")
+            or 0
+        ) + int(selected_patch.get("stable_payload_files") or 0)
         public_info = {
             "version": info.get("latest_version") or info.get("version") or "",
             "release_notes": info.get("release_notes") or info.get("update_message") or "",
             "force_update": bool(info.get("force_update", False)),
-            "file_count": len(info.get("files") or {}),
+            "file_count": patch_file_count,
             "has_package": bool(
                 (info.get("package") or {}).get("url")
                 or info.get("package_url")
@@ -9695,10 +9774,15 @@ def check_update_api() -> dict[str, Any]:
             ),
             "package_sha256": (info.get("package") or {}).get("sha256") or info.get("package_sha256") or "",
             "package_size": int((info.get("package") or {}).get("size") or info.get("package_size") or 0),
-            "requires_full_package": True,
+            "patch_sha256": selected_patch.get("sha256") or "",
+            "patch_size": int(selected_patch.get("size") or 0),
+            "requires_full_package": bool(info.get("requires_full_package", False)),
             "requires_full_package_note": info.get("requires_full_package_note") or "",
-            "supports_web_incremental_updates": _safe_web_incremental_supported(),
-            "update_strategy": "full-package",
+            "supports_web_incremental_updates": bool(
+                info.get("supports_incremental_updates")
+                and _safe_web_incremental_supported()
+            ),
+            "update_strategy": info.get("update_strategy") or "full-package",
             "repair_required": bool(info.get("repair_required", False)),
             "integrity_mismatches": list(info.get("integrity_mismatches") or []),
         }
@@ -9724,10 +9808,17 @@ def apply_update_api() -> dict[str, Any]:
         else:
             result = updater.apply_update_headless(info)
             if result.get("ok"):
-                if result.get("restart_required"):
+                if result.get("agent_started") and result.get("exit_required"):
+                    result["auto_restart"] = _schedule_client_exit_for_update()
+                    result["msg"] = (
+                        "补丁已验证，客户端即将退出；外部更新器会完成切换并重新启动。"
+                        if result.get("auto_restart")
+                        else "补丁已验证，请关闭客户端以完成安装。"
+                    )
+                elif result.get("restart_required"):
                     result["auto_restart"] = _schedule_client_restart()
                     result["msg"] = "更新已安装，客户端即将自动重启。" if result.get("auto_restart") else "更新已安装，请重启客户端后生效。"
-                emit_log("success", result.get("msg") or "更新已安装，重启客户端后生效。", "settings")
+                emit_log("success", result.get("msg") or "更新已准备完成。", "settings")
             else:
                 details = result.get("failed_details") or {}
                 if details:
