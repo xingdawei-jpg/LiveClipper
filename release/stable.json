@@ -1,18 +1,21 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "channel": "stable",
-  "channel_status": "awaiting-external-distribution",
+  "channel_status": "hold",
   "version": "2026.7.13.10",
   "latest_version": "2026.7.13.10",
   "runtime_layout_version": 2,
   "minimum_runtime_layout_version": 2,
-  "update_strategy": "full-package",
+  "minimum_launcher_version": "1.0.0",
+  "minimum_updater_version": "1.1.0",
+  "update_strategy": "hold",
   "supports_incremental_updates": false,
   "requires_full_package": true,
-  "requires_full_package_note": "Full-package distribution is managed externally; program-file incremental updates are disabled.",
-  "release_notes": "Stable channel remains at 2026.7.13.10 until the external full-package download is published.",
+  "requires_full_package_note": "Stable automatic updates are temporarily paused.",
+  "release_notes": "Stable automatic updates are temporarily paused while the next full-package baseline is validated.",
   "force_update": false,
   "release_page_url": "",
+  "bridge_url": "",
   "package": {
     "format": "zip",
     "url": "",
@@ -20,5 +23,11 @@
     "size": 551779519,
     "filename": "LiveClipperWeb_2026.7.13.10_full_20260713.zip"
   },
-  "published_at": "2026-07-13 08:52:26"
+  "patches": [],
+  "published_at": "2026-07-14 00:38:37",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "e489293f17704e2f",
+    "value": "39zH70Pkg6TZNdUsaUUqQWOy3G6oIQdzOfeSfsM2oRb/4Gf3JG3rr2AX+gJozdUlPnpOM/gr0KBdMxdFqRcDCA=="
+  }
 }
