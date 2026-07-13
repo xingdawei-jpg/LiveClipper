@@ -38,6 +38,8 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertFalse(manifest["requires_full_package"])
         self.assertEqual(manifest["minimum_updater_version"], "1.1.0")
         self.assertEqual(manifest["files"], {})
+        self.assertIn("签名补丁", manifest["requires_full_package_note"])
+        self.assertNotRegex(manifest["release_notes"], r"[Ãæ]")
         self.assertIn("app/release_update_public_key.pem", manifest["runtime_files"])
 
     def test_updater_requires_an_exact_signed_patch_route(self) -> None:

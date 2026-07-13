@@ -129,13 +129,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build the LiveClipper Runtime V3 manifest.")
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
+    parser.add_argument("--notes-file", type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--requires-full-package", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--recovery", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
-    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+    release_notes = args.notes
+    if args.notes_file:
+        release_notes = args.notes_file.read_text(encoding="utf-8-sig").strip()
+    manifest = build_manifest(
+        args.version,
+        release_notes or f"v{args.version} update",
+        args.force,
+    )
     if args.check and VERSION_FILE.exists():
         current = json.loads(VERSION_FILE.read_text(encoding="utf-8-sig"))
         manifest["updated_at"] = current.get("updated_at") or manifest["updated_at"]

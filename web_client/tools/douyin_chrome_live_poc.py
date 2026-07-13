@@ -680,6 +680,14 @@ def launch_chrome(port: int, url: str, profile_dir: Path) -> subprocess.Popen[An
         chrome,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={profile_dir}",
+        "--disk-cache-size=134217728",
+        "--media-cache-size=67108864",
+        (
+            "--disable-features="
+            "OptimizationGuideOnDeviceModel,OptimizationGuideModelExecution,"
+            "OptimizationGuideModelDownloading,OptimizationTargetPrediction,"
+            "OptimizationHints,TextSafetyClassifier"
+        ),
         "--no-first-run",
         "--new-window",
         url,

@@ -2652,9 +2652,9 @@ async function resetKeywords() {
 }
 
 async function clearCache() {
-  if (!window.confirm("将清理成片/预览临时缓存，不会删除已导出的成片和原始素材；之后需要重新生成 AI 预览。确认继续？")) return;
+  if (!window.confirm("将清理成片/预览临时缓存和直播浏览器的可再生成缓存；不会删除登录信息、已导出的成片和原始素材。之后需要重新生成 AI 预览。确认继续？")) return;
   const result = await api("/api/cache/clear", { method: "POST", body: "{}" });
-  toast(result.message || "缓存清理完成", "success");
+  toast(result.message || "缓存清理完成", result.failed?.length ? "warning" : "success");
 }
 
 async function applyUserDataDir() {

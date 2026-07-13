@@ -21,7 +21,7 @@ import uuid
 import webbrowser
 from collections import deque
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -909,6 +909,8 @@ _USER_DATA_MIGRATE_SKIP = {
     "temp",
     "clip_previews",
     "web_uploads",
+    "chrome-live-poc",
+    "live_rec_diagnostics",
     "app",
     "web_client",
     "__pycache__",
@@ -995,10 +997,75 @@ def _remove_cache_target(path: Path) -> dict[str, Any] | None:
         return {"path": str(path), "files": 0, "bytes": 0, "mb": 0, "removed": False, "error": str(exc)}
 
 
+def _local_liveclipper_data_root() -> Path:
+    return Path(
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or tempfile.gettempdir()
+    ) / "LiveClipper"
+
+
+def _prune_local_update_backups(keep: int = 2) -> None:
+    backup_root = _local_liveclipper_data_root() / "update_backups"
+    try:
+        candidates = sorted(
+            (path for path in backup_root.iterdir() if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except (FileNotFoundError, OSError):
+        return
+    for stale in candidates[max(0, int(keep)) :]:
+        try:
+            shutil.rmtree(stale)
+        except OSError as exc:
+            emit_log("warning", f"更新备份清理跳过 {stale.name}: {exc}", "system")
+
+
+@app.on_event("startup")
+def _maintain_runtime_cache() -> None:
+    _prune_local_update_backups(keep=2)
+
+
 def _cache_clear_targets() -> list[Path]:
     targets: list[Path] = []
-    for name in ("cache", "temp", "clip_previews", "web_uploads"):
+    for name in (
+        "cache",
+        "temp",
+        "clip_previews",
+        "web_uploads",
+        "live_rec_diagnostics",
+    ):
         targets.append(_safe_user_child(name))
+
+    # Preserve the dedicated Chrome profile's login/session data while
+    # removing only models and caches that Chrome can regenerate.
+    appdata_root = Path(os.environ.get("APPDATA") or Path.home())
+    chrome_profile = appdata_root / "LiveClipper" / "chrome-live-poc"
+    for relative in (
+        "OptGuideOnDeviceModel",
+        "OptGuideOnDeviceClassifierModel",
+        "OptGuideManifestModel",
+        "optimization_guide_model_store",
+        "WasmTtsEngine",
+        "Safe Browsing",
+        "component_crx_cache",
+        "extensions_crx_cache",
+        "GrShaderCache",
+        "ShaderCache",
+        "GPUPersistentCache",
+        "BrowserMetrics",
+        "BrowserMetrics-spare.pma",
+        "CrashpadMetrics-active.pma",
+        "Default/Cache",
+        "Default/Code Cache",
+        "Default/GPUCache",
+        "Default/DawnGraphiteCache",
+        "Default/DawnWebGPUCache",
+    ):
+        targets.append(chrome_profile / Path(*PurePosixPath(relative).parts))
+
+    targets.append(_local_liveclipper_data_root() / "update_backups")
 
     temp_root = Path(tempfile.gettempdir())
     for name in ("live_cutter_web_asr", "live_cutter_stt", "livec_schedule", "liveclipper_ts_normalized"):

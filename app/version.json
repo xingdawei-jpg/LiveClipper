@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.7.13.13",
-  "version": "2026.7.13.13",
-  "latest_version": "2026.7.13.13",
+  "build_id": "2026.7.14.1",
+  "version": "2026.7.14.1",
+  "latest_version": "2026.7.14.1",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -21,11 +21,11 @@
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/release_update_public_key.pem": "d245c8e44144344895379497368d7b74e889298648ced0e0a21f5f0255c76917",
     "web_client/frontend/index.html": "24cd22cb243e3b748fbf291a5b2066b56de154edcc5345fd075c060651e6bacc",
-    "web_client/frontend/assets/app.js": "5d9893683cadaf8c12c8d12da85e84be0e59d1cecba2a5b3143e1540f07f98d6",
+    "web_client/frontend/assets/app.js": "96d2ccd2642b27183abe13d4153a3d8f7397bc950d54855c63a1357ce0c2e6d6",
     "web_client/frontend/assets/styles.css": "8e86b816271b7a564c2b93cb2bd261c5f8a39ab890c4ddf097dd7f2e2dbee741",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
-    "web_client/tools/douyin_chrome_live_poc.py": "e81d48c9d1d90a39a5021bb170aaea17bbc762c6a1c7455f7441b84817e98dcc"
+    "web_client/tools/douyin_chrome_live_poc.py": "f7db39595d8e5de3853ddb7da7ab7533606ca55bfb23854d02bc537cb8c3b44c"
   },
   "integrity_files": [
     "app/keywords.json",
@@ -40,10 +40,10 @@
   ],
   "source_files": {
     "web_client/desktop.py": "3f90f8655bf56a801faaa4f0f92359dd9412d699f7af83e9c6a6c25a9c544f80",
-    "web_client/server.py": "30641e72100afcde944585d9127d5c58ec0b63bc9fe8828a53a6f00007e6a288",
+    "web_client/server.py": "db970224ab9a7dbcc12b3364e0527aaed51322e0c996eeae80875df0c37b0b1d",
     "web_client/liveclipper_web.spec": "846ff7f966d80e8ce582157953248ee6d2d699e55bb9d63ddce8fb17b51af329",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
-    "tools/build_update_manifest.py": "c21377fc1f76adf06faa384ab914cc210d3bed6ba392be0a0cc8e3763b4444ff",
+    "tools/build_update_manifest.py": "520dcdefd702783b1a567fa1603630eb58eea1f1c09f64e0dd32d4f84e51b3e0",
     "tools/build_release_channel.py": "67f4256176eacfa5a40d6353114e072fde3b574d0b95e3b990979e3d3f9e3eda",
     "tools/build_v3_package.py": "8a581d43706c3de19d8fd767a007c30a4ea026112bb60fa44ba74d731043b5fe",
     "tools/build_delta_package.py": "5ba47af9ef889e48bdaca2749a0a387ff3551fa006f2de2a02ee0e3b09bb8a49",
@@ -92,9 +92,9 @@
     "app/updater.py": "39d308d3cd2f00a42319739d1c2d1165c17431dbd15d2aced70b51f0a5428e24",
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b"
   },
-  "release_notes": "重建 Runtime V3 正式更新基线：更新过程显示实时进度，签名补丁复用未变化文件并显著缩短安装时间；增加旧更新器版本门禁、补丁完整性计划校验和稳定文件事务回滚。",
-  "update_message": "重建 Runtime V3 正式更新基线：更新过程显示实时进度，签名补丁复用未变化文件并显著缩短安装时间；增加旧更新器版本门禁、补丁完整性计划校验和稳定文件事务回滚。",
+  "release_notes": "修复缓存清理遗漏：安全清理直播浏览器模型与缓存并保留登录；限制缓存增长；修复数据迁移复制垃圾和更新备份长期残留。",
+  "update_message": "修复缓存清理遗漏：安全清理直播浏览器模型与缓存并保留登录；限制缓存增长；修复数据迁移复制垃圾和更新备份长期残留。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-14 00:26:34"
+  "updated_at": "2026-07-14 01:20:53"
 }
