@@ -1024,7 +1024,14 @@ def _prune_local_update_backups(keep: int = 2) -> None:
 
 @app.on_event("startup")
 def _maintain_runtime_cache() -> None:
-    _prune_local_update_backups(keep=2)
+    worker = threading.Timer(
+        60.0,
+        _prune_local_update_backups,
+        kwargs={"keep": 2},
+    )
+    worker.name = "liveclipper-cache-maintenance"
+    worker.daemon = True
+    worker.start()
 
 
 def _cache_clear_targets() -> list[Path]:

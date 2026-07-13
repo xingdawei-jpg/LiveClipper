@@ -141,5 +141,41 @@ class CacheCleanupTests(unittest.TestCase):
             self.assertTrue((backup_root / "new").is_dir())
 
 
+    def test_startup_maintenance_is_deferred_off_health_path(self) -> None:
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys;"
+                f"sys.path.insert(0,{str(ROOT / 'app')!r});"
+                f"sys.path.insert(0,{str(ROOT / 'web_client')!r});"
+                "from unittest.mock import patch;import server;"
+                "patcher=patch.object(server.threading,'Timer');timer=patcher.start();"
+                "server._maintain_runtime_cache();"
+                "worker=timer.return_value;"
+                "print(json.dumps({'delay':timer.call_args.args[0],"
+                "'target':timer.call_args.args[1].__name__,"
+                "'kwargs':timer.call_args.kwargs.get('kwargs'),"
+                "'daemon':worker.daemon,'name':worker.name,"
+                "'started':worker.start.call_count}));patcher.stop()"
+            ),
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=True,
+        )
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(payload["delay"], 60.0)
+        self.assertEqual(payload["target"], "_prune_local_update_backups")
+        self.assertEqual(payload["kwargs"], {"keep": 2})
+        self.assertTrue(payload["daemon"])
+        self.assertEqual(payload["name"], "liveclipper-cache-maintenance")
+        self.assertEqual(payload["started"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
