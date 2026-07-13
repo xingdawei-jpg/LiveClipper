@@ -1,4 +1,4 @@
-"""Build app/version.json for LiveClipper incremental updates."""
+"""Build the immutable runtime manifest stored in app/version.json."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "app"
 WEB_DIR = ROOT / "web_client"
 VERSION_FILE = APP_DIR / "version.json"
+RELEASE_PAGE_URL = "https://github.com/xingdawei-jpg/LiveClipper/releases/latest"
+RUNTIME_LAYOUT_VERSION = 2
 
 APP_SKIP = {
     ".installed_version",
@@ -27,17 +29,14 @@ APP_SKIP = {
     "license_feishu_backend.py",
     "license_stats_store.py",
     "feishu_scheduler.py",
-    "licenses.json",
-    "generated_codes.json",
-    "ai_settings.json",
-    "version.json",
-    "live_cutter.spec",
     "live_recorder_page_BACKUP.py",
     "verify.py",
+    "version.json",
 }
-APP_SUFFIXES = {".py", ".json", ".txt"}
-WEB_FILES = [
-    WEB_DIR / "server.py",
+
+RUNTIME_FILES = [
+    APP_DIR / "keywords.json",
+    APP_DIR / "license_public_key.txt",
     WEB_DIR / "frontend" / "index.html",
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
@@ -46,139 +45,98 @@ WEB_FILES = [
     WEB_DIR / "tools" / "douyin_chrome_live_poc.py",
 ]
 
-INTEGRITY_FILES = [
-    "app/ai_clipper.py",
-    "app/cutter_logic.py",
-    "app/updater.py",
-    "web_client/server.py",
-    "web_client/frontend/index.html",
-    "web_client/frontend/assets/app.js",
-    "web_client/tools/douyin_active_product_probe_poc.py",
-    "web_client/tools/douyin_chrome_live_poc.py",
+SOURCE_FILES = [
+    WEB_DIR / "desktop.py",
+    WEB_DIR / "server.py",
+    WEB_DIR / "liveclipper_web.spec",
+    ROOT / "tools" / "build_update_manifest.py",
+    ROOT / "tools" / "build_release_channel.py",
 ]
 
-RECOVERY_FILES = INTEGRITY_FILES + [
-    "app/ai_model_config.py",
-    "app/config.py",
-    "app/keywords.json",
-    "app/volcengine_asr.py",
-    "web_client/frontend/assets/styles.css",
-    "web_client/tools/douyin_active_product_probe_poc.py",
-    "web_client/tools/douyin_chrome_live_poc.py",
-]
-
-
-TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js"}
+TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js", ".spec"}
 
 
 def _manifest_bytes(path: Path) -> bytes:
     data = path.read_bytes()
     if path.suffix.lower() in TEXT_SUFFIXES:
-        # GitHub raw serves repository-normalized LF text for these files.
         data = data.replace(b"\r\n", b"\n")
     return data
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(_manifest_bytes(path))
-    return digest.hexdigest()
+    return hashlib.sha256(_manifest_bytes(path)).hexdigest()
 
 
-def _app_files() -> list[Path]:
-    result: list[Path] = []
+def _source_files() -> list[Path]:
+    result = list(SOURCE_FILES)
     for path in sorted(APP_DIR.iterdir()):
-        if not path.is_file():
-            continue
-        if path.name.startswith("_"):
-            continue
-        if path.name in APP_SKIP:
+        if not path.is_file() or path.name in APP_SKIP or path.name.startswith("_"):
             continue
         if ".bak" in path.name:
             continue
-        if path.suffix.lower() in APP_SUFFIXES:
+        if path.suffix.lower() in {".py", ".json", ".txt"}:
             result.append(path)
-    return result
+    return list(dict.fromkeys(path for path in result if path.exists()))
 
 
-def build_manifest(
-    version: str,
-    release_notes: str,
-    force_update: bool = False,
-    recovery: bool = False,
-    requires_full_package: bool = False,
-) -> dict:
-    files: dict[str, str] = {}
-    if recovery:
-        for relative in RECOVERY_FILES:
-            path = ROOT / relative
-            if path.exists():
-                files[relative] = _sha256(path)
-    else:
-        for path in _app_files():
-            files[f"app/{path.name}"] = _sha256(path)
-        for path in WEB_FILES:
-            if path.exists():
-                files[path.relative_to(ROOT).as_posix()] = _sha256(path)
+def _hash_map(paths: list[Path]) -> dict[str, str]:
+    return {path.relative_to(ROOT).as_posix(): _sha256(path) for path in paths if path.exists()}
+
+
+def build_manifest(version: str, release_notes: str, force_update: bool = False) -> dict:
+    runtime_files = _hash_map(RUNTIME_FILES)
+    source_files = _hash_map(_source_files())
     return {
+        "schema_version": 2,
+        "runtime_layout_version": RUNTIME_LAYOUT_VERSION,
+        "build_id": version,
         "version": version,
         "latest_version": version,
-        "files": files,
+        "update_strategy": "full-package",
+        "supports_incremental_updates": False,
+        "requires_full_package": True,
+        "requires_full_package_note": "本版本采用整包升级。程序代码不会再写入用户数据目录，请下载完整包后替换旧程序。",
+        "release_page_url": RELEASE_PAGE_URL,
+        "package_url": "",
+        "package_sha256": "",
+        "package_size": 0,
+        # Kept empty deliberately: legacy clients treat this field as files to
+        # copy into AppData. Runtime v2 never publishes program-file deltas.
+        "files": {},
+        "runtime_files": runtime_files,
+        "integrity_files": list(runtime_files),
+        "source_files": source_files,
         "release_notes": release_notes,
-        "update_url": "",
         "update_message": release_notes,
-        "integrity_files": [name for name in INTEGRITY_FILES if name in files],
-        "recovery_update": bool(recovery),
-        "requires_full_package": bool(requires_full_package),
-        "requires_full_package_note": "如果当前客户端提示旧完整包或用户喜好库刷新 Not Found，请关闭旧包，下载新版完整包后再使用；旧启动器不能安全应用后端增量更新。",
+        "update_url": "",
         "force_update": bool(force_update),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build LiveClipper incremental update manifest.")
+    parser = argparse.ArgumentParser(description="Build the LiveClipper runtime manifest.")
     parser.add_argument("--version", required=True)
     parser.add_argument("--notes", default="")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--requires-full-package", action="store_true")
-    parser.add_argument("--recovery", action="store_true", help="Publish only the critical runtime recovery set.")
-    parser.add_argument("--check", action="store_true", help="Do not write; fail if manifest differs.")
+    parser.add_argument("--requires-full-package", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--recovery", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
 
-    if args.check:
-        current = VERSION_FILE.read_text(encoding="utf-8")
-        try:
-            current_manifest = json.loads(current)
-            current_updated_at = current_manifest.get("updated_at")
-        except Exception:
-            current_updated_at = None
-        manifest = build_manifest(
-            args.version,
-            args.notes or f"v{args.version} update",
-            args.force,
-            args.recovery,
-            args.requires_full_package,
-        )
-        if current_updated_at:
-            manifest["updated_at"] = current_updated_at
-        text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-        if current != text:
+    manifest = build_manifest(args.version, args.notes or f"v{args.version} update", args.force)
+    if args.check and VERSION_FILE.exists():
+        current = json.loads(VERSION_FILE.read_text(encoding="utf-8-sig"))
+        manifest["updated_at"] = current.get("updated_at") or manifest["updated_at"]
+        if current != manifest:
             print("app/version.json is not up to date.")
             return 1
         print("app/version.json is up to date.")
         return 0
-    manifest = build_manifest(
-        args.version,
-        args.notes or f"v{args.version} update",
-        args.force,
-        args.recovery,
-        args.requires_full_package,
-    )
-    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    VERSION_FILE.write_text(text, encoding="utf-8")
+
+    VERSION_FILE.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {VERSION_FILE}")
-    print(f"files={len(manifest['files'])}")
+    print(f"runtime_files={len(manifest['runtime_files'])} source_files={len(manifest['source_files'])}")
     return 0
 
 

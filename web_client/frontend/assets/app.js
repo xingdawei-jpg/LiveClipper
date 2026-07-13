@@ -1284,10 +1284,12 @@ function batchNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function formatBatchProgress({ total, done = 0, succeeded = null, current = 0, failed = 0, label = "", status = "" } = {}) {
+function formatBatchProgress({ total, done = 0, succeeded = null, current = 0, failed = 0, insufficient = 0, label = "", status = "" } = {}) {
   const safeTotal = Math.max(0, Math.floor(batchNumber(total)));
   if (safeTotal <= 1) return null;
   const safeFailed = Math.max(0, Math.floor(batchNumber(failed)));
+  const safeInsufficient = Math.max(0, Math.min(safeFailed, Math.floor(batchNumber(insufficient))));
+  const safeOtherFailed = Math.max(0, safeFailed - safeInsufficient);
   const safeDone = Math.max(0, Math.min(safeTotal, Math.floor(batchNumber(done))));
   const parsedSucceeded = succeeded == null ? Number.NaN : Number(succeeded);
   const fallbackSucceeded = status === "completed" ? safeDone : Math.max(0, safeDone - safeFailed);
@@ -1302,10 +1304,12 @@ function formatBatchProgress({ total, done = 0, succeeded = null, current = 0, f
   if (!["completed", "failed", "cancelled"].includes(status) && safeCurrent > 0 && safeDone < safeTotal) {
     parts.push(`正在第 ${safeCurrent} 个`);
   }
-  if (safeFailed > 0) parts.push(`失败 ${safeFailed}`);
+  if (safeInsufficient > 0) parts.push(`内容不足 ${safeInsufficient}`);
+  if (safeOtherFailed > 0) parts.push(`其他失败 ${safeOtherFailed}`);
   const titleParts = [`共 ${safeTotal} 个`, `已完成 ${safeDone} 个`];
   if (safeCurrent > 0 && safeDone < safeTotal) titleParts.push(`当前第 ${safeCurrent} 个`);
-  if (safeFailed > 0) titleParts.push(`失败 ${safeFailed} 个`);
+  if (safeInsufficient > 0) titleParts.push(`内容不足 ${safeInsufficient} 个`);
+  if (safeOtherFailed > 0) titleParts.push(`其他失败 ${safeOtherFailed} 个`);
   if (cleanLabel) titleParts.push(cleanLabel);
   return {
     total: safeTotal,
@@ -1313,6 +1317,7 @@ function formatBatchProgress({ total, done = 0, succeeded = null, current = 0, f
     succeeded: safeSucceeded,
     current: safeCurrent,
     failed: safeFailed,
+    insufficient: safeInsufficient,
     status,
     label: cleanLabel,
     text: parts.join(" · "),
@@ -1362,6 +1367,7 @@ function batchProgressFromTask(task) {
     succeeded: task.batch_succeeded,
     current: task.batch_current,
     failed: task.batch_failed,
+    insufficient: task.batch_insufficient,
     label: task.batch_label,
     status: task.status || "",
   });
@@ -1373,6 +1379,7 @@ function batchProgressFromTask(task) {
       succeeded: Math.max(batchNumber(structured.succeeded), batchNumber(inferred.succeeded)),
       current: batchNumber(inferred.current) || batchNumber(structured.current),
       failed: Math.max(batchNumber(structured.failed), batchNumber(inferred.failed)),
+      insufficient: Math.max(batchNumber(structured.insufficient), batchNumber(inferred.insufficient)),
       label: inferred.label || structured.label,
       status: task.status || "",
     }) || structured;
@@ -1402,8 +1409,9 @@ function batchProgressFromOutputHistory(scope) {
   const indexedDone = new Set(related.map((item) => Number(item.index || 0)).filter((value) => value > 0)).size;
   const done = Math.max(recordedDone, indexedDone);
   const failed = Math.max(...related.map((item) => batchNumber(item.batch_failed)), 0);
+  const insufficient = Math.max(...related.map((item) => batchNumber(item.batch_insufficient)), 0);
   const succeeded = Math.max(...related.map((item) => batchNumber(item.batch_succeeded)), Math.max(0, done - failed));
-  return formatBatchProgress({ total, done, succeeded, failed, status: "completed" });
+  return formatBatchProgress({ total, done, succeeded, failed, insufficient, status: "completed" });
 }
 
 function progressFromTask(task) {
@@ -1443,14 +1451,16 @@ function progressFromTask(task) {
 
 function batchProgressFromText(text, status = "") {
   const value = String(text || "").trim();
-  const success = value.match(/^(?:智能成片(?:批量)?完成[：:]\s*)?成功\s*(\d+)\s*\/\s*(\d+)(?:\s*个)?[。.]?$/);
+  const success = value.match(/(?:^|[：:]\s*)成功\s*(\d+)\s*\/\s*(\d+)(?:\s*[个组])?(?:\s|[，。·]|$)/);
   if (success) {
     const succeeded = Number(success[1]);
     const total = Number(success[2]);
+    const insufficient = Number(value.match(/内容不足\s*(\d+)/)?.[1] || 0);
     return formatBatchProgress({
       done: status === "completed" ? total : succeeded,
       succeeded,
       failed: Math.max(0, total - succeeded),
+      insufficient,
       total,
       status: status || "completed",
     });
@@ -1571,6 +1581,8 @@ function newestScopedTasks(tasks, scope) {
 
 function issueSuggestion(message) {
   const text = String(message || "");
+  if (/AI未满足时长|时长未达标|超过目标上限/.test(text)) return "AI片单未落入目标时长范围，已跳过该素材并继续批量任务。";
+  if (/有效内容不足|内容不足|目标至少|目标下限/.test(text)) return "该素材可用卖点较少，可缩短目标时长或补充素材。";
   if (/素材|视频|至少|添加|不存在|路径/.test(text)) return "请补充素材或检查文件路径。";
   if (/402|余额不足|quota|balance|充值/i.test(text)) return "请到模型平台充值，或在设置中更换可用 API Key。";
   if (/API|Key|模型|DeepSeek|OpenAI|连接|网络|代理/.test(text)) return "请到设置里检查 AI 配置和网络。";
@@ -1582,12 +1594,32 @@ function issueSuggestion(message) {
 function issueForScope(scope, scopedTasks) {
   const failed = newestTask(scopedTasks.filter((task) => task.status === "failed"));
   if (failed) {
-    const message = failed.error || failed.message || "任务处理失败。";
+    const failureDetails = Array.isArray(failed.batch_failure_details) ? failed.batch_failure_details : [];
+    const message = failureDetails[0]?.message || failed.error || failed.message || "任务处理失败。";
     return {
       title: failed.title || "任务失败",
       message,
       suggestion: issueSuggestion(message),
       tone: "error",
+    };
+  }
+
+  const partial = newestTask(scopedTasks.filter((task) => task.status === "completed" && Number(task.batch_failed || 0) > 0));
+  if (partial) {
+    const failureDetails = Array.isArray(partial.batch_failure_details) ? partial.batch_failure_details : [];
+    const first = failureDetails[0] || {};
+    const message = first.message || partial.message || "部分素材未生成成片。";
+    const hasInsufficient = Number(partial.batch_insufficient || 0) > 0;
+    const hasDurationMismatch = failureDetails.some((item) => item?.code === "duration_mismatch");
+    let title = "部分素材处理失败";
+    if (hasInsufficient && hasDurationMismatch) title = "部分素材内容或时长不符合";
+    else if (hasInsufficient) title = "部分素材内容不足";
+    else if (hasDurationMismatch) title = "部分素材时长未达标";
+    return {
+      title,
+      message,
+      suggestion: issueSuggestion(message),
+      tone: "warning",
     };
   }
 
@@ -2843,7 +2875,10 @@ function renderUpdateState() {
     notes.textContent = (releaseNotes || (hasUpdate ? "\u53d1\u73b0\u53ef\u5b89\u88c5\u66f4\u65b0\u3002" : "\u6ca1\u6709\u53ef\u7528\u66f4\u65b0\u3002")) + suffix + fullPackageNote;
   }
   const applyButton = $("update-card-apply");
-  if (applyButton) applyButton.disabled = !hasUpdate || busy || fullPackageRequired;
+  if (applyButton) {
+    applyButton.textContent = fullPackageRequired ? "获取完整包" : "安装";
+    applyButton.disabled = !hasUpdate || busy || (fullPackageRequired && !info.has_package);
+  }
 }
 
 function openUpdateCard() {
@@ -2938,15 +2973,15 @@ async function applyUpdate() {
   }
   const runtime = await getRuntimeInfo();
   if (needsFullPackageUpdate(runtime, state.update.info)) {
-    const message = fullPackageUpdateMessage(runtime);
+    const result = await api("/api/update/open-package", { method: "POST", body: "{}" });
+    const message = result.msg || fullPackageUpdateMessage(runtime);
     setUpdateState({
       installing: false,
-      error: message,
-      message: "需要新版完整包",
+      error: result.ok ? "" : message,
+      message: result.ok ? "已打开完整包下载页面" : "需要新版完整包",
     });
-    alert(message);
-    toast("当前客户端已禁止在线增量安装，请使用新版完整包。", "warning");
-    return { ok: false, full_package_required: true, msg: message };
+    toast(message, result.ok ? "success" : "warning");
+    return { ...result, full_package_required: true };
   }
   if (!confirm("\u5b89\u88c5\u66f4\u65b0\u540e\u9700\u8981\u91cd\u542f\u5ba2\u6237\u7aef\u624d\u80fd\u751f\u6548\uff0c\u7ee7\u7eed\u5417\uff1f")) return;
   setUpdateState({
@@ -5520,15 +5555,19 @@ function buildFinalPreferenceSummary(summary = {}, topicCoverage = {}) {
   if (!entries.length) return summary || {};
   const actualLabel = entries[0][0];
   const previousLabel = summary.used_label || summary.label || "";
+  const displayLabel = previousLabel || actualLabel;
   return {
     ...(summary || {}),
     status: "final",
     mode: "最终片单统计",
-    label: actualLabel,
-    used_label: actualLabel,
-    ai_selected_label: previousLabel && previousLabel !== actualLabel ? previousLabel : undefined,
+    label: displayLabel,
+    used_label: displayLabel,
+    ai_selected_label: previousLabel || undefined,
+    actual_mainline_label: actualLabel,
     source: "final_clips",
-    detail: `按最终保留片段统计，主线为${actualLabel}。`,
+    detail: displayLabel !== actualLabel
+      ? `AI偏好为${displayLabel}；按最终保留片段统计，正文主题主线为${actualLabel}。`
+      : `按最终保留片段统计，主线为${actualLabel}。`,
   };
 }
 
@@ -5734,6 +5773,19 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const warnings = [];
   const preferenceEligibleClips = preferenceLabel ? clips.filter((clip) => clipEligibleForPreference(clip)) : [];
   const preferenceHitCount = preferenceEligibleClips.filter((clip) => clipMatchesPreference(clip, preferenceLabel)).length;
+  if (preferenceLabel && !Object.prototype.hasOwnProperty.call(topicCoverage.topic_counts || {}, preferenceLabel)) {
+    const preferenceHitDuration = preferenceEligibleClips
+      .filter((clip) => clipMatchesPreference(clip, preferenceLabel))
+      .reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+    const preferenceProductDuration = preferenceEligibleClips
+      .reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+    topicCoverage = {
+      ...topicCoverage,
+      preference_count: preferenceHitCount,
+      preference_ratio: preferenceEligibleClips.length ? preferenceHitCount / preferenceEligibleClips.length : 0,
+      preference_duration_ratio: preferenceProductDuration ? preferenceHitDuration / preferenceProductDuration : 0,
+    };
+  }
   const salesChain = buildSalesChainSummary(clips);
   if (topicCoverage.overconcentrated) {
     warnings.push(`偏好主题占比过高：${Number(topicCoverage.preference_count || 0)}/${Number(topicCoverage.product_count || 0)}，需要补充其他卖点。`);
@@ -5860,7 +5912,9 @@ function renderPreviewSummary(analysis) {
   const preferenceProductCount = Number(topicCoverage.product_count || analysis.preferenceEligibleCount || 0);
   const preferenceCount = Number(
     analysis.preferenceLabel
-      ? (topicCounts[analysis.preferenceLabel] ?? topicCoverage.preference_count ?? analysis.preferenceHitCount ?? 0)
+      ? (Object.prototype.hasOwnProperty.call(topicCounts, analysis.preferenceLabel)
+          ? topicCounts[analysis.preferenceLabel]
+          : (analysis.preferenceHitCount ?? topicCoverage.preference_count ?? 0))
       : 0
   );
   const preferenceRatio = preferenceProductCount > 0 ? preferenceCount / preferenceProductCount : 0;

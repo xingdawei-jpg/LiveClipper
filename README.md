@@ -41,4 +41,4 @@ python desktop.py
 
 - `release_artifacts/`、`release_dist/`、`build/`、`dist/`、日志、用户配置和密钥类文件不要提交。
 - `app/ffmpeg/*.exe` 用于本地打包和测试，但不提交到 Git。
-- Web 桌面版结构变化较大时，优先发布全量包，不直接套旧版增量更新。
+- Runtime V2 只发布经过哈希验证的全量包，程序文件不得写入 AppData。

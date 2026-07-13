@@ -13,6 +13,7 @@ release_artifacts/
 packaging/build/
 packaging/dist/
 packaging/release_*/
+vendor/
 *.spec.bak
 *.zip
 *.exe
@@ -46,9 +47,15 @@ web_client/__pycache__/
 # Backups and scratch scripts kept out of the clean source tree
 .codex_backups/
 .project_docs/
-tests/
+tests/__pycache__/
+tests/.pytest_cache/
 tools/README.md
 tools/feishu_license_dedupe.py
+tools/douyin_active_product_probe_poc.py
+tools/douyin_chrome_live_poc.py
+design-qa.md
+docs/ui_param_popover_mockup*.html
+docs/ui_param_popover_mockup*.png
 *.bak
 *.before_*
 *.bak*

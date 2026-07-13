@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import math
 import os
@@ -19,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -30,48 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 
-def _version_key(value: str) -> tuple[int, int, int, int]:
-    parts: list[int] = []
-    for chunk in str(value or "").replace("-", ".").split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple((parts + [0, 0, 0, 0])[:4])
-
-
-def _read_app_version(path: Path) -> str:
-    try:
-        data = json.loads((path / "version.json").read_text(encoding="utf-8-sig"))
-        return data.get("version") or data.get("latest_version") or "0"
-    except Exception:
-        return "0"
-
-
-def _valid_app_dir(path: Path) -> bool:
-    required = ("license_client.py", "cutter_logic.py", "ai_model_config.py")
-    return path.is_dir() and all((path / name).exists() for name in required)
-
-
-def _app_public_key(path: Path) -> str:
-    try:
-        return (path / "license_public_key.txt").read_text(encoding="utf-8-sig").strip()
-    except Exception:
-        return ""
-
-
-def _select_app_dir(*candidates: Path) -> Path:
-    expected_public_key = _app_public_key(candidates[0]) if candidates else ""
-    valid = [path for path in candidates if _valid_app_dir(path)]
-    if expected_public_key:
-        matched = [path for path in valid if _app_public_key(path) == expected_public_key]
-        if matched:
-            valid = matched
-    if not valid:
-        return candidates[0]
-    valid.sort(key=lambda path: _version_key(_read_app_version(path)), reverse=True)
-    return valid[0]
-
-
-USER_UPDATE_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
+RUNTIME_LAYOUT_VERSION = 2
+USER_DATA_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 ENV_BUNDLE_DIR = Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve() if os.environ.get("LIVECLIPPER_BUNDLE_DIR") else None
 
@@ -86,40 +46,23 @@ else:
     REPO_ROOT = MODULE_WEB_DIR.parent
 
 
-def _valid_web_dir(path: Path) -> bool:
-    return path.is_dir() and (path / "frontend" / "index.html").exists() and (path / "frontend" / "assets").is_dir()
-
-
-def _read_web_version(path: Path) -> str:
-    return _read_app_version(path.parent / "app")
-
-
-def _select_web_dir(*candidates: Path) -> Path:
-    valid = [path for path in candidates if _valid_web_dir(path)]
-    if valid:
-        valid.sort(key=lambda path: _version_key(_read_web_version(path)), reverse=True)
-        return valid[0]
-    return candidates[0]
-
-
 if ENV_BUNDLE_DIR or getattr(sys, "frozen", False):
-    WEB_DIR = _select_web_dir(BUNDLE_DIR / "web_client", MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
+    WEB_DIR = (BUNDLE_DIR / "web_client").resolve()
+    APP_DIR = (BUNDLE_DIR / "app").resolve()
+    CODE_SOURCE = "bundled"
 else:
-    WEB_DIR = _select_web_dir(MODULE_WEB_DIR, USER_UPDATE_ROOT / "web_client")
-if ENV_BUNDLE_DIR or getattr(sys, "frozen", False):
-    APP_DIR = _select_app_dir(
-        REPO_ROOT / "app",
-        WEB_DIR.parent / "app",
-        USER_UPDATE_ROOT / "app",
-    )
-else:
-    APP_DIR = _select_app_dir(
-        REPO_ROOT / "app",
-        WEB_DIR.parent / "app",
-        USER_UPDATE_ROOT / "app",
-    )
+    WEB_DIR = MODULE_WEB_DIR.resolve()
+    APP_DIR = (REPO_ROOT / "app").resolve()
+    CODE_SOURCE = "source"
 FRONTEND_DIR = WEB_DIR / "frontend"
 ASSETS_DIR = FRONTEND_DIR / "assets"
+
+required_runtime_paths = [APP_DIR / "version.json", FRONTEND_DIR / "index.html"]
+if CODE_SOURCE == "source":
+    required_runtime_paths.append(APP_DIR / "cutter_logic.py")
+for required_path in required_runtime_paths:
+    if not required_path.is_file():
+        raise RuntimeError(f"LiveClipper runtime is incomplete: {required_path}")
 
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
@@ -326,6 +269,8 @@ def _progress_message(raw: str, scope: str) -> str | None:
 
     if not compact or "__batch" in lower or "[progress]" in lower:
         return ""
+    if "跳过成片语音识别" in compact or "使用源 SRT 映射" in compact:
+        return "正在烧录源字幕。"
     if re.match(r"^(frame=|video:|audio:|subtitle:|qavg:)", lower):
         return ""
     if re.match(r"^(ffmpeg:|\[t\]|vf:|rc=|kb:)", lower):
@@ -651,6 +596,12 @@ def _load_version() -> str:
         return data.get("version") or data.get("latest_version") or "dev"
     except Exception:
         return "dev"
+
+
+def _legacy_runtime_overlays_present() -> bool:
+    if os.environ.get("LIVECLIPPER_LEGACY_OVERLAYS_PRESENT") == "1":
+        return True
+    return any((USER_DATA_ROOT / name).exists() for name in ("app", "web_client", "tools"))
 
 
 DEFAULT_PREFERENCE_WEIGHTS = {
@@ -1123,6 +1074,7 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
     batch_total = max(1, task_batch_total or total)
     batch_done = max(0, min(batch_total, int(task.get("batch_done") or total)))
     batch_failed = max(0, int(task.get("batch_failed") or 0))
+    batch_insufficient = max(0, min(batch_failed, int(task.get("batch_insufficient") or 0)))
     raw_batch_succeeded = task.get("batch_succeeded")
     if raw_batch_succeeded is None:
         raw_batch_succeeded = max(0, batch_done - batch_failed)
@@ -1145,6 +1097,7 @@ def _output_history_records_from_task(task: dict[str, Any]) -> list[dict[str, An
                 "batch_done": batch_done,
                 "batch_succeeded": batch_succeeded,
                 "batch_failed": batch_failed,
+                "batch_insufficient": batch_insufficient,
                 "exists": Path(path).exists(),
             }
         )
@@ -1787,7 +1740,9 @@ def _new_task(scope: str, title: str) -> str:
             "batch_succeeded": 0,
             "batch_current": 0,
             "batch_failed": 0,
+            "batch_insufficient": 0,
             "batch_label": "",
+            "batch_failure_details": [],
         }
     return task_id
 
@@ -1846,7 +1801,9 @@ def _set_task(task_id: str, **updates: Any) -> None:
 _BATCH_PROGRESS_RE = re.compile(
     r"^(跳过失败|完成扫描|完成导出|快速分割|处理|完成|扫描|导出)\s*(\d+)\s*/\s*(\d+)(?:\s*[:：]\s*(.+))?$"
 )
-_BATCH_SUCCESS_RE = re.compile(r"^成功\s*(\d+)\s*/\s*(\d+)(?:\s*个)?$")
+_BATCH_SUCCESS_RE = re.compile(
+    r"(?:^|[：:]\s*)成功\s*(\d+)\s*/\s*(\d+)(?:\s*[个组])?(?:\s|[，。·]|$)"
+)
 
 
 def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
@@ -1856,12 +1813,14 @@ def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
 
     success = _BATCH_SUCCESS_RE.search(text)
     if success:
-        done = int(success.group(1))
+        succeeded = int(success.group(1))
         total = int(success.group(2))
         if total > 1:
             return {
                 "batch_total": total,
-                "batch_done": max(0, min(total, done)),
+                "batch_done": total,
+                "batch_succeeded": max(0, min(total, succeeded)),
+                "batch_failed": max(0, total - succeeded),
                 "batch_current": 0,
             }
 
@@ -1886,6 +1845,65 @@ def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
     if label:
         updates["batch_label"] = label[:120]
     return updates
+
+
+def _batch_failure_detail(label: str, error: Any) -> dict[str, Any]:
+    message = re.sub(r"\s+", " ", str(error or "未知错误")).strip()
+    insufficient = "有效内容不足" in message or (
+        "低于目标下限" in message and "片单" in message
+    )
+    duration_mismatch = not insufficient and any(token in message for token in (
+        "AI未满足时长",
+        "成片时长未达标",
+        "最终成片时长未达标",
+        "超过目标上限",
+    ))
+    detail: dict[str, Any] = {
+        "label": str(label or "").strip(),
+        "code": (
+            "insufficient_content"
+            if insufficient
+            else "duration_mismatch"
+            if duration_mismatch
+            else "processing_failed"
+        ),
+        "message": message,
+    }
+    metrics = re.search(
+        r"可用候选\s*(\d+)\s*条.*?最佳片单\s*([\d.]+)\s*秒.*?目标至少\s*([\d.]+)\s*秒",
+        message,
+    )
+    if metrics:
+        detail.update({
+            "candidate_count": int(metrics.group(1)),
+            "best_duration": float(metrics.group(2)),
+            "duration_low": float(metrics.group(3)),
+        })
+    duration_range = re.search(
+        r"(?:最佳片单|预计成片|成片真实时长|最终成片时长)\s*([\d.]+)\s*秒.*?(?:要求|允许)\s*([\d.]+)\s*[-至]\s*([\d.]+)\s*秒",
+        message,
+    )
+    if duration_range:
+        detail.update({
+            "best_duration": float(duration_range.group(1)),
+            "duration_low": float(duration_range.group(2)),
+            "duration_high": float(duration_range.group(3)),
+        })
+    return detail
+
+
+def _batch_summary_message(prefix: str, succeeded: int, total: int, details: list[dict[str, Any]], unit: str) -> str:
+    insufficient = sum(1 for item in details if item.get("code") == "insufficient_content")
+    duration_mismatch = sum(1 for item in details if item.get("code") == "duration_mismatch")
+    other_failed = max(0, len(details) - insufficient - duration_mismatch)
+    parts = [f"{prefix}：成功 {succeeded}/{total} {unit}"]
+    if insufficient:
+        parts.append(f"内容不足 {insufficient}")
+    if duration_mismatch:
+        parts.append(f"时长未达标 {duration_mismatch}")
+    if other_failed:
+        parts.append(f"其他失败 {other_failed}")
+    return " · ".join(parts)
 
 
 _LOG_PROGRESS_SIGNAL_RE = re.compile(r"\[PROGRESS\]\s*(\d+(?:\.\d+)?)", re.I)
@@ -1925,7 +1943,13 @@ def _label_for_internal_progress(percent: float) -> str:
     return "剪辑处理中"
 
 
-def _set_task_progress(task_id: str, progress: float, message: str | None = None) -> None:
+def _set_task_progress(
+    task_id: str,
+    progress: float,
+    message: str | None = None,
+    *,
+    force_message: bool = False,
+) -> None:
     with _TASK_LOCK:
         task = _TASKS.get(task_id)
         if not task or task.get("status") == "cancelled":
@@ -1933,7 +1957,7 @@ def _set_task_progress(task_id: str, progress: float, message: str | None = None
         current = float(task.get("progress") or 0)
         incoming = max(0, min(99, float(progress)))
         task["progress"] = max(current, incoming)
-        if message and incoming >= current - 0.5:
+        if message and (force_message or incoming >= current - 0.5):
             task["message"] = message
             task.update(_task_batch_updates_from_message(message))
 
@@ -2005,7 +2029,7 @@ def _task_log_fn(
         if stage:
             progress, label = stage
             scaled = base + (progress / 100.0) * span
-            _set_task_progress(task_id, scaled, label)
+            _set_task_progress(task_id, scaled, label, force_message=True)
 
     return _log
 
@@ -3843,18 +3867,28 @@ def _preview_final_preference_summary(
     candidates.sort(key=lambda item: (-item[1], -item[2], item[0]))
     actual_label, actual_count, actual_duration = candidates[0]
     previous_label = str(preference_summary.get("used_label") or preference_summary.get("label") or "").strip()
+    display_label = previous_label or actual_label
+    display_count = int(counts.get(display_label) or 0)
+    display_duration = float(durations.get(display_label) or 0.0)
     result = dict(preference_summary or {})
     result.update({
         "status": "final",
         "mode": "最终片单统计",
-        "label": actual_label,
-        "used_label": actual_label,
-        "final_count": actual_count,
-        "final_duration": round(actual_duration, 3),
+        "label": display_label,
+        "used_label": display_label,
+        "final_count": display_count,
+        "final_duration": round(display_duration, 3),
+        "actual_mainline_label": actual_label,
+        "actual_mainline_count": actual_count,
+        "actual_mainline_duration": round(actual_duration, 3),
         "source": "final_clips",
-        "detail": f"按最终保留片段统计，主线为{actual_label}。",
+        "detail": (
+            f"AI偏好为{display_label}；按最终保留片段统计，正文主题主线为{actual_label}。"
+            if display_label != actual_label
+            else f"按最终保留片段统计，主线为{actual_label}。"
+        ),
     })
-    if previous_label and previous_label != actual_label:
+    if previous_label:
         result["ai_selected_label"] = previous_label
     return result
 
@@ -6015,7 +6049,18 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         total_groups = len(groups)
         outputs: list[str] = []
         failures: list[str] = []
-        _set_task(task_id, batch_total=total_groups, batch_done=0, batch_current=1, batch_failed=0, batch_label="")
+        failure_details: list[dict[str, Any]] = []
+        _set_task(
+            task_id,
+            batch_total=total_groups,
+            batch_done=0,
+            batch_succeeded=0,
+            batch_current=1,
+            batch_failed=0,
+            batch_insufficient=0,
+            batch_label="",
+            batch_failure_details=[],
+        )
         emit_log("info", f"批量混剪开始：{total_groups} 组，目标时长={payload.duration}秒", scope)
 
         for index, (group_name, paths) in enumerate(groups, start=1):
@@ -6062,16 +6107,45 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                 _archive_used_pip(used_pip_file, scope)
                 outputs.append(str(output_path))
                 _set_task_progress(task_id, min(94, 10 + (index / total_groups) * 84), f"完成 {index}/{total_groups}: {group_name}")
+                _set_task(
+                    task_id,
+                    batch_done=index,
+                    batch_succeeded=len(outputs),
+                    batch_current=index + 1 if index < total_groups else 0,
+                    batch_failed=len(failure_details),
+                    batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_failure_details=list(failure_details),
+                )
                 emit_log("success", f"混剪批量 [{index}/{total_groups}] 完成：{group_name}", scope)
             except Exception as group_exc:
                 failures.append(f"第 {index} 组 {group_name}: {group_exc}")
+                failure_details.append(_batch_failure_detail(f"第 {index} 组 {group_name}", group_exc))
                 _set_task_progress(task_id, min(94, 10 + (index / total_groups) * 84), f"跳过失败 {index}/{total_groups}: {group_name}")
-                _set_task(task_id, batch_failed=len(failures))
+                _set_task(
+                    task_id,
+                    batch_done=index,
+                    batch_succeeded=len(outputs),
+                    batch_current=index + 1 if index < total_groups else 0,
+                    batch_failed=len(failure_details),
+                    batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_failure_details=list(failure_details),
+                )
                 emit_log("error", f"混剪批量 [{index}/{total_groups}] 失败：{group_name}，{group_exc}", scope)
 
         if not outputs:
+            _set_task(
+                task_id,
+                batch_done=total_groups,
+                batch_succeeded=0,
+                batch_current=0,
+                batch_failed=len(failure_details),
+                batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                batch_failure_details=list(failure_details),
+                message=_batch_summary_message("批量混剪完成", 0, total_groups, failure_details, "组"),
+            )
             raise RuntimeError("批量混剪没有成功输出。")
         _consume_trial("混剪成片", units=len(outputs), scope=scope)
+        summary_message = _batch_summary_message("批量混剪完成", len(outputs), total_groups, failure_details, "组")
         _set_task(
             task_id,
             status="completed",
@@ -6079,15 +6153,18 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
             output=outputs[0],
             outputs=outputs,
             result_count=len(outputs),
-            message=f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组",
+            message=summary_message,
             batch_total=total_groups,
-            batch_done=len(outputs),
+            batch_done=total_groups,
+            batch_succeeded=len(outputs),
             batch_current=0,
-            batch_failed=len(failures),
+            batch_failed=len(failure_details),
+            batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
             batch_label="",
+            batch_failure_details=list(failure_details),
         )
         if failures:
-            emit_log("warning", f"批量混剪完成：成功 {len(outputs)}/{total_groups} 组，失败 {len(failures)} 组。", scope)
+            emit_log("warning", summary_message, scope)
         else:
             emit_log("success", f"批量混剪完成：成功 {len(outputs)} 组。", scope)
     except Exception as exc:
@@ -7201,7 +7278,9 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             batch_succeeded=0,
             batch_current=1 if total_videos > 1 else 0,
             batch_failed=0,
+            batch_insufficient=0,
             batch_label="",
+            batch_failure_details=[],
         )
         _set_task_progress(task_id, 8, f"准备处理 {total_videos} 个视频")
         base_dir = _default_output_dir(videos[0], payload.output_dir, "dedup_output")
@@ -7215,7 +7294,7 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             if not video.exists():
                 failures.append(f"{video.name}: 文件不存在")
                 _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"跳过失败 {index}/{total_videos}: {video.name}")
-                _set_task(task_id, batch_failed=len(failures))
+                _set_task(task_id, batch_done=index, batch_succeeded=len(outputs), batch_failed=len(failures), batch_current=index + 1 if index < total_videos else 0)
                 emit_log("error", f"[{index}/{len(videos)}] 文件不存在：{video}", scope)
                 continue
             out_dir = base_dir if payload.output_dir.strip() else _default_output_dir(video, "", "dedup_output")
@@ -7226,12 +7305,13 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             if ok:
                 outputs.append(str(output))
                 _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"完成 {index}/{total_videos}: {video.name}")
+                _set_task(task_id, batch_done=index, batch_succeeded=len(outputs), batch_failed=len(failures), batch_current=index + 1 if index < total_videos else 0)
                 emit_log("success", f"[{index}/{len(videos)}] 完成：{output.name}（{applied}）", scope)
                 _archive_used_pip(used_pip_file, scope)
             else:
                 failures.append(f"{video.name}: {stderr_text or '视频处理失败'}")
                 _set_task_progress(task_id, min(96, 10 + (index / total_videos) * 84), f"跳过失败 {index}/{total_videos}: {video.name}")
-                _set_task(task_id, batch_failed=len(failures))
+                _set_task(task_id, batch_done=index, batch_succeeded=len(outputs), batch_failed=len(failures), batch_current=index + 1 if index < total_videos else 0)
                 emit_log("error", f"[{index}/{len(videos)}] 处理失败：{_short_error(stderr_text)}。解决办法：{_solution_for_error(stderr_text)}", scope)
         if not outputs:
             raise RuntimeError(failures[0] if failures else "没有生成成功的视频。")
@@ -7244,7 +7324,8 @@ def _run_dedup(task_id: str, payload: DedupPayload) -> None:
             outputs=outputs,
             result_count=len(outputs),
             batch_total=total_videos,
-            batch_done=len(outputs),
+            batch_done=total_videos,
+            batch_succeeded=len(outputs),
             batch_current=0,
             batch_failed=len(failures),
             batch_label="",
@@ -7734,10 +7815,8 @@ def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveR
 def _douyin_active_probe_script() -> Path:
     script_name = "douyin_active_product_probe_poc.py"
     candidates = [
-        USER_UPDATE_ROOT / "web_client" / "tools" / script_name,
         WEB_DIR / "tools" / script_name,
         MODULE_WEB_DIR / "tools" / script_name,
-        USER_UPDATE_ROOT / "tools" / script_name,
         WEB_DIR.parent / "tools" / script_name,
         TOOLS_DIR / script_name,
         BUNDLE_DIR / "tools" / script_name,
@@ -7765,7 +7844,9 @@ def _short_file_hash(path: Path, length: int = 12) -> str:
 def _manifest_expected_hash(relative_path: str) -> str:
     try:
         data = json.loads((APP_DIR / "version.json").read_text(encoding="utf-8-sig"))
-        files = data.get("files") if isinstance(data.get("files"), dict) else {}
+        files = data.get("runtime_files") if isinstance(data.get("runtime_files"), dict) else {}
+        if not files:
+            files = data.get("files") if isinstance(data.get("files"), dict) else {}
         return str(files.get(relative_path.replace("\\", "/")) or "").strip().lower()
     except Exception:
         return ""
@@ -8850,11 +8931,22 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         total_videos = max(1, len(paths))
         if total_videos > 1:
             emit_log("info", f"批量容错已启用：共 {total_videos} 个素材，单个失败将自动跳过并继续。", "smart-cut")
-        _set_task(task_id, batch_total=total_videos, batch_done=0, batch_current=1 if total_videos > 1 else 0, batch_failed=0, batch_label="")
+        _set_task(
+            task_id,
+            batch_total=total_videos,
+            batch_done=0,
+            batch_succeeded=0,
+            batch_current=1 if total_videos > 1 else 0,
+            batch_failed=0,
+            batch_insufficient=0,
+            batch_label="",
+            batch_failure_details=[],
+        )
         _set_task_progress(task_id, 8, f"校验 {total_videos} 个素材")
 
         outputs: list[str] = []
         failures: list[str] = []
+        failure_details: list[dict[str, Any]] = []
         succeeded_videos = 0
 
         for index, video in enumerate(paths, start=1):
@@ -8958,6 +9050,8 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     batch_succeeded=succeeded_videos,
                     batch_current=index + 1 if index < total_videos else 0,
                     batch_failed=len(failures),
+                    batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_failure_details=list(failure_details),
                     batch_label="" if index >= total_videos else f"等待处理 {index + 1}/{total_videos}",
                 )
                 if total_videos > 1:
@@ -8973,6 +9067,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     emit_log("warning", "任务已停止。", "smart-cut")
                     return
                 failures.append(f"{video.name}: {video_exc}")
+                failure_details.append(_batch_failure_detail(video.name, video_exc))
                 _set_task_progress(task_id, min(94, 10 + (index / total_videos) * 82), f"跳过失败 {index}/{total_videos}: {video.name}")
                 next_current = index + 1 if index < total_videos else 0
                 _set_task(
@@ -8982,6 +9077,8 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     batch_done=index,
                     batch_succeeded=succeeded_videos,
                     batch_failed=len(failures),
+                    batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_failure_details=list(failure_details),
                     batch_current=next_current,
                     batch_label="" if next_current == 0 else f"等待处理 {next_current}/{total_videos}",
                     message=f"已跳过失败 {index}/{total_videos}: {video.name}",
@@ -8994,9 +9091,21 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             return
         if not outputs:
             detail = failures[0] if failures else "没有成功输出。"
+            _set_task(
+                task_id,
+                batch_total=total_videos,
+                batch_done=total_videos,
+                batch_succeeded=0,
+                batch_current=0,
+                batch_failed=len(failure_details),
+                batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                batch_failure_details=list(failure_details),
+                message=_batch_summary_message("智能成片完成", 0, total_videos, failure_details, "个"),
+            )
             if total_videos > 1:
                 raise RuntimeError(f"批量智能成片没有成功输出：{detail}")
             raise RuntimeError(detail)
+        summary_message = _batch_summary_message("智能成片完成", succeeded_videos, total_videos, failure_details, "个")
         _set_task(
             task_id,
             status="completed",
@@ -9004,16 +9113,18 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             output=outputs[0] if outputs else "",
             outputs=outputs,
             result_count=len(outputs),
-            message=f"智能成片完成：成功 {succeeded_videos}/{total_videos} 个",
+            message=summary_message,
             batch_total=total_videos,
             batch_done=total_videos,
             batch_succeeded=succeeded_videos,
             batch_current=0,
             batch_failed=len(failures),
+            batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
             batch_label="",
+            batch_failure_details=list(failure_details),
         )
         if failures:
-            emit_log("warning", f"智能成片批量完成：成功 {succeeded_videos}/{total_videos} 个，失败 {len(failures)} 个。", "smart-cut")
+            emit_log("warning", summary_message, "smart-cut")
         else:
             emit_log("success", f"智能成片任务完成，输出 {len(outputs)} 个文件。", "smart-cut")
     except Exception as exc:
@@ -9437,6 +9548,11 @@ def runtime() -> dict[str, Any]:
         "user_data_custom": not _path_same(_get_user_data_dir(), _default_user_data_dir()),
         "license_public_key_suffix": public_key_suffix,
         "supports_web_incremental_updates": _safe_web_incremental_supported(),
+        "update_strategy": "full-package",
+        "runtime_layout_version": RUNTIME_LAYOUT_VERSION,
+        "code_source": CODE_SOURCE,
+        "legacy_runtime_overlays_present": _legacy_runtime_overlays_present(),
+        "legacy_runtime_overlays_ignored": True,
         "runtime_integrity": _runtime_integrity_summary(),
         "server_module_file": str(Path(__file__).resolve()),
         "batch_resilience_version": 2,
@@ -9498,7 +9614,7 @@ def _schedule_client_restart(delay: float = 1.5) -> bool:
 
 
 def _safe_web_incremental_supported() -> bool:
-    return True
+    return False
 
 
 def _runtime_integrity_summary() -> dict[str, Any]:
@@ -9506,7 +9622,9 @@ def _runtime_integrity_summary() -> dict[str, Any]:
         manifest = json.loads((APP_DIR / "version.json").read_text(encoding="utf-8-sig"))
     except Exception:
         return {"ok": False, "checked": 0, "mismatched": ["app/version.json"]}
-    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    files = manifest.get("runtime_files") if isinstance(manifest.get("runtime_files"), dict) else {}
+    if not files:
+        files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
     targets = list(manifest.get("integrity_files") or [])
     mismatched: list[str] = []
     for name in targets:
@@ -9538,21 +9656,13 @@ def _runtime_integrity_summary() -> dict[str, Any]:
 
 def _runtime_updater_module():
     global _RUNTIME_UPDATER_MODULE
-    updater_path = (APP_DIR / "updater.py").resolve()
     current = _RUNTIME_UPDATER_MODULE
-    if current is not None and Path(str(getattr(current, "__file__", ""))).resolve() == updater_path:
+    if current is not None:
         return current
-    if not updater_path.exists():
-        raise RuntimeError(f"未找到运行时更新器：{updater_path}")
-    module_name = "_liveclipper_runtime_updater"
-    spec = importlib.util.spec_from_file_location(module_name, updater_path)
-    if not spec or not spec.loader:
-        raise RuntimeError(f"无法加载运行时更新器：{updater_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    _RUNTIME_UPDATER_MODULE = module
-    return module
+    import updater
+
+    _RUNTIME_UPDATER_MODULE = updater
+    return updater
 
 
 @app.get("/api/update/check")
@@ -9568,10 +9678,27 @@ def check_update_api() -> dict[str, Any]:
             "release_notes": info.get("release_notes") or info.get("update_message") or "",
             "force_update": bool(info.get("force_update", False)),
             "file_count": len(info.get("files") or {}),
-            "has_package": bool(info.get("update_url") or info.get("download_url")),
-            "requires_full_package": bool(info.get("requires_full_package", False)),
+            "has_package": bool(
+                (info.get("package") or {}).get("url")
+                or info.get("package_url")
+                or info.get("release_page_url")
+                or info.get("update_url")
+                or info.get("download_url")
+            ),
+            "package_url": (
+                (info.get("package") or {}).get("url")
+                or info.get("package_url")
+                or info.get("release_page_url")
+                or info.get("update_url")
+                or info.get("download_url")
+                or ""
+            ),
+            "package_sha256": (info.get("package") or {}).get("sha256") or info.get("package_sha256") or "",
+            "package_size": int((info.get("package") or {}).get("size") or info.get("package_size") or 0),
+            "requires_full_package": True,
             "requires_full_package_note": info.get("requires_full_package_note") or "",
             "supports_web_incremental_updates": _safe_web_incremental_supported(),
+            "update_strategy": "full-package",
             "repair_required": bool(info.get("repair_required", False)),
             "integrity_mismatches": list(info.get("integrity_mismatches") or []),
         }
@@ -9619,6 +9746,29 @@ def apply_update_api() -> dict[str, Any]:
     finally:
         with _UPDATE_LOCK:
             _UPDATE_STATE["running"] = False
+
+
+@app.post("/api/update/open-package")
+def open_update_package_api() -> dict[str, Any]:
+    try:
+        updater = _runtime_updater_module()
+        info = updater.check_update()
+        if not info:
+            return {"ok": False, "msg": "当前已经是最新版本"}
+        package_url = (
+            (info.get("package") or {}).get("url")
+            or info.get("package_url")
+            or info.get("release_page_url")
+            or info.get("update_url")
+            or info.get("download_url")
+            or ""
+        )
+        if not package_url:
+            return {"ok": False, "msg": "完整包下载地址尚未发布，请从官方发布渠道获取。"}
+        opened = bool(webbrowser.open(package_url, new=2))
+        return {"ok": opened, "url": package_url, "msg": "已打开完整包下载页面" if opened else "无法自动打开下载页面"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开完整包下载页面失败：{exc}") from exc
 
 
 @app.post("/api/dialog/videos")

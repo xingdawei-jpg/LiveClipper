@@ -24,6 +24,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
+from selection_contracts import DurationContract
 
 # 编码器辅助：优先硬件加速，回退软件编码
 _hw_encoder_checked = False
@@ -878,13 +879,72 @@ def _planned_output_speed_factor(dedup_preset="medium", video_options=None):
     return 1.0
 
 
-def _ai_target_duration_for_final_duration(target_duration, dedup_preset="medium", video_options=None):
-    try:
-        target = float(target_duration or 60)
-    except Exception:
-        target = 60.0
+def _selection_duration_contract(target_duration, dedup_preset="medium", video_options=None):
     speed = _planned_output_speed_factor(dedup_preset, video_options)
-    return max(10, int(round(target * speed))), speed
+    return DurationContract.create(target_duration, speed)
+
+
+def _ai_target_duration_for_final_duration(target_duration, dedup_preset="medium", video_options=None):
+    contract = _selection_duration_contract(target_duration, dedup_preset, video_options)
+    return max(10, contract.ai_target_seconds), contract.speed_factor
+
+
+def _final_duration_contract(target_duration):
+    contract = DurationContract.create(target_duration, 1.0)
+    return contract.final_target, contract.final_min, contract.final_max
+
+
+def _selection_duration_total(clips):
+    total = 0.0
+    for clip in clips or []:
+        try:
+            if isinstance(clip, dict):
+                duration = clip.get("duration")
+                if duration is None:
+                    duration = float(clip.get("end", 0)) - float(clip.get("start", 0))
+            elif len(clip) >= 6:
+                duration = clip[5]
+            else:
+                duration = float(clip[3]) - float(clip[2])
+            total += max(0.0, float(duration or 0))
+        except Exception:
+            continue
+    return total
+
+
+def _validate_selected_duration_contract(clips, target_duration, speed_factor=1.0, log_fn=None):
+    source_total = _selection_duration_total(clips)
+    contract = DurationContract.create(target_duration, speed_factor)
+    status = contract.status(source_total)
+    speed = contract.speed_factor
+    projected = status["projected_final"]
+    target, low, high = contract.final_target, contract.final_min, contract.final_max
+    if log_fn:
+        log_fn(
+            f"时长合同: 片单原时长{source_total:.1f}s，按{speed:.2f}x预计成片{projected:.1f}s，"
+            f"要求{low:.0f}-{high:.0f}s"
+        )
+    if not status["accepted"]:
+        raise RuntimeError(
+            f"AI未满足时长：片单原时长{source_total:.1f}秒，预计成片{projected:.1f}秒，"
+            f"目标{target:.0f}秒（允许{low:.0f}-{high:.0f}秒）"
+        )
+    return {
+        "source_total": source_total,
+        "projected_final": projected,
+        "target": target,
+        "low": low,
+        "high": high,
+        "duration_contract": contract.to_dict(),
+    }
+
+
+def _validate_actual_duration_contract(actual_duration, target_duration, margin=1.0):
+    contract = DurationContract.create(target_duration, 1.0, acceptance_margin=margin)
+    target, low, high = contract.final_target, contract.final_min, contract.final_max
+    actual = max(0.0, float(actual_duration or 0.0))
+    ok = actual > 0 and contract.status(actual)["accepted"]
+    return ok, {"actual": actual, "target": target, "low": low, "high": high}
 
 
 def _append_filter(base, extra):
@@ -1567,6 +1627,15 @@ def parse_srt_clips(srt_path, log_fn=None):
 # ============================================================
 
 
+_OUTPUT_SUBTITLE_PUNCTUATION = '，。！？、；：“”‘’（）《》【】…—·,.!?;:\'"()[]{}<>~～・'
+
+
+def _strip_output_subtitle_punctuation(text):
+    return str(text or "").translate(
+        str.maketrans("", "", _OUTPUT_SUBTITLE_PUNCTUATION)
+    ).strip()
+
+
 def _split_subtitle_text(text, max_chars=12):
     """将长文案拆分为短句，按标点和语义停顿点分割"""
     import re
@@ -1692,6 +1761,10 @@ def generate_ass(clips, width, height, output_path):
         segments = _split_subtitle_text(clean_text, max_chars=12)
         if not segments:
             segments = [clean_text]
+        segments = [
+            cleaned for cleaned in (_strip_output_subtitle_punctuation(seg) for seg in segments)
+            if cleaned
+        ]
         # 合并关键词列表（AI标注 + 静态配置）
         all_keywords = list(set(ai_keywords + SUBTITLE_KEYWORDS))
         # 按短句数分配时间
@@ -2004,11 +2077,13 @@ def process_video(video_path, srt_path=None, output_path=None,
     TARGET_DURATION = target_duration
     TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
     _log(f"目标时长: {target_duration}秒 (容差{max(5, target_duration // 6)}秒)")
-    _ai_target_duration, _planned_speed_factor = _ai_target_duration_for_final_duration(
+    _duration_contract = _selection_duration_contract(
         target_duration,
         dedup_preset,
         dedup_video_options,
     )
+    _ai_target_duration = _duration_contract.ai_target_seconds
+    _planned_speed_factor = _duration_contract.speed_factor
     if abs(_planned_speed_factor - 1.0) > 0.01:
         _log(
             f"AI选片时长折算: 成片目标{target_duration}s × 预计变速{_planned_speed_factor:.2f}x "
@@ -2335,6 +2410,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                 multi_version=False,
                 focus_hint=_fh,
                 target_duration=_ai_target_duration,
+                final_target_duration=target_duration,
+                duration_contract=_duration_contract,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
@@ -2346,7 +2423,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 analysis_metadata = {}
                 preference_summary = {}
             if not ordered_clips:
-                raise RuntimeError("AI未返回合格片单，已停止，避免关键词兜底生成低质量预览/成片")
+                raise RuntimeError(_ai_mod.selection_failure_message(analysis_metadata))
         except Exception as e:
             _log(f"AI 选片失败: {e}")
             raise
@@ -2379,6 +2456,14 @@ def process_video(video_path, srt_path=None, output_path=None,
         if auto_srt and temp_srt:
             from stt import cleanup_srt; cleanup_srt(temp_srt)
         return False
+
+    if ai_is_enabled():
+        _validate_selected_duration_contract(
+            ordered_clips,
+            target_duration,
+            _planned_speed_factor,
+            _log,
+        )
 
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
     if not _clips_only:
@@ -2521,7 +2606,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             except Exception:
                 pass
         else:
-            _log(f"编码器: 稳定软件编码 ({_software_encoder_name()})")
+            _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
         probe_cmd = [ffmpeg_cmd, "-i", video_path]
         proc = subprocess.Popen(probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
@@ -3117,6 +3202,33 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"去重完成: {nosub_mb:.1f}MB")
     _log(f"阶段耗时: 去重 {time.time() - _dedup_stage_started:.1f}s")
 
+    _nosub_duration = _probe_media_duration(nosub_file)
+    _duration_ok, _duration_contract = _validate_actual_duration_contract(
+        _nosub_duration,
+        target_duration,
+        margin=1.0,
+    )
+    _log(
+        f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
+        f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
+    )
+    if not _duration_ok:
+        _duration_error = (
+            f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
+            f"目标{_duration_contract['target']:.0f}秒"
+            f"（允许{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}秒）"
+        )
+        _log(_duration_error + "，已停止字幕烧录，避免继续耗时并输出错误成片")
+        _run_log["结果"] = "失败"
+        _run_log["错误"] = _duration_error
+        _save_run_log()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if auto_srt and temp_srt:
+            from stt import cleanup_srt
+            cleanup_srt(temp_srt)
+        DEDUP_PRESET = old_preset
+        raise RuntimeError(_duration_error)
+
     # ============================================================
     # 第四步：字幕后置处理（Whisper识别最终视频 + DeepSeek修复错别字）
     # ============================================================
@@ -3201,6 +3313,33 @@ def process_video(video_path, srt_path=None, output_path=None,
             _actual_dur = float(_r.stdout.strip())
     except Exception:
         pass
+
+    if _actual_dur > 0:
+        _final_duration_ok, _final_contract = _validate_actual_duration_contract(
+            _actual_dur,
+            target_duration,
+            margin=1.0,
+        )
+        if not _final_duration_ok:
+            _duration_error = (
+                f"最终成片时长未达标：实际{_final_contract['actual']:.1f}秒，"
+                f"目标{_final_contract['target']:.0f}秒"
+                f"（允许{_final_contract['low']:.0f}-{_final_contract['high']:.0f}秒）"
+            )
+            _log(_duration_error)
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            _run_log["结果"] = "失败"
+            _run_log["错误"] = _duration_error
+            _save_run_log()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            if auto_srt and temp_srt:
+                from stt import cleanup_srt
+                cleanup_srt(temp_srt)
+            DEDUP_PRESET = old_preset
+            raise RuntimeError(_duration_error)
 
     # ---- 切割评分 ----
     report = _build_cut_report(ordered_clips, success_count, total_clips, output_path, size_mb)
@@ -3577,9 +3716,89 @@ def _prepare_mapped_subtitle_segments(raw_segments):
             else:
                 part_end = cursor + duration * (max(1, len(part)) / total_chars)
             if part_end > cursor:
-                split_segments.append({"start": cursor, "end": part_end, "text": part})
+                output_text = _strip_output_subtitle_punctuation(part)
+                if output_text:
+                    split_segments.append({"start": cursor, "end": part_end, "text": output_text})
             cursor = part_end
-    return split_segments
+    if len(split_segments) <= 1:
+        return split_segments
+
+    # Very short mapped fragments are usually produced by a cut boundary or a
+    # proportional text split. Keep their words, but merge them into the
+    # nearest continuous caption so viewers do not see a 1-frame flash.
+    merged_segments = []
+    pending_prefix = None
+    for seg in split_segments:
+        current = seg.copy()
+        duration = current["end"] - current["start"]
+        if pending_prefix is not None:
+            if current["start"] - pending_prefix["end"] <= 0.18:
+                current["start"] = pending_prefix["start"]
+                current["text"] = pending_prefix["text"] + current["text"]
+            else:
+                merged_segments.append(pending_prefix)
+            pending_prefix = None
+        if duration >= 0.22:
+            merged_segments.append(current)
+            continue
+        if merged_segments and current["start"] - merged_segments[-1]["end"] <= 0.18:
+            merged_segments[-1]["end"] = max(merged_segments[-1]["end"], current["end"])
+            merged_segments[-1]["text"] += current["text"]
+        else:
+            pending_prefix = current
+    if pending_prefix is not None:
+        merged_segments.append(pending_prefix)
+    return merged_segments
+
+
+def _ass_timestamp(seconds):
+    total_cs = int(round(max(0.0, float(seconds or 0.0)) * 100.0))
+    hours, remainder = divmod(total_cs, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    secs, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"
+
+
+def _ffmpeg_filter_path(path):
+    return (
+        os.path.abspath(str(path))
+        .replace("\\", "/")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+    )
+
+
+def _write_mapped_subtitle_ass(path, segments, width, height, font_name, font_size, margin_v):
+    sc = SUBTITLE_OVERLAY
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {max(1, int(width or 1080))}",
+        f"PlayResY: {max(1, int(height or 1920))}",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        (
+            f"Style: Default,{font_name},{int(font_size)},"
+            f"{sc.get('font_color', '&H00FFFFFF')},&H000000FF,"
+            f"{sc.get('outline_color', '&H00000000')},&H80000000,"
+            f"-1,0,0,0,100,100,0,0,1,{max(0, int(sc.get('outline_width', 0)))},2,2,20,20,{int(margin_v)},1"
+        ),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for seg in segments:
+        text = str(seg.get("text") or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+        if not text:
+            continue
+        lines.append(
+            f"Dialogue: 0,{_ass_timestamp(seg['start'])},{_ass_timestamp(seg['end'])},Default,,0,0,0,,{text}"
+        )
+    with open(path, "w", encoding="utf-8-sig", newline="\n") as ass_file:
+        ass_file.write("\n".join(lines) + "\n")
 
 
 def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, subtitle_segments,
@@ -3594,7 +3813,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
     _log("[PROGRESS] 0.78")
 
     try:
-        from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_PATH, IS_MAC
+        from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_NAME, FONT_BOLD_PATH, IS_MAC
 
         font_dest = os.path.join(temp_dir, "drawtext_font.ttc")
         if os.path.exists(FONT_BOLD_PATH) and not os.path.exists(font_dest):
@@ -3616,58 +3835,45 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
         if w and w > 0:
             font_size = max(28, int(font_size * w / 1080))
         margin_v = sc.get("margin_v", 270) + 100
-
-        drawtext_filters = []
-        for idx, seg in enumerate(fixed_segments):
-            txt_path = os.path.join(temp_dir, f"mapped_sub_{idx:04d}.txt")
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(seg["text"])
-            if IS_MAC:
-                text_file = txt_path.replace("'", "'\\''")
-            else:
-                text_file = txt_path.replace("\\", "/").replace(":", "\\:")
-            font = f"fontfile='{drawtext_font}'"
-            drawtext_filters.append(
-                f"drawtext={font}:textfile='{text_file}'"
-                f":fontsize={font_size}:fontcolor=white"
-                f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
-                f":x=(w-text_w)/2:y=h-{margin_v}"
-                f":enable='between(t\\,{seg['start']:.3f}\\,{seg['end']:.3f})'"
-            )
-
-        if not drawtext_filters:
-            return False
-        vf_chain = ",".join(drawtext_filters)
-        norm_output = output_path.replace("/", os.sep)
+        norm_output = str(output_path).replace("/", os.sep)
         has_pip = pip_path is not None
         pos_map = {"左上": "10:10", "右上": "W-w-10:10", "左下": "10:H-h-10", "右下": "W-w-10:H-h-10"}
         pip_position = pos_map.get(pip_pos, "W-w-10:H-h-10")
 
-        if has_pip:
-            if pip_path and pip_path != "auto" and os.path.exists(pip_path):
-                pip_fc = f"[1:v]scale=iw*{pip_size}:ih*{pip_size},format=rgba,colorchannelmixer=aa={pip_opacity}[pip];[0:v][pip]overlay={pip_position}[with_pip]"
-                drawtext_fc = "[with_pip]" + vf_chain + ",copy[out_v]"
+        def _build_subtitle_cmd(filter_chain):
+            if has_pip and pip_path and pip_path != "auto" and os.path.exists(pip_path):
+                filter_complex = (
+                    f"[1:v]scale=iw*{pip_size}:ih*{pip_size},format=rgba,"
+                    f"colorchannelmixer=aa={pip_opacity}[pip];"
+                    f"[0:v][pip]overlay={pip_position}[with_pip];"
+                    f"[with_pip]{filter_chain}[out_v]"
+                )
                 loop_n = _calc_pip_loop(video_path, pip_path, ffmpeg)
-                sub_cmd = [
+                command = [
                     ffmpeg, "-y", "-i", video_path, "-stream_loop", str(loop_n), "-i", pip_path,
-                    "-filter_complex", f"{pip_fc};{drawtext_fc}",
+                    "-filter_complex", filter_complex,
+                    "-map", "[out_v]", "-map", "0:a",
+                ]
+            elif has_pip:
+                filter_complex = (
+                    f"[0:v]split[main][pip];"
+                    f"[pip]scale=iw*{pip_size}:ih*{pip_size},format=rgba,"
+                    f"colorchannelmixer=aa={pip_opacity}[overlay];"
+                    f"[main][overlay]overlay={pip_position}[with_pip];"
+                    f"[with_pip]{filter_chain}[out_v]"
+                )
+                command = [
+                    ffmpeg, "-y", "-i", video_path,
+                    "-filter_complex", filter_complex,
                     "-map", "[out_v]", "-map", "0:a",
                 ]
             else:
-                pip_fc = f"[0:v]split[main][pip];[pip]scale=iw*{pip_size}:ih*{pip_size},format=rgba,colorchannelmixer=aa={pip_opacity}[overlay];[main][overlay]overlay={pip_position}[with_pip]"
-                drawtext_fc = "[with_pip]" + vf_chain + ",copy[out_v]"
-                sub_cmd = [
-                    ffmpeg, "-y", "-i", video_path,
-                    "-filter_complex", f"{pip_fc};{drawtext_fc}",
-                    "-map", "[out_v]", "-map", "0:a",
-                ]
-        else:
-            sub_cmd = [ffmpeg, "-y", "-i", video_path, "-vf", vf_chain]
-
-        sub_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-        sub_cmd += _final_vcodec_args()
-        sub_cmd += _final_audio_sync_args()
-        sub_cmd += ["-movflags", "+faststart", norm_output]
+                command = [ffmpeg, "-y", "-i", video_path, "-vf", filter_chain]
+            command += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+            command += _final_vcodec_args()
+            command += _final_audio_sync_args()
+            command += ["-movflags", "+faststart", norm_output]
+            return command
 
         popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace")
@@ -3687,19 +3893,61 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
             popen_kw["env"] = dict(os.environ)
             popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
 
+        ass_path = os.path.join(temp_dir, "mapped_subtitles.ass")
+        _write_mapped_subtitle_ass(
+            ass_path, fixed_segments, w, h, FONT_BOLD_NAME, font_size, margin_v,
+        )
+        ass_filter = (
+            f"ass=filename='{_ffmpeg_filter_path(ass_path)}'"
+            f":fontsdir='{_ffmpeg_filter_path(temp_dir)}'"
+        )
+        _log(f"字幕烧录: 单轨 ASS，共 {len(fixed_segments)} 条字幕")
         ok, rc, stderr_data = _run_ffmpeg_with_hw_fallback(
-            sub_cmd, popen_kw, 450, _log, "源SRT字幕烧录", output_path,
+            _build_subtitle_cmd(ass_filter), popen_kw, 450, _log, "源SRT单轨字幕烧录", output_path,
             software_args=_final_software_vcodec_args()
         )
         if ok:
             _log("源 SRT 映射字幕烧录成功。")
             _log("[PROGRESS] 0.9")
             return True
-        _log(f"源 SRT 映射字幕烧录失败，回退成片语音识别。exit={rc}")
+        _log(f"单轨字幕烧录失败，改用兼容字幕滤镜。exit={rc}")
         if stderr_data:
-            for line in stderr_data.strip().split("\n")[-5:]:
+            for line in stderr_data.strip().split("\n")[-3:]:
                 if line.strip():
                     _log(f"  ffmpeg: {line.strip()}")
+
+        try:
+            if os.path.exists(norm_output):
+                os.remove(norm_output)
+        except Exception:
+            pass
+        drawtext_filters = []
+        for idx, seg in enumerate(fixed_segments):
+            txt_path = os.path.join(temp_dir, f"mapped_sub_{idx:04d}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(seg["text"])
+            if IS_MAC:
+                text_file = txt_path.replace("'", "'\\''")
+            else:
+                text_file = txt_path.replace("\\", "/").replace(":", "\\:")
+            drawtext_filters.append(
+                f"drawtext=fontfile='{drawtext_font}':textfile='{text_file}'"
+                f":fontsize={font_size}:fontcolor=white"
+                f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
+                f":x=(w-text_w)/2:y=h-{margin_v}"
+                f":enable='between(t\\,{seg['start']:.3f}\\,{seg['end']:.3f})'"
+            )
+        if not drawtext_filters:
+            return False
+        ok, rc, stderr_data = _run_ffmpeg_with_hw_fallback(
+            _build_subtitle_cmd(",".join(drawtext_filters)), popen_kw, 450, _log,
+            "源SRT兼容字幕烧录", output_path, software_args=_final_software_vcodec_args(),
+        )
+        if ok:
+            _log("源 SRT 映射字幕烧录成功（兼容模式）。")
+            _log("[PROGRESS] 0.9")
+            return True
+        _log(f"源 SRT 映射字幕烧录失败，回退成片语音识别。exit={rc}")
         return False
     except Exception as exc:
         _log(f"源 SRT 映射字幕异常，回退成片语音识别: {exc}")
@@ -4217,10 +4465,9 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     except ImportError:
         pass  # ASR_CORRECTIONS not defined in config
 
-        # --- 去除字幕标点符号 ---
-    _punct_chars = '，。！？、；：\u201c\u201d\u2018\u2019（）《》【】…—·,.!?;:\\\'\\"()[]{}<>~～·・'
+    # --- 去除字幕标点符号 ---
     for seg in fixed_segments:
-        seg["text"] = seg["text"].translate(str.maketrans('', '', _punct_chars)).strip()
+        seg["text"] = _strip_output_subtitle_punctuation(seg["text"])
     _log(f"字幕标点已清除")
 
     # --- 4d+4e: drawtext 逐条烧录字幕 ---
@@ -4661,7 +4908,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         except Exception:
             pass
     else:
-        _log(f"编码器: 稳定软件编码 ({_software_encoder_name()})")
+        _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
 
     # Temp dir
     tmp = os.path.join("C:\\", "lc_temp_mix_" + os.urandom(4).hex())
@@ -4832,11 +5079,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     import ai_clipper as _ai_mod
     preference_summary = {}
     analysis_metadata = {}
-    _ai_target_duration, _planned_speed_factor = _ai_target_duration_for_final_duration(
+    _duration_contract = _selection_duration_contract(
         target_duration,
         dedup_preset,
         dedup_video_options,
     )
+    _ai_target_duration = _duration_contract.ai_target_seconds
+    _planned_speed_factor = _duration_contract.speed_factor
     if abs(_planned_speed_factor - 1.0) > 0.01:
         _log(
             f"AI选片时长折算: 成片目标{target_duration}s × 预计变速{_planned_speed_factor:.2f}x "
@@ -4932,6 +5181,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           focus_hint=focus_hint,
                                           merge_mode=True,
                                           target_duration=_ai_target_duration,
+                                          final_target_duration=target_duration,
+                                          duration_contract=_duration_contract,
                                           ai_controls=ai_controls,
                                           word_timings=_mix_word_timings)
         try:
@@ -4945,7 +5196,10 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         shutil.rmtree(tmp, ignore_errors=True); return False
 
     if not ordered_clips:
-        _log("AI 未选到任何片段"); shutil.rmtree(tmp, ignore_errors=True); return False
+        failure_message = _ai_mod.selection_failure_message(analysis_metadata)
+        _log(f"AI 未选到任何片段: {failure_message}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(failure_message)
 
     _log(f"AI 选到 {len(ordered_clips)} 个片段")
 
@@ -5187,24 +5441,12 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             + suffix
         )
 
-    _mapped_total = _mix_meta_total(all_clips_meta)
-    try:
-        _mapped_low, _mapped_high = _ai_mod._multi_version_target_bounds(_ai_target_duration)
-    except Exception:
-        try:
-            _target_seconds = float(_ai_target_duration or target_duration or 60)
-        except Exception:
-            _target_seconds = 60.0
-        _mapped_low = max(25.0, _target_seconds - max(5.0, _target_seconds / 6.0))
-        _mapped_high = _target_seconds + max(5.0, _target_seconds / 6.0)
-    _short_gap = max(3.0, float(_ai_target_duration or target_duration or 60) * 0.08)
-    if _mapped_total + _short_gap < float(_mapped_low):
-        _duration_error = (
-            f"AI选片时长不足: {len(all_clips_meta)}段/{_mapped_total:.1f}s，"
-            f"低于目标下限{float(_mapped_low):.0f}s，拒绝输出半成品"
-        )
-        _log(_duration_error)
-        raise RuntimeError(_duration_error)
+    _validate_selected_duration_contract(
+        all_clips_meta,
+        target_duration,
+        _planned_speed_factor,
+        _log,
+    )
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
 
@@ -5872,6 +6114,26 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             shutil.copy2(raw_concat, nosub_file)
     _log(f"阶段耗时: 去重 {time.time() - _dedup_stage_started:.1f}s")
 
+    _nosub_duration = _probe_media_duration(nosub_file)
+    _duration_ok, _duration_contract = _validate_actual_duration_contract(
+        _nosub_duration,
+        target_duration,
+        margin=1.0,
+    )
+    _log(
+        f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
+        f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
+    )
+    if not _duration_ok:
+        _duration_error = (
+            f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
+            f"目标{_duration_contract['target']:.0f}秒"
+            f"（允许{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}秒）"
+        )
+        _log(_duration_error + "，已停止字幕烧录")
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(_duration_error)
+
     # ============================================================
     # Step 6: Subtitle overlay (if enabled)
     # ============================================================
@@ -5906,6 +6168,26 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _actual_dur = float(_r.stdout.strip())
     except Exception:
         pass
+
+    if _actual_dur > 0:
+        _final_duration_ok, _final_contract = _validate_actual_duration_contract(
+            _actual_dur,
+            target_duration,
+            margin=1.0,
+        )
+        if not _final_duration_ok:
+            _duration_error = (
+                f"最终成片时长未达标：实际{_final_contract['actual']:.1f}秒，"
+                f"目标{_final_contract['target']:.0f}秒"
+                f"（允许{_final_contract['low']:.0f}-{_final_contract['high']:.0f}秒）"
+            )
+            _log(_duration_error)
+            try:
+                os.remove(final)
+            except OSError:
+                pass
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise RuntimeError(_duration_error)
 
     _report_old_dur, _report_old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
     try:

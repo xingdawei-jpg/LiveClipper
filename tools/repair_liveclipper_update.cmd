@@ -5,9 +5,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0repair_liveclipper
 set "RESULT=%ERRORLEVEL%"
 echo.
 if "%RESULT%"=="0" (
-  echo Recovery completed and verified. Reopen LiveClipper now.
+  echo Legacy program files were archived. Open the new full package now.
 ) else (
-  echo Recovery failed. See repair_result.txt for details.
+  echo Cleanup failed. See repair_result.txt for details.
 )
 pause
 exit /b %RESULT%

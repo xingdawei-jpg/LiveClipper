@@ -1,12 +1,10 @@
 """
 LiveClipper 启动器
-- 极简入口，只负责定位 app/ 目录并启动主程序
-- PyInstaller 只打包此文件 → exe 极小且几乎不需要更新
-- 所有业务代码在 app/ 目录，可增量替换
+- 极简入口，只负责定位当前安装包内的 app/ 目录并启动主程序
+- 用户数据目录不允许提供或覆盖程序代码
 """
 import os
 import sys
-import json
 
 try:
     import gui  # PyInstaller: 自动收集 gui 及其依赖
@@ -24,28 +22,6 @@ def _get_base_path():
         return os.path.dirname(os.path.abspath(__file__))
 
 
-def _get_update_dir():
-    """获取持久更新目录（不受 EXE 打包/重装影响）"""
-    return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper', 'app')
-
-
-def _version_key(version):
-    parts = []
-    for chunk in str(version or "").replace("-", ".").split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts[:4] + [0] * (4 - len(parts)))
-
-
-def _read_app_version(app_dir):
-    try:
-        with open(os.path.join(app_dir, "version.json"), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("version") or data.get("latest_version") or "0"
-    except Exception:
-        return "0"
-
-
 def _is_valid_app_dir(app_dir):
     required = ("gui.py", "config.py", "schedule_page.py", "product_scan_page.py")
     return (
@@ -55,37 +31,24 @@ def _is_valid_app_dir(app_dir):
 
 
 def find_app_dir():
-    """
-    定位 app/ 目录。
-
-    老版本会把更新文件放在 %APPDATA%/LiveClipper/app/。如果那里残留了
-    不完整或更旧的文件，不能让它盖掉新安装包内置的完整 app。
-    """
+    """定位源码目录或当前安装包内唯一的 app/ 目录。"""
     base = _get_base_path()
-    update_dir = _get_update_dir()
 
-    candidates = []
     if not getattr(sys, 'frozen', False):
-        candidates.append((base, 100))
-    candidates.extend([
-        (os.path.join(base, '_internal', 'app'), 90),  # PyInstaller onedir bundled app
-        (os.path.join(base, 'app'), 80),               # exe sibling app
-        (update_dir, 60),                              # legacy incremental update app
-    ])
+        return base if _is_valid_app_dir(base) else None
 
-    # 最终尝试：从 _MEIPASS 查找（兼容旧 onefile 包）
-    if getattr(sys, 'frozen', False) and hasattr(sys, "_MEIPASS"):
-        candidates.append((os.path.join(sys._MEIPASS, 'app'), 70))
+    candidates = [
+        os.path.join(base, '_internal', 'app'),
+        os.path.join(base, 'app'),
+    ]
 
-    valid = []
-    for d, priority in candidates:
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, 'app'))
+
+    for d in candidates:
         d = os.path.normpath(d)
         if _is_valid_app_dir(d):
-            valid.append((_version_key(_read_app_version(d)), priority, d))
-
-    if valid:
-        valid.sort(reverse=True)
-        return valid[0][2]
+            return d
 
     return None
 

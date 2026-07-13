@@ -1,1083 +1,321 @@
-"""
-LiveClipper 自动更新模块
-- 启动时后台检查 GitHub Releases 是否有新版本
-- 支持强制更新、下载进度、SHA256 校验
-- 更新后提示用户重启
+"""LiveClipper release checker.
+
+Program files are immutable at runtime. Updates are delivered as a verified
+full package; this module never writes Python, frontend, or tool files into the
+user-data directory.
 """
 
-import os
-import sys
-import json
+from __future__ import annotations
+
+import base64
 import hashlib
+import json
+import os
+import re
+import ssl
+import sys
 import threading
-import tempfile
-import subprocess
-import time
-import tkinter as tk
-from tkinter import ttk
-from tkinter import messagebox
+import urllib.request
+import webbrowser
 from pathlib import Path
+from typing import Any
 
-_NO_WINDOW = 0x08000000
 
-
-# ============ 配置（发布时修改） ============
-
-# GitHub 仓库（私有仓库需在 version.json 里放完整 URL）
 GITHUB_REPO = "xingdawei-jpg/LiveClipper"
+RELEASE_CHANNEL_PATH = "release/stable.json"
+LEGACY_VERSION_PATH = "app/version.json"
+DEFAULT_RELEASE_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+RUNTIME_LAYOUT_VERSION = 2
 
-# version.json 的远程地址（优先使用这个）
-# 如果设置了这个，会忽略 GITHUB_REPO
-VERSION_URL = ""  # 使用 GITHUB_REPO 自动生成
 
-# 当前版本号（每次发布时更新）
-CURRENT_VERSION = "2026.7.13.9"
+def _runtime_root() -> Path:
+    configured = os.environ.get("LIVECLIPPER_BUNDLE_DIR")
+    if configured:
+        return Path(configured).resolve()
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal")).resolve()
+    return Path(__file__).resolve().parent.parent
 
-def init_installed_version():
-    """First-launch: create .installed_version from version.json if not exists.
-    Call this once at app startup before any update check."""
+
+def _local_manifest_path() -> Path:
+    bundled = _runtime_root() / "app" / "version.json"
+    if bundled.is_file():
+        return bundled
+    return Path(__file__).resolve().with_name("version.json")
+
+
+def _local_manifest() -> dict[str, Any]:
     try:
-        vf = _get_installed_version_file()
-        if not os.path.exists(vf):
-            # Read version from bundled version.json
-            if getattr(sys, 'frozen', False):
-                base_dir = os.path.dirname(sys.executable)
-                candidates = [
-                    os.path.join(base_dir, '_internal', 'version.json'),
-                    os.path.join(base_dir, '_internal', 'app', 'version.json'),
-                ]
-            else:
-                candidates = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')]
-            vj = next((item for item in candidates if os.path.exists(item)), "")
-            if os.path.exists(vj):
-                with open(vj, 'r', encoding='utf-8-sig') as f:
-                    vdata = json.load(f)
-                ver = vdata.get('latest_version', '')
-                if ver:
-                    _set_installed_version(ver)
-                    return
-            _set_installed_version(CURRENT_VERSION)
+        data = json.loads(_local_manifest_path().read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
     except Exception:
-        _set_installed_version(CURRENT_VERSION)
+        return {}
 
 
-def _get_installed_version_file():
-    """Path to local version tracking file"""
-    base = _get_install_base() if hasattr(sys, 'modules') else os.path.dirname(os.path.abspath(__file__))
-    try:
-        base = _get_install_base()
-    except Exception:
-        base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, ".installed_version")
+def _manifest_version(data: dict[str, Any]) -> str:
+    return str(data.get("version") or data.get("latest_version") or "0")
 
-def _get_installed_version():
-    """Read installed version from local file, fallback to CURRENT_VERSION"""
-    installed = ""
-    try:
-        vf = _get_installed_version_file()
-        if os.path.exists(vf):
-            with open(vf, "r", encoding="utf-8") as f:
-                v = f.read().strip()
-            if v:
-                installed = v
-    except Exception:
-        pass
-    try:
-        return max([installed, CURRENT_VERSION], key=parse_version)
-    except Exception:
-        return installed or CURRENT_VERSION
 
-def _set_installed_version(version):
-    """Write installed version to local file after update"""
-    try:
-        vf = _get_installed_version_file()
-        with open(vf, "w", encoding="utf-8") as f:
-            f.write(version.strip())
-    except Exception:
-        pass
+CURRENT_VERSION = _manifest_version(_local_manifest())
 
 
-def init_installed_version():
-    """First-launch: create .installed_version from version.json if not exists.
-    Call this once at app startup before any update check."""
-    try:
-        vf = _get_installed_version_file()
-        if not os.path.exists(vf):
-            # Read version from bundled version.json
-            if getattr(sys, 'frozen', False):
-                base_dir = os.path.dirname(sys.executable)
-                candidates = [
-                    os.path.join(base_dir, '_internal', 'version.json'),
-                    os.path.join(base_dir, '_internal', 'app', 'version.json'),
-                ]
-            else:
-                candidates = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.json')]
-            vj = next((item for item in candidates if os.path.exists(item)), "")
-            if vj:
-                with open(vj, 'r', encoding='utf-8-sig') as f:
-                    data = json.load(f)
-                ver = data.get('latest_version') or data.get('version', CURRENT_VERSION)
-                _set_installed_version(ver)
-                return ver
-            else:
-                _set_installed_version(CURRENT_VERSION)
-                return CURRENT_VERSION
-    except Exception:
-        pass
-    return CURRENT_VERSION
+def parse_version(version_str: Any) -> tuple[int, ...]:
+    text = str(version_str or "").strip().lstrip("vV")
+    match = re.match(r"(\d+(?:\.\d+)*)", text)
+    if not match:
+        return (0,)
+    return tuple(int(part) for part in match.group(1).split("."))
 
-# 检查更新的 API 地址（GitHub Releases）
-def get_version_url():
-    """获取 version.json 的实际地址"""
-    if VERSION_URL:
-        return VERSION_URL
-    if GITHUB_REPO and "/" in GITHUB_REPO:
-        return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/app/version.json"
-    return ""
 
+def is_newer(remote_version: Any, local_version: Any) -> bool:
+    return parse_version(remote_version) > parse_version(local_version)
 
-# ============ 版本比较 ============
 
-def parse_version(version_str):
-    """解析语义化版本号或日期版本号，返回可比较的元组"""
-    import re
+def init_installed_version() -> str:
+    """Compatibility API: the running package manifest is the only version."""
+    return _get_installed_version()
 
-    vs = str(version_str or "").strip().lstrip("vV")
-    match = re.match(r"(\d+(?:\.\d+)*)", vs)
-    if match:
-        return tuple(int(part) for part in match.group(1).split("."))
-    return (0, 0, 0)
 
-    # Strip optional "v" prefix
-    vs = str(version_str).lstrip("vV")
-    # Try date format first: 2026.4.26 or 2026.04.26
-    match = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", vs)
-    if match:
-        return tuple(int(x) for x in match.groups())
-    # Fall back to semantic version: 8.5.1
-    match = re.match(r"(\d+)\.(\d+)\.(\d+)", vs)
-    if match:
-        return tuple(int(x) for x in match.groups())
-    return (0, 0, 0)
+def _get_installed_version() -> str:
+    return _manifest_version(_local_manifest())
 
 
-def is_newer(remote_version, local_version):
-    """判断远程版本是否比本地新"""
-    rv = parse_version(remote_version)
-    lv = parse_version(local_version)
-    return rv > lv
+def _get_installed_version_file() -> str:
+    """Return the retired marker path for diagnostics only."""
+    return str(_runtime_root() / ".installed_version")
 
 
-# ============ 网络请求（纯Python，不依赖curl.exe）============
-
-def _fetch_url(url, timeout=15):
-    """用 urllib 获取 URL 内容，支持 HTTPS 和重定向"""
-    import urllib.request, ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return resp.read().decode("utf-8")
-
-
-def _fetch_json(url, timeout=15):
-    """获取 URL 并解析为 JSON"""
-    text = _fetch_url(url, timeout=timeout)
-    return json.loads(text)
-
-
-def _fetch_github_api_file(repo, path, timeout=15):
-    """通过 GitHub API 获取仓库文件内容，返回 JSON 对象"""
-    url = f"https://api.github.com/repos/{repo}/contents/{path}"
-    data = _fetch_json(url, timeout=timeout)
-    import base64
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    return json.loads(content)
-
-
-def _get_update_urls():
-    """生成更新检测 URL 列表（优先级从高到低）"""
-    urls = []
-    # 1. GitHub API - 无缓存，实时性最高
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/app/version.json"
-    urls.append(("GitHub API", url))
-    # 2. 直连 raw.githubusercontent.com
-    urls.append(("GitHub Raw", get_version_url()))
-    # 3. 代理镜像
-    for prefix in ["https://ghfast.top/https://", "https://gh-proxy.com/https://"]:
-        mirror_url = prefix + get_version_url().replace("https://", "")
-        urls.append((f"Mirror", mirror_url))
-    # 4. jsDelivr CDN（国内速度快但可能有缓存）
-    cdn_url = f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/app/version.json"
-    urls.append((f"jsDelivr", cdn_url))
-    return urls
-
-
-# ============ 检查更新 ============
-
-def check_update():
-    """
-    检查是否有新版本
-    返回 dict（包含版本信息）或 None（无更新/出错）
-    """
-    local_ver = _get_installed_version()
-    for name, url in _get_update_urls():
-        try:
-            if name == "GitHub API":
-                data = _fetch_github_api_file(GITHUB_REPO, "app/version.json")
-            else:
-                data = _fetch_json(url, timeout=10)
-        except Exception:
-            continue
-
-        remote_ver = data.get("latest_version", data.get("version", ""))
-        if not remote_ver:
-            continue
-        if is_newer(remote_ver, local_ver):
-            return data
-        if parse_version(remote_ver) == parse_version(local_ver):
-            mismatches = _manifest_integrity_mismatches(data)
-            if mismatches:
-                repair = dict(data)
-                repair["repair_required"] = True
-                repair["integrity_mismatches"] = mismatches
-                return repair
-
-    return None
-
-
-# ============ 下载与校验 ============
-
-def compute_sha256(filepath):
-    """计算文件的 SHA256 哈希值"""
-    sha = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            sha.update(chunk)
-    return sha.hexdigest()
-
-
-def download_file(url, dest_path, progress_callback=None):
-    """
-    下载文件，纯 Python 实现（兼容网络限制）
-    progress_callback(downloaded_bytes, total_bytes)
-    """
-    import urllib.request, ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/1.0"})
-    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-        total_size = int(resp.headers.get("Content-Length", 0))
-        downloaded = 0
-        with open(dest_path, "wb") as f:
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_callback and total_size > 0:
-                    progress_callback(downloaded, total_size)
-    if progress_callback:
-        progress_callback(downloaded, downloaded)
-    if os.path.exists(dest_path):
-        with open(dest_path, "rb") as f:
-            header = f.read(512)
-        if b"<html" in header.lower() or b"<!doctype" in header.lower():
-            os.remove(dest_path)
-            raise Exception("下载被拦截，服务器返回了网页。请检查网络或手动下载更新。")
-
-
-def _fetch_file_bytes(url, timeout=30):
-    """下载单个文件，返回 bytes（纯 Python）"""
-    import urllib.request, ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return resp.read()
-
-
-def _download_file_bytes(fname, expected_sha):
-    """下载单个文件的 bytes，尝试多个源+重试，验证 SHA256"""
-    repo = GITHUB_REPO
-    source_path = _manifest_source_path(fname)
-    sources = [
-        ("GitHub API", f"https://api.github.com/repos/{repo}/contents/{source_path}?ref=main"),
-        ("Raw", f"https://raw.githubusercontent.com/{repo}/main/{source_path}"),
-        ("jsDelivr", f"https://cdn.jsdelivr.net/gh/{repo}@main/{source_path}"),
-    ]
-    for prefix in ["https://ghfast.top/https://", "https://gh-proxy.com/https://"]:
-        sources.append((f"Mirror", prefix + f"raw.githubusercontent.com/{repo}/main/{source_path}"))
-
-    # 每个源尝试2次，超时递减
-    for name, url in sources:
-        for attempt in range(2):
-            timeout = 15 if attempt == 0 else 30
-            try:
-                if "api.github.com" in url:
-                    data = _fetch_json(url, timeout=timeout)
-                    import base64
-                    content = base64.b64decode(data["content"])
-                else:
-                    content = _fetch_file_bytes(url, timeout=timeout)
-                is_expected_html = source_path.lower().endswith((".html", ".htm"))
-                if len(content) < 50 or (not is_expected_html and content[:5].lower() in (b"<htm", b"<!doc")):
-                    continue
-                actual = hashlib.sha256(content).hexdigest().lower()
-                if actual == expected_sha.lower():
-                    return content
-            except Exception:
-                continue
-    return None
-
-
-def _manifest_source_path(fname):
-    normalized = str(fname or "").replace("\\", "/").lstrip("/")
-    if normalized.startswith(("app/", "web_client/", "tools/")):
-        return normalized
-    return "app/" + normalized
-
-
-def _manifest_target_path(fname):
-    normalized = str(fname or "").replace("\\", "/").lstrip("/")
-    if normalized.startswith(("app/", "web_client/", "tools/")):
-        return normalized
-    return "app/" + normalized
-
-
-def _update_root():
-    return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper")
-
-
-def _write_update_file(relative_path, content):
-    relative_path = _manifest_target_path(relative_path)
-    target = os.path.join(_update_root(), *relative_path.split("/"))
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "wb") as f:
-        f.write(content)
-    return target
-
-
-def _active_runtime_root():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _manifest_local_paths(relative_path):
-    normalized = _manifest_target_path(relative_path)
-    root = _active_runtime_root()
-    paths = [os.path.join(root, *normalized.split("/"))]
-    if normalized.startswith("web_client/tools/"):
-        paths.append(os.path.join(root, "tools", os.path.basename(normalized)))
-    return list(dict.fromkeys(paths))
-
-
-def _normalized_file_sha256(path):
-    try:
-        with open(path, "rb") as handle:
-            data = handle.read()
-        if os.path.splitext(path)[1].lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
-            data = data.replace(b"\r\n", b"\n")
-        return hashlib.sha256(data).hexdigest().lower()
-    except Exception:
-        return ""
-
-
-def _manifest_integrity_mismatches(version_info):
-    files = (version_info or {}).get("files") or {}
-    targets = list((version_info or {}).get("integrity_files") or files.keys())
-    mismatches = []
-    for name in targets:
-        expected = str(files.get(name) or "").lower()
-        if not expected:
-            continue
-        matched = any(_normalized_file_sha256(path) == expected for path in _manifest_local_paths(name))
-        if not matched:
-            mismatches.append(name)
-    return mismatches
-
-
-def apply_update_headless(version_info):
-    """Apply an update without Tk dialogs. Used by the Web desktop client."""
-    if (version_info or {}).get("requires_full_package"):
-        return {
-            "ok": False,
-            "full_package_required": True,
-            "msg": (version_info or {}).get("requires_full_package_note") or "此版本需要下载新版完整包，不能通过在线增量更新安装。",
-            "updated": [],
-            "failed": [],
-        }
-    files_info = (version_info or {}).get("files", {})
-    if files_info:
-        staged = {}
-        failed = []
-        failed_details = {}
-        for fname, expected_sha in files_info.items():
-            content = _download_file_bytes(fname, expected_sha)
-            if content is None:
-                failed.append(fname)
-                failed_details[fname] = "下载失败或文件校验不一致"
-                continue
-            actual_sha = hashlib.sha256(content).hexdigest().lower()
-            if actual_sha != str(expected_sha).lower():
-                failed.append(fname)
-                failed_details[fname] = "SHA256 校验失败"
-                continue
-            staged[fname] = content
-
-        # Do not create a mixed runtime. The version marker is written only
-        # after every payload has downloaded, verified, and been persisted.
-        if failed:
-            return {
-                "ok": False,
-                "updated": [],
-                "failed": failed,
-                "failed_details": failed_details,
-                "restart_required": False,
-                "version": version_info.get("latest_version") or version_info.get("version") or "",
-            }
-
-        updated = []
-        for fname, content in staged.items():
-            try:
-                _write_update_file(fname, content)
-                updated.append(fname)
-            except Exception as exc:
-                failed.append(fname)
-                failed_details[fname] = f"写入失败：{exc}"
-
-        if not failed and "version.json" not in files_info and "app/version.json" not in files_info:
-            try:
-                version_bytes = json.dumps(version_info, ensure_ascii=False, indent=2).encode("utf-8")
-                _write_update_file("app/version.json", version_bytes)
-            except Exception as exc:
-                failed.append("app/version.json")
-                failed_details["app/version.json"] = f"版本标记写入失败：{exc}"
-
-        new_ver = version_info.get("latest_version") or version_info.get("version") or ""
-        if new_ver and not failed:
-            _set_installed_version(new_ver)
-        return {
-            "ok": bool(updated) and not failed,
-            "updated": updated,
-            "failed": failed,
-            "failed_details": failed_details,
-            "restart_required": bool(updated) and not failed,
-            "version": new_ver,
-        }
-
-    download_url = (version_info or {}).get("update_url") or (version_info or {}).get("download_url") or ""
-    if not download_url:
-        return {"ok": False, "msg": "没有可用的更新文件", "updated": [], "failed": []}
-
-    temp_dir = tempfile.mkdtemp(prefix="liveclipper_update_web_")
-    try:
-        zip_path = os.path.join(temp_dir, download_url.split("/")[-1] or "update.zip")
-        download_file(download_url, zip_path)
-        ok = _apply_update(zip_path)
-        return {
-            "ok": bool(ok),
-            "updated": ["package"] if ok else [],
-            "failed": [] if ok else ["package"],
-            "restart_required": bool(ok),
-            "version": version_info.get("latest_version") or version_info.get("version") or "",
-        }
-    finally:
-        try:
-            import shutil
-
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-
-# ============ GUI 组件 ============
-
-class UpdateDialog(tk.Toplevel):
-    """更新提示对话框"""
-    
-    def __init__(self, parent, version_info):
-        super().__init__(parent)
-        self.version_info = version_info
-        self.result = None  # "update" / "skip" / "later"
-        
-        self.title("发现新版本")
-        self.geometry("420x280")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        
-        # 居中显示
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 420) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 280) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._on_later)
-    
-    def _build_ui(self):
-        vi = self.version_info
-        version = vi.get("latest_version", "?")
-        notes = vi.get("release_notes", "修复了一些问题")
-        # Check if incremental update is available
-        is_update = _is_installed() and vi.get("update_url", "")
-        if is_update:
-            notes += "\n\n（增量更新，仅下载变更文件，几秒完成）"
-        force = vi.get("force_update", False)
-        
-        # 标题
-        tk.Label(
-            self, text=f"🎉 新版本 v{version.lstrip("vV")} 可用",
-            font=("Microsoft YaHei UI", 13, "bold")
-        ).pack(pady=(15, 5))
-        
-        # 更新说明
-        tk.Label(
-            self, text=notes,
-            font=("Microsoft YaHei UI", 9),
-            wraplength=380, justify="left",
-            fg="#555555"
-        ).pack(padx=20, pady=5)
-        
-        # 强制更新提示
-        if force:
-            tk.Label(
-                self, text="⚠️ 此版本为重要更新，需要立即升级",
-                font=("Microsoft YaHei UI", 9),
-                fg="#E74C3C"
-            ).pack(pady=(0, 5))
-        
-        # 按钮
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
-        
-        if force:
-            # 强制更新：只有更新按钮
-            tk.Button(
-                btn_frame, text="立即更新", width=15,
-                command=self._on_update,
-                bg="#2196F3", fg="white",
-                font=("Microsoft YaHei UI", 10)
-            ).pack(side="left", padx=5)
-        else:
-            tk.Button(
-                btn_frame, text="立即更新", width=12,
-                command=self._on_update,
-                font=("Microsoft YaHei UI", 10)
-            ).pack(side="left", padx=5)
-            tk.Button(
-                btn_frame, text="稍后提醒", width=12,
-                command=self._on_later,
-                font=("Microsoft YaHei UI", 10)
-            ).pack(side="left", padx=5)
-    
-    def _on_update(self):
-        self.result = "update"
-        self.destroy()
-    
-    def _on_later(self):
-        self.result = "later"
-        self.destroy()
-
-
-class DownloadDialog(tk.Toplevel):
-    """下载进度对话框"""
-    
-    def __init__(self, parent, version_info, on_complete=None, on_error=None):
-        super().__init__(parent)
-        self.version_info = version_info
-        self.on_complete = on_complete
-        self.on_error = on_error
-        self.cancelled = False
-        
-        self.title("正在下载更新")
-        self.geometry("400x140")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        
-        # 居中
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 400) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 140) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        
-        # 开始下载
-        self.after(100, self._start_download)
-    
-    def _build_ui(self):
-        tk.Label(
-            self, text="⬇️ 正在下载更新包...",
-            font=("Microsoft YaHei UI", 11)
-        ).pack(pady=(15, 5))
-        
-        self._progress_value = 0
-        self._progress_canvas = tk.Canvas(self, width=350, height=20, bg="#E0E0E0", highlightthickness=0)
-        self._progress_canvas.pack(pady=5)
-        self._progress_bar = self._progress_canvas.create_rectangle(0, 0, 0, 20, fill="#2196F3", outline="")
-        
-        self.status_label = tk.Label(
-            self, text="准备中...",
-            font=("Microsoft YaHei UI", 9),
-            fg="#888888"
-        )
-        self.status_label.pack()
-        
-        tk.Button(
-            self, text="取消", width=10,
-            command=self._on_cancel,
-            font=("Microsoft YaHei UI", 9)
-        ).pack(pady=(5, 0))
-    
-    def _format_size(self, size_bytes):
-        if size_bytes < 1024:
-            return f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
-            return f"{size_bytes / 1024:.1f} KB"
-        else:
-            return f"{size_bytes / (1024 * 1024):.1f} MB"
-    
-    def _start_download(self):
-        # Support incremental file-by-file updates from version.json "files" field
-        files_info = self.version_info.get("files", {})
-        has_update_url = self.version_info.get("update_url", "") or self.version_info.get("download_url", "")
-
-        if files_info:
-            # Incremental update: download individual files
-            self._do_incremental_update(files_info)
-        elif has_update_url:
-            # Full package download
-            download_url = self.version_info.get("update_url", "") or self.version_info.get("download_url", "")
-            self._do_full_download(download_url)
-        else:
-            self.on_error("无可用的更新方式")
-            self.destroy()
-            return
-
-    def _do_incremental_update(self, files_info):
-        """逐文件增量更新：全部校验成功后再切换版本。"""
-        import hashlib as _hl
-
-        file_list = list(files_info.items())
-        total = len(file_list)
-        success_count = 0
-        fail_count = 0
-
-        def update_thread():
-            nonlocal success_count, fail_count
-            staged = {}
-            for idx, (fname, expected_sha) in enumerate(file_list):
-                if self.cancelled:
-                    return
-
-                # Update progress
-                pct = (idx / total) * 100
-                self.after(0, lambda p=pct, f=fname, current=idx + 1: (
-                    self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * p / 100), 20),
-                    self.status_label.config(text=f"({current}/{total}) {f}")
-                ))
-
-                # Download with Python (multi-source, SHA256 verified)
-                content = _download_file_bytes(fname, expected_sha)
-                if content is None:
-                    fail_count += 1
-                    continue
-
-                # Verify SHA256
-                actual_sha = _hl.sha256(content).hexdigest()
-                if actual_sha.lower() != expected_sha.lower():
-                    fail_count += 1
-                    continue
-                staged[fname] = content
-
-            if self.cancelled:
-                return
-
-            if fail_count == 0:
-                for fname, content in staged.items():
-                    try:
-                        _write_update_file(fname, content)
-                        success_count += 1
-                    except Exception:
-                        fail_count += 1
-
-            # app/version.json is the runtime switch. Write it last so a
-            # partial update can never outrank the bundled complete runtime.
-            if fail_count == 0 and "version.json" not in files_info and "app/version.json" not in files_info:
-                try:
-                    version_bytes = json.dumps(self.version_info, ensure_ascii=False, indent=2).encode("utf-8")
-                    _write_update_file("app/version.json", version_bytes)
-                except Exception:
-                    fail_count += 1
-
-            if fail_count == 0:
-                try:
-                    new_ver = self.version_info.get("latest_version", self.version_info.get("version", ""))
-                    if new_ver:
-                        _set_installed_version(new_ver)
-                except Exception:
-                    fail_count += 1
-
-            try:
-                import shutil
-                for cache_root in {
-                    os.path.join(_update_root(), "app"),
-                    os.path.join(_update_root(), "web_client"),
-                }:
-                    cache_dir = os.path.join(cache_root, "__pycache__")
-                    if os.path.isdir(cache_dir):
-                        shutil.rmtree(cache_dir)
-            except Exception:
-                pass
-
-            self.after(0, lambda: self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * 100 / 100), 20))
-            self.after(0, lambda: self.status_label.config(text="更新完成"))
-
-            if fail_count == 0:
-                self.after(500, lambda: self.on_complete(None, "", True))
-                self.after(600, self.destroy)
-            elif success_count > 0:
-                msg = f"更新完成: {success_count} 成功, {fail_count} 失败"
-                self.after(0, lambda: self.on_error(msg))
-                self.after(0, self.destroy)
-            else:
-                self.after(0, lambda: self.on_error("所有文件下载失败，请检查网络"))
-                self.after(0, self.destroy)
-
-        threading.Thread(target=update_thread, daemon=True).start()
-
-    def _do_full_download(self, download_url):
-        """全量下载（zip/exe包）- 尝试镜像加速"""
-        # 尝试用镜像替代直连GitHub
-        mirror_prefixes = [
-            "https://gh-proxy.com/https://",
-            "https://ghfast.top/https://",
-        ]
-        mirror_url = None
-        for prefix in mirror_prefixes:
-            if "github.com" in download_url or "githubusercontent.com" in download_url:
-                test_url = prefix + download_url.replace("https://", "")
-                try:
-                    result = subprocess.run(
-                        ["curl.exe", "-s", "-k", "-L", "-I", "--max-time", "5", test_url],
-                        capture_output=True, timeout=8
-, creationflags=_NO_WINDOW)
-                    if result.returncode == 0:
-                        mirror_url = test_url
-                        break
-                except Exception:
-                    continue
-        
-        if mirror_url:
-            download_url = mirror_url
-
-        expected_sha = self.version_info.get("sha256", "")
-        self._is_incremental_update = False
-
-        def progress_cb(downloaded, total):
-            if self.cancelled:
-                return
-            if total > 0:
-                pct = downloaded / total * 100
-                self._progress_canvas.coords(self._progress_bar, 0, 0, int(350 * pct / 100), 20)
-                self.status_label.config(
-                    text=f"{self._format_size(downloaded)} / {self._format_size(total)}"
-                )
-            else:
-                self.status_label.config(text=f"已下载 {self._format_size(downloaded)}")
-
-        def download_thread():
-            try:
-                temp_dir = tempfile.mkdtemp(prefix="liveclipper_update_")
-                filename = download_url.split("/")[-1] or "LiveClipper_Setup.exe"
-                temp_path = os.path.join(temp_dir, filename)
-
-                download_file(download_url, temp_path, progress_cb)
-
-                if self.cancelled:
-                    return
-
-                if expected_sha and isinstance(expected_sha, str):
-                    self.after(0, lambda: self.status_label.config(text="正在校验文件完整性..."))
-                    actual_sha = compute_sha256(temp_path)
-                    if actual_sha.lower() != expected_sha.lower():
-                        self.after(0, lambda: self.on_error(
-                            f"文件校验失败\n期望: {expected_sha[:16]}...\n实际: {actual_sha[:16]}..."
-                        ))
-                        self.after(0, self.destroy)
-                        return
-
-                self.after(0, lambda: self.on_complete(temp_path, filename, False))
-                self.after(0, self.destroy)
-
-            except Exception as e:
-                if not self.cancelled:
-                    self.after(0, lambda: self.on_error(f"下载失败: {str(e)}"))
-                    self.after(0, self.destroy)
-
-        threading.Thread(target=download_thread, daemon=True).start()
-    def _on_cancel(self):
-        self.cancelled = True
-        self.destroy()
-
-
-# ============ 主入口 ============
-
-def check_and_prompt_update(parent_window):
-    """
-    在后台检查更新，如果有新版本则弹出提示
-    parent_window: tkinter 根窗口
-    """
-    def _check():
-        version_info = check_update()
-        if version_info:
-            # 在主线程弹出对话框
-            parent_window.after(0, lambda: _show_dialog(version_info))
-    
-    threading.Thread(target=_check, daemon=True).start()
-
-
-def _show_dialog(version_info):
-    """在主线程中显示更新对话框"""
-    try:
-        root = tk._default_root
-    except AttributeError:
-        return
-    
-    if not root or not root.winfo_exists():
-        return
-    
-    dlg = UpdateDialog(root, version_info)
-    root.wait_window(dlg)
-    
-    if dlg.result == "update":
-        # 显示下载对话框
-        download_dlg = DownloadDialog(
-            root, version_info,
-            on_complete=_on_download_complete,
-            on_error=_on_download_error
-        )
-        root.wait_window(download_dlg)
-
-
-def _on_download_complete(filepath, filename, is_incremental=False):
-    """下载完成，处理更新"""
-    try:
-        if is_incremental and filename.endswith('.zip'):
-            # Incremental update: extract zip and restart
-            success = _apply_update(filepath)
-            # Clean up temp file
-            try:
-                os.remove(filepath)
-                os.rmdir(os.path.dirname(filepath))
-            except Exception:
-                pass
-            if success:
-                # _apply_update handles restart via bat script
-                pass
-            else:
-                messagebox.showerror(
-                    "更新失败",
-                    "解压更新包失败，请尝试重新下载。",
-                    icon="error"
-                )
-        else:
-            # Full update: auto-apply zip update
-            success = _apply_update(filepath)
-            try:
-                os.remove(filepath)
-                os.rmdir(os.path.dirname(filepath))
-            except Exception:
-                pass
-            if success:
-                result = messagebox.askyesno(
-                    "更新完成",
-                    "更新已安装成功！\n\n需要重启程序以应用更新。\n\n点击「是」立即重启。",
-                    icon="info"
-                )
-                if result:
-                    exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
-                    subprocess.Popen([exe], creationflags=_NO_WINDOW)
-                    try:
-                        root = tk._default_root
-                        if root:
-                            root.quit()
-                    except Exception:
-                        pass
-                    sys.exit(0)
-            else:
-                messagebox.showerror(
-                    "更新失败",
-                    "自动安装更新失败，请手动下载最新版本。",
-                    icon="error"
-                )
-    except Exception:
-        pass
-
-
-def _is_installed():
-    """Check if this is an existing installation (has FFmpeg)"""
-    if getattr(sys, 'frozen', False):
-        base = os.path.dirname(sys.executable)
-        ffmpeg_path = os.path.join(base, '_internal', 'ffmpeg', 'ffmpeg.exe')
-        return os.path.exists(ffmpeg_path)
+def _set_installed_version(_version: Any) -> bool:
+    """Retired compatibility API. A marker can no longer change runtime truth."""
     return False
 
 
-def _get_install_base():
-    """Get the installation base directory"""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def _get_update_dir():
-    """获取持久更新目录"""
-    return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper', 'app')
-
-def _apply_update(zip_path):
-    """Extract update zip and replace app files, handle GitHub zip structure"""
-    import zipfile, tempfile, shutil as _shutil
-    base = _get_install_base()
-    
+def _ssl_context() -> ssl.SSLContext:
     try:
-        # Extract to temp staging
-        staging = os.path.join(tempfile.gettempdir(), "liveclipper_update_staging")
-        if os.path.exists(staging):
-            _shutil.rmtree(staging, ignore_errors=True)
-        os.makedirs(staging, exist_ok=True)
+        import certifi
 
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(staging)
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
-        # Find app directory - handle GitHub zip structure (LiveClipper-main/app/)
-        app_src = None
-        # Check common patterns
-        candidates = []
-        for root, dirs, fns in os.walk(staging):
-            if "ai_clipper.py" in fns and "gui.py" in fns:
-                candidates.append(root)
-        
-        if candidates:
-            # Prefer the one closest to staging root
-            app_src = min(candidates, key=lambda x: len(x))
-        
-        if not app_src:
-            return False
 
-        # Determine target app directory
-        update_dir = _get_update_dir()
-        targets = [update_dir]  # ① 持久更新目录（首选）
-        
-        if getattr(sys, 'frozen', False):
-            targets.append(os.path.join(base, "app"))           # ② exe同级
-            targets.append(os.path.join(base, "_internal", "app"))  # ③ 内嵌
-        else:
-            # Dev mode: same directory
-            dev_target = os.path.dirname(os.path.abspath(__file__))
-            if os.path.basename(dev_target) != "app":
-                dev_target = os.path.join(dev_target, "app")
-            targets.append(dev_target)
+def _request_bytes(url: str, timeout: int = 15) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/2"})
+    with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+        return response.read()
 
-        for target_app in targets:
-            if not os.path.isdir(target_app):
-                os.makedirs(target_app, exist_ok=True)
 
-        copied = 0
-        for fname in os.listdir(app_src):
-            if fname.endswith(('.py', '.json', '.pem')):
-                src_f = os.path.join(app_src, fname)
-                for target_app in targets:
-                    dst_f = os.path.join(target_app, fname)
-                    try:
-                        _shutil.copy2(src_f, dst_f)
-                    except Exception:
-                        pass
-                copied += 1
+def _fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
+    data = json.loads(_request_bytes(url, timeout=timeout).decode("utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("release manifest is not an object")
+    return data
 
-        # Also copy from LiveClipper-main/app/ if different from app_src
-        gh_app = os.path.join(staging, "LiveClipper-main", "app")
-        if os.path.isdir(gh_app) and gh_app != app_src:
-            for fname in os.listdir(gh_app):
-                if fname.endswith(('.py', '.json', '.pem')):
-                    src_f = os.path.join(gh_app, fname)
-                    dst_f = os.path.join(target_app, fname)
-                    try:
-                        _shutil.copy2(src_f, dst_f)
-                        copied += 1
-                    except Exception:
-                        pass
 
-        # Update installed version
+def _fetch_github_file(path: str, timeout: int = 15) -> dict[str, Any]:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}?ref=main"
+    payload = _fetch_json(url, timeout=timeout)
+    content = base64.b64decode(payload["content"])
+    data = json.loads(content.decode("utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("release manifest is not an object")
+    return data
+
+
+def get_version_url() -> str:
+    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{RELEASE_CHANNEL_PATH}"
+
+
+def _release_sources(path: str) -> list[tuple[str, str]]:
+    raw = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{path}"
+    return [
+        ("GitHub API", path),
+        ("GitHub Raw", raw),
+        ("jsDelivr", f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@main/{path}"),
+    ]
+
+
+def _fetch_release_path(path: str) -> dict[str, Any] | None:
+    for source, value in _release_sources(path):
         try:
-            vj_paths = [
-                os.path.join(app_src, "version.json"),
-                os.path.join(staging, "LiveClipper-main", "app", "version.json"),
-            ]
-            for vj in vj_paths:
-                if os.path.exists(vj):
-                    import json as _json
-                    with open(vj, "r", encoding="utf-8") as f:
-                        vdata = _json.load(f)
-                    new_ver = vdata.get("latest_version", vdata.get("version", ""))
-                    if new_ver:
-                        _set_installed_version(new_ver)
+            if source == "GitHub API":
+                return _fetch_github_file(value)
+            return _fetch_json(value, timeout=12)
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_release(data: dict[str, Any]) -> dict[str, Any]:
+    result = dict(data)
+    version = _manifest_version(result)
+    result["version"] = version
+    result["latest_version"] = version
+    result["schema_version"] = int(result.get("schema_version") or 1)
+    result["update_strategy"] = "full-package"
+    result["requires_full_package"] = True
+    result.setdefault("release_page_url", DEFAULT_RELEASE_PAGE)
+    result.setdefault(
+        "requires_full_package_note",
+        "本版本采用整包升级。程序代码不会再写入用户数据目录，请下载完整包后替换旧程序。",
+    )
+    return result
+
+
+def _manifest_file_path(relative_path: str) -> Path | None:
+    normalized = str(relative_path or "").replace("\\", "/").lstrip("/")
+    root = _runtime_root()
+    if normalized.startswith("app/"):
+        return root / normalized
+    if normalized.startswith("web_client/tools/"):
+        packaged_tool = root / "tools" / Path(normalized).name
+        return packaged_tool if packaged_tool.exists() else root / normalized
+    if normalized.startswith(("web_client/", "tools/")):
+        return root / normalized
+    return None
+
+
+def _normalized_sha256(path: Path) -> str:
+    data = path.read_bytes()
+    if path.suffix.lower() in {".py", ".json", ".txt", ".html", ".css", ".js"}:
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest().lower()
+
+
+def _manifest_integrity_mismatches(manifest: dict[str, Any]) -> list[str]:
+    files = manifest.get("runtime_files") if isinstance(manifest.get("runtime_files"), dict) else {}
+    if not files:
+        files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    targets = list(manifest.get("integrity_files") or [])
+    mismatches: list[str] = []
+    for name in targets:
+        path = _manifest_file_path(name)
+        expected = str(files.get(name) or "").lower()
+        try:
+            matched = bool(path and expected and path.is_file() and _normalized_sha256(path) == expected)
+        except Exception:
+            matched = False
+        if not matched:
+            mismatches.append(str(name))
+    return mismatches
+
+
+def check_update() -> dict[str, Any] | None:
+    local_manifest = _local_manifest()
+    local_version = _manifest_version(local_manifest)
+
+    remote = _fetch_release_path(RELEASE_CHANNEL_PATH)
+    if not remote:
+        remote = _fetch_release_path(LEGACY_VERSION_PATH)
+    if remote:
+        release = _normalize_release(remote)
+        if is_newer(_manifest_version(release), local_version):
+            return release
+
+    mismatches = _manifest_integrity_mismatches(local_manifest)
+    if mismatches:
+        repair = _normalize_release(remote or local_manifest)
+        repair["repair_required"] = True
+        repair["integrity_mismatches"] = mismatches
+        repair["release_page_url"] = repair.get("release_page_url") or DEFAULT_RELEASE_PAGE
+        return repair
+    return None
+
+
+def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]:
+    info = _normalize_release(version_info or {})
+    package = info.get("package") if isinstance(info.get("package"), dict) else {}
+    package_url = (
+        package.get("url")
+        or info.get("package_url")
+        or info.get("release_page_url")
+        or info.get("update_url")
+        or info.get("download_url")
+        or DEFAULT_RELEASE_PAGE
+    )
+    return {
+        "ok": False,
+        "full_package_required": True,
+        "restart_required": False,
+        "version": _manifest_version(info),
+        "package_url": package_url,
+        "updated": [],
+        "failed": [],
+        "msg": info.get("requires_full_package_note"),
+    }
+
+
+def compute_sha256(filepath: str | os.PathLike[str]) -> str:
+    digest = hashlib.sha256()
+    with open(filepath, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_file(url: str, dest_path: str, progress_callback=None) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/2"})
+    with urllib.request.urlopen(request, timeout=60, context=_ssl_context()) as response:
+        total = int(response.headers.get("Content-Length") or 0)
+        downloaded = 0
+        with open(dest_path, "wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
                     break
-        except Exception:
-            pass
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    progress_callback(downloaded, total)
 
-        # Clean up staging
+
+def _package_url(info: dict[str, Any]) -> str:
+    package = info.get("package") if isinstance(info.get("package"), dict) else {}
+    return str(
+        package.get("url")
+        or info.get("package_url")
+        or info.get("release_page_url")
+        or DEFAULT_RELEASE_PAGE
+    )
+
+
+def check_and_prompt_update(parent_window) -> None:
+    def worker() -> None:
+        info = check_update()
+        if not info:
+            return
+
+        def prompt() -> None:
+            from tkinter import messagebox
+
+            version = _manifest_version(info)
+            message = (
+                f"发现新版本 {version}。\n\n"
+                "本次需要下载完整包，用户设置和素材不会受影响。\n"
+                "是否打开下载页面？"
+            )
+            if messagebox.askyesno("LiveClipper 更新", message, parent=parent_window):
+                webbrowser.open(_package_url(info), new=2)
+
         try:
-            _shutil.rmtree(staging, ignore_errors=True)
+            parent_window.after(0, prompt)
         except Exception:
             pass
 
-        return copied > 0
-
-    except Exception:
-        return False
-def _restart_app():
-    """Restart the application"""
-    try:
-        if getattr(sys, 'frozen', False):
-            exe = sys.executable
-        else:
-            exe = sys.argv[0]
-        subprocess.Popen([exe], shell=True, creationflags=_NO_WINDOW)
-    except Exception:
-        pass
-    try:
-        root = tk._default_root
-        if root:
-            root.quit()
-    except Exception:
-        pass
-    sys.exit(0)
+    threading.Thread(target=worker, daemon=True).start()
 
 
-def _on_download_error(msg):
-    """下载失败"""
-    messagebox.showerror("更新失败", msg, icon="error")
-
-
-# ============ 独立运行测试 ============
-
-if __name__ == "__main__":
-    # 测试模式：直接运行检查更新
-    print(f"当前版本: {CURRENT_VERSION}")
-    print(f"检查更新: {get_version_url() or '(未配置)'}")
-    
-    info = check_update()
-    if info:
-        print(f"发现新版本: v{info.get('latest_version')}")
-        print(f"更新说明: {info.get('release_notes', '无')}")
-        print(f"强制更新: {info.get('force_update', False)}")
-    else:
-        print("已是最新版本，或检查更新失败。")
+__all__ = [
+    "CURRENT_VERSION",
+    "RUNTIME_LAYOUT_VERSION",
+    "apply_update_headless",
+    "check_and_prompt_update",
+    "check_update",
+    "compute_sha256",
+    "download_file",
+    "get_version_url",
+    "init_installed_version",
+    "is_newer",
+    "parse_version",
+    "_get_installed_version",
+]

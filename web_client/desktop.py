@@ -6,7 +6,6 @@ import time
 import webbrowser
 import os
 import sys
-import importlib.util
 import json
 import urllib.request
 from pathlib import Path
@@ -17,15 +16,27 @@ import uvicorn
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
+RUNTIME_LAYOUT_VERSION = 2
+LEGACY_RUNTIME_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
     REPO_ROOT = BUNDLE_DIR
     os.environ.setdefault("LIVECLIPPER_BUNDLE_DIR", str(BUNDLE_DIR))
     os.environ.setdefault("LIVECLIPPER_FROZEN", "1")
+    os.environ.setdefault("LIVECLIPPER_CODE_SOURCE", "bundled")
 else:
     BUNDLE_DIR = MODULE_WEB_DIR.parent
     REPO_ROOT = MODULE_WEB_DIR.parent
+    os.environ.setdefault("LIVECLIPPER_CODE_SOURCE", "source")
+
+os.environ.setdefault("LIVECLIPPER_RUNTIME_LAYOUT", str(RUNTIME_LAYOUT_VERSION))
+os.environ.setdefault(
+    "LIVECLIPPER_LEGACY_OVERLAYS_PRESENT",
+    "1"
+    if any((LEGACY_RUNTIME_ROOT / name).exists() for name in ("app", "web_client", "tools"))
+    else "0",
+)
 
 
 def _repair_tool_stdio() -> None:
@@ -63,55 +74,11 @@ def _run_tool_subprocess() -> bool:
     return True
 
 
-def _version_key(version: str) -> tuple[int, int, int, int]:
-    parts: list[int] = []
-    for chunk in str(version or "").replace("-", ".").split("."):
-        digits = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple((parts + [0, 0, 0, 0])[:4])
-
-
-def _read_version(path: Path) -> str:
-    try:
-        import json
-
-        version_file = path / "app" / "version.json"
-        if not version_file.exists():
-            version_file = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "app" / "version.json"
-        data = json.loads(version_file.read_text(encoding="utf-8-sig"))
-        return data.get("version") or data.get("latest_version") or "0"
-    except Exception:
-        return "0"
-
-
-def _updated_server_path() -> Path | None:
-    update_web = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "web_client"
-    if not (update_web / "server.py").exists():
-        return None
-    if not (update_web / "frontend" / "index.html").exists():
-        return None
-
-    bundled_web = BUNDLE_DIR / "web_client" if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-    if _version_key(_read_version(update_web.parent)) <= _version_key(_read_version(bundled_web.parent)):
-        return None
-    return update_web / "server.py"
-
-
 def _load_server_app():
-    update_server = _updated_server_path()
-    if update_server:
-        update_web = update_server.parent
-        update_app = update_web.parent / "app"
-        if update_app.is_dir() and str(update_app) not in sys.path:
-            sys.path.insert(0, str(update_app))
-        if str(update_web) not in sys.path:
-            sys.path.insert(0, str(update_web))
-        spec = importlib.util.spec_from_file_location("server", update_server)
-        if spec and spec.loader:
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["server"] = module
-            spec.loader.exec_module(module)
-            return module.app
+    for module_dir in (BUNDLE_DIR / "app", MODULE_WEB_DIR):
+        module_text = str(module_dir)
+        if module_dir.is_dir() and module_text not in sys.path:
+            sys.path.insert(0, module_text)
 
     from server import app
 
@@ -120,9 +87,6 @@ def _load_server_app():
 
 def _icon_path() -> str | None:
     candidates = []
-    update_icon = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "web_client" / "frontend" / "assets" / "liveclipper.ico"
-    candidates.append(update_icon)
-
     web_dir = Path(__file__).resolve().parent
     candidates.append(web_dir / "frontend" / "assets" / "liveclipper.ico")
 

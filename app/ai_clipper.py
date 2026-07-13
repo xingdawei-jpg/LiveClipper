@@ -13,6 +13,7 @@ _detail_kw_prompt = ""
 _LAST_CATEGORY_FILTER_SUMMARY = {}
 _LAST_FOCUS_SUMMARY = {}
 _LAST_TOPIC_COVERAGE_SUMMARY = {}
+_LAST_SELECTION_FAILURE = {}
 import os
 import sys
 from contextvars import ContextVar
@@ -22,21 +23,37 @@ import urllib.error
 import re
 import unicodedata
 
+from selection_contracts import (
+    CandidateSet, DurationContract, SelectionCandidate, SelectionManifest,
+    SelectionRequest, SelectionResult,
+)
+from category_profiles import iter_vertical_profiles, resolve_vertical_profile
+
 
 _ANALYSIS_METADATA_CONTEXT = ContextVar("liveclipper_analysis_metadata", default=None)
 
 
 def _begin_analysis_metadata():
-    global _LAST_CATEGORY_FILTER_SUMMARY, _LAST_FOCUS_SUMMARY, _LAST_TOPIC_COVERAGE_SUMMARY
+    global _LAST_CATEGORY_FILTER_SUMMARY, _LAST_FOCUS_SUMMARY, _LAST_TOPIC_COVERAGE_SUMMARY, _LAST_SELECTION_FAILURE
     metadata = {
         "category_summary": {},
         "preference_summary": {},
         "topic_coverage_summary": {},
+        "selection_failure": {},
+        "hook_candidate_summary": {},
+        "trim_priorities": {},
+        "final_target_duration": None,
+        "duration_contract": {},
+        "candidate_contract": {},
+        "selection_manifest": {},
+        "selection_request": {},
+        "selection_result": {},
     }
     _ANALYSIS_METADATA_CONTEXT.set(metadata)
     _LAST_CATEGORY_FILTER_SUMMARY = metadata["category_summary"]
     _LAST_FOCUS_SUMMARY = metadata["preference_summary"]
     _LAST_TOPIC_COVERAGE_SUMMARY = metadata["topic_coverage_summary"]
+    _LAST_SELECTION_FAILURE = metadata["selection_failure"]
     return metadata
 
 
@@ -71,13 +88,56 @@ def _set_last_topic_coverage_summary(summary):
     return value
 
 
+def _set_last_selection_failure(summary):
+    global _LAST_SELECTION_FAILURE
+    value = dict(summary or {})
+    _LAST_SELECTION_FAILURE = value
+    _analysis_metadata_context()["selection_failure"] = value
+    return value
+
+
 def get_last_analysis_metadata():
     metadata = _analysis_metadata_context()
     return {
         "category_summary": dict(metadata.get("category_summary") or {}),
         "preference_summary": dict(metadata.get("preference_summary") or {}),
         "topic_coverage_summary": dict(metadata.get("topic_coverage_summary") or {}),
+        "selection_failure": dict(metadata.get("selection_failure") or {}),
+        "hook_candidate_summary": dict(metadata.get("hook_candidate_summary") or {}),
+        "final_target_duration": metadata.get("final_target_duration"),
+        "duration_contract": dict(metadata.get("duration_contract") or {}),
+        "candidate_contract": dict(metadata.get("candidate_contract") or {}),
+        "selection_manifest": dict(metadata.get("selection_manifest") or {}),
+        "selection_request": dict(metadata.get("selection_request") or {}),
+        "selection_result": dict(metadata.get("selection_result") or {}),
     }
+
+
+def selection_failure_message(metadata=None):
+    failure = dict((metadata or get_last_analysis_metadata()).get("selection_failure") or {})
+    if not failure:
+        return "AI未返回合格片单，已停止，避免生成低质量预览或成片"
+    reason = str(failure.get("reason") or "未通过最终质检").strip()
+    candidate_count = int(failure.get("candidate_count") or 0)
+    best_duration = float(failure.get("best_duration") or 0.0)
+    duration_low = float(failure.get("duration_low") or 0.0)
+    duration_high = float(failure.get("duration_high") or 0.0)
+    if failure.get("code") == "insufficient_content":
+        return (
+            f"有效内容不足：可用候选{candidate_count}条，"
+            f"最佳片单{best_duration:.1f}秒，目标至少{duration_low:.0f}秒"
+        )
+    if failure.get("code") == "ai_duration_contract_failed":
+        return (
+            f"AI未满足时长：可用候选{candidate_count}条，"
+            f"最佳片单{best_duration:.1f}秒，目标至少{duration_low:.0f}秒"
+        )
+    if failure.get("code") == "duration_out_of_range":
+        return (
+            f"AI未满足时长：最佳片单{best_duration:.1f}秒，"
+            f"要求{duration_low:.0f}-{duration_high:.0f}秒"
+        )
+    return f"AI片单质检未通过：{reason}"
 
 from ai_model_config import (
     DEEPSEEK_DEFAULT_BASE_URL,
@@ -927,6 +987,34 @@ def _multi_version_target_bounds(target_duration):
     return max(lower_floor, target - tolerance), target + tolerance
 
 
+def _coerce_duration_contract(duration_contract=None, target_duration=60, final_target_duration=None):
+    try:
+        source_target = max(0.001, float(target_duration or 60))
+    except Exception:
+        source_target = 60.0
+    try:
+        final_target = max(0.001, float(final_target_duration or source_target))
+    except Exception:
+        final_target = source_target
+    inferred_speed = source_target / final_target if final_target > 0 else 1.0
+    return DurationContract.coerce(
+        duration_contract,
+        final_target=final_target,
+        speed_factor=inferred_speed,
+    )
+
+
+def _duration_source_bounds(target_duration, duration_contract=None):
+    if duration_contract is None:
+        return _multi_version_target_bounds(target_duration)
+    contract = DurationContract.coerce(
+        duration_contract,
+        final_target=target_duration,
+        speed_factor=1.0,
+    )
+    return contract.source_min, contract.source_max
+
+
 def _target_clip_count_range(target_duration):
     try:
         target = int(target_duration or 60)
@@ -954,8 +1042,8 @@ def target_clip_count_text(target_duration):
     return f"{low}-{high}"
 
 
-def _target_duration_rule_text(target_duration):
-    low, high = _multi_version_target_bounds(target_duration)
+def _target_duration_rule_text(target_duration, duration_contract=None):
+    low, high = _duration_source_bounds(target_duration, duration_contract)
     return (
         f"总时长必须控制在{low:.0f}-{high:.0f}秒；"
         f"目标是{int(target_duration or 60)}秒左右，超过{high:.0f}秒必须删除低信息/重复片段，"
@@ -988,7 +1076,7 @@ def _preference_target_bounds(target_duration, requested="自动"):
     if target >= 100:
         return (4, 6 if manual else 5)
     if target >= 80:
-        return (3, 5 if manual else 4)
+        return (3, 6 if manual else 4)
     if target >= 50:
         return (3, 4) if manual else (2, 3)
     return (2, 3) if manual else (1, 2)
@@ -1007,7 +1095,9 @@ _TOPIC_EVIDENCE_KEYWORDS = {
     ),
     "面料质感": (
         "面料", "材质", "莱赛尔", "天丝", "氨纶", "弹力", "聚酯纤维", "纯棉", "棉麻",
-        "针织", "冰丝", "真丝", "垂感", "垂坠", "高织", "薄纱", "薄如纱", "克重",
+        "针织", "冰丝", "真丝", "垂感", "垂坠", "高织", "薄纱", "网纱", "薄如纱", "克重",
+        "纱线", "竹节麻", "再生纤维", "木浆", "透气", "清爽", "凉快", "不扎", "粘肤",
+        "粘汗", "缩水", "起球",
     ),
     "穿着体验": (
         "舒服", "舒适", "亲肤", "柔软", "冰凉", "凉感", "裸肤", "裸感", "透气", "不闷",
@@ -1694,13 +1784,23 @@ def _score_hook_text_candidate(text, duration, hook_keywords=None, focus_hint=No
 
 def _collect_hook_candidates_from_entries(entries, hook_keywords=None, focus_hint=None, ai_controls=None, limit=12):
     candidates = []
-    for idx, entry in enumerate(entries, 1):
+    for fallback_idx, entry in enumerate(entries, 1):
         if len(entry) < 3:
             continue
-        es, ee, text = entry[:3]
+        if len(entry) >= 4:
+            idx, es, ee, text = entry[:4]
+        else:
+            idx = fallback_idx
+            es, ee, text = entry[:3]
         try:
+            idx = int(idx)
             dur = float(ee) - float(es)
         except Exception:
+            continue
+        _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        if starts_incomplete or ends_incomplete:
+            # Keep the sentence available to the director as body material, but
+            # never advertise an obvious fragment as a Hook candidate.
             continue
         score, reasons = _score_hook_text_candidate(text, dur, hook_keywords, focus_hint, ai_controls)
         if score > 0:
@@ -2478,6 +2578,9 @@ def _normalize_forced_category(category=None):
                 return cat
     except NameError:
         pass
+    profile = resolve_vertical_profile(text)
+    if profile:
+        return profile.key
     if _is_food_fresh_category(text):
         return "食品/生鲜"
     return None
@@ -2485,8 +2588,9 @@ def _normalize_forced_category(category=None):
 
 def _feedback_category_bucket(main_category=None):
     normalized = _normalize_forced_category(main_category)
-    if _is_food_fresh_category(normalized or main_category):
-        return "food_fresh"
+    profile = resolve_vertical_profile(normalized or main_category)
+    if profile:
+        return profile.feedback_bucket
     if normalized:
         return "clothing"
     return "general"
@@ -2699,7 +2803,8 @@ def _post_filter_food_cross_product(clips, log_fn=None):
 
 def _category_system_overlay(main_category=None):
     if not _is_food_fresh_category(main_category):
-        return ""
+        profile = resolve_vertical_profile(main_category)
+        return str(profile.system_overlay or "") if profile else ""
     return f"""[品类覆盖: 食品/生鲜直播切片]
 上方女装示例只作短视频结构参考；当前主品类是食品/生鲜时，禁止套用服装词，如上身、显瘦、尺码、面料、穿搭。
 {_food_fresh_context_prompt(main_category)}
@@ -3010,18 +3115,20 @@ def _pre_clean_srt(srt_text, log_fn=None):
 # ============================================================
 DIRECTOR_SYSTEM_PROMPT = """你是带货短视频的最终剪辑导演。你必须理解字幕语义、设计完整叙事，并直接给出最终成片顺序。
 
-你的输出会被程序原样用于剪辑。程序只检查违禁内容和时间索引，不会替你删重复卖点、补片、换Hook或重排，所以你必须在输出前自行完成整片审稿。
+你的主片单会被程序原样用于剪辑。程序只检查违禁内容、时间索引和时长合同，不会自行判断卖点、换Hook或重排。你还必须给出备用扩展计划；只有主片单低于时长下限时，程序才会按你指定的插入片段和叙事锚点执行。
 
 硬性要求：
-1. 只输出JSON数组，不要解释，不要Markdown。
-2. 每项必须包含 clip_type、srt_indices、focus、reason。srt_indices只能使用输入中真实存在且未标记“不可选”的编号。
+1. 只输出JSON对象，不要解释，不要Markdown。对象必须包含clips和expansion_plan两个数组。
+2. 每项必须包含 clip_type、srt_indices、focus、reason、trim_priority。srt_indices只能使用输入中真实存在且未标记“不可选”的编号。
 3. 数组顺序就是成片顺序：必须恰好1个Hook且在第一项，恰好1个Close且在最后一项；Close之后不能有任何Product。
 4. 叙事顺序应为：强Hook提出效果或痛点 -> 第二段立即兑现Hook -> 核心效果 -> 原因/细节证据 -> 不同场景或顾虑解除 -> 自然总结。不要按字幕时间排序，要按观众理解顺序排序。
 5. 每个片段必须能独立听懂。srt_indices必须连续，通常1-2条；只有补齐主谓宾或完整句尾时才允许3条。禁止不连续编号，禁止以“而且、然后、所以、但是、因为、就是、还、大头含量是、还有一种人在”等半句开头或结尾。
 6. 严禁重复同一子主题。同一个显瘦部位、同一种帽子搭配、同一个面料结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
 7. 偏好是主线，不是凑数量。同一偏好下必须选择不同子主题；如果只有一个干净子主题，就只选一个，不得用三段近义表达冒充三段偏好。
 8. 不选直播操作、主播自言自语或现场调度，例如“切个歌、我把包取了、帮我拿一下、看后台、今天没洗头”。不选“我喜欢它两个点、首先、第一点、几个地方”这类报数式铺垫，除非后续所有点都在紧邻片段中完整展开。不选价格、链接、拍码、关注、领券、满减、倒计时和任何标记不可选的字幕。
-9. 目标时长约__TARGET__秒，必须尽量控制在__LOW__-__HIGH__秒；低于__LOW__秒会被判定为未完成片单。安全内容不足时可以略短，但不能只输出半成品；继续寻找不同卖点、不同场景、不同顾虑解除的完整片段来补足，绝不能用残句和重复内容填满。
+9. 目标时长约__TARGET__秒，最终片单必须控制在__LOW__-__HIGH__秒；低于__LOW__秒或超过__HIGH__秒都会被拒绝。内容不足时继续寻找不同卖点、不同场景、不同顾虑解除的完整片段；内容过多时删除整段低价值Product，绝不能截断单句、重复凑数或靠超时长蒙混过关。
+10. trim_priority表示超时长时的删片优先级：Hook、紧随Hook的第二段、Close必须填0；其余Product填互不重复的正整数，1代表最先删除。先给重复、偏离本轮偏好、低信息量的片段较小数字，核心偏好证据填较大数字。程序只会按你给出的顺序累计删整段，不会替你判断内容价值。
+11. expansion_plan提供4-8个主片单未使用的完整Product备用片段。每项包含priority、after_srt_indices、after_order、srt_indices、focus、reason；priority从1开始且不重复，数字越小越优先补入。after_srt_indices必须指向clips中某个现有片段的srt_indices，表示补片应插在该段之后；不得锚定Close，也不得把补片放到Close后。备用片段必须覆盖不同子主题，不得与主片单或其他备用片段重复。
 
 输出前在心里把所有选中字幕按数组顺序连读一遍，并逐项确认：Hook后有兑现、相邻段不重复、每句首尾完整、Close确实是最后一句。发现问题后先修改，再输出JSON。"""
 
@@ -3959,27 +4066,373 @@ def _director_clip_source_key(clip):
     return marker.group(0).upper() if marker else ""
 
 
-def _director_duration_status(clips, target_duration):
+def _director_clip_trim_key(clip):
     try:
-        target = float(target_duration or 60)
+        start = round(float(clip[2]), 3)
+        end = round(float(clip[3]), 3)
     except Exception:
-        target = 60.0
-    low, high = _multi_version_target_bounds(target)
+        start, end = 0.0, 0.0
+    text = re.sub(r"\s+", "", str(clip[1] if len(clip) > 1 else ""))
+    return f"{start:.3f}:{end:.3f}:{hashlib.sha1(text.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _director_duration_status(clips, target_duration, duration_contract=None):
+    contract = _coerce_duration_contract(
+        duration_contract,
+        target_duration=target_duration,
+        final_target_duration=(duration_contract or {}).get("final_target") if isinstance(duration_contract, dict) else None,
+    )
     total = sum(_clip_duration_value(clip) for clip in clips or [])
-    gap = max(0.0, float(low) - float(total))
-    severe_gap = max(3.0, target * 0.08)
+    contract_status = contract.status(total)
     return {
         "total": float(total),
-        "low": float(low),
-        "high": float(high),
-        "gap": float(gap),
-        "severe_gap": float(severe_gap),
-        "short": gap > severe_gap,
+        "low": float(contract.source_min),
+        "high": float(contract.source_max),
+        "gap": float(contract_status["gap"]),
+        "severe_gap": 0.0,
+        "short": bool(contract_status["short"]),
+        "long": bool(contract_status["long"]),
+        "projected_final": float(contract_status["projected_final"]),
     }
 
 
-def _director_context_boundary_flags(text):
+def _director_clip_entry_indices(clip, srt_entries):
+    """Resolve one immutable clip back to its candidate indices."""
+    try:
+        clip_start = float(clip[2])
+        clip_end = float(clip[3])
+    except Exception:
+        return []
+    clip_source = _director_clip_source_key(clip)
+    selected = []
+    for entry_index, (entry_start, entry_end, entry_text) in enumerate(srt_entries or [], 1):
+        entry_source = _director_candidate_source(entry_text)
+        if clip_source and entry_source and clip_source.lower() != entry_source.lower():
+            continue
+        overlap = max(0.0, min(clip_end, float(entry_end)) - max(clip_start, float(entry_start)))
+        if overlap > 0.05:
+            selected.append(entry_index)
+    return selected
+
+
+def _director_safe_patch_candidate(
+    indices,
+    srt_entries,
+    selected_indices=None,
+    selected_clips=None,
+    focus="",
+    forbidden_words=None,
+    price_patterns=None,
+):
+    """Build a Product only from AI-declared immutable candidate indices."""
+    if isinstance(indices, bool):
+        return None
+    if isinstance(indices, int):
+        indices = [indices]
+    if not isinstance(indices, list) or not indices or len(indices) > 3:
+        return None
+    try:
+        normalized = [int(value) for value in indices]
+    except Exception:
+        return None
+    if normalized != sorted(set(normalized)):
+        return None
+    if any(right != left + 1 for left, right in zip(normalized, normalized[1:])):
+        return None
+    if normalized[0] < 1 or normalized[-1] > len(srt_entries or []):
+        return None
+    if set(normalized) & set(selected_indices or set()):
+        return None
+
+    entries = [srt_entries[index - 1] for index in normalized]
+    sources = {_director_candidate_source(entry[2]) for entry in entries}
+    sources.discard("")
+    if len(sources) > 1:
+        return None
+    start = float(entries[0][0])
+    end = float(entries[-1][1])
+    text = "".join(str(entry[2] or "") for entry in entries).strip()
+    if not text or end <= start:
+        return None
+    if _is_safety_blocked_text(text, forbidden_words, price_patterns) or _is_backstage_instruction(text):
+        return None
+    _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+    if starts_incomplete or ends_incomplete:
+        return None
+
+    candidate = ("product", text, start, end, 50, end - start, str(focus or "").strip())
+    candidate_source = _director_clip_source_key(candidate)
+    for existing in selected_clips or []:
+        existing_source = _director_clip_source_key(existing)
+        if candidate_source and existing_source and candidate_source.lower() != existing_source.lower():
+            continue
+        overlap = max(0.0, min(end, float(existing[3])) - max(start, float(existing[2])))
+        if overlap > 0.25:
+            return None
+    return candidate
+
+
+def _director_safe_candidate_inventory(srt_entries):
+    try:
+        forbidden_words = load_keywords().get("forbidden_phrases", [])
+    except Exception:
+        forbidden_words = []
+    price_patterns = _safety_price_cta_patterns()
+    inventory = []
+    for index, (start, end, text) in enumerate(srt_entries or [], 1):
+        candidate = _director_safe_patch_candidate(
+            [index],
+            srt_entries,
+            forbidden_words=forbidden_words,
+            price_patterns=price_patterns,
+        )
+        if candidate is None:
+            continue
+        inventory.append({
+            "srt_index": index,
+            "source": _director_candidate_source(text),
+            "duration_sec": round(max(0.0, float(end) - float(start)), 1),
+            "text": re.sub(r"\s+", " ", str(text or "")).strip()[:180],
+        })
+    return inventory
+
+
+def _director_missing_sources(clips, required_sources):
+    required = {
+        str(source or "").strip().upper()
+        for source in (required_sources or set())
+        if str(source or "").strip()
+    }
+    selected = {
+        _director_clip_source_key(clip).strip().upper()
+        for clip in (clips or [])
+        if _director_clip_source_key(clip).strip()
+    }
+    return sorted(required - selected)
+
+
+def _apply_ai_expansion_plan(
+    clips,
+    expansion_plan,
+    srt_entries,
+    target_duration,
+    log_fn=None,
+    label="AI预排补片",
+    duration_contract=None,
+    required_sources=None,
+):
+    """Apply AI-declared insertions; the program only validates indices and duration."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    items = list(clips or [])
+    if len(items) < 2 or not isinstance(expansion_plan, list):
+        return []
+    initial_status = _director_duration_status(items, target_duration, duration_contract)
+    missing_sources = _director_missing_sources(items, required_sources)
+    if not initial_status["short"] and not missing_sources:
+        return items
+
+    base_index_groups = [
+        tuple(_director_clip_entry_indices(clip, srt_entries))
+        for clip in items
+    ]
+    selected_indices = {index for group in base_index_groups for index in group}
+    close_position = next((idx for idx, clip in enumerate(items) if _is_close_clip(clip)), len(items))
+    max_anchor = max(1, close_position - 1) if close_position < len(items) else max(1, len(items) - 1)
+
+    ranked = []
+    used_priorities = set()
+    for response_order, raw in enumerate(expansion_plan):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            priority = int(raw.get("priority", response_order + 1) or response_order + 1)
+        except Exception:
+            continue
+        if priority <= 0 or priority in used_priorities:
+            continue
+        used_priorities.add(priority)
+        ranked.append((priority, response_order, raw))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+
+    additions = []
+    working_clips = list(items)
+    for priority, _response_order, raw in ranked:
+        candidate = _director_safe_patch_candidate(
+            raw.get("srt_indices"),
+            srt_entries,
+            selected_indices=selected_indices,
+            selected_clips=working_clips,
+            focus=raw.get("focus", ""),
+        )
+        if candidate is None:
+            continue
+        candidate_source = _director_clip_source_key(candidate).strip().upper()
+        fills_missing_source = bool(candidate_source and candidate_source in missing_sources)
+        if missing_sources and not initial_status["short"] and not fills_missing_source:
+            continue
+        projected_status = _director_duration_status(
+            working_clips + [candidate],
+            target_duration,
+            duration_contract,
+        )
+        if projected_status["long"] and not fills_missing_source:
+            continue
+
+        anchor_position = None
+        raw_anchor = raw.get("after_srt_indices")
+        if isinstance(raw_anchor, int):
+            raw_anchor = [raw_anchor]
+        if isinstance(raw_anchor, list):
+            try:
+                anchor_group = tuple(sorted(set(int(value) for value in raw_anchor)))
+            except Exception:
+                anchor_group = ()
+            if anchor_group:
+                anchor_position = next(
+                    (idx for idx, group in enumerate(base_index_groups) if tuple(group) == anchor_group),
+                    None,
+                )
+        if anchor_position is None:
+            try:
+                anchor_position = int(raw.get("after_order", 2) or 2) - 1
+            except Exception:
+                anchor_position = 1
+        anchor_position = max(1, min(int(anchor_position), max_anchor))
+
+        additions.append((anchor_position, priority, candidate))
+        working_clips.append(candidate)
+        selected_indices.update(_director_clip_entry_indices(candidate, srt_entries))
+        missing_sources = _director_missing_sources(working_clips, required_sources)
+        if not projected_status["short"] and not missing_sources:
+            break
+
+    if not additions:
+        return []
+
+    insertions = {}
+    for anchor_position, priority, candidate in additions:
+        insertions.setdefault(anchor_position, []).append((priority, candidate))
+    result = []
+    for position, clip in enumerate(items):
+        result.append(clip)
+        for _priority, candidate in sorted(insertions.get(position, []), key=lambda item: item[0]):
+            result.append(candidate)
+
+    final_status = _director_duration_status(result, target_duration, duration_contract)
+    _log(
+        f"{label}: 按AI插入锚点补入 {len(additions)} 段，"
+        f"{initial_status['total']:.1f}s -> {final_status['total']:.1f}s"
+        + (
+            "，已进入时长与来源合同"
+            if not final_status["short"] and not _director_missing_sources(result, required_sources)
+            else "，仍需继续修复时长或来源覆盖"
+        )
+    )
+    return result
+
+
+def _apply_ai_removal_priority(clips, remove_orders, target_duration, log_fn=None, label="AI优先级精简", duration_contract=None):
+    """Apply AI's semantic removal ranking; the program only performs duration arithmetic."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    items = list(clips or [])
+    if len(items) <= 2:
+        return []
+    status = _director_duration_status(items, target_duration, duration_contract)
+    if status["total"] <= status["high"] + 0.05:
+        return items
+
+    protected = {1, 2}
+    if _is_close_clip(items[-1]):
+        protected.add(len(items))
+    ranking = []
+    seen = set()
+    for raw_order in remove_orders or []:
+        if isinstance(raw_order, bool):
+            continue
+        try:
+            order = int(raw_order)
+        except Exception:
+            continue
+        if order < 1 or order > len(items) or order in seen or order in protected:
+            continue
+        seen.add(order)
+        ranking.append(order)
+    if not ranking:
+        return []
+
+    kept_orders = set(range(1, len(items) + 1))
+    total = float(status["total"])
+    removed = []
+    for order in ranking:
+        if total <= status["high"] + 0.05:
+            break
+        clip = items[order - 1]
+        projected = total - _clip_duration_value(clip)
+        if projected < status["low"] - 0.05:
+            continue
+        kept_orders.discard(order)
+        removed.append(order)
+        total = projected
+
+    if total > status["high"] + 0.05 or total < status["low"] - 0.05:
+        _log(
+            f"{label}: AI删除优先级不足以满足时长，"
+            f"{status['total']:.1f}s -> {total:.1f}s（要求{status['low']:.0f}-{status['high']:.0f}s）"
+        )
+        return []
+    trimmed = [clip for order, clip in enumerate(items, 1) if order in kept_orders]
+    _log(
+        f"{label}: 按AI删除优先级移除 {len(removed)} 段，"
+        f"{status['total']:.1f}s -> {total:.1f}s（保留Hook与承接句）"
+    )
+    return trimmed
+
+
+def _apply_declared_trim_priorities(clips, target_duration, log_fn=None, duration_contract=None):
+    priorities = dict(_analysis_metadata_context().get("trim_priorities") or {})
+    ranked = []
+    used_priorities = set()
+    for order, clip in enumerate(clips or [], 1):
+        raw_priority = priorities.get(_director_clip_trim_key(clip))
+        try:
+            priority = int(raw_priority)
+        except Exception:
+            continue
+        if priority <= 0 or priority in used_priorities:
+            continue
+        used_priorities.add(priority)
+        ranked.append((priority, order))
+    ranked.sort(key=lambda item: item[0])
+    return _apply_ai_removal_priority(
+        clips,
+        [order for _priority, order in ranked],
+        target_duration,
+        log_fn,
+        label="AI预排精简",
+        duration_contract=duration_contract,
+    )
+
+
+def _director_boundary_text(text):
     value = re.sub(r"\[[vV]\d+\]\s*", "", str(text or "")).strip()
+    while value:
+        vocal = re.match(r"^(?:嗯+|啊+|呃+|哦+|诶+)\s*[。！？!?；;，,、：:]*\s*", value)
+        confirmed = re.match(r"^(?:对|是的|没错|好的)\s*[。！？!?；;，,、：:]+\s*", value)
+        match = vocal or confirmed
+        if not match or match.end() <= 0:
+            break
+        value = value[match.end():].lstrip()
+    return value
+
+
+def _director_context_boundary_flags(text):
+    value = _director_boundary_text(text)
     compact = re.sub(r"[\s。！？!?；;]+$", "", value)
     repair_prefixes = (
         "还要", "还有", "而且", "但是", "所以", "不过", "就是", "然后",
@@ -4001,7 +4454,125 @@ def _director_context_boundary_flags(text):
     return starts_for_repair, starts_hard, ends
 
 
-def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
+def _director_candidate_source(text):
+    marker = re.search(r"\[V\d+\]", str(text or ""), flags=re.IGNORECASE)
+    return marker.group(0).upper() if marker else ""
+
+
+def _director_srt_time(seconds):
+    total_ms = int(round(max(0.0, float(seconds or 0.0)) * 1000.0))
+    hours, remainder = divmod(total_ms, 3600000)
+    minutes, remainder = divmod(remainder, 60000)
+    secs, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+
+def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
+    """Build one immutable candidate set before the AI sees any indices."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    entries = _parse_srt_entries_for_hook(cleaned_srt)
+    if not entries:
+        return cleaned_srt
+
+    frozen = []
+    merge_count = 0
+    for start, end, text in entries:
+        current = [float(start), float(end), str(text or "").strip()]
+        if not frozen:
+            frozen.append(current)
+            continue
+
+        previous = frozen[-1]
+        previous_source = _director_candidate_source(previous[2])
+        current_source = _director_candidate_source(current[2])
+        same_source = previous_source == current_source
+        gap = current[0] - previous[1]
+        _, _, prev_needs_next = _director_context_boundary_flags(previous[2])
+        current_needs_prev, _, _ = _director_context_boundary_flags(current[2])
+        previous_has_strong_end = bool(re.search(r"[。！？!?；;]\s*$", previous[2]))
+        combined_duration = current[1] - previous[0]
+        merge_duration_cap = 22.0
+        completion_merge_cap = 32.0
+        needs_boundary_merge = prev_needs_next or (current_needs_prev and not previous_has_strong_end)
+        should_merge = (
+            same_source
+            and -0.15 <= gap <= 2.2
+            and needs_boundary_merge
+            and (
+                combined_duration <= merge_duration_cap
+                or (prev_needs_next and combined_duration <= completion_merge_cap)
+            )
+        )
+        if not should_merge:
+            frozen.append(current)
+            continue
+
+        current_text = current[2]
+        if current_source:
+            current_text = re.sub(r"^\s*\[V\d+\]\s*", "", current_text, flags=re.IGNORECASE)
+        previous[1] = current[1]
+        previous[2] = f"{previous[2]}{current_text}".strip()
+        merge_count += 1
+
+    candidate_clips = [
+        ("product", text, start, end, 0.0, max(0.0, end - start))
+        for start, end, text in frozen
+        if text and end > start
+    ]
+    candidate_clips = _trim_filler_start(
+        candidate_clips,
+        cleaned_srt,
+        log_fn,
+        word_timings=word_timings,
+    )
+    candidate_clips = _trim_dangling_tail_clauses(candidate_clips, word_timings, log_fn)
+
+    candidates = []
+    for clip in candidate_clips:
+        _clip_type, text, start, end = clip[:4]
+        if not text or float(end) <= float(start):
+            continue
+        _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        candidates.append(SelectionCandidate(
+            candidate_id=len(candidates) + 1,
+            source_id=_director_candidate_source(text),
+            start=float(start),
+            end=float(end),
+            text=str(text).strip(),
+            hook_eligible=not starts_incomplete and not ends_incomplete,
+        ))
+
+    candidate_set = CandidateSet.from_candidates(candidates)
+    _analysis_metadata_context()["candidate_contract"] = candidate_set.summary()
+    if not candidate_set.candidates:
+        return cleaned_srt
+
+    blocks = [
+        f"{item.candidate_id}\n{_director_srt_time(item.start)} --> {_director_srt_time(item.end)}\n{item.text}\n"
+        for item in candidate_set.candidates
+    ]
+    prefix = f"AI候选定型: 合并 {merge_count} 处前后半句，" if merge_count else "AI候选定型: "
+    _log(
+        f"{prefix}{len(blocks)} 个候选已固定文本和时间戳 "
+        f"(合同 {candidate_set.digest[:12]})"
+    )
+    return "\n".join(blocks)
+
+
+def _director_hard_audit(
+    clips,
+    target_duration,
+    hook_cap_sec,
+    log_fn=None,
+    preferred_focus="",
+    require_preference_hook=False,
+    require_preference_mainline=False,
+    preference_target_duration=None,
+    duration_contract=None,
+):
     """Keep only mechanical safety checks; leave narrative decisions to AI."""
     def _log(msg):
         if log_fn:
@@ -4037,6 +4608,28 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
     if backstage_removed:
         _log(f"AI硬质检: 移除 {len(backstage_removed)} 段直播现场调度")
     hard_removed += len(backstage_removed) + invalid_count
+
+    # A broken Product or Close sentence is a local defect, not a reason to
+    # reject the whole AI narrative. Hook still requires repair because an
+    # incomplete opening would damage the entire video immediately.
+    boundary_removed = []
+    boundary_kept = []
+    for clip in valid:
+        text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
+        _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        if (starts_incomplete or ends_incomplete) and not _is_hook_clip(clip):
+            boundary_removed.append(clip)
+            continue
+        boundary_kept.append(clip)
+    if boundary_removed:
+        valid = boundary_kept
+        hard_removed += len(boundary_removed)
+        examples = "；".join(
+            re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()[:34]
+            for clip in boundary_removed[:3]
+        )
+        _log(f"AI边界验收: 删除 {len(boundary_removed)} 段卖点/收尾半句，保留其余片单（{examples}）")
+
     issues = []
     warnings = []
     if hard_removed:
@@ -4055,8 +4648,64 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
     close_positions = [idx for idx, clip in enumerate(valid) if _is_close_clip(clip)]
     if hook_positions != [0]:
         issues.append("Hook必须且只能位于首段")
-    if close_positions != [len(valid) - 1]:
+    # Close is desirable but optional after hard compliance cleanup. If an
+    # incomplete Close was removed, the remaining AI order is still usable.
+    if close_positions and close_positions != [len(valid) - 1]:
         issues.append("Close必须且只能位于末段")
+
+    if require_preference_hook and hook_positions == [0]:
+        preferred_block = _focus_label_to_block(preferred_focus)
+        hook_block = _clip_focus_block(valid[0])
+        if preferred_block and hook_block != preferred_block:
+            issues.append(f"Hook未体现指定偏好{preferred_block}，需从偏好Hook候选重选")
+        strict_followup_blocks = {
+            "版型显瘦", "面料质感", "穿着体验", "颜色氛围", "场景搭配",
+            "尺寸长度", "工艺细节", "对比优势", "口感食欲", "新鲜品质",
+            "产地溯源", "规格分量", "发货保鲜", "场景吃法",
+        }
+        if len(valid) >= 2 and preferred_block in strict_followup_blocks:
+            followup_block = _clip_focus_block(valid[1])
+            if followup_block != preferred_block:
+                issues.append(f"Hook第二段未承接{preferred_block}，需直接解释、证明或兑现开场")
+
+    if require_preference_mainline:
+        preference_summary = _topic_coverage_summary(
+            valid,
+            preferred_focus,
+            preference_target_duration or target_duration,
+            requested=preferred_focus,
+        )
+        preferred_topic = str(preference_summary.get("preferred_topic") or "")
+        preferred_count = int(preference_summary.get("preference_count") or 0)
+        preferred_duration = float(
+            (preference_summary.get("topic_durations") or {}).get(preferred_topic, 0.0) or 0.0
+        )
+        other_topics = [
+            (topic, int(count or 0), float((preference_summary.get("topic_durations") or {}).get(topic, 0.0) or 0.0))
+            for topic, count in (preference_summary.get("topic_counts") or {}).items()
+            if topic not in {preferred_topic, "其他"}
+        ]
+        dominant_other = max(other_topics, key=lambda item: (item[1], item[2]), default=("", 0, 0.0))
+        mainline_issues = []
+        if preference_summary.get("underpreferred"):
+            mainline_issues.append(
+                f"偏好片段仅{preferred_count}段，至少需要{preference_summary.get('preference_min', 0)}段"
+            )
+        if preference_summary.get("overconcentrated"):
+            mainline_issues.append(
+                f"偏好内容超过上限{preference_summary.get('preference_max', 0)}段或占时过高，需删除同义重复"
+            )
+        if dominant_other[1] > preferred_count or (
+            dominant_other[2] > preferred_duration * 1.25 and dominant_other[2] - preferred_duration > 6.0
+        ):
+            mainline_issues.append(
+                f"补充主题{dominant_other[0]}已超过偏好主线"
+            )
+        if mainline_issues:
+            warnings.append(
+                f"偏好覆盖提示: {preferred_topic}（{'；'.join(mainline_issues)}）。"
+                "该统计仅用于预览核对，不否决AI已完成的叙事片单"
+            )
 
     try:
         hook_cap = float(hook_cap_sec or 0)
@@ -4081,7 +4730,10 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
         _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
         if starts_incomplete or ends_incomplete:
             side = "开头承接前句" if starts_incomplete else "结尾未说完"
-            fragment_examples.append(f"第{clip_index}段{side}:{text[:34]}")
+            excerpt = text[:34] if starts_incomplete else text[-34:]
+            if ends_incomplete and len(text) > 34:
+                excerpt = "..." + excerpt
+            fragment_examples.append(f"第{clip_index}段{side}:{excerpt}")
     if fragment_examples:
         issues.append(
             f"存在{len(fragment_examples)}段明确半句边界，需由AI合并相邻字幕（"
@@ -4089,7 +4741,7 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
             + "）"
         )
 
-    duration_status = _director_duration_status(valid, target_duration)
+    duration_status = _director_duration_status(valid, target_duration, duration_contract)
     total_duration = duration_status["total"]
     low, high = duration_status["low"], duration_status["high"]
     if total_duration < low:
@@ -4099,7 +4751,10 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
         else:
             warnings.append(duration_message)
     elif total_duration > high:
-        warnings.append(f"总时长{total_duration:.1f}s超过{high:.0f}s")
+        issues.append(
+            f"总时长{total_duration:.1f}s超过目标上限{high:.0f}s，"
+            f"至少需删除约{total_duration - high:.0f}s的低优先级完整Product"
+        )
 
     seen_text = set()
     duplicate_count = 0
@@ -4131,6 +4786,7 @@ def _director_hard_audit(clips, target_duration, hook_cap_sec, log_fn=None):
         "hard_removed": hard_removed,
         "total_duration": total_duration,
         "duration_short": bool(duration_status["short"]),
+        "duration_long": bool(duration_status["long"]),
         "duration_low": low,
         "duration_high": high,
         "duration_gap": duration_status["gap"],
@@ -4163,39 +4819,389 @@ def _director_fatal_issues(audit):
     return [item for item in issues if "硬合规移除" not in item]
 
 
-def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec):
+def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec, srt_entries=None, duration_contract=None):
     skeleton = []
     for idx, clip in enumerate(clips or [], 1):
+        selected_indices = []
+        try:
+            clip_start = float(clip[2])
+            clip_end = float(clip[3])
+            for entry_index, (entry_start, entry_end, _entry_text) in enumerate(srt_entries or [], 1):
+                overlap = max(0.0, min(clip_end, float(entry_end)) - max(clip_start, float(entry_start)))
+                if overlap > 0.05:
+                    selected_indices.append(entry_index)
+        except Exception:
+            selected_indices = []
         skeleton.append({
             "order": idx,
             "clip_type": str(clip[0]),
-            "start": round(float(clip[2]), 3),
-            "end": round(float(clip[3]), 3),
+            "srt_indices": selected_indices,
+            "duration_sec": round(max(0.0, float(clip[3]) - float(clip[2])), 1),
             "text": re.sub(r"\s+", " ", str(clip[1] or "")).strip()[:120],
         })
-    low, high = _multi_version_target_bounds(target_duration)
+    low, high = _duration_source_bounds(target_duration, duration_contract)
+    current_total = sum(float(item.get("duration_sec") or 0.0) for item in skeleton)
     issue_text = "；".join(str(item) for item in (issues or [])) or "叙事结构需要复核"
+    duration_short = any("低于目标下限" in str(item) or "需补足" in str(item) for item in (issues or []))
+    duration_long = any("超过目标上限" in str(item) or "需删除" in str(item) for item in (issues or []))
+    duration_permission = ""
+    if duration_long:
+        duration_permission = (
+            "本轮明确允许删除骨架中信息量最低、重复或非主线的完整Product；"
+            "必须保留Hook、紧随Hook的兑现段、核心证据和自然收尾。不得缩短候选内部时间。"
+            f"当前骨架合计{current_total:.1f}秒，至少删除{max(0.0, current_total - high):.1f}秒，"
+            f"删除后必须落在{low:.0f}-{high:.0f}秒，优先接近{float(target_duration):.0f}秒。"
+            "输出前逐项相加duration_sec复核，超过上限就继续删除整段Product。"
+        )
+    elif duration_short:
+        duration_gap = max(0.0, low - current_total)
+        minimum_new_products = max(1, int((duration_gap + 7.9) // 8.0))
+        duration_permission = (
+            "本轮明确允许在Close之前补入不同主题的完整Product；新增片段顺序也必须符合整片叙事。"
+            f"当前骨架合计{current_total:.1f}秒，至少补足{duration_gap:.1f}秒，"
+            f"必须新增至少{minimum_new_products}个当前骨架没有的安全候选编号组；"
+            "如果新增这些片段后仍未达到下限，就继续增加，不得原样照抄骨架。"
+            f"补入后必须落在{low:.0f}-{high:.0f}秒。"
+        )
     return (
         "【整体叙事修复】你是最终剪辑导演。上一次完整片单经过硬合规检查后发现："
         f"{issue_text}。以下是仍安全的原顺序骨架："
         f"{json.dumps(skeleton, ensure_ascii=False)}。"
-        "请基于全部可选字幕重新输出一份完整JSON片单，不要只输出补充片段，也不要把新增片段追加在Close后。"
-        "优先保留骨架中语义完整且承接正常的内容，但必须重新检查整条叙事：Hook首位且仅一段，"
+        "请输出修复后的完整JSON片单，不要只输出补充片段，也不要把新增片段追加在Close后。"
+        "除时长问题允许的整段增删外，没有被上述问题点名的骨架项必须保持原srt_indices、相对顺序和clip_type；"
+        "只允许替换问题片段，禁止改写或截短候选。"
+        f"{duration_permission}"
+        "重新检查整条叙事：Hook首位且仅一段，"
         "第二段直接兑现Hook，Product按效果-证据-场景/顾虑自然推进，Close末位且仅一段，Close后不得再有Product。"
         "不得使用价格、链接、关注、拍码、券、后台调度或违禁内容；不得重复同一卖点。"
         f"总时长控制在{low:.0f}-{high:.0f}秒，Hook不超过{float(hook_cap_sec or 0):.1f}秒，"
-        "每段使用完整字幕条目；相邻编号是同一句的前后半句时，必须放进同一个clip的srt_indices，"
-        "不能拆成两个相邻clip。宁可略短也不要截断句子。仅输出完整片单JSON数组。】"
+        "每个候选编号已经是完整语义和最终时间边界，禁止改写、扩展或拆分候选。"
+        "不得用超长或过短片单逃避目标，也不要截断句子。仅输出完整片单JSON数组。】"
     )
 
 
-def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False, focus_hint=None, hook_candidates_hint=None, merge_mode=False, target_duration=60, ai_controls=None, record_history=True, word_timings=None):
+def _call_director_trim_selection(api_key, base_url, model, clips, target_duration, log_fn=None, preferred_focus="", duration_contract=None):
+    """Ask AI to rank removable clips, then apply that ranking with exact arithmetic."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    low, high = _duration_source_bounds(target_duration, duration_contract)
+    items = []
+    for order, clip in enumerate(clips or [], 1):
+        try:
+            duration = max(0.0, float(clip[3]) - float(clip[2]))
+        except Exception:
+            duration = _clip_duration_value(clip)
+        items.append({
+            "order": order,
+            "clip_type": str(clip[0] if len(clip) > 0 else "product"),
+            "duration_sec": round(duration, 1),
+            "focus": str(clip[6] if len(clip) > 6 else "")[:40],
+            "text": re.sub(r"\s+", " ", str(clip[1] if len(clip) > 1 else "")).strip()[:180],
+        })
+    current_total = sum(float(item["duration_sec"]) for item in items)
+    if not items:
+        return []
+
+    system_prompt = (
+        "你是短视频最终删片导演。输入片单的片段内容、边界和顺序已经固定。"
+        "你只负责给所有可删除Product排出完整的删除优先顺序，不需要计算最终时长。"
+        "不能新增、改写、拆分或重排片段。首段Hook、紧随Hook的第二段、末段Close禁止列入删除顺序。"
+        "先删重复、低信息量、偏离指定偏好的Product，后删核心效果和证据。"
+        "只输出JSON对象，不要解释。"
+    )
+    focus_rule = f"本轮指定偏好是“{preferred_focus}”，优先保留真正命中该偏好的核心证据。" if preferred_focus else ""
+    user_prompt = (
+        f"当前片单合计{current_total:.1f}秒，目标约{float(target_duration):.0f}秒，"
+        f"程序会严格把结果控制在{low:.0f}-{high:.0f}秒。{focus_rule}"
+        "返回remove_priority，按最先删除到最后删除排列，并列出除受保护片段外的所有Product编号。"
+        "返回格式只能是：{\"remove_priority\":[5,3,7,4]}。\n"
+        "固定片单：\n"
+        + json.dumps(items, ensure_ascii=False)
+    )
+    body_dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "top_p": 0.8,
+        "max_tokens": 1024,
+    }
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        body_dict["thinking"] = {"type": "disabled"}
+    if "seed" in model.lower():
+        body_dict["reasoning_effort"] = "low"
+
+    request = urllib.request.Request(
+        ai_chat_completions_url(base_url),
+        data=json.dumps(body_dict, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(request, timeout=180, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", content)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        data = json.loads(match.group(0) if match else cleaned)
+        raw_remove_orders = data.get("remove_priority") if isinstance(data, dict) else None
+        if isinstance(raw_remove_orders, list):
+            trimmed = _apply_ai_removal_priority(
+                clips,
+                raw_remove_orders,
+                target_duration,
+                log_fn,
+                label="AI超长精简",
+                duration_contract=duration_contract,
+            )
+            if trimmed:
+                return trimmed
+            _log("AI超长精简: 删除优先级未能收口到目标时长")
+            return []
+
+        # Compatibility with responses generated from an older cached prompt.
+        raw_orders = data.get("keep_orders") if isinstance(data, dict) else None
+        if not isinstance(raw_orders, list):
+            _log("AI超长精简: 响应缺少remove_priority，拒绝执行")
+            return []
+        keep_orders = []
+        for value in raw_orders:
+            if isinstance(value, bool):
+                return []
+            order = int(value)
+            if order < 1 or order > len(clips) or order in keep_orders:
+                _log("AI超长精简: keep_orders含无效或重复编号，拒绝执行")
+                return []
+            keep_orders.append(order)
+        if keep_orders != sorted(keep_orders):
+            _log("AI超长精简: keep_orders改变原叙事顺序，拒绝执行")
+            return []
+        if not {1, 2}.issubset(set(keep_orders)):
+            _log("AI超长精简: keep_orders未保留Hook与承接句，拒绝执行")
+            return []
+        trimmed = [clips[order - 1] for order in keep_orders]
+        trimmed_total = sum(_clip_duration_value(clip) for clip in trimmed)
+        if trimmed_total < low - 0.05 or trimmed_total > high + 0.05:
+            _log(f"AI超长精简: 旧格式结果{trimmed_total:.1f}s仍不在{low:.0f}-{high:.0f}s")
+            return []
+        _log(
+            f"AI超长精简: AI决定保留 {len(trimmed)}/{len(clips)} 段，"
+            f"{current_total:.1f}s -> {trimmed_total:.1f}s"
+        )
+        return trimmed
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        message = f"AI 接口调用失败 (HTTP {error.code})：{_friendly_http(error.code, detail)}"
+        _log(f"⚠️ {message}")
+        if _is_non_retryable_http(error.code):
+            raise NonRetryableAIError(message) from error
+        return []
+    except Exception as error:
+        _log(f"AI超长精简失败: {_friendly_msg(str(error))}")
+        return []
+
+
+def _call_director_expand_selection(
+    api_key,
+    base_url,
+    model,
+    clips,
+    srt_entries,
+    target_duration,
+    log_fn=None,
+    preferred_focus="",
+    duration_contract=None,
+    merge_mode=False,
+    required_sources=None,
+):
+    """Ask AI for insert-only operations, then apply them without rebuilding the story."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    items = list(clips or [])
+    status = _director_duration_status(items, target_duration, duration_contract)
+    contract_missing_sources = _director_missing_sources(items, required_sources)
+    if not status["short"] and not contract_missing_sources:
+        return items
+
+    selected_indices = {
+        index
+        for clip in items
+        for index in _director_clip_entry_indices(clip, srt_entries)
+    }
+    inventory = [
+        candidate
+        for candidate in _director_safe_candidate_inventory(srt_entries)
+        if int(candidate["srt_index"]) not in selected_indices
+    ]
+    if not inventory:
+        _log("AI增量补片: 没有剩余安全候选")
+        return []
+
+    skeleton = []
+    for order, clip in enumerate(items, 1):
+        skeleton.append({
+            "order": order,
+            "clip_type": str(clip[0] if len(clip) > 0 else "product"),
+            "srt_indices": _director_clip_entry_indices(clip, srt_entries),
+            "source": _director_clip_source_key(clip).upper(),
+            "duration_sec": round(_clip_duration_value(clip), 1),
+            "focus": str(clip[6] if len(clip) > 6 else "")[:40],
+            "text": re.sub(r"\s+", " ", str(clip[1] if len(clip) > 1 else "")).strip()[:180],
+        })
+
+    selected_sources = {
+        str(item.get("source") or "").upper()
+        for item in skeleton
+        if str(item.get("source") or "").strip()
+    }
+    available_sources = {
+        str(item.get("source") or "").upper()
+        for item in inventory
+        if str(item.get("source") or "").strip()
+    }
+    missing_sources = (
+        contract_missing_sources
+        if required_sources
+        else sorted(available_sources - selected_sources) if merge_mode else []
+    )
+    source_rule = ""
+    if missing_sources:
+        source_rule = (
+            f"这是混剪，当前片单尚未使用来源{','.join(source.strip('[]') for source in missing_sources)}；"
+            "如果这些来源有能自然承接的安全候选，优先把它们放入扩展计划，但不得牺牲语义完整和品类一致。"
+        )
+
+    system_prompt = (
+        "你是短视频增量补片导演。当前主片单的内容、顺序、Hook和Close已经锁定。"
+        "你只能从剩余候选中选择完整Product，并指定插入到哪一段之后；不能删除、改写、拆分、替换或重排现有片段。"
+        "只输出JSON对象，不要解释、不要Markdown。"
+    )
+    user_prompt = (
+        f"当前片单{status['total']:.1f}秒，时长合同要求{status['low']:.1f}-{status['high']:.1f}秒，"
+        f"至少还需补足{status['gap']:.1f}秒。指定偏好为“{preferred_focus or '全量选片'}”。{source_rule}"
+        "请返回6-12个按纳入优先级排列的备用Product，累计时长必须充分覆盖缺口。"
+        "每个备用片段必须是当前片单没有的新卖点、证据、场景或顾虑解除；"
+        "priority从1开始且不重复，after_srt_indices必须完整复制当前片单某个非Close片段的srt_indices，"
+        "after_order同时填写该锚点的order。不得锚定Hook导致插入片段破坏Hook与第二段承接，优先锚定第2段或后续Product。"
+        "程序会按priority逐个纳入，并在精确达到时长区间后停止。"
+        "返回格式只能是："
+        '{"expansion_plan":[{"priority":1,"after_srt_indices":[8],"after_order":2,'
+        '"srt_indices":[21],"focus":"面料证据","reason":"补充不同证据"}]}。\n'
+        "锁定主片单：\n" + json.dumps(skeleton, ensure_ascii=False) + "\n"
+        "剩余安全候选：\n" + json.dumps(inventory, ensure_ascii=False)
+    )
+    body_dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "top_p": 0.8,
+        "max_tokens": 2048,
+    }
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        body_dict["thinking"] = {"type": "disabled"}
+    if "seed" in model.lower():
+        body_dict["reasoning_effort"] = "low"
+
+    request = urllib.request.Request(
+        ai_chat_completions_url(base_url),
+        data=json.dumps(body_dict, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(request, timeout=180, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        _log(f"AI增量补片: 响应成功，内容长度={len(content)}字")
+        cleaned = re.sub(r"^```(?:json)?\s*", "", content)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        data = json.loads(match.group(0) if match else cleaned)
+        plan = data.get("expansion_plan") if isinstance(data, dict) else None
+        if not isinstance(plan, list):
+            _log("AI增量补片: 响应缺少expansion_plan，拒绝执行")
+            return []
+        expanded = _apply_ai_expansion_plan(
+            items,
+            plan,
+            srt_entries,
+            target_duration,
+            log_fn,
+            label="AI增量补片",
+            duration_contract=duration_contract,
+            required_sources=required_sources,
+        )
+        if not expanded:
+            _log("AI增量补片: AI操作未能产生可执行的新片段")
+        return expanded
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        message = f"AI 接口调用失败 (HTTP {error.code})：{_friendly_http(error.code, detail)}"
+        _log(f"⚠️ {message}")
+        if _is_non_retryable_http(error.code):
+            raise NonRetryableAIError(message) from error
+        return []
+    except Exception as error:
+        _log(f"AI增量补片失败: {_friendly_msg(str(error))}")
+        return []
+
+
+def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=False, focus_hint=None, hook_candidates_hint=None, merge_mode=False, target_duration=60, ai_controls=None, record_history=True, word_timings=None, final_target_duration=None, duration_contract=None):
     global _AI_TARGET_DURATION, _LAST_FOCUS_SUMMARY, _LAST_TOPIC_COVERAGE_SUMMARY
-    _begin_analysis_metadata()
-    _AI_TARGET_DURATION = target_duration
+    _analysis_metadata = _begin_analysis_metadata()
+    _duration_contract = _coerce_duration_contract(
+        duration_contract,
+        target_duration=target_duration,
+        final_target_duration=final_target_duration,
+    )
+    _AI_TARGET_DURATION = _duration_contract.ai_target_seconds
+    _final_target_duration = _duration_contract.final_target
+    _analysis_metadata["final_target_duration"] = _final_target_duration
+    _analysis_metadata["duration_contract"] = _duration_contract.to_dict()
+    _selection_request = SelectionRequest.create(
+        source_ids=sorted(set(re.findall(r"\[(V\d+)\]", str(srt_text or ""), flags=re.I))),
+        category=force_category,
+        focus=focus_hint,
+        merge_mode=merge_mode,
+        duration_contract=_duration_contract,
+        controls=ai_controls,
+    )
+    _analysis_metadata["selection_request"] = _selection_request.to_dict()
     _set_last_topic_coverage_summary({})
+    _set_last_selection_failure({})
     def _log(msg):
         if log_fn: log_fn(msg)
+
+    _log(
+        f"AI时长合同: 成片{_duration_contract.final_target:.0f}s "
+        f"(允许{_duration_contract.final_min:.0f}-{_duration_contract.final_max:.0f}s)，"
+        f"按{_duration_contract.speed_factor:.2f}x选择原片"
+        f"{_duration_contract.source_min:.1f}-{_duration_contract.source_max:.1f}s"
+    )
 
     settings = load_settings()
     if not settings.get("api_key"):
@@ -4253,6 +5259,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     else:
         detected_main_cat = _forced_main_cat
         _log("AI选片规则: 已关闭强制同一品类过滤")
+    if not multi_version:
+        cleaned_srt = _freeze_director_candidates(cleaned_srt, log_fn, word_timings=word_timings)
     # 用检测到的品类（或用户指定）作为跨品类过滤的偏好品类
     _cross_cat_preferred = _forced_main_cat or detected_main_cat
     _history_key = _clip_history_key(cleaned_srt)
@@ -4306,48 +5314,86 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_focus_hint = focus_hint
     _director_focus_summary = {}
     _director_fallback_clips = []
-    _director_short_fallback_clips = []
-    _director_short_fallback_total = 0.0
+    _director_last_audit = {}
+    _director_best_duration = 0.0
+    _director_candidate_count = 0
     _director_stage = "首次完整编排"
     _director_format_retry_used = False
     _director_narrative_repair_used = False
-    _max_attempts = 3 if _director_mode else 5
+    _director_trim_source_clips = None
+    _director_expand_source_clips = None
+    _max_attempts = 2 if _director_mode else 5
+    _indexed_srt_entries = _build_ai_srt_entry_index(cleaned_srt)
+    _director_call_entries = _indexed_srt_entries
+    _director_candidate_count = len(_indexed_srt_entries)
+    _director_safe_inventory = _director_safe_candidate_inventory(_indexed_srt_entries)
+    _director_safe_candidate_duration = sum(
+        float(item.get("duration_sec") or 0.0)
+        for item in _director_safe_inventory
+    )
+    _source_candidate_counts = {}
+    for _candidate in _director_safe_inventory:
+        _source = str(_candidate.get("source") or "").strip().upper()
+        if _source:
+            _source_candidate_counts[_source] = _source_candidate_counts.get(_source, 0) + 1
+    _director_required_sources = {
+        source for source, count in _source_candidate_counts.items()
+        if merge_mode and count >= 2
+    }
+    if len(_director_required_sources) > 1:
+        _log(
+            "混剪来源合同: "
+            + "、".join(source.strip("[]") for source in sorted(_director_required_sources))
+            + " 各至少1段"
+        )
+    _log(f"AI: 构建SRT条目索引 {len(_indexed_srt_entries)} 条")
     for attempt in range(_max_attempts):
         if _director_mode:
             _log(f"AI: 调用 {model}（{_director_stage}）...")
         else:
             _log(f"AI: 调用 {model}(第 {attempt + 1} 次)...")
-        # ★构建SRT条目列表（供AI按索引选片）★
-        _indexed_srt_entries = []
-        for block in cleaned_srt.strip().split(chr(10)+chr(10)):
-            bl = block.strip().split(chr(10))
-            if len(bl) >= 1 and '-->' in bl[0]:
-                try:
-                    parts = bl[0].split('-->')
-                    h, m, s = parts[0].strip().replace(',', '.').split(':')
-                    es = int(h)*3600 + int(m)*60 + float(s)
-                    h, m, s = parts[1].strip().replace(',', '.').split(':')
-                    ee = int(h)*3600 + int(m)*60 + float(s)
-                    txt = ' '.join(bl[1:]).strip()
-                    _indexed_srt_entries.append((es, ee, txt))
-                except: pass
-        if attempt == 0:
-            _log(f"AI: 构建SRT条目索引 {len(_indexed_srt_entries)} 条")
-        
-        clips = _call_ai(
-            api_key,
-            base_url,
-            model,
-            cleaned_srt,
-            log_fn,
-            focus_hint=_director_focus_hint if _director_mode else focus_hint,
-            srt_entries=_indexed_srt_entries,
-            hook_candidates_hint=hook_candidates_hint,
-            ai_controls=ai_controls,
-            recent_history_hint=_recent_history_hint,
-            extra_instruction=_director_repair or None,
-            main_category=_cross_cat_preferred,
-        )
+        if _director_expand_source_clips is not None:
+            clips = _call_director_expand_selection(
+                api_key,
+                base_url,
+                model,
+                _director_expand_source_clips,
+                _indexed_srt_entries,
+                _AI_TARGET_DURATION,
+                log_fn,
+                preferred_focus=_director_focus_hint,
+                duration_contract=_duration_contract,
+                merge_mode=merge_mode,
+                required_sources=_director_required_sources,
+            )
+        elif _director_trim_source_clips is not None:
+            clips = _call_director_trim_selection(
+                api_key,
+                base_url,
+                model,
+                _director_trim_source_clips,
+                _AI_TARGET_DURATION,
+                log_fn,
+                preferred_focus=_director_focus_hint,
+                duration_contract=_duration_contract,
+            )
+        else:
+            clips = _call_ai(
+                api_key,
+                base_url,
+                model,
+                cleaned_srt,
+                log_fn,
+                focus_hint=_director_focus_hint if _director_mode else focus_hint,
+                srt_entries=_director_call_entries,
+                hook_candidates_hint=hook_candidates_hint,
+                ai_controls=ai_controls,
+                recent_history_hint=_recent_history_hint,
+                extra_instruction=_director_repair or None,
+                main_category=_cross_cat_preferred,
+                duration_contract=_duration_contract,
+                merge_mode=merge_mode,
+            )
         if not clips:
             if _director_mode:
                 if not _director_format_retry_used and attempt + 1 < _max_attempts:
@@ -4355,7 +5401,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     _director_stage = "响应格式重试"
                     _director_repair = (
                         "【响应格式纠正】上一次响应没有解析出可用片单。"
-                        "请严格只输出JSON数组，每项只包含clip_type、srt_indices、focus、reason；"
+                        "请严格只输出JSON对象，包含clips和expansion_plan；clips每项只包含clip_type、srt_indices、focus、reason、trim_priority；"
                         "srt_indices必须是连续的整数数组，不要解释、不要Markdown、不要输出时间戳。】"
                     )
                     _log("AI响应未解析出可用片单，进行一次格式重试")
@@ -4369,37 +5415,133 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             elif _director_focus_summary:
                 _set_last_focus_summary(_director_focus_summary)
 
-            # Director mode keeps narrative decisions with AI. Here we only
-            # restore clips cut inside a single SRT timestamp; no local
-            # completion, insertion, merging, or story reordering.
-            clips = _restore_director_clip_srt_boundaries(clips, cleaned_srt, log_fn)
-            # Weak openers such as "然后/而且/但是" are boundary noise, not a
-            # reason to discard the whole sentence. Trim only the leading word
-            # before hard-auditing for real half-sentence boundaries.
-            clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
-            clips = _repair_director_context_edges(clips, cleaned_srt, log_fn)
-            clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
-            clips = _trim_dangling_tail_clauses(clips, word_timings, log_fn)
+            # Candidate text and timestamps are immutable after indexing. The AI,
+            # hard audit, preview and cutter must all consume the same boundaries.
             if not clips:
                 continue
 
+            _hook_candidate_summary = dict(
+                get_last_analysis_metadata().get("hook_candidate_summary") or {}
+            )
+            _audit_preferred_focus = (
+                _hook_candidate_summary.get("requested_focus")
+                or _director_focus_hint
+                or focus_hint
+                or ""
+            )
+            _require_preference_hook = bool(
+                _hook_candidate_summary.get("preference_hook_required")
+            )
+            _require_preference_mainline = bool(
+                _require_preference_hook
+                and int(_hook_candidate_summary.get("preference_candidate_count") or 0) >= 3
+                and _preference_quota_supported(_audit_preferred_focus)
+            )
             clips, _director_audit = _director_hard_audit(
                 clips,
                 _AI_TARGET_DURATION,
                 _hook_cap_sec,
                 log_fn,
+                preferred_focus=_audit_preferred_focus,
+                require_preference_hook=_require_preference_hook,
+                require_preference_mainline=_require_preference_mainline,
+                preference_target_duration=_final_target_duration,
+                duration_contract=_duration_contract,
             )
+            if _director_audit.get("duration_long"):
+                _priority_trimmed = _apply_declared_trim_priorities(
+                    clips,
+                    _AI_TARGET_DURATION,
+                    log_fn,
+                    duration_contract=_duration_contract,
+                )
+                if _priority_trimmed:
+                    clips, _director_audit = _director_hard_audit(
+                        _priority_trimmed,
+                        _AI_TARGET_DURATION,
+                        _hook_cap_sec,
+                        log_fn,
+                        preferred_focus=_audit_preferred_focus,
+                        require_preference_hook=_require_preference_hook,
+                        require_preference_mainline=_require_preference_mainline,
+                        preference_target_duration=_final_target_duration,
+                        duration_contract=_duration_contract,
+                    )
+            _missing_sources_before_expansion = _director_missing_sources(
+                clips,
+                _director_required_sources,
+            )
+            if (
+                (_director_audit.get("duration_short") or _missing_sources_before_expansion)
+                and _director_expand_source_clips is None
+            ):
+                _declared_expansion = list(
+                    _analysis_metadata_context().get("expansion_plan") or []
+                )
+                _expanded = _apply_ai_expansion_plan(
+                    clips,
+                    _declared_expansion,
+                    _indexed_srt_entries,
+                    _AI_TARGET_DURATION,
+                    log_fn,
+                    duration_contract=_duration_contract,
+                    required_sources=_director_required_sources,
+                )
+                if _expanded:
+                    clips, _director_audit = _director_hard_audit(
+                        _expanded,
+                        _AI_TARGET_DURATION,
+                        _hook_cap_sec,
+                        log_fn,
+                        preferred_focus=_audit_preferred_focus,
+                        require_preference_hook=_require_preference_hook,
+                        require_preference_mainline=_require_preference_mainline,
+                        preference_target_duration=_final_target_duration,
+                        duration_contract=_duration_contract,
+                    )
+                    if _director_audit.get("duration_long"):
+                        _priority_trimmed = _apply_declared_trim_priorities(
+                            clips,
+                            _AI_TARGET_DURATION,
+                            log_fn,
+                            duration_contract=_duration_contract,
+                        )
+                        if _priority_trimmed:
+                            clips, _director_audit = _director_hard_audit(
+                                _priority_trimmed,
+                                _AI_TARGET_DURATION,
+                                _hook_cap_sec,
+                                log_fn,
+                                preferred_focus=_audit_preferred_focus,
+                                require_preference_hook=_require_preference_hook,
+                                require_preference_mainline=_require_preference_mainline,
+                                preference_target_duration=_final_target_duration,
+                                duration_contract=_duration_contract,
+                            )
+            _director_last_audit = dict(_director_audit or {})
+            _audit_total = float(_director_audit.get("total_duration") or 0.0)
+            if (
+                _director_best_duration <= 0
+                or abs(_audit_total - float(_AI_TARGET_DURATION or 0))
+                < abs(_director_best_duration - float(_AI_TARGET_DURATION or 0))
+            ):
+                _director_best_duration = _audit_total
             _director_hard_issues = list(_director_audit.get("issues") or [])
-            _director_fatal = _director_fatal_issues(_director_audit)
-            _director_has_hard_issue = bool(_director_fatal or _director_audit.get("duration_short"))
+            _director_fatal = [
+                issue for issue in _director_fatal_issues(_director_audit)
+                if "低于目标下限" not in str(issue) and "至少还需补足" not in str(issue)
+            ]
+            _director_missing_sources_now = _director_missing_sources(
+                clips,
+                _director_required_sources,
+            )
+            _director_has_hard_issue = bool(
+                _director_fatal
+                or _director_audit.get("duration_short")
+                or _director_missing_sources_now
+            )
             if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
-            if clips and _director_only_duration_short_issue(_director_audit):
-                _short_total = float(_director_audit.get("total_duration") or 0.0)
-                _short_floor = _director_short_fallback_floor(_AI_TARGET_DURATION)
-                if _short_total >= _short_floor and _short_total > _director_short_fallback_total:
-                    _director_short_fallback_clips = list(clips)
-                    _director_short_fallback_total = _short_total
             if (
                 _director_fatal
                 and not _director_narrative_repair_used
@@ -4412,11 +5554,28 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     _review_issues = [
                         "请修复硬质检指出的问题，只替换问题片段，保留完整语义、Hook首段和Close末段"
                     ]
+                _director_call_entries = _indexed_srt_entries
+                _non_duration_issues = [
+                    issue for issue in _review_issues
+                    if "超过目标上限" not in str(issue)
+                ]
+                if _director_audit.get("duration_long") and not _non_duration_issues:
+                    _director_stage = "AI片单精简"
+                    _director_trim_source_clips = list(clips)
+                    _director_repair = ""
+                    _log(
+                        "AI叙事质检: "
+                        + "；".join(_review_issues)
+                        + "，交回AI仅做整段删片，不重新生成片单"
+                    )
+                    continue
                 _director_repair = _director_repair_instruction(
                     clips,
                     _review_issues,
                     _AI_TARGET_DURATION,
                     _hook_cap_sec,
+                    _director_call_entries,
+                    duration_contract=_duration_contract,
                 )
                 _log(
                     "AI叙事质检: "
@@ -4431,23 +5590,41 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     f"总时长{_director_audit.get('total_duration', 0):.1f}s低于目标下限{_director_audit.get('duration_low', 0):.0f}s"
                 ])
                 if attempt + 1 < _max_attempts:
-                    _director_stage = "时长不足重试"
-                    _director_repair = _director_repair_instruction(
-                        clips,
-                        _duration_issue,
-                        _AI_TARGET_DURATION,
-                        _hook_cap_sec,
-                    )
+                    _director_stage = "AI片单增量补足"
+                    _director_expand_source_clips = list(clips)
+                    _director_repair = ""
                     _log(
                         "AI叙事质检: "
                         + "；".join(_duration_issue)
-                        + "，交回AI补足完整卖点片段，不做本地插片"
+                        + "，锁定现有叙事，仅交回AI生成插入操作"
                     )
                     continue
                 _log(
                     f"AI叙事质检: 片单仅{_director_audit.get('total_duration', 0):.1f}s，"
                     f"低于目标下限{_director_audit.get('duration_low', 0):.0f}s，拒绝作为成功结果"
                 )
+                continue
+            _director_missing_sources_now = _director_missing_sources(
+                clips,
+                _director_required_sources,
+            )
+            if _director_missing_sources_now:
+                _source_issue = (
+                    "混剪来源覆盖不足:缺少"
+                    + "、".join(source.strip("[]") for source in _director_missing_sources_now)
+                )
+                _director_last_audit = dict(_director_audit or {})
+                _director_last_audit["issues"] = list(
+                    _director_last_audit.get("issues") or []
+                ) + [_source_issue]
+                if attempt + 1 < _max_attempts:
+                    _director_stage = "混剪来源增量补足"
+                    _director_expand_source_clips = list(clips)
+                    _log(
+                        f"AI叙事质检: {_source_issue}，锁定现有叙事，仅补入缺失来源的AI备用片"
+                    )
+                    continue
+                _log(f"AI叙事质检未通过: {_source_issue}")
                 continue
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
@@ -4460,6 +5637,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         _remaining_issues,
                         _AI_TARGET_DURATION,
                         _hook_cap_sec,
+                        _indexed_srt_entries,
+                        duration_contract=_duration_contract,
                     )
                     _log(
                         "AI叙事修复仍未通过: "
@@ -4475,14 +5654,22 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _director_topic_summary = _topic_coverage_summary(
                 clips,
                 _current_focus_used_label(),
-                _AI_TARGET_DURATION,
+                _final_target_duration,
                 get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
             )
             _set_last_topic_coverage_summary(_director_topic_summary)
             _record_history_if_needed(clips)
+            _selection_manifest = SelectionManifest.from_clips(
+                clips,
+                candidate_digest=str((_analysis_metadata.get("candidate_contract") or {}).get("digest") or ""),
+                duration_contract=_duration_contract,
+            )
+            _analysis_metadata["selection_manifest"] = _selection_manifest.to_dict()
+            _analysis_metadata["selection_result"] = SelectionResult.success(_selection_manifest).to_dict()
             _log(
                 f"AI叙事编排完成: {len(clips)}段/{sum(_clip_duration_value(c) for c in clips):.1f}s，"
-                "程序仅执行硬合规检查，未做主题补片或叙事重排"
+                f"片单合同 {_selection_manifest.digest[:12]}；"
+                "程序仅执行硬合规检查及AI声明的增删操作，未做主题判断或叙事重排"
             )
             return clips
         _active_preference = _current_focus_used_label()
@@ -4521,6 +5708,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 recent_history_hint=_recent_history_hint,
                 extra_instruction=_preference_instruction,
                 main_category=_cross_cat_preferred,
+                duration_contract=_duration_contract,
             )
             _set_last_focus_summary(_attempt_focus_summary)
             _preferred_block = _focus_label_to_block(_active_preference)
@@ -4925,22 +6113,46 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 f"目标下限{_fallback_duration['low']:.0f}s）"
             )
             return _director_fallback_clips
-        if _director_short_fallback_clips:
-            _fallback_duration = _director_duration_status(_director_short_fallback_clips, _AI_TARGET_DURATION)
-            _set_last_topic_coverage_summary(_topic_coverage_summary(
-                _director_short_fallback_clips,
-                _current_focus_used_label(),
-                _AI_TARGET_DURATION,
-                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
-            ))
-            _record_history_if_needed(_director_short_fallback_clips)
-            _log(
-                "AI有效内容不足目标时长，使用最佳AI短片单"
-                f"（{len(_director_short_fallback_clips)}段/{_fallback_duration['total']:.1f}s，"
-                f"目标下限{_fallback_duration['low']:.0f}s）；未使用关键词兜底"
+        _final_issues = list(_director_last_audit.get("issues") or [])
+        _duration_low = float(
+            _director_last_audit.get("duration_low")
+            or _multi_version_target_bounds(_AI_TARGET_DURATION)[0]
+        )
+        _duration_short = bool(_director_last_audit.get("duration_short"))
+        _duration_high = float(
+            _director_last_audit.get("duration_high")
+            or _multi_version_target_bounds(_AI_TARGET_DURATION)[1]
+        )
+        _duration_long = bool(_director_last_audit.get("duration_long"))
+        _fatal_without_duration = [
+            issue for issue in _director_fatal_issues(_director_last_audit)
+            if "低于目标下限" not in issue and "至少还需补足" not in issue
+        ]
+        _failure_code = "narrative_rejected"
+        if _duration_short and not _fatal_without_duration:
+            _failure_code = (
+                "insufficient_content"
+                if _director_safe_candidate_duration + 0.05 < _duration_low
+                else "ai_duration_contract_failed"
             )
-            return _director_short_fallback_clips
-        _log("AI编排未返回可用片单")
+        elif _duration_long:
+            _failure_code = "duration_out_of_range"
+        _failure_reason = "；".join(_final_issues) or "AI响应未解析出可用片单"
+        _set_last_selection_failure({
+            "code": _failure_code,
+            "reason": _failure_reason,
+            "candidate_count": _director_candidate_count,
+            "best_duration": round(_director_best_duration, 1),
+            "duration_low": round(_duration_low, 1),
+            "duration_high": round(_duration_high, 1),
+            "target_duration": float(_AI_TARGET_DURATION or 0),
+            "safe_candidate_duration": round(_director_safe_candidate_duration, 1),
+        })
+        _log(
+            "AI最终拒绝原因: "
+            f"{_failure_reason}（候选{_director_candidate_count}条，"
+            f"最佳{_director_best_duration:.1f}s，目标下限{_duration_low:.0f}s）"
+        )
         return []
 
     # 用最好的结果(不硬拒绝)
@@ -5115,6 +6327,10 @@ def _hook_preference_keywords(focus_hint=None, ai_controls=None):
         "发货保鲜": ["发货", "现发", "冷链", "冰袋", "保温箱", "保鲜", "锁鲜", "冷冻", "速冻", "坏果包赔"],
         "场景吃法": ["早餐", "夜宵", "下午茶", "办公室", "孩子", "全家", "聚餐", "火锅", "煲汤", "下饭", "即食", "囤货"],
     }
+    if focus_label in _DEFAULT_PREFERENCE_KEYWORDS:
+        keywords.extend(_DEFAULT_PREFERENCE_KEYWORDS.get(focus_label) or [])
+    if focus_label in _TOPIC_EVIDENCE_KEYWORDS:
+        keywords.extend(_TOPIC_EVIDENCE_KEYWORDS.get(focus_label) or [])
     for pref, kws in pref_map.items():
         if pref in text or pref[:2] in text:
             keywords.extend(kws)
@@ -5246,6 +6462,11 @@ def _parse_srt_entries_for_hook(srt_text):
         except Exception:
             continue
     return entries
+
+
+def _build_ai_srt_entry_index(srt_text):
+    """Single source of truth for numbered and unnumbered SRT candidate blocks."""
+    return list(_parse_srt_entries_for_hook(srt_text) or [])
 
 
 def _final_hook_quality_score(text, duration, hook_keywords=None, focus_hint=None, ai_controls=None, next_clip=None):
@@ -5678,7 +6899,7 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=5.0, focus_hint
     return clips
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False):
     def _log(msg):
         if log_fn: log_fn(msg)
     main_category = _normalize_forced_category(main_category) or main_category
@@ -5767,6 +6988,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _focus_score_excluded_count = 0
         for i, (es, ee, et) in enumerate(srt_entries, 1):
             _srt_entry_map[i] = (es, ee, et)
+            _entry_duration = max(0.0, float(ee) - float(es))
             # 违禁词预扫描：标记含违禁词的条目
             _et_variants = _safety_text_variants(et)
             _matched_fw = []
@@ -5794,9 +7016,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             else:
                 _focus_score_entry_texts.append(et)
             if _matched_fw or _matched_price or _matched_content or _matched_backstage:
-                _indexed_lines.append(f"[#{i:02d}] [不可选：含违禁词、价格/CTA或直播操作]")
+                _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] [不可选：含违禁词、价格/CTA或直播操作]")
             else:
-                _indexed_lines.append(f"[#{i:02d}] {et}")
+                _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] {et}")
         indexed_transcript = chr(10).join(_indexed_lines)
         # 追加用户自定义细节关键词（注入到AI prompt末尾，高优先级关注）
         if _detail_kw_prompt:
@@ -5811,39 +7033,97 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _kw_data = load_keywords()
     _hook_kw = _kw_data["hook_keywords"]
     _entries_for_hook = [
-        (es, ee, et)
+        (_idx, es, ee, et)
         for _idx, (es, ee, et) in sorted(_srt_entry_map.items())
         if _idx not in _forbidden_indices
     ]
+    _manual_focus_label = _normalize_focus_label(focus_hint)
+    if str(_manual_focus_label or "").strip().lower() in {"", "自动", "auto", "默认", "无"}:
+        _manual_focus_label = ""
     _hook_candidates, _hook_candidate_total = _collect_hook_candidates_from_entries(
         _entries_for_hook,
         hook_keywords=_hook_kw,
         focus_hint=focus_hint,
         ai_controls=ai_controls,
-        limit=12,
+        limit=48,
     )
+    _preference_hook_candidates = [
+        candidate for candidate in _hook_candidates
+        if _manual_focus_label and _hook_matches_preference(candidate[1], _manual_focus_label, None)
+    ]
+    _analysis_metadata_context()["hook_candidate_summary"] = {
+        "requested_focus": _manual_focus_label,
+        "candidate_count": int(_hook_candidate_total),
+        "preference_candidate_count": len(_preference_hook_candidates),
+        "preference_hook_required": bool(_manual_focus_label and _preference_hook_candidates and not _skip_focus),
+        "allowed_hook_indices": [],
+    }
     _hook_hint = ""
+    _allowed_hook_indices = set()
     if hook_candidates_hint:
         # 多版本模式：使用外部传入的分配候选
         _hook_hint = hook_candidates_hint
         _log(f"AI: 使用分配的Hook候选")
     elif _hook_candidates:
-        import random as _hook_random
-        _pref_candidates = [c for c in _hook_candidates if c[3] >= 18]
-        _plain_candidates = [c for c in _hook_candidates if c[3] < 18]
-        _hook_random.shuffle(_pref_candidates)
-        _hook_random.shuffle(_plain_candidates)
-        _ranked_hook_candidates = sorted(_pref_candidates, key=lambda c: c[3], reverse=True) + _plain_candidates
+        _preference_hook_ids = {candidate[0] for candidate in _preference_hook_candidates}
+        _general_hook_candidates = [candidate for candidate in _hook_candidates if candidate[0] not in _preference_hook_ids]
+        if _preference_hook_candidates:
+            _ranked_hook_candidates = (
+                sorted(_preference_hook_candidates, key=lambda c: (-c[3], c[0]))[:8]
+                + sorted(_general_hook_candidates, key=lambda c: (-c[3], c[0]))
+            )
+        else:
+            _ranked_hook_candidates = sorted(_hook_candidates, key=lambda c: (-c[3], c[0]))
         _picked_hook_candidates = _ranked_hook_candidates[:12]
-        _cand_text = [f'#{idx_k:02d}"{et[:18]}"({dur:.0f}s/{",".join(reasons[:2])})' for idx_k, et, dur, _score, reasons in _picked_hook_candidates]
-        _hook_hint = f"\n★Hook候选（已按爆点/人群痛点/效果前置综合打分，优先从中选择不同开场）: {', '.join(_cand_text)}★"
-        _log(f"AI: Hook候选池 {_hook_candidate_total} 个，提供 {len(_picked_hook_candidates)} 个")
+        if _manual_focus_label and _preference_hook_candidates and not _skip_focus:
+            _allowed_hook_indices = {
+                candidate[0] for candidate in _picked_hook_candidates
+                if candidate[0] in _preference_hook_ids
+            }
+        elif not _skip_focus:
+            _allowed_hook_indices = {candidate[0] for candidate in _picked_hook_candidates}
+        _analysis_metadata_context()["hook_candidate_summary"]["allowed_hook_indices"] = sorted(
+            _allowed_hook_indices
+        )
+        _cand_text = [
+            f'#{idx_k:02d}[{"偏好Hook" if idx_k in _preference_hook_ids else "通用Hook"}]'
+            f'"{et[:18]}"({dur:.0f}s/{",".join(reasons[:2])})'
+            for idx_k, et, dur, _score, reasons in _picked_hook_candidates
+        ]
+        if _preference_hook_candidates and _manual_focus_label:
+            _hook_hint = (
+                f"\n★用户明确指定“{_manual_focus_label}”。已找到{len(_preference_hook_candidates)}个合格偏好Hook，"
+                "Hook的srt_indices只能填写下列[偏好Hook]中的一个编号，禁止从全文其他编号自行挑Hook。"
+                "第二段必须继续同一主题，直接解释、证明或兑现Hook，不得跳到别的卖点。"
+                f"候选: {', '.join(_cand_text)}★"
+            )
+        else:
+            _hook_hint = f"\n★Hook候选（已按爆点/人群痛点/效果前置综合打分）: {', '.join(_cand_text)}★"
+        _log(
+            f"AI: Hook候选池 {_hook_candidate_total} 个，提供 {len(_picked_hook_candidates)} 个"
+            + (f"（偏好Hook {len(_preference_hook_candidates)} 个）" if _preference_hook_candidates else "")
+        )
     else:
         _hook_hint = "\n★未找到短爆点Hook候选，请从SRT中找最有冲击力的短句作为Hook★"
 
-    # 随机化:同一视频多次生成不同成品
+    if _allowed_hook_indices:
+        _contract_lines = []
+        for _contract_line in indexed_transcript.splitlines():
+            _contract_match = re.match(r"\[#(\d+)\b", _contract_line)
+            if _contract_match and int(_contract_match.group(1)) not in _allowed_hook_indices:
+                _contract_line = _contract_line.replace("] ", "] [不可作Hook] ", 1)
+            _contract_lines.append(_contract_line)
+        indexed_transcript = "\n".join(_contract_lines)
+
+    _director_repair_mode = bool(
+        extra_instruction and "【整体叙事修复】" in str(extra_instruction)
+    )
+
+    # 单版本叙事优先稳定；定向修复进一步降温，避免第二次调用改写已合格骨架。
     import random
-    temperature = round(random.uniform(0.15, 0.75), 2)
+    temperature = 0.1 if _director_repair_mode else (
+        round(random.uniform(0.35, 0.55), 2) if _skip_focus else 0.2
+    )
     _log(f"AI: temperature={temperature}")
 
     # 随机偏好提示(每次侧重不同角度，增加差异化)
@@ -5932,6 +7212,10 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     _block_support_counts = {}
                     for _entry_text in _focus_score_texts:
                         _block = _clip_focus_block(("product", _entry_text, 0, 0, 0, 0, ""))
+                        if _food_mode and _block not in _food_focus_labels:
+                            continue
+                        if not _food_mode and _block in _food_focus_labels:
+                            continue
                         if _preference_quota_supported(_block):
                             _block_support_counts[_block] = _block_support_counts.get(_block, 0) + 1
                     if _block_support_counts:
@@ -5943,16 +7227,16 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                             f"AI: 自动偏好改用安全字幕主主题 → {_fallback_focus}"
                             f"({_fallback_support}条)"
                         )
-                # 选得分最高的偏好，但最高分差距<2时随机选（增加差异化）
-                _max_score = max(_focus_scores.values())
-                _candidates = [k for k, v in _focus_scores.items() if v >= _max_score - 1]
-                if len(_candidates) > 1:
-                    import random as _rand_pref
-                    _best_focus = _rand_pref.choice(_candidates)
-                    _best_score = _focus_scores[_best_focus]
-                else:
-                    _best_focus = max(_focus_scores, key=_focus_scores.get)
-                    _best_score = _focus_scores[_best_focus]
+                # 自动偏好必须可复现：按得分、有效条目数、名称稳定排序。
+                _best_focus = sorted(
+                    _focus_scores,
+                    key=lambda key: (
+                        -float(_focus_scores.get(key, 0)),
+                        -int(_focus_support_counts.get(key, 0) or 0),
+                        str(key),
+                    ),
+                )[0]
+                _best_score = _focus_scores[_best_focus]
                 # 从all_angle_hints找对应的完整提示
                 _focus_hint_map_full = {
                     "版型显瘦": "侧重身材痛点，优先选显瘦,遮肉,修饰身材,收腰的片段",
@@ -5975,41 +7259,15 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     "场景吃法": "侧重食用场景，优先选早餐,夜宵,办公室,全家囤货,火锅煲汤等片段",
                 }
                 focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
-                # 40%概率随机换一个偏好（避免同视频永远同一个），但只能切到有干净候选支撑的偏好。
-                import random as _rand_switch
-                _switchable_focuses = [
-                    k for k, v in _focus_scores.items()
-                    if (
-                        k != _best_focus
-                        and k in _focus_hint_map_full
-                        and ((k in _food_focus_labels) if _food_mode else (k not in _food_focus_labels))
-                        and float(v) >= max(3.0, float(_best_score) * 0.8)
-                        and int(_focus_support_counts.get(k, 0) or 0) >= 3
-                    )
-                ]
-                if _rand_switch.random() < 0.4 and _switchable_focuses:
-                    _alt_focus = _rand_switch.choice(_switchable_focuses)
-                    focus = _focus_hint_map_full[_alt_focus]
-                    _remember_focus_summary(
-                        "智能偏好",
-                        _alt_focus,
-                        focus,
-                        requested="自动",
-                        score=_focus_scores.get(_alt_focus, _best_score),
-                        matched_label=_best_focus,
-                        switched_from=_best_focus,
-                    )
-                    _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次)，随机切换到有干净候选的→ {_alt_focus}(命中{_focus_scores.get(_alt_focus, 0):.1f}次) → {focus}")
-                else:
-                    _remember_focus_summary(
-                        "智能偏好",
-                        _best_focus,
-                        focus,
-                        requested="自动",
-                        score=_best_score,
-                        matched_label=_best_focus,
-                    )
-                    _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
+                _remember_focus_summary(
+                    "智能偏好",
+                    _best_focus,
+                    focus,
+                    requested="自动",
+                    score=_best_score,
+                    matched_label=_best_focus,
+                )
+                _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
             else:
                 focus = "不额外限定偏好，优先选择主品类内最完整、最具体、最安全的卖点片段"
                 _remember_focus_summary("智能偏好", "全量选片", focus, requested="自动")
@@ -6030,7 +7288,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _srt_max = max(_srt_times) if _srt_times else 60
     _srt_min = min(_srt_times) if _srt_times else 0
 
-    _target_rule = _target_duration_rule_text(_AI_TARGET_DURATION)
+    _target_rule = _target_duration_rule_text(_AI_TARGET_DURATION, duration_contract)
 
     # 多版本模式：选更多片段，允许同卖点不同角度
     if _skip_focus:
@@ -6081,7 +7339,13 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
             "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
         ]
-    _diff_vibe = random.choice(_diff_vibes)
+    if _manual_focus_label and not _skip_focus:
+        _diff_vibe = (
+            f"★本轮差异化由用户指定偏好“{_manual_focus_label}”决定，不再叠加随机选片重点。"
+            "该偏好必须成为Product主线，其他主题只负责补充完整介绍，不得反客为主★"
+        )
+    else:
+        _diff_vibe = random.choice(_diff_vibes)
     _ai_rules_prompt = _build_ai_rules_prompt(ai_controls=ai_controls, main_category=main_category)
 
     # 偏好权重直接进 prompt
@@ -6117,8 +7381,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _preference_quota_prompt = ""
     if not _skip_focus and _preference_quota_supported(_active_preference):
         _preference_request = get_last_analysis_metadata()["preference_summary"].get("requested", "自动")
+        _preference_target_duration = (
+            _analysis_metadata_context().get("final_target_duration") or _AI_TARGET_DURATION
+        )
         _preference_quota, _preference_max = _preference_target_bounds(
-            _AI_TARGET_DURATION,
+            _preference_target_duration,
             _preference_request,
         )
         _preference_quota_prompt = (
@@ -6127,12 +7394,36 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             "偏好内容总时长不得超过Product总时长的55%（用户手动指定偏好时可放宽到65%）。"
             "仅在focus/reason里写偏好名称不算命中，"
             "片段原字幕必须出现对应场景、效果、材质或卖点证据。若干净候选不足，选尽所有干净候选并用其他卖点补足。"
-            "全片Product至少覆盖3个独立卖点主题；除偏好主题外，其他角度每类1-2段。"
+            "全片Product至少覆盖3个独立卖点主题；除偏好主题外，其他角度每类1-2段，"
+            "任何单一补充主题的片段数和总时长都不得超过用户指定偏好。"
             "成交角色不同不代表主题不同，不能把颜色内容分别标成效果/证明/场景来冒充主题覆盖。\n"
             "★直播口癖降级★ 不选以“来准备好”“就是你们会发现”“如果你想要有一点尝试的心态”开头的铺垫，"
             "不选以“呀对不对”“是不是这种感觉”收尾的互动句；除非去掉口癖后仍是一句独立且有新增信息的完整卖点。\n"
         )
+    if _manual_focus_label and _preference_hook_candidates and not _skip_focus:
+        _hook_focus_rule = (
+            f"★Hook必须体现用户指定偏好“{_manual_focus_label}”，第二段必须同主题兑现Hook；"
+            "强度相近时选择偏好Hook，不得用其他主题的通用强Hook覆盖用户选择★"
+        )
+    else:
+        _hook_focus_rule = (
+            "★Hook先保证人群/痛点/效果足够强，不要为了命中偏好使用平淡开头★ "
+            "第二段必须承接Hook承诺或展示直接效果"
+        )
     _category_context_prompt = _food_fresh_context_prompt(main_category)
+    _source_labels = sorted({
+        _director_candidate_source(entry_text)
+        for _entry_start, _entry_end, entry_text in (srt_entries or [])
+        if _director_candidate_source(entry_text)
+    })
+    _merge_source_rule = ""
+    if merge_mode and len(_source_labels) > 1:
+        _merge_source_rule = (
+            "\n★混剪来源合同★ 当前候选包含"
+            + "、".join(_source_labels)
+            + "。每个具备安全、完整、同品类候选的来源至少进入1个Product；"
+            "优先让不同来源分别承担效果、证据、场景等不同叙事职责，不得全片只用一个来源。\n"
+        )
     if _is_food_fresh_category(main_category):
         _priority_line = "- 优先选受众代入强的卖点(口感食欲>新鲜品质>产地溯源>规格分量>发货保鲜>场景吃法)"
         _close_priority_line = '- 对于Close片段,优先选"复购背书""发货保鲜""囤货场景"类,避开含价格和保健功效的内容'
@@ -6189,11 +7480,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
 ★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目(数组),不要填start/end时间戳.★优先选1个完整条目；如果前一句必须靠后一句承接，允许选2个连续条目，确保单片段5-10秒且语义完整★:
 [
-  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}"}},
-  {{"clip_type": "hook", "srt_indices": [12], "focus": "{_example_product_focus_1}", "reason": "不同钩子类型"}},
-  {{"clip_type": "product", "srt_indices": [18], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}"}},
-  {{"clip_type": "product", "srt_indices": [25], "focus": "{_example_product_focus_2}", "reason": "{_example_product_reason_2}"}},
-  {{"clip_type": "close", "srt_indices": [45], "focus": "{_example_close_focus}", "reason": "{_example_close_reason}"}},
+  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}", "trim_priority": 0}},
+  {{"clip_type": "hook", "srt_indices": [12], "focus": "{_example_product_focus_1}", "reason": "不同钩子类型", "trim_priority": 0}},
+  {{"clip_type": "product", "srt_indices": [18], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}", "trim_priority": 2}},
+  {{"clip_type": "product", "srt_indices": [25], "focus": "{_example_product_focus_2}", "reason": "{_example_product_reason_2}", "trim_priority": 1}},
+  {{"clip_type": "close", "srt_indices": [45], "focus": "{_example_close_focus}", "reason": "{_example_close_reason}", "trim_priority": 0}},
   ...
 ]
 
@@ -6202,21 +7493,47 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 
 字幕条目:
 {indexed_transcript}"""
+
+    if _director_repair_mode:
+        user_msg = f"""这是一次定向片单修复，不是重新自由策划。必须解决检查项，不能原样返回旧骨架。
+
+{extra_instruction}
+
+本轮指定偏好：{_active_preference or focus or '全量选片'}
+{_preference_quota_prompt}
+{_hook_focus_rule}
+{_hook_hint}
+
+执行顺序：
+1. 先保留骨架中未被点名的问题项及其相对顺序，Hook仍是第1段，第二段仍直接兑现Hook，Close仍是末段。
+2. 再从下方安全候选中补入或替换完整Product，必须真实达到检查项写明的偏好段数和时长区间。
+3. 输出前逐项相加候选标注的秒数；低于下限继续补，高于上限按trim_priority删低价值Product。
+4. 只使用连续srt_indices，不得编造编号、文本或时间，不得选择标为不可选的条目。
+5. 返回修复后的完整有序JSON对象，不要解释，不要Markdown。对象包含clips和expansion_plan；clips是修复后的主片单，expansion_plan仍需提供4-8个未使用备用Product。
+
+clips每项格式：
+{{"clip_type":"hook|product|close","srt_indices":[1],"focus":"实际卖点主题","reason":"本段叙事作用","trim_priority":0}}
+expansion_plan每项格式：
+{{"priority":1,"after_srt_indices":[1],"after_order":1,"srt_indices":[2],"focus":"备用主题","reason":"补片作用"}}
+Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填写不重复的正整数，数字越小越先删。
+
+全部候选：
+{indexed_transcript}"""
     else:
         user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中精选条目并编排成一个完整的带货短视频脚本.
 
 {_category_context_prompt}
-
+{_merge_source_rule}
 要求:
 1. {_dedup_rule}
 2. 像讲故事一样编排，每个片段自然衔接下一段，听起来是一段流畅的口播
-3. ★你是最终叙事负责人★ 返回数组的顺序就是最终成片顺序，后续程序不会替你重排、补片或替换主题。必须只有1个Hook且位于首段，只有1个Close且位于末段；Close之后绝对不能再有Product。先兑现Hook，再展开效果、证据、场景或顾虑，最后自然收束
+3. ★你是最终叙事负责人★ clips数组的顺序就是最终成片顺序，后续程序不会替你重排或替换主题；程序只会在低于时长下限时执行你声明的expansion_plan。必须只有1个Hook且位于首段，只有1个Close且位于末段；Close之后绝对不能再有Product。先兑现Hook，再展开效果、证据、场景或顾虑，最后自然收束
 4. 通常选择{_clip_range}个片段，{_total_rule}。数量不是硬指标；若安全且完整的内容不足，宁可略短也不要用重复、残句或无关内容凑数
 5. ★每个片段优先选1个编号条目；如果只选前一句会导致语义不完整，必须连带后一句，允许选2个连续编号条目；只有补齐完整主谓宾时才允许3个连续条目★ 完整句 > 短句；绝对不要在一句话中间截断
 6. ★片段之间禁止条目编号重叠★ 同一条目只能出现在一个片段中
 7. srt_indices必须连续；禁止选择#05和#07却跳过#06。若两条不连续字幕都值得保留，必须分别作为两个片段放到各自合适的叙事位置
 8. [本轮选片偏好]{focus}
-   ★Hook先保证人群/痛点/效果足够强，不要为了命中偏好使用平淡开头★ 第二段优先承接Hook承诺或展示直接效果；主卖点偏好优先进入证明细节和顾虑解除段。后续Product必须覆盖其他卖点角度（{_coverage_examples}等），确保单视频介绍完整。偏好角度遵守上述目标区间，其他同一角度最多2段，禁止全片只讲一个维度
+   {_hook_focus_rule}；主卖点偏好优先进入证明细节和顾虑解除段。后续Product必须覆盖其他卖点角度（{_coverage_examples}等），确保单视频介绍完整。偏好角度遵守上述目标区间，其他同一角度最多2段，禁止全片只讲一个维度
 {_preference_quota_prompt}
 9. {_diff_vibe}
 10. {_hook_rule}
@@ -6226,19 +7543,23 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 {_recent_history_prompt}
 {_extra_instruction_prompt}
 
-★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目（数组），不要填start/end时间戳。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
-[
-  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}"}},
-  {{"clip_type": "product", "srt_indices": [8], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}"}},
-  ...
-]
+★输出格式★: 只输出一个JSON对象。clips中每个片段用srt_indices指定编号条目，不要填start/end时间戳；每项都填写trim_priority。expansion_plan提供4-8个未被clips使用的完整Product，并用after_srt_indices锚定插入位置。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
+{{
+  "clips": [
+    {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}", "trim_priority": 0}},
+    {{"clip_type": "product", "srt_indices": [8], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}", "trim_priority": 0}}
+  ],
+  "expansion_plan": [
+    {{"priority": 1, "after_srt_indices": [8], "after_order": 2, "srt_indices": [18], "focus": "{_example_product_focus_2}", "reason": "备用不同卖点"}}
+  ]
+}}
 
 {_hook_hint}
 
 字幕条目:
 {indexed_transcript}"""
 
-    _system_low, _system_high = _multi_version_target_bounds(_AI_TARGET_DURATION)
+    _system_low, _system_high = _duration_source_bounds(_AI_TARGET_DURATION, duration_contract)
     if _skip_focus:
         _system_prompt = SYSTEM_PROMPT.replace("45-65", f"{_system_low:.0f}-{_system_high:.0f}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")
     else:
@@ -6306,8 +7627,22 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _skip_focus = _orig_skip  # 恢复全局状态
         if return_raw:
             # return_raw模式（多版本选素材）：直接解析clips数组
-            return _parse_ai_response(content, log_fn, srt_entries, _forbidden_indices)
-        return _parse_ai_response(content, log_fn, srt_entries, _forbidden_indices)
+            return _parse_ai_response(
+                content,
+                log_fn,
+                srt_entries,
+                _forbidden_indices,
+                require_srt_indices=bool(srt_entries) and not _orig_skip,
+                allowed_hook_indices=_allowed_hook_indices or None,
+            )
+        return _parse_ai_response(
+            content,
+            log_fn,
+            srt_entries,
+            _forbidden_indices,
+            require_srt_indices=bool(srt_entries) and not _orig_skip,
+            allowed_hook_indices=_allowed_hook_indices or None,
+        )
     except urllib.error.HTTPError as e:
         err = ""
         try: err = e.read().decode("utf-8", errors="replace")[:200]
@@ -6378,7 +7713,7 @@ def _parse_raw_response(content, log_fn=None):
         return None
 
 
-def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None):
+def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None, require_srt_indices=False, allowed_hook_indices=None):
     def _log(msg):
         if log_fn: log_fn(msg)
 
@@ -6458,6 +7793,10 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
             else:
                 return []
 
+    raw_expansion_plan = data.get("expansion_plan", []) if isinstance(data, dict) else []
+    _analysis_metadata_context()["expansion_plan"] = (
+        list(raw_expansion_plan) if isinstance(raw_expansion_plan, list) else []
+    )
     if not isinstance(data, list):
         data = data.get("clips", [])
     if not isinstance(data, list):
@@ -6478,6 +7817,12 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
     clips = []
     skipped_no_text = 0
     skipped_bad_time = 0
+    skipped_missing_indices = 0
+    skipped_invalid_hook = 0
+    allowed_hook_indices = {
+        int(index) for index in (allowed_hook_indices or [])
+        if str(index).strip().isdigit()
+    }
     for idx, item in enumerate(data):
         # 诊断:打印第一个 item 的所有字段名
         if idx == 0:
@@ -6487,13 +7832,28 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
         ct = type_map.get(ct, ct)
         if ct not in GOLDEN_CHAIN:
             ct = "highlight"
+        try:
+            trim_priority = int(item.get("trim_priority", 0) or 0)
+        except Exception:
+            trim_priority = 0
         
         # ★优先使用srt_indices查表★（解决AI时间戳幻觉问题）
         srt_idx = item.get("srt_indices", item.get("srt_index", None))
+        if require_srt_indices and not srt_idx:
+            skipped_missing_indices += 1
+            continue
         if srt_idx and _srt_entry_map:
             # 按索引查SRT条目，构建clip
             if isinstance(srt_idx, int):
                 srt_idx = [srt_idx]
+            if ct == "hook" and allowed_hook_indices:
+                try:
+                    hook_indices = [int(index) for index in srt_idx]
+                except Exception:
+                    hook_indices = []
+                if len(hook_indices) != 1 or hook_indices[0] not in allowed_hook_indices:
+                    skipped_invalid_hook += 1
+                    continue
             # 排序+拆分不连续索引为多个clip
             valid_indices = sorted(set(i for i in srt_idx if 1 <= i <= len(_srt_entry_map) and i not in (forbidden_indices or set())))
             if not valid_indices:
@@ -6516,7 +7876,12 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
                 focus = str(item.get("focus", "")).strip()
                 ct_this = ct if gi == 0 else ct  # 保持类型不变
                 dur = float(ee_end - es_start)
-                clips.append((ct_this, group_text, float(es_start), float(ee_end), 50, dur, focus))
+                clip_value = (ct_this, group_text, float(es_start), float(ee_end), 50, dur, focus)
+                clips.append(clip_value)
+                if trim_priority > 0:
+                    _analysis_metadata_context().setdefault("trim_priorities", {})[
+                        _director_clip_trim_key(clip_value)
+                    ] = trim_priority
                 if gi > 0:
                     _log(f"  不连续索引拆分: [{ct}] 补充clip {group}")
         else:
@@ -6529,9 +7894,22 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
             if end <= start:
                 skipped_bad_time += 1; continue
             focus = str(item.get("focus", "")).strip()
-            clips.append((ct, text, start, end, 50, float(end - start), focus))
+            clip_value = (ct, text, start, end, 50, float(end - start), focus)
+            clips.append(clip_value)
+            if trim_priority > 0:
+                _analysis_metadata_context().setdefault("trim_priorities", {})[
+                    _director_clip_trim_key(clip_value)
+                ] = trim_priority
+    _log(
+        f"AI: JSON片单{len(data)}项，解析到{len(clips)}段"
+        f"（缺编号{skipped_missing_indices}，非法Hook{skipped_invalid_hook}，"
+        f"无文本{skipped_no_text}，无效时间{skipped_bad_time}）"
+    )
     if not clips:
-        _log(f"AI: {len(data)}项中有效0(无文本:{skipped_no_text}, 时间错误:{skipped_bad_time})")
+        _log(
+            f"AI: {len(data)}项中有效0(缺少候选编号:{skipped_missing_indices}, "
+            f"无文本:{skipped_no_text}, 时间错误:{skipped_bad_time})"
+        )
     return clips
 
 
@@ -9230,12 +10608,17 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
         norm_text = re.sub(r'[^\u4e00-\u9fff\w]', '', text_for_prefix.strip())
         filler_prefix_len = 0
         if clip_index not in word_trimmed_indices:
-            for fw in _sorted_filler:
-                if not fw:
-                    continue
-                if norm_text.startswith(fw):
-                    filler_prefix_len = len(fw)
-                    break  # 长前缀优先，第一个匹配就是最长的
+            remaining_norm = norm_text
+            for _prefix_pass in range(4):
+                matched_prefix = ""
+                for fw in _sorted_filler:
+                    if fw and remaining_norm.startswith(fw):
+                        matched_prefix = fw
+                        break
+                if not matched_prefix or len(remaining_norm) - len(matched_prefix) < 6:
+                    break
+                filler_prefix_len += len(matched_prefix)
+                remaining_norm = remaining_norm[len(matched_prefix):]
 
         if filler_prefix_len > 0 and len(norm_text) > filler_prefix_len:
             # 按字符比例估算裁切时间
@@ -11851,6 +13234,22 @@ CATEGORY_PROMPT_RULES = {
     "鞋子": "主推鞋子品类。场景搭配和品质细节优先。",
     "食品/生鲜": "主推食品/生鲜品类。用户指定后不要再因具体品名未命中词库而退回通用/服装逻辑；先识别本场主商品和子类型，再让口感食欲、新鲜品质、产地溯源、规格分量、发货保鲜、场景吃法至少覆盖3类；优先试吃/切开/开箱/产地/冷链/囤货片段；普通食品不得剪成治疗、预防、保健、药用功效卖点。",
 }
+
+def _install_vertical_category_profiles():
+    """Register verticals once; unknown categories still fall back to general AI rules."""
+    for profile in iter_vertical_profiles():
+        if profile.product_keywords:
+            PRODUCT_CATEGORIES.setdefault(profile.key, list(profile.product_keywords))
+        if profile.filename_keywords:
+            FILENAME_CATEGORY_KEYWORDS.setdefault(profile.key, list(profile.filename_keywords))
+        if profile.focus_order:
+            CATEGORY_FOCUS_ORDER.setdefault(profile.key, list(profile.focus_order))
+        if profile.prompt_rule:
+            CATEGORY_PROMPT_RULES.setdefault(profile.key, profile.prompt_rule)
+
+
+_install_vertical_category_profiles()
+
 
 def _detect_product_category(text):
     """检测文本提到的品类，返回品类名或 None"""
