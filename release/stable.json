@@ -1,24 +1,45 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "channel": "stable",
   "channel_status": "awaiting-external-distribution",
-  "version": "2026.7.13.10",
-  "latest_version": "2026.7.13.10",
-  "runtime_layout_version": 2,
+  "version": "2026.7.13.12",
+  "latest_version": "2026.7.13.12",
+  "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
-  "update_strategy": "full-package",
-  "supports_incremental_updates": false,
-  "requires_full_package": true,
-  "requires_full_package_note": "Full-package distribution is managed externally; program-file incremental updates are disabled.",
-  "release_notes": "Stable channel remains at 2026.7.13.10 until the external full-package download is published.",
+  "update_strategy": "verified-version-delta-with-full-fallback",
+  "supports_incremental_updates": true,
+  "requires_full_package": false,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
+  "release_notes": "修复混剪中部分素材因缺少词级时间而未进入AI候选的问题；增加多素材自然均衡、来源分布审查与受控AI重编；完善时长补足、预览来源统计和Runtime V3签名增量更新链路。",
   "force_update": false,
   "release_page_url": "",
+  "bridge_url": "",
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "7F02C8E47211EF2CDECA8353A575859C94A9794BD713E4BF8FBA9001A416EA12",
-    "size": 551779519,
-    "filename": "LiveClipperWeb_2026.7.13.10_full_20260713.zip"
+    "sha256": "EFE951D5DB17FD3151009A22A7DDBB878850C9DCBC4B3D877E3309D53D275F84",
+    "size": 631768320,
+    "filename": "LiveClipperWeb_2026.7.13.12_full_v3_compact_r3_20260713.zip"
   },
-  "published_at": "2026-07-13 08:52:26"
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.13.11",
+      "to_version": "2026.7.13.12",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.13.12/LiveClipperPatch_2026.7.13.11_to_2026.7.13.12_v3_r3.zip",
+      "sha256": "53510D9716F23C1AB5C7E6E6FBDD9B332F267BCF50261ECE67FF66366364011F",
+      "size": 17177547,
+      "filename": "LiveClipperPatch_2026.7.13.11_to_2026.7.13.12_v3_r3.zip",
+      "runtime_payload_files": 3,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-13 23:09:58",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "e489293f17704e2f",
+    "value": "T/db2ALjAiuNCQEZonylITYwW4/CC+9jbCXWTchWiylOvPFeY87jNtQZNplwfk+oPc5+wl++Na35wJIfqUbOCw=="
+  }
 }
