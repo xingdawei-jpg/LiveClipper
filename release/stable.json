@@ -30,7 +30,7 @@
       "to_version": "2026.7.14.4",
       "source_layout_version": 3,
       "target_layout_version": 3,
-      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.4/LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
+      "url": "https://cdn.jsdelivr.net/gh/xingdawei-jpg/LiveClipper@da47e3437dbba25a1d8d1f6f6ac0452a2cd214ab/LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
       "sha256": "1F2A7CB091D92F5A5C5FEC4D7A59CC575FA533BDF1C890AF97600648D632C981",
       "size": 17272740,
       "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
@@ -38,10 +38,10 @@
       "stable_payload_files": 0
     }
   ],
-  "published_at": "2026-07-14 10:08:42",
+  "published_at": "2026-07-14 10:40:33",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "hXbIQ4KP3ABrluEV+7bFeUj+M87PH+tTccYBI9rRbGGDIX55ro4FaeWnWs1LsdWmOlugO/JfThG3Q4sgM5CbBg=="
+    "value": "IfjKWvu7iUMm0SFWv26BmQxaEadY3KMmQ6/MZ1qVI4LLBco8ZMuGEPyRZXHaVMGyyWHJ0nCDxolD8YB15lWYDw=="
   }
 }
