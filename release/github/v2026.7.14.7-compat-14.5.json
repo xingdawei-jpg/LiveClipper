@@ -1,0 +1,17 @@
+{
+  "tag": "v2026.7.14.7-compat-14.5",
+  "title": "LiveClipper 2026.7.14.7 compatibility patch for 2026.7.14.5",
+  "notes": "Signed Runtime V3 compatibility patch from 2026.7.14.5 directly to 2026.7.14.7.\n\n- Lets users on the 2026.7.14.5 final baseline skip 2026.7.14.6 and install 2026.7.14.7 incrementally.\n- Keeps launcher 1.1.0 and updater 1.2.0 unchanged.\n- Preserves the existing 2026.7.14.6 to 2026.7.14.7 patch.",
+  "assets": [
+    {
+      "name": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip",
+      "sha256": "C83C1B5288D1ABE3AF317946E97DAFBA00D7DFD05CB29007988A89FFA009B3B5"
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip.sha256.txt",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip.sha256.txt",
+      "sha256": "E6314766599A6B449032A5A9FDCC8CB1C367A17C680F9A67101786AEEFDB0743"
+    }
+  ]
+}
