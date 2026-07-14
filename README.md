@@ -1,0 +1,1 @@
+﻿# LiveClipper signed update assets
