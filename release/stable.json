@@ -26,6 +26,33 @@
   "patches": [
     {
       "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.14.5",
+      "to_version": "2026.7.14.7",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.7-compat-14.5/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.7-compat-14.5/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip",
+        "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.7-compat-14.5/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip"
+        },
+        {
+          "name": "Aliyun OSS",
+          "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip"
+        }
+      ],
+      "sha256": "C83C1B5288D1ABE3AF317946E97DAFBA00D7DFD05CB29007988A89FFA009B3B5",
+      "size": 17265954,
+      "filename": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.7_v3.zip",
+      "runtime_payload_files": 4,
+      "stable_payload_files": 0
+    },
+    {
+      "format": "liveclipper-version-delta-v1",
       "from_version": "2026.7.14.6",
       "to_version": "2026.7.14.7",
       "source_layout_version": 3,
@@ -52,10 +79,10 @@
       "stable_payload_files": 0
     }
   ],
-  "published_at": "2026-07-14 17:41:21",
+  "published_at": "2026-07-15 01:13:18",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "ucHbLsi4MHUJWe2ln0vphVnElPJBH+KIOYmGPRjlXHxpjhPBdwhCtuEGxErKkqJ2kBQSuDTzZXSPTns5zr5GAA=="
+    "value": "KNxO9fac+zDMqKdMcrqZvqk4dCcuoqkxfGHQ/CWQ0dCqG6hKAItDBF3gmWjfZ8t+A16L4xVyBbk47zmQSapyAA=="
   }
 }
