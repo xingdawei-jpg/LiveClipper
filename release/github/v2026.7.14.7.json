@@ -1,0 +1,17 @@
+{
+  "tag": "v2026.7.14.7",
+  "title": "LiveClipper 2026.7.14.7",
+  "notes": "Runtime V3 signed incremental update from 2026.7.14.6 to 2026.7.14.7.\n\n- Keep one complete AI story composition, then use targeted insert or remove operations instead of repeatedly rewriting the whole sequence.\n- Restore invalid or missing Hooks deterministically and preserve mixed-source coverage during duration trimming.\n- Trim weak sentence prefixes with word-level timestamps.\n- Recheck price, CTA, forbidden terms, and ASR residue in the final preview and export clip list.\n- Keep launcher 1.1.0 and updater 1.2.0 unchanged.",
+  "assets": [
+    {
+      "name": "LiveClipperPatch_2026.7.14.6_to_2026.7.14.7_v3.zip",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.6_to_2026.7.14.7_v3.zip",
+      "sha256": "C5426848064F5A1061D1D5CEABBB5FE95B68531696A63DD47500848DDDBC62A6"
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.14.6_to_2026.7.14.7_v3.zip.sha256.txt",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.6_to_2026.7.14.7_v3.zip.sha256.txt",
+      "sha256": "2F77FCC3CE16A017850E49368E2158F94D30D6EFB6F2ADA7A12BC8FDB84E7729"
+    }
+  ]
+}
