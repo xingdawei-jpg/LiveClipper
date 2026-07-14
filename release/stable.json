@@ -1,33 +1,47 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "hold",
-  "version": "2026.7.14.3",
-  "latest_version": "2026.7.14.3",
+  "channel_status": "awaiting-external-distribution",
+  "version": "2026.7.14.4",
+  "latest_version": "2026.7.14.4",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
   "minimum_launcher_version": "1.0.0",
   "minimum_updater_version": "1.1.0",
-  "update_strategy": "hold",
-  "supports_incremental_updates": false,
-  "requires_full_package": true,
-  "requires_full_package_note": "Automatic update is paused after an external-device health rollback.",
-  "release_notes": "Automatic update is paused after an external-device health rollback.",
+  "update_strategy": "verified-version-delta-with-full-fallback",
+  "supports_incremental_updates": true,
+  "requires_full_package": false,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
+  "release_notes": "修复增量更新时继承旧版本运行目录环境，导致新版本后端仍加载13.13并被健康检查回滚；冻结运行时现强制绑定自身目录。",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "2CD19F081E1776B73F6B1DABC72F716A971EE9DF4C27A79AD29CCCC362C9756B",
-    "size": 581614888,
-    "filename": "LiveClipperWeb_2026.7.14.3_full_v3_20260714.zip"
+    "sha256": "745927B9B061B40DD421B9C022261B5EF922BA4F3E9EF2F0B717449D68EF71B3",
+    "size": 581616322,
+    "filename": "LiveClipperWeb_2026.7.14.4_full_v3_20260714.zip"
   },
-  "patches": [],
-  "published_at": "2026-07-14 09:38:52",
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.13.13",
+      "to_version": "2026.7.14.4",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.4/LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
+      "sha256": "1F2A7CB091D92F5A5C5FEC4D7A59CC575FA533BDF1C890AF97600648D632C981",
+      "size": 17272740,
+      "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
+      "runtime_payload_files": 5,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-14 10:08:42",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "peeW7oAV/aPRrZZR+3HN2jt3c2K+9nrBuzwZSwr6ebqQne5w1qs1chltMJEGyJx74LiSl16kT8QxiVMj5eYzAg=="
+    "value": "hXbIQ4KP3ABrluEV+7bFeUj+M87PH+tTccYBI9rRbGGDIX55ro4FaeWnWs1LsdWmOlugO/JfThG3Q4sgM5CbBg=="
   }
 }
