@@ -1,18 +1,18 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "awaiting-external-distribution",
+  "channel_status": "hold",
   "version": "2026.7.14.3",
   "latest_version": "2026.7.14.3",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
   "minimum_launcher_version": "1.0.0",
   "minimum_updater_version": "1.1.0",
-  "update_strategy": "verified-version-delta-with-full-fallback",
-  "supports_incremental_updates": true,
-  "requires_full_package": false,
-  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
-  "release_notes": "修复 Runtime V3 更新后健康回执单次超时导致的误回滚；增加回执重试、路径兼容和持久诊断日志。",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "Automatic update is paused after an external-device health rollback.",
+  "release_notes": "Automatic update is paused after an external-device health rollback.",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
@@ -23,25 +23,11 @@
     "size": 581614888,
     "filename": "LiveClipperWeb_2026.7.14.3_full_v3_20260714.zip"
   },
-  "patches": [
-    {
-      "format": "liveclipper-version-delta-v1",
-      "from_version": "2026.7.13.13",
-      "to_version": "2026.7.14.3",
-      "source_layout_version": 3,
-      "target_layout_version": 3,
-      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.3/LiveClipperPatch_2026.7.13.13_to_2026.7.14.3_v3.zip",
-      "sha256": "C63715E6C8AC7E4D316765D0015F6782397EB3E1ABD1C93B1543B466526385A9",
-      "size": 17271570,
-      "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.3_v3.zip",
-      "runtime_payload_files": 5,
-      "stable_payload_files": 0
-    }
-  ],
-  "published_at": "2026-07-14 09:14:39",
+  "patches": [],
+  "published_at": "2026-07-14 09:38:52",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "IgNpEYaSxdHiXdeDjL5JRy+ujcOBm/dieIoflgrK+0qpSXdqo4Ey1LPCHK0YKOZlt+E5tMUAhI5q3d71w7T+CQ=="
+    "value": "peeW7oAV/aPRrZZR+3HN2jt3c2K+9nrBuzwZSwr6ebqQne5w1qs1chltMJEGyJx74LiSl16kT8QxiVMj5eYzAg=="
   }
 }
