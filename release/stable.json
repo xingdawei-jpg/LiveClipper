@@ -1,33 +1,47 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "hold",
-  "version": "2026.7.14.1",
-  "latest_version": "2026.7.14.1",
+  "channel_status": "awaiting-external-distribution",
+  "version": "2026.7.14.2",
+  "latest_version": "2026.7.14.2",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
   "minimum_launcher_version": "1.0.0",
   "minimum_updater_version": "1.1.0",
-  "update_strategy": "hold",
-  "supports_incremental_updates": false,
-  "requires_full_package": true,
-  "requires_full_package_note": "Automatic update is paused while rollback diagnostics are reviewed.",
-  "release_notes": "Automatic update is paused while rollback diagnostics are reviewed.",
+  "update_strategy": "verified-version-delta-with-full-fallback",
+  "supports_incremental_updates": true,
+  "requires_full_package": false,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
+  "release_notes": "修复慢速电脑更新后误回滚：旧更新备份清理改为启动后后台延迟执行，不再阻塞45秒健康确认。",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "FDFC6141398E1DD9C7B26564775A3A853F78032E3D8F385B02F1064FFCC9F8F2",
-    "size": 579319938,
-    "filename": "LiveClipperWeb_2026.7.14.1_full_v3_20260714.zip"
+    "sha256": "2631FA6504C4B109B560FFD32FDE23DFB00F0B8785E252F857617C9C3F3038C3",
+    "size": 579319749,
+    "filename": "LiveClipperWeb_2026.7.14.2_full_v3_20260714.zip"
   },
-  "patches": [],
-  "published_at": "2026-07-14 07:47:03",
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.13.13",
+      "to_version": "2026.7.14.2",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.2/LiveClipperPatch_2026.7.13.13_to_2026.7.14.2_v3.zip",
+      "sha256": "3BF7B25ED32227D69F7ED66AEB6ED5D89EBBCBC53E02DE16568C37C3809B0512",
+      "size": 17270557,
+      "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.2_v3.zip",
+      "runtime_payload_files": 5,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-14 08:26:33",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "m8K4mmpZI11F7z2CtD3FO6GSG/2EfVEmPqsuF6AGhIaDNWXVqLctICuBNjH6DafKpslQg4UDSEjaNFYc9kvPBQ=="
+    "value": "aF7WNoLcSt9ctSaIh+EK+049kbwNQU9uAZMfj8YdSpnKTeLkWZWSKuqJR6Tb1+THA0NsvT0M+vCHgceK9rSuAA=="
   }
 }
