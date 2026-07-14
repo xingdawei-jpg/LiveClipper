@@ -4557,6 +4557,11 @@ def _merge_selected_segments(
         if source_marker:
             text = f"[{source_marker}] {text}"
         values = list(base)
+        base_type = str(base[0] if base else "product").strip().lower()
+        if base_type == "hook":
+            values[0] = "hook" if group_index == 0 else "product"
+        elif base_type == "close":
+            values[0] = "close" if group_index == len(groups) - 1 else "product"
         values[1] = text or str(public_clip.get("text") or "")
         values[2] = start
         values[3] = end
@@ -4602,6 +4607,37 @@ def _clips_from_preview_selection(
         result.extend(_merge_selected_segments(public_clip, raw_clips[idx], requested_segments))
     return result
 
+
+def _hard_filter_preview_selection(clips: list[Any], scope: str) -> list[tuple[Any, ...]]:
+    """Recheck exact user-selected clauses without changing their order."""
+    items = [tuple(clip) for clip in (clips or [])]
+    try:
+        import ai_clipper as ai_mod
+        filtered = list(ai_mod._filter_price_and_cta(items, None) or [])
+    except Exception as exc:
+        emit_log("warning", f"预览最终安全检查跳过：{exc}", scope)
+        filtered = items
+
+    normalized: list[tuple[Any, ...]] = []
+    for position, clip in enumerate(filtered):
+        values = list(clip)
+        while len(values) < 6:
+            values.append(0)
+        clip_type = str(values[0] or "product").strip().lower()
+        if clip_type == "hook" and position != 0:
+            values[0] = "product"
+        elif clip_type == "close" and position != len(filtered) - 1:
+            values[0] = "product"
+        normalized.append(tuple(values))
+
+    removed = len(items) - len(normalized)
+    if removed:
+        emit_log(
+            "warning",
+            f"预览最终硬安全检查删除 {removed} 个含违禁词、价格、CTA或识别残留的子句组；其余顺序保持不变。",
+            scope,
+        )
+    return normalized
 
 def _preview_selection_segment_count(selected_segments: dict[str, list[int]] | None) -> int:
     if not isinstance(selected_segments, dict):
@@ -9250,6 +9286,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
+        clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再混剪。")
         _log_preview_selection(scope, "预览混剪子句选择", selected_indices, selected_segments, clips)
@@ -9568,6 +9605,7 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
+        clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再成片。")
         _log_preview_selection(scope, "预览成片子句选择", selected_indices, selected_segments, clips)

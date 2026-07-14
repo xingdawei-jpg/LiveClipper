@@ -18,6 +18,7 @@ ai_clipper = importlib.import_module("ai_clipper")
 cutter_logic = importlib.import_module("cutter_logic")
 selection_contracts = importlib.import_module("selection_contracts")
 server = importlib.import_module("server")
+volcengine_asr = importlib.import_module("volcengine_asr")
 
 
 class AiCandidateReliabilityTests(unittest.TestCase):
@@ -73,6 +74,102 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             5.0,
         )
 
+    def test_duration_grace_survives_ai_metadata_bridge_to_cutter_contract(self) -> None:
+        metadata = ai_clipper._begin_analysis_metadata()
+        metadata["duration_relaxation"] = {
+            "applied": True,
+            "grace_seconds": 5.0,
+            "reason": "safe_candidates_exhausted",
+            "projected_final_duration": 52.0 / 1.15,
+            "standard_final_min": 50.0,
+            "relaxed_final_min": 45.0,
+        }
+
+        public_metadata = ai_clipper.get_last_analysis_metadata()
+        grace = cutter_logic._selection_shortage_grace_seconds(public_metadata)
+        clips = [("product", "安全候选已经用尽后的完整片单", 0.0, 52.0, 50, 52.0)]
+        accepted = cutter_logic._validate_selected_duration_contract(
+            clips,
+            60,
+            1.15,
+            shortage_grace_seconds=grace,
+        )
+
+        self.assertEqual(grace, 5.0)
+        self.assertTrue(accepted["used_shortage_grace"])
+        self.assertAlmostEqual(accepted["projected_final"], 52.0 / 1.15, places=2)
+        self.assertAlmostEqual(accepted["low"], 45.0, places=2)
+
+        too_short = [("product", "仍低于宽限下限的片单", 0.0, 50.0, 50, 50.0)]
+        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
+            cutter_logic._validate_selected_duration_contract(
+                too_short,
+                60,
+                1.15,
+                shortage_grace_seconds=grace,
+            )
+
+    def test_weak_prefix_chain_is_trimmed_with_exact_word_boundary(self) -> None:
+        words = [
+            {"text": "对", "start": 0.0, "end": 0.2},
+            {"text": "而且", "start": 0.25, "end": 0.6},
+            {"text": "它没有什么重量", "start": 0.65, "end": 1.8},
+            {"text": "很轻", "start": 1.85, "end": 2.3},
+        ]
+        trimmed, removed = volcengine_asr._semantic_trim_weak_prefix(words)
+        self.assertEqual(removed, ["对", "而且"])
+        self.assertEqual(trimmed[0]["text"], "它没有什么重量")
+        self.assertAlmostEqual(trimmed[0]["start"], 0.65, places=2)
+
+    def test_invalid_ai_hook_is_restored_without_rebuilding_products(self) -> None:
+        entries = [
+            (0.0, 3.0, "这件套装穿上特别轻松。"),
+            (3.0, 8.0, "周末和朋友逛街很有松弛感。"),
+            (8.0, 14.0, "面料轻薄透气，穿起来不会闷。"),
+            (14.0, 18.0, "这一整套日常穿很耐看。"),
+        ]
+        parsed_after_invalid_hook = [
+            ("product", entries[1][2], 3.0, 8.0, 50, 5.0, "场景搭配"),
+            ("product", entries[2][2], 8.0, 14.0, 50, 6.0, "面料质感"),
+            ("close", entries[3][2], 14.0, 18.0, 50, 4.0, "场景搭配"),
+        ]
+        stabilized = ai_clipper._stabilize_director_structure(
+            parsed_after_invalid_hook,
+            entries,
+            {
+                "allowed_hook_indices": [1],
+                "ranked_hook_indices": [1],
+                "requested_focus": "场景搭配",
+            },
+        )
+        self.assertEqual([clip[0] for clip in stabilized], ["hook", "product", "product", "close"])
+        self.assertEqual([clip[1] for clip in stabilized[1:]], [clip[1] for clip in parsed_after_invalid_hook])
+        _safe, audit = ai_clipper._director_hard_audit(stabilized, 18, 8)
+        self.assertFalse(any("Hook必须" in issue for issue in audit["issues"]))
+
+    def test_complete_story_repair_api_has_been_removed(self) -> None:
+        self.assertFalse(hasattr(ai_clipper, "_director_repair_instruction"))
+
+    def test_preview_split_parent_keeps_only_one_hook_role(self) -> None:
+        raw = ("hook", "第一句完整开场第二句继续说明", 0.0, 4.0, 50, 4.0, "场景搭配")
+        public = {
+            "index": 0,
+            "segments": [
+                {"index": 0, "start": 0.0, "end": 1.2, "text": "第一句完整开场", "selected": True},
+                {"index": 1, "start": 2.1, "end": 4.0, "text": "第二句继续说明", "selected": True},
+            ],
+        }
+        groups = server._merge_selected_segments(public, raw, [0, 1])
+        self.assertEqual([clip[0] for clip in groups], ["hook", "product"])
+
+    def test_preview_exact_clause_hard_filter_catches_cta_and_asr_residue(self) -> None:
+        clips = [
+            ("product", "给我们关注点好哦", 0.0, 2.0, 50, 2.0, "互动"),
+            ("product", "影子身高170体重asr", 2.0, 4.0, 50, 2.0, "尺寸"),
+            ("product", "L腰围76全松紧，穿着很舒服", 4.0, 8.0, 50, 4.0, "尺寸长度"),
+        ]
+        filtered = server._hard_filter_preview_selection(clips, "test")
+        self.assertEqual([clip[1] for clip in filtered], [clips[2][1]])
     def test_incomplete_product_is_removed_without_rejecting_whole_story(self) -> None:
         clips = [
             ("hook", "这件衣服特别修饰肩型", 0.0, 2.0, 50, 2.0, "版型"),
@@ -184,39 +281,6 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertTrue(audit["duration_long"])
         self.assertTrue(any("超过目标上限70s" in issue for issue in audit["issues"]))
 
-    def test_overlong_repair_instruction_contains_exact_duration_budget(self) -> None:
-        clips = [
-            ("hook", "开场", 0.0, 5.0, 50, 5.0),
-            ("product", "核心卖点", 5.0, 75.0, 50, 70.0),
-            ("close", "收尾", 75.0, 80.0, 50, 5.0),
-        ]
-        instruction = ai_clipper._director_repair_instruction(
-            clips,
-            ["总时长80.0s超过目标上限70s，至少需删除约10s"],
-            60,
-            8,
-            [(clip[2], clip[3], clip[1]) for clip in clips],
-        )
-        self.assertIn('"duration_sec": 70.0', instruction)
-        self.assertIn("至少删除10.0秒", instruction)
-        self.assertIn("删除后必须落在50-70秒", instruction)
-
-    def test_short_repair_instruction_requires_new_candidates_instead_of_copying_skeleton(self) -> None:
-        clips = [
-            ("hook", "开场", 0.0, 4.0, 50, 4.0),
-            ("product", "承接", 4.0, 10.0, 50, 6.0),
-            ("close", "收尾", 10.0, 14.0, 50, 4.0),
-        ]
-        instruction = ai_clipper._director_repair_instruction(
-            clips,
-            ["总时长14.0s低于目标下限50s，至少还需补足约36s"],
-            60,
-            8,
-            [(clip[2], clip[3], clip[1]) for clip in clips],
-        )
-        self.assertIn("必须新增至少5个当前骨架没有的安全候选编号组", instruction)
-        self.assertIn("不得原样照抄骨架", instruction)
-
     def test_specialized_ai_trim_applies_ai_removal_priority_with_exact_arithmetic(self) -> None:
         clips = [
             ("hook", "开场", 0.0, 5.0, 50, 5.0, "效果"),
@@ -254,6 +318,26 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         self.assertEqual([clip[1] for clip in trimmed], ["开场", "承接开场", "核心证据", "自然收尾"])
 
+    def test_ai_removal_priority_cannot_break_mix_source_contract(self) -> None:
+        clips = [
+            ("hook", "[V1]开场", 0.0, 5.0, 50, 5.0, "效果"),
+            ("product", "[V1]承接", 5.0, 10.0, 50, 5.0, "证据"),
+            ("product", "[V2]另一来源证据", 10.0, 15.0, 50, 5.0, "面料"),
+            ("product", "[V1]可删除补充", 15.0, 20.0, 50, 5.0, "场景"),
+            ("close", "[V2]自然收尾", 20.0, 25.0, 50, 5.0, "场景"),
+        ]
+        trimmed = ai_clipper._apply_ai_removal_priority(
+            clips,
+            [3, 4],
+            15,
+            required_sources={"[V1]": 2, "[V2]": 2},
+        )
+        self.assertIn(clips[2][1], [clip[1] for clip in trimmed])
+        self.assertNotIn(clips[3][1], [clip[1] for clip in trimmed])
+        self.assertEqual(
+            ai_clipper._director_missing_sources(trimmed, {"[V1]": 2, "[V2]": 2}),
+            [],
+        )
     def test_analysis_metadata_exposes_mix_source_contract(self) -> None:
         metadata = ai_clipper._begin_analysis_metadata()
         metadata["source_contract"] = {"required_counts": {"[V1]": 2, "[V2]": 2}}
@@ -300,8 +384,10 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             preferred_focus="面料质感",
             require_preference_hook=True,
         )
-        self.assertTrue(any("Hook未体现指定偏好" in issue for issue in audit["issues"]))
-        self.assertTrue(any("Hook第二段未承接" in issue for issue in audit["issues"]))
+        self.assertFalse(any("Hook未体现指定偏好" in issue for issue in audit["issues"]))
+        self.assertFalse(any("Hook第二段未承接" in issue for issue in audit["issues"]))
+        self.assertTrue(any("Hook未体现指定偏好" in warning for warning in audit["warnings"]))
+        self.assertTrue(any("Hook第二段未承接" in warning for warning in audit["warnings"]))
 
     def test_manual_preference_drift_is_reported_without_rejecting_ai_story(self) -> None:
         clips = [

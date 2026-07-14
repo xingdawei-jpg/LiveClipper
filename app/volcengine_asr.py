@@ -128,7 +128,10 @@ def _semantic_trim_weak_prefix(words):
     """Trim only disposable leading connectors, keeping timestamps word-exact."""
     current = list(words or [])
     removed = []
-    prefixes = ("然后", "而且", "但是", "因为", "就是", "没错", "对的", "是的")
+    prefixes = (
+        "然后", "而且", "但是", "因为", "就是", "没错", "对的", "是的",
+        "嗯", "啊", "对",
+    )
     while current:
         compact = "".join(_semantic_plain_text(word.get("text") or "") for word in current)
         matched = next((prefix for prefix in prefixes if compact.startswith(prefix)), "")

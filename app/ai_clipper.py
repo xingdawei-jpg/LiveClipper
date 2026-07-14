@@ -107,6 +107,7 @@ def get_last_analysis_metadata():
         "selection_failure": dict(metadata.get("selection_failure") or {}),
         "hook_candidate_summary": dict(metadata.get("hook_candidate_summary") or {}),
         "final_target_duration": metadata.get("final_target_duration"),
+        "duration_relaxation": dict(metadata.get("duration_relaxation") or {}),
         "duration_contract": dict(metadata.get("duration_contract") or {}),
         "candidate_contract": dict(metadata.get("candidate_contract") or {}),
         "selection_manifest": dict(metadata.get("selection_manifest") or {}),
@@ -4502,7 +4503,7 @@ def _apply_ai_expansion_plan(
     return result
 
 
-def _apply_ai_removal_priority(clips, remove_orders, target_duration, log_fn=None, label="AI优先级精简", duration_contract=None):
+def _apply_ai_removal_priority(clips, remove_orders, target_duration, log_fn=None, label="AI优先级精简", duration_contract=None, required_sources=None):
     """Apply AI's semantic removal ranking; the program only performs duration arithmetic."""
     def _log(message):
         if log_fn:
@@ -4544,7 +4545,14 @@ def _apply_ai_removal_priority(clips, remove_orders, target_duration, log_fn=Non
         projected = total - _clip_duration_value(clip)
         if projected < status["low"] - 0.05:
             continue
-        kept_orders.discard(order)
+        tentative_orders = kept_orders - {order}
+        tentative_clips = [
+            item for item_order, item in enumerate(items, 1)
+            if item_order in tentative_orders
+        ]
+        if _director_missing_sources(tentative_clips, required_sources):
+            continue
+        kept_orders = tentative_orders
         removed.append(order)
         total = projected
 
@@ -4562,7 +4570,7 @@ def _apply_ai_removal_priority(clips, remove_orders, target_duration, log_fn=Non
     return trimmed
 
 
-def _apply_declared_trim_priorities(clips, target_duration, log_fn=None, duration_contract=None):
+def _apply_declared_trim_priorities(clips, target_duration, log_fn=None, duration_contract=None, required_sources=None):
     priorities = dict(_analysis_metadata_context().get("trim_priorities") or {})
     ranked = []
     used_priorities = set()
@@ -4584,6 +4592,7 @@ def _apply_declared_trim_priorities(clips, target_duration, log_fn=None, duratio
         log_fn,
         label="AI预排精简",
         duration_contract=duration_contract,
+        required_sources=required_sources,
     )
 
 
@@ -4730,6 +4739,147 @@ def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
     return "\n".join(blocks)
 
 
+def _stabilize_director_structure(clips, srt_entries, hook_summary=None, log_fn=None):
+    """Repair clip roles and mechanical duplicates without rebuilding AI narration."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    items = [tuple(clip) for clip in (clips or []) if isinstance(clip, (list, tuple))]
+    if not items:
+        return []
+
+    # Exact duplicate text is a mechanical defect. Preserve the first occurrence
+    # so the AI-authored relative order of all other clips stays unchanged.
+    deduped = []
+    seen_text = set()
+    duplicate_count = 0
+    for clip in items:
+        compact = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(clip[1] or "")).lower()
+        if compact and compact in seen_text:
+            duplicate_count += 1
+            continue
+        if compact:
+            seen_text.add(compact)
+        deduped.append(clip)
+    items = deduped
+
+    summary = dict(hook_summary or {})
+    ranked_hook_indices = [
+        int(value) for value in (
+            summary.get("ranked_hook_indices")
+            or summary.get("allowed_hook_indices")
+            or []
+        )
+        if str(value).strip().isdigit()
+    ]
+
+    valid_hook_position = None
+    for position, clip in enumerate(items):
+        if not _is_hook_clip(clip):
+            continue
+        text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
+        _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        if not starts_incomplete and not ends_incomplete and not _is_safety_blocked_text(text):
+            valid_hook_position = position
+            break
+
+    restored_index = 0
+    if valid_hook_position is None:
+        chosen_clip = None
+        chosen_position = None
+        for entry_index in ranked_hook_indices:
+            if entry_index < 1 or entry_index > len(srt_entries or []):
+                continue
+            entry_start, entry_end, entry_text = srt_entries[entry_index - 1]
+            clean_text = re.sub(r"\[[vV]\d+\]\s*", "", str(entry_text or "")).strip()
+            _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(clean_text)
+            if (
+                not clean_text
+                or starts_incomplete
+                or ends_incomplete
+                or _is_safety_blocked_text(clean_text)
+                or _is_backstage_instruction(clean_text)
+            ):
+                continue
+            for position, clip in enumerate(items):
+                if abs(float(clip[2]) - float(entry_start)) < 0.05 and abs(float(clip[3]) - float(entry_end)) < 0.05:
+                    chosen_clip = _retag_clip_type(clip, "hook")
+                    chosen_position = position
+                    break
+            if chosen_clip is None:
+                duration = max(0.0, float(entry_end) - float(entry_start))
+                chosen_clip = (
+                    "hook", str(entry_text).strip(), float(entry_start), float(entry_end),
+                    50, duration, str(summary.get("requested_focus") or "开场"),
+                )
+            restored_index = entry_index
+            break
+
+        if chosen_clip is None:
+            for position, clip in enumerate(items):
+                if _is_close_clip(clip):
+                    continue
+                text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
+                _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+                if starts_incomplete or ends_incomplete or _is_safety_blocked_text(text):
+                    continue
+                chosen_clip = _retag_clip_type(clip, "hook")
+                chosen_position = position
+                break
+
+        if chosen_clip is not None:
+            if chosen_position is not None:
+                items.pop(chosen_position)
+            items.insert(0, chosen_clip)
+            valid_hook_position = 0
+    elif valid_hook_position != 0:
+        chosen_clip = items.pop(valid_hook_position)
+        items.insert(0, chosen_clip)
+        valid_hook_position = 0
+
+    # One opening role and at most one final Close are structural invariants.
+    normalized = []
+    for position, clip in enumerate(items):
+        if _is_hook_clip(clip) and position != 0:
+            clip = _retag_clip_type(clip, "product")
+        if _is_close_clip(clip) and position != len(items) - 1:
+            clip = _retag_clip_type(clip, "product")
+        normalized.append(tuple(clip))
+    items = normalized
+
+    # Remove only substantial same-source overlap. This is mechanical duplicate
+    # media protection, not semantic selection or reordering.
+    stable = []
+    overlap_count = 0
+    for clip in items:
+        source = _director_clip_source_key(clip)
+        should_drop = False
+        for kept in stable:
+            kept_source = _director_clip_source_key(kept)
+            if source and kept_source and source != kept_source:
+                continue
+            overlap = max(0.0, min(float(clip[3]), float(kept[3])) - max(float(clip[2]), float(kept[2])))
+            shorter = min(_clip_duration_value(clip), _clip_duration_value(kept))
+            if shorter > 0 and overlap > 0.35 and overlap / shorter >= 0.5:
+                should_drop = True
+                overlap_count += 1
+                break
+        if not should_drop:
+            stable.append(clip)
+    items = stable
+
+    changes = []
+    if restored_index:
+        changes.append(f"恢复Hook候选#{restored_index}")
+    if duplicate_count:
+        changes.append(f"移除{duplicate_count}段完全重复")
+    if overlap_count:
+        changes.append(f"移除{overlap_count}段主要时间重叠")
+    if changes:
+        _log("AI结构稳定: " + "，".join(changes) + "；未重写Product叙事")
+    return items
+
 def _director_hard_audit(
     clips,
     target_duration,
@@ -4825,7 +4975,7 @@ def _director_hard_audit(
         preferred_block = _focus_label_to_block(preferred_focus)
         hook_block = _clip_focus_block(valid[0])
         if preferred_block and hook_block != preferred_block:
-            issues.append(f"Hook未体现指定偏好{preferred_block}，需从偏好Hook候选重选")
+            warnings.append(f"Hook未体现指定偏好{preferred_block}，保留安全开场并在预览提示")
         strict_followup_blocks = {
             "版型显瘦", "面料质感", "穿着体验", "颜色氛围", "场景搭配",
             "尺寸长度", "工艺细节", "对比优势", "口感食欲", "新鲜品质",
@@ -4834,7 +4984,7 @@ def _director_hard_audit(
         if len(valid) >= 2 and preferred_block in strict_followup_blocks:
             followup_block = _clip_focus_block(valid[1])
             if followup_block != preferred_block:
-                issues.append(f"Hook第二段未承接{preferred_block}，需直接解释、证明或兑现开场")
+                warnings.append(f"Hook第二段未承接{preferred_block}，保留AI叙事并在预览提示")
 
     if require_preference_mainline:
         preference_summary = _topic_coverage_summary(
@@ -4987,68 +5137,7 @@ def _director_fatal_issues(audit):
     return [item for item in issues if "硬合规移除" not in item]
 
 
-def _director_repair_instruction(clips, issues, target_duration, hook_cap_sec, srt_entries=None, duration_contract=None):
-    skeleton = []
-    for idx, clip in enumerate(clips or [], 1):
-        selected_indices = []
-        try:
-            clip_start = float(clip[2])
-            clip_end = float(clip[3])
-            for entry_index, (entry_start, entry_end, _entry_text) in enumerate(srt_entries or [], 1):
-                overlap = max(0.0, min(clip_end, float(entry_end)) - max(clip_start, float(entry_start)))
-                if overlap > 0.05:
-                    selected_indices.append(entry_index)
-        except Exception:
-            selected_indices = []
-        skeleton.append({
-            "order": idx,
-            "clip_type": str(clip[0]),
-            "srt_indices": selected_indices,
-            "duration_sec": round(max(0.0, float(clip[3]) - float(clip[2])), 1),
-            "text": re.sub(r"\s+", " ", str(clip[1] or "")).strip()[:120],
-        })
-    low, high = _duration_source_bounds(target_duration, duration_contract)
-    current_total = sum(float(item.get("duration_sec") or 0.0) for item in skeleton)
-    issue_text = "；".join(str(item) for item in (issues or [])) or "叙事结构需要复核"
-    duration_short = any("低于目标下限" in str(item) or "需补足" in str(item) for item in (issues or []))
-    duration_long = any("超过目标上限" in str(item) or "需删除" in str(item) for item in (issues or []))
-    duration_permission = ""
-    if duration_long:
-        duration_permission = (
-            "本轮明确允许删除骨架中信息量最低、重复或非主线的完整Product；"
-            "必须保留Hook、紧随Hook的兑现段、核心证据和自然收尾。不得缩短候选内部时间。"
-            f"当前骨架合计{current_total:.1f}秒，至少删除{max(0.0, current_total - high):.1f}秒，"
-            f"删除后必须落在{low:.0f}-{high:.0f}秒，优先接近{float(target_duration):.0f}秒。"
-            "输出前逐项相加duration_sec复核，超过上限就继续删除整段Product。"
-        )
-    elif duration_short:
-        duration_gap = max(0.0, low - current_total)
-        minimum_new_products = max(1, int((duration_gap + 7.9) // 8.0))
-        duration_permission = (
-            "本轮明确允许在Close之前补入不同主题的完整Product；新增片段顺序也必须符合整片叙事。"
-            f"当前骨架合计{current_total:.1f}秒，至少补足{duration_gap:.1f}秒，"
-            f"必须新增至少{minimum_new_products}个当前骨架没有的安全候选编号组；"
-            "如果新增这些片段后仍未达到下限，就继续增加，不得原样照抄骨架。"
-            f"补入后必须落在{low:.0f}-{high:.0f}秒。"
-        )
-    return (
-        "【整体叙事修复】你是最终剪辑导演。上一次完整片单经过硬合规检查后发现："
-        f"{issue_text}。以下是仍安全的原顺序骨架："
-        f"{json.dumps(skeleton, ensure_ascii=False)}。"
-        "请输出修复后的完整JSON片单，不要只输出补充片段，也不要把新增片段追加在Close后。"
-        "除时长问题允许的整段增删外，没有被上述问题点名的骨架项必须保持原srt_indices、相对顺序和clip_type；"
-        "只允许替换问题片段，禁止改写或截短候选。"
-        f"{duration_permission}"
-        "重新检查整条叙事：Hook首位且仅一段，"
-        "第二段直接兑现Hook，Product按效果-证据-场景/顾虑自然推进，Close末位且仅一段，Close后不得再有Product。"
-        "不得使用价格、链接、关注、拍码、券、后台调度或违禁内容；不得重复同一卖点。"
-        f"总时长控制在{low:.0f}-{high:.0f}秒，Hook不超过{float(hook_cap_sec or 0):.1f}秒，"
-        "每个候选编号已经是完整语义和最终时间边界，禁止改写、扩展或拆分候选。"
-        "不得用超长或过短片单逃避目标，也不要截断句子。仅输出完整片单JSON数组。】"
-    )
-
-
-def _call_director_trim_selection(api_key, base_url, model, clips, target_duration, log_fn=None, preferred_focus="", duration_contract=None):
+def _call_director_trim_selection(api_key, base_url, model, clips, target_duration, log_fn=None, preferred_focus="", duration_contract=None, required_sources=None):
     """Ask AI to rank removable clips, then apply that ranking with exact arithmetic."""
     def _log(message):
         if log_fn:
@@ -5129,6 +5218,7 @@ def _call_director_trim_selection(api_key, base_url, model, clips, target_durati
                 log_fn,
                 label="AI超长精简",
                 duration_contract=duration_contract,
+                required_sources=required_sources,
             )
             if trimmed:
                 return trimmed
@@ -5485,7 +5575,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _srt_entries_times.append(_es)
     srt_max_end = max(_srt_entries_times) + 0.5 if _srt_entries_times else None
 
-    # 单版本：AI负责最终叙事；通过硬质检即返回，只把硬问题交回AI整体修复。
+    # 单版本：AI只做一次完整叙事；后续仅允许受限的整段插入或删除操作。
     # 多版本素材池沿用旧流程，因为它只选候选素材，不直接决定成片顺序。
     # 计算目标片段数（用于检查AI是否选够），与 UI 时长档位共用同一套规则。
     _target_min_clips, _target_max_clips = _target_clip_count_range(_AI_TARGET_DURATION)
@@ -5505,13 +5595,9 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_candidate_count = 0
     _director_stage = "首次完整编排"
     _director_format_retry_used = False
-    _director_narrative_repair_used = False
-    _director_source_repair_used = False
     _director_trim_source_clips = None
     _director_expand_source_clips = None
-    # Director mode has a bounded three-call budget. This leaves room for a
-    # final AI-anchored expansion when a complete plan and one repair still
-    # miss the duration contract, without returning to the old five-call loop.
+    # One complete composition plus bounded format/insert/remove operations.
     _max_attempts = 3 if _director_mode else 5
     _indexed_srt_entries = _build_ai_srt_entry_index(cleaned_srt)
     _director_call_entries = _indexed_srt_entries
@@ -5605,6 +5691,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 log_fn,
                 preferred_focus=_director_focus_hint,
                 duration_contract=_duration_contract,
+                required_sources=_director_required_sources,
             )
         else:
             clips = _call_ai(
@@ -5624,9 +5711,20 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 merge_mode=merge_mode,
                 required_sources=_director_required_sources,
             )
+        if not clips and _director_expand_source_clips is not None:
+            clips = list(_director_expand_source_clips)
+            _log("AI增量补片未产生可执行操作，保留锁定片单，不回到完整重编")
+        elif not clips and _director_trim_source_clips is not None:
+            clips = list(_director_trim_source_clips)
+            _log("AI删片操作未产生可执行结果，保留锁定片单，不回到完整重编")
         if not clips:
             if _director_mode:
-                if not _director_format_retry_used and attempt + 1 < _max_attempts:
+                if (
+                    _director_expand_source_clips is None
+                    and _director_trim_source_clips is None
+                    and not _director_format_retry_used
+                    and attempt + 1 < _max_attempts
+                ):
                     _director_format_retry_used = True
                     _director_stage = "响应格式重试"
                     _director_repair = (
@@ -5634,7 +5732,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         "请严格只输出JSON对象，包含clips和expansion_plan；clips每项只包含clip_type、srt_indices、focus、reason、trim_priority；"
                         "srt_indices必须是连续的整数数组，不要解释、不要Markdown、不要输出时间戳。】"
                     )
-                    _log("AI响应未解析出可用片单，进行一次格式重试")
+                    _log("AI响应未解析出可用片单，只进行一次格式重试")
                     continue
                 break
             continue
@@ -5667,6 +5765,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 and int(_hook_candidate_summary.get("preference_candidate_count") or 0) >= 3
                 and _preference_quota_supported(_audit_preferred_focus)
             )
+            clips = _stabilize_director_structure(
+                clips,
+                _indexed_srt_entries,
+                _hook_candidate_summary,
+                log_fn,
+            )
             clips, _director_audit = _director_hard_audit(
                 clips,
                 _AI_TARGET_DURATION,
@@ -5684,6 +5788,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     _AI_TARGET_DURATION,
                     log_fn,
                     duration_contract=_duration_contract,
+                    required_sources=_director_required_sources,
                 )
                 if _priority_trimmed:
                     clips, _director_audit = _director_hard_audit(
@@ -5735,6 +5840,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                             _AI_TARGET_DURATION,
                             log_fn,
                             duration_contract=_duration_contract,
+                            required_sources=_director_required_sources,
                         )
                         if _priority_trimmed:
                             clips, _director_audit = _director_hard_audit(
@@ -5791,49 +5897,31 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             )
             if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
-            if (
-                _director_fatal
-                and not _director_narrative_repair_used
-                and attempt + 1 < _max_attempts
-            ):
-                _director_narrative_repair_used = True
-                _director_stage = "整体叙事修复"
-                _review_issues = list(_director_fatal)
-                if not _review_issues:
-                    _review_issues = [
-                        "请修复硬质检指出的问题，只替换问题片段，保留完整语义、Hook首段和Close末段"
-                    ]
-                _director_call_entries = _indexed_srt_entries
-                _non_duration_issues = [
-                    issue for issue in _review_issues
-                    if "超过目标上限" not in str(issue)
-                ]
-                if _director_audit.get("duration_long") and not _non_duration_issues:
+            if not clips:
+                break
+
+            if _director_audit.get("duration_long"):
+                if _director_trim_source_clips is None and attempt + 1 < _max_attempts:
                     _director_stage = "AI片单精简"
                     _director_trim_source_clips = list(clips)
+                    _director_expand_source_clips = None
                     _director_repair = ""
                     _log(
-                        "AI叙事质检: "
-                        + "；".join(_review_issues)
-                        + "，交回AI仅做整段删片，不重新生成片单"
+                        "AI叙事质检: 总时长超过合同，锁定Hook与现有顺序，"
+                        "仅交回AI生成整段Product删除优先级"
                     )
                     continue
-                _director_repair = _director_repair_instruction(
-                    clips,
-                    _review_issues,
-                    _AI_TARGET_DURATION,
-                    _hook_cap_sec,
-                    _director_call_entries,
-                    duration_contract=_duration_contract,
-                )
+                _log("AI叙事质检未通过: 删片操作后仍超过时长上限，不重新生成完整片单")
+                break
+
+            if _director_fatal:
                 _log(
-                    "AI叙事质检: "
-                    + "；".join(_review_issues)
-                    + "，交回AI整体修复，不做本地删补或重排"
+                    "AI叙事质检未通过: "
+                    + "；".join(_director_fatal)
+                    + "；局部结构稳定仍无法修复，停止本次片单，不重新生成完整片单"
                 )
-                continue
-            if not clips:
-                continue
+                break
+
             if _director_audit.get("duration_short"):
                 _duration_issue = list(_director_audit.get("issues") or [
                     f"总时长{_director_audit.get('total_duration', 0):.1f}s低于目标下限{_director_audit.get('duration_low', 0):.0f}s"
@@ -5841,18 +5929,20 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 if attempt + 1 < _max_attempts:
                     _director_stage = "AI片单增量补足"
                     _director_expand_source_clips = list(clips)
+                    _director_trim_source_clips = None
                     _director_repair = ""
                     _log(
                         "AI叙事质检: "
                         + "；".join(_duration_issue)
-                        + "，锁定现有叙事，仅交回AI生成插入操作"
+                        + "，锁定现有叙事，仅交回AI生成Product插入操作"
                     )
                     continue
                 _log(
                     f"AI叙事质检: 片单仅{_director_audit.get('total_duration', 0):.1f}s，"
-                    f"低于目标下限{_director_audit.get('duration_low', 0):.0f}s，拒绝作为成功结果"
+                    f"低于目标下限{_director_audit.get('duration_low', 0):.0f}s"
                 )
-                continue
+                break
+
             _director_missing_sources_now = _director_missing_sources(
                 clips,
                 _director_required_sources,
@@ -5876,62 +5966,33 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 if attempt + 1 < _max_attempts:
                     _director_stage = "混剪来源增量补足"
                     _director_expand_source_clips = list(clips)
-                    _log(
-                        f"AI叙事质检: {_source_issue}，锁定现有叙事，仅补入缺失来源的AI备用片"
-                    )
+                    _director_trim_source_clips = None
+                    _log(f"AI叙事质检: {_source_issue}，锁定现有叙事，仅补缺失来源Product")
                     continue
                 _log(f"AI叙事质检未通过: {_source_issue}")
-                continue
+                break
+
             _source_distribution = _director_source_distribution_summary(
                 clips,
                 _director_required_sources,
             )
             if merge_mode and _source_distribution.get("issues"):
-                _source_issue = "混剪来源分布失衡:" + "、".join(
-                    _source_distribution.get("issues") or []
+                _log(
+                    "AI叙事提示: 混剪来源分布仍不完全均衡:"
+                    + "、".join(_source_distribution.get("issues") or [])
+                    + "；最低来源合同已满足，保留当前叙事，不进行整片重编"
                 )
-                _director_last_audit = dict(_director_audit or {})
-                _director_last_audit["issues"] = list(
-                    _director_last_audit.get("issues") or []
-                ) + [_source_issue]
-                if not _director_source_repair_used and attempt + 1 < _max_attempts:
-                    _director_source_repair_used = True
-                    _director_stage = "混剪来源整体重编"
-                    _director_call_entries = _indexed_srt_entries
-                    _director_trim_source_clips = None
-                    _director_expand_source_clips = None
-                    _director_repair = _director_source_distribution_repair_instruction(
-                        _source_distribution,
-                        _director_required_sources,
-                    )
-                    _log(f"AI叙事质检: {_source_issue}，交回AI完整重编片单，不由程序插片或重排")
-                    continue
-                _log(f"AI叙事提示: {_source_issue}；AI重编后仍未完全均衡，保留可用叙事避免任务失败")
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
+
             _remaining_issues = _director_fatal_issues(_director_audit)
             if _remaining_issues:
-                if attempt + 1 < _max_attempts:
-                    _director_stage = "叙事质检重试"
-                    _director_repair = _director_repair_instruction(
-                        clips,
-                        _remaining_issues,
-                        _AI_TARGET_DURATION,
-                        _hook_cap_sec,
-                        _indexed_srt_entries,
-                        duration_contract=_duration_contract,
-                    )
-                    _log(
-                        "AI叙事修复仍未通过: "
-                        + "；".join(_remaining_issues)
-                        + "，继续交回AI修复，不做本地删补或重排"
-                    )
-                    continue
                 _log(
-                    "AI叙事质检未通过，拒绝返回半成品: "
+                    "AI叙事质检未通过: "
                     + "；".join(_remaining_issues)
+                    + "；不重新生成完整片单"
                 )
-                continue
+                break
             _director_topic_summary = _topic_coverage_summary(
                 clips,
                 _current_focus_used_label(),
@@ -7450,6 +7511,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _analysis_metadata_context()["hook_candidate_summary"]["allowed_hook_indices"] = sorted(
             _allowed_hook_indices
         )
+        _analysis_metadata_context()["hook_candidate_summary"]["ranked_hook_indices"] = [
+            candidate[0]
+            for candidate in _picked_hook_candidates
+            if candidate[0] in _allowed_hook_indices
+        ]
         _cand_text = [
             f'#{idx_k:02d}[{"偏好Hook" if idx_k in _preference_hook_ids else "通用Hook"}]'
             f'"{et[:18]}"({dur:.0f}s/{",".join(reasons[:2])})'
@@ -12874,6 +12940,9 @@ def _safety_pattern_matches(patterns, text_variants):
 # terms such as "莱赛尔" or a normal use of "一定" are not falsely blocked.
 _CONTENT_SAFETY_PATTERNS = (
     ("CTA关注引导", re.compile(r"点(?:好|个|下|一下|一)?关注")),
+    ("CTA关注倒序识别", re.compile(r"关注(?:点好|点一下|一下)")),
+    ("CTA冲单引导", re.compile(r"冲一冲")),
+    ("ASR识别残留", re.compile(r"(?:身高|体重|腰围|胸围)[^，。！？!?]{0,12}(?i:asr)")),
     ("CTA链接引导", re.compile(r"(?:上|挂|放)(?:个|下)?(?:链|连)接")),
     ("效果承诺:包出片", re.compile(r"包出片")),
     ("材质安全宣称:母婴级", re.compile(r"母婴(?:店)?级(?:别)?")),

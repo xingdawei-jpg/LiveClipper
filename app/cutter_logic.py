@@ -1013,6 +1013,7 @@ def _validate_selected_duration_contract(
         "standard_low": standard_low,
         "high": high,
         "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
+        "used_shortage_grace": bool(status.get("used_shortage_grace")),
         "user_confirmed": bool(user_confirmed),
         "duration_contract": contract.to_dict(),
     }
