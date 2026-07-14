@@ -49,6 +49,10 @@
         <div class="update-card-body">
           <div class="update-card-version" id="update-card-version">当前版本</div>
           <div class="update-card-notes" id="update-card-notes">点击检查更新获取最新状态。</div>
+          <div class="update-card-progress" id="update-card-progress-wrap" hidden>
+            <progress id="update-card-progress" max="100" value="0"></progress>
+            <span id="update-card-progress-text">0%</span>
+          </div>
         </div>
         <div class="update-card-actions">
           <button class="button button-secondary button-small" type="button" data-action="check-update">检查</button>

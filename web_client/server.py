@@ -137,10 +137,28 @@ _VIDEO_INFO_CACHE: dict[str, dict[str, Any]] = {}
 _VIDEO_FP_CACHE: dict[str, dict[str, Any]] = {}
 _UPDATE_STATE: dict[str, Any] = {
     "running": False,
+    "stage": "idle",
+    "percent": 0,
+    "downloaded": 0,
+    "total": 0,
+    "message": "",
+    "error": "",
+    "updated_at": 0.0,
     "last_result": None,
 }
 _UPDATE_LOCK = threading.Lock()
 _RUNTIME_UPDATER_MODULE: Any = None
+
+
+def _set_update_state(**values: Any) -> None:
+    with _UPDATE_LOCK:
+        _UPDATE_STATE.update(values)
+        _UPDATE_STATE["updated_at"] = time.time()
+
+
+def _get_update_state() -> dict[str, Any]:
+    with _UPDATE_LOCK:
+        return dict(_UPDATE_STATE)
 
 
 def _now() -> str:
@@ -9867,24 +9885,71 @@ def check_update_api() -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"检查更新失败：{exc}") from exc
 
 
+@app.get("/api/update/status")
+def update_status_api() -> dict[str, Any]:
+    return {"ok": True, **_get_update_state()}
+
+
 @app.post("/api/update/apply")
 def apply_update_api() -> dict[str, Any]:
     with _UPDATE_LOCK:
         if _UPDATE_STATE.get("running"):
-            return {"ok": False, "running": True, "msg": "更新正在安装中"}
-        _UPDATE_STATE["running"] = True
-        _UPDATE_STATE["last_result"] = None
+            return {
+                "ok": False,
+                "running": True,
+                "msg": _UPDATE_STATE.get("message") or "更新正在安装中",
+            }
+        _UPDATE_STATE.update(
+            {
+                "running": True,
+                "stage": "checking",
+                "percent": 0,
+                "downloaded": 0,
+                "total": 0,
+                "message": "正在检查更新",
+                "error": "",
+                "updated_at": time.time(),
+                "last_result": None,
+            }
+        )
+
+    def on_download_progress(downloaded: int, total: int, message: str) -> None:
+        percent = 0
+        if total > 0:
+            percent = max(0, min(100, int(downloaded * 100 / total)))
+        _set_update_state(
+            stage="downloading" if downloaded < total or total <= 0 else "verifying",
+            percent=percent,
+            downloaded=max(0, int(downloaded)),
+            total=max(0, int(total)),
+            message=message,
+            error="",
+        )
 
     try:
         updater = _runtime_updater_module()
         updater.init_installed_version()
         info = updater.check_update()
         if not info:
-            result = {"ok": True, "updated": [], "restart_required": False, "msg": "当前已经是最新版本"}
+            result = {
+                "ok": True,
+                "updated": [],
+                "restart_required": False,
+                "msg": "当前已经是最新版本",
+            }
+            _set_update_state(stage="complete", percent=100, message=result["msg"])
         else:
-            result = updater.apply_update_headless(info)
+            result = updater.apply_update_headless(
+                info,
+                progress_callback=on_download_progress,
+            )
             if result.get("ok"):
                 if result.get("agent_started") and result.get("exit_required"):
+                    _set_update_state(
+                        stage="handoff",
+                        percent=100,
+                        message="补丁已验证，正在交给独立更新器",
+                    )
                     result["auto_restart"] = _schedule_client_exit_for_update()
                     result["msg"] = (
                         "补丁已验证，客户端即将退出；外部更新器会完成切换并重新启动。"
@@ -9894,6 +9959,11 @@ def apply_update_api() -> dict[str, Any]:
                 elif result.get("restart_required"):
                     result["auto_restart"] = _schedule_client_restart()
                     result["msg"] = "更新已安装，客户端即将自动重启。" if result.get("auto_restart") else "更新已安装，请重启客户端后生效。"
+                _set_update_state(
+                    stage="complete",
+                    percent=100,
+                    message=result.get("msg") or "更新已准备完成",
+                )
                 emit_log("success", result.get("msg") or "更新已准备完成。", "settings")
             else:
                 details = result.get("failed_details") or {}
@@ -9903,16 +9973,24 @@ def apply_update_api() -> dict[str, Any]:
                     emit_log("error", f"更新安装失败：{detail_text}", "settings")
                 else:
                     emit_log("error", f"更新安装失败：{result.get('failed') or result.get('msg')}", "settings")
-        with _UPDATE_LOCK:
-            _UPDATE_STATE["last_result"] = result
+                _set_update_state(
+                    stage="full-package" if result.get("full_package_required") else "error",
+                    message=result.get("msg") or "更新未完成",
+                    error=result.get("msg") or "更新未完成",
+                )
+        _set_update_state(last_result=result)
         return result
     except Exception as exc:
-        with _UPDATE_LOCK:
-            _UPDATE_STATE["last_result"] = {"ok": False, "msg": str(exc)}
+        failure = {"ok": False, "msg": str(exc)}
+        _set_update_state(
+            stage="error",
+            message="安装更新失败",
+            error=str(exc),
+            last_result=failure,
+        )
         raise HTTPException(status_code=500, detail=f"安装更新失败：{exc}") from exc
     finally:
-        with _UPDATE_LOCK:
-            _UPDATE_STATE["running"] = False
+        _set_update_state(running=False)
 
 
 @app.post("/api/update/open-package")

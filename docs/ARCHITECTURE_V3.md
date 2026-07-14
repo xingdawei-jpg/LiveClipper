@@ -56,7 +56,9 @@ starts that retained runtime.
 
 The runtime contains the web server, frontend, AI selection logic, media
 pipeline, and adapters. It may check for updates and download a patch, but it
-does not write program files or activate a version.
+does not write program files or activate a version. The runtime remains open
+while the patch is downloaded and SHA256-verified. It exits only after the
+verified patch and a temporary updater copy are ready.
 
 ### Independent updater
 
@@ -92,9 +94,26 @@ The following documents are signed:
 - each delta patch manifest;
 - each remote release-channel manifest.
 
-The signed channel carries patch URLs, sizes, SHA256 values, exact source and
-target versions, and full-package fallback information. SHA256 protects
-transport integrity; the Ed25519 signature authenticates the publisher.
+The signed channel carries ordered patch download sources, sizes, SHA256
+values, exact source and target versions, and full-package fallback
+information. Each automatic patch has a GitHub primary direct HTTPS URL and an
+Aliyun OSS fallback direct HTTPS URL. SHA256 protects transport integrity; the
+Ed25519 signature authenticates the publisher.
+
+The runtime downloader:
+
+1. rejects non-HTTPS sources before download;
+2. retries each source with a bounded socket timeout;
+3. switches to the next signed source automatically;
+4. keeps a partial .part file and resumes with an HTTP Range request;
+5. accepts a cached file only after exact size and SHA256 verification;
+6. exposes downloaded bytes, total bytes, stage, and error state through
+   /api/update/status;
+7. never sends URL query secrets to user-facing error messages.
+
+Remote channel states ready, hold, and awaiting-external-distribution are
+explicit. Only ready can advertise an installable patch. A hold or awaiting
+channel cannot start an update, even when its version is newer.
 
 ## 5. Delta format
 
@@ -175,5 +194,12 @@ version has passed health confirmation.
 - installed launcher and updater versions;
 - the minimum updater version required by the release channel;
 - durable update progress under LocalAppData.
+
+/api/update/status exposes the in-runtime download phase:
+
+- running state and stage;
+- downloaded and total bytes;
+- percentage and current source message;
+- final result or resumable failure reason.
 
 Support decisions use these fields rather than a displayed version alone.

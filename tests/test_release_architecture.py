@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -36,6 +37,17 @@ def _load_desktop():
     return module
 
 
+def _load_tool(name: str):
+    path = ROOT / "tools" / f"{name}.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(f"liveclipper_test_{name}", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class _JsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self._body = json.dumps(payload).encode("utf-8")
@@ -48,6 +60,42 @@ class _JsonResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+class _DownloadResponse:
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        chunk_size: int = 3,
+    ) -> None:
+        self._body = body
+        self._offset = 0
+        self.status = status
+        self.headers = headers or {}
+        self._chunk_size = chunk_size
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, size: int = -1) -> bytes:
+        if self._offset >= len(self._body):
+            return b""
+        if size < 0:
+            limit = len(self._body)
+        else:
+            limit = min(len(self._body), self._offset + min(size, self._chunk_size))
+        chunk = self._body[self._offset:limit]
+        self._offset = limit
+        return chunk
 
 
 class ReleaseArchitectureTests(unittest.TestCase):
@@ -70,7 +118,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
         )
         self.assertTrue(manifest["supports_incremental_updates"])
         self.assertFalse(manifest["requires_full_package"])
-        self.assertEqual(manifest["minimum_updater_version"], "1.1.0")
+        self.assertEqual(manifest["minimum_updater_version"], "1.2.0")
         self.assertEqual(manifest["files"], {})
         self.assertIn("签名补丁", manifest["requires_full_package_note"])
         self.assertNotRegex(manifest["release_notes"], r"[Ãæ]")
@@ -96,11 +144,206 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertIsNone(updater._select_delta_patch(info, "2026.7.13.10"))
         self.assertFalse(updater.delta_runtime_supported())
 
+    def test_stable_component_versions_have_one_source(self) -> None:
+        versions = _load_tool("runtime_v3_versions")
+        launcher = _load_tool("liveclipper_launcher")
+        agent = _load_tool("liveclipper_update_agent")
+        package_builder = _load_tool("build_v3_package")
+        manifest_builder = _load_tool("build_update_manifest")
+        self.assertEqual(versions.LAUNCHER_VERSION, "1.1.0")
+        self.assertEqual(versions.UPDATER_VERSION, "1.2.0")
+        self.assertEqual(launcher.LAUNCHER_VERSION, versions.LAUNCHER_VERSION)
+        self.assertEqual(agent.UPDATER_VERSION, versions.UPDATER_VERSION)
+        self.assertEqual(package_builder.LAUNCHER_VERSION, versions.LAUNCHER_VERSION)
+        self.assertEqual(package_builder.UPDATER_VERSION, versions.UPDATER_VERSION)
+        built = manifest_builder.build_manifest("2099.1.1", "test")
+        self.assertEqual(built["minimum_launcher_version"], versions.LAUNCHER_VERSION)
+        self.assertEqual(built["minimum_updater_version"], versions.UPDATER_VERSION)
+
+    def test_release_sources_require_https_and_keep_order(self) -> None:
+        builder = _load_tool("build_release_channel")
+        sources = builder._download_sources(
+            [
+                "https://github.com/example/patch.zip",
+                "https://bucket.oss-cn-hangzhou.aliyuncs.com/patch.zip",
+                "https://github.com/example/patch.zip",
+            ]
+        )
+        self.assertEqual(
+            [item["name"] for item in sources],
+            ["GitHub", "Aliyun OSS"],
+        )
+        with self.assertRaises(ValueError):
+            builder._download_sources(["http://example.invalid/patch.zip"])
+
+    def test_update_progress_frontend_backend_contract(self) -> None:
+        server = (ROOT / "web_client" / "server.py").read_text(encoding="utf-8")
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('@app.get("/api/update/status")', server)
+        self.assertIn('api("/api/update/status")', frontend)
+        self.assertIn("progress_callback=on_download_progress", server)
+
+    def test_hold_channel_does_not_offer_an_update(self) -> None:
+        updater = _load_updater()
+        local = {
+            "version": "2026.7.14.4",
+            "runtime_files": {},
+            "integrity_files": [],
+        }
+        remote = {
+            "version": "2026.7.14.5",
+            "channel_status": "hold",
+            "patches": [],
+        }
+        with (
+            patch.object(updater, "_local_manifest", return_value=local),
+            patch.object(updater, "_fetch_signed_release", return_value=remote),
+        ):
+            self.assertIsNone(updater.check_update())
+
+    def test_patch_sources_are_https_ordered_and_deduplicated(self) -> None:
+        updater = _load_updater()
+        sources = updater._patch_sources(
+            {
+                "url": "https://github.example/patch.zip",
+                "sources": [
+                    {"name": "GitHub", "url": "https://github.example/patch.zip"},
+                    {"name": "OSS", "url": "https://oss.example/patch.zip"},
+                    "http://unsafe.example/patch.zip",
+                ],
+            }
+        )
+        self.assertEqual(
+            [item["url"] for item in sources],
+            [
+                "https://github.example/patch.zip",
+                "https://oss.example/patch.zip",
+            ],
+        )
+
+    def test_verified_download_falls_back_to_second_source(self) -> None:
+        updater = _load_updater()
+        payload = b"verified delta payload"
+        patch_info = {
+            "url": "https://github.example/patch.zip",
+            "sources": [
+                {"name": "GitHub", "url": "https://github.example/patch.zip"},
+                {"name": "OSS", "url": "https://oss.example/patch.zip"},
+            ],
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+        response = _DownloadResponse(
+            payload,
+            headers={"Content-Length": str(len(payload))},
+        )
+        progress: list[tuple[int, int, str]] = []
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "patch.zip"
+            with (
+                patch.object(
+                    updater.urllib.request,
+                    "urlopen",
+                    side_effect=[
+                        OSError("primary unavailable"),
+                        OSError("primary unavailable"),
+                        response,
+                    ],
+                ) as open_mock,
+                patch.object(updater.time, "sleep", return_value=None),
+            ):
+                updater._verified_download(
+                    patch_info,
+                    destination,
+                    lambda done, total, message: progress.append(
+                        (done, total, message)
+                    ),
+                )
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(open_mock.call_count, 3)
+            self.assertTrue(any("OSS" in item[2] for item in progress))
+
+    def test_verified_download_resumes_a_partial_file(self) -> None:
+        updater = _load_updater()
+        payload = b"resume this signed patch"
+        split = 7
+        patch_info = {
+            "url": "https://oss.example/patch.zip",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+        response = _DownloadResponse(
+            payload[split:],
+            status=206,
+            headers={
+                "Content-Length": str(len(payload) - split),
+                "Content-Range": f"bytes {split}-{len(payload) - 1}/{len(payload)}",
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "patch.zip"
+            partial = destination.with_suffix(".zip.part")
+            partial.write_bytes(payload[:split])
+            with patch.object(
+                updater.urllib.request,
+                "urlopen",
+                return_value=response,
+            ) as open_mock:
+                updater._verified_download(patch_info, destination)
+            request = open_mock.call_args.args[0]
+            self.assertEqual(request.headers.get("Range"), f"bytes={split}-")
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertFalse(partial.exists())
+
+    def test_verified_download_uses_cache_without_network(self) -> None:
+        updater = _load_updater()
+        payload = b"already verified"
+        patch_info = {
+            "url": "https://oss.example/patch.zip",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "patch.zip"
+            destination.write_bytes(payload)
+            with patch.object(updater.urllib.request, "urlopen") as open_mock:
+                updater._verified_download(patch_info, destination)
+            open_mock.assert_not_called()
+
+    def test_verified_download_preserves_partial_after_network_failure(self) -> None:
+        updater = _load_updater()
+        payload = b"partial bytes must survive"
+        patch_info = {
+            "url": "https://github.example/patch.zip",
+            "sources": [
+                {"name": "OSS", "url": "https://oss.example/patch.zip"},
+            ],
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "patch.zip"
+            partial = destination.with_suffix(".zip.part")
+            partial.write_bytes(payload[:5])
+            with (
+                patch.object(
+                    updater.urllib.request,
+                    "urlopen",
+                    side_effect=OSError("offline"),
+                ),
+                patch.object(updater.time, "sleep", return_value=None),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "已保留断点"):
+                    updater._verified_download(patch_info, destination)
+            self.assertEqual(partial.read_bytes(), payload[:5])
+
     def test_old_updater_version_forces_full_package_route(self) -> None:
         updater = _load_updater()
         release = {
             "version": "2026.7.13.14",
-            "minimum_updater_version": "1.1.0",
+            "minimum_updater_version": "1.2.0",
             "patches": [
                 {
                     "format": updater.DELTA_FORMAT,
@@ -116,7 +359,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
             install_root = Path(temp)
             install_manifest = install_root / updater.INSTALL_MANIFEST
             install_manifest.write_text(
-                '{"updater_version":"1.0.0"}',
+                '{"updater_version":"1.1.0"}',
                 encoding="utf-8",
             )
             with (
@@ -127,7 +370,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
                 self.assertTrue(old_route["requires_full_package"])
                 self.assertFalse(old_route["supports_incremental_updates"])
                 install_manifest.write_text(
-                    '{"updater_version":"1.1.0"}',
+                    '{"updater_version":"1.2.0"}',
                     encoding="utf-8",
                 )
                 current_route = updater._with_update_route(

@@ -30,6 +30,7 @@ from release_signing import (
     sha256_file,
     verify_manifest,
 )
+from runtime_v3_versions import UPDATER_VERSION
 
 
 PATCH_FORMAT = "liveclipper-version-delta-v1"

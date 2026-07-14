@@ -20,9 +20,9 @@ if APP_IMPORT_DIR.is_dir() and str(APP_IMPORT_DIR) not in sys.path:
 
 
 from release_signing import sha256_file, verify_manifest
+from runtime_v3_versions import LAUNCHER_VERSION
 
 
-LAUNCHER_VERSION = "1.0.0"
 LAYOUT_VERSION = 3
 STATE_FILE = "current.json"
 RUNTIME_MANIFEST = "runtime_manifest.json"

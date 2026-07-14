@@ -6,6 +6,7 @@ import argparse
 import sys
 import json
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -24,19 +25,46 @@ PUBLIC_KEY_FILE = ROOT / "app" / "release_update_public_key.pem"
 GITHUB_REPO = "xingdawei-jpg/LiveClipper"
 
 
-def _patch_record(path: Path, url: str) -> dict:
+def _download_sources(urls: list[str]) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_url in urls:
+        url = str(raw_url or "").strip()
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise ValueError(f"patch source must be a direct HTTPS URL: {url}")
+        if url in seen:
+            continue
+        seen.add(url)
+        hostname = parsed.hostname or "download source"
+        if hostname.endswith("github.com"):
+            name = "GitHub"
+        elif hostname.endswith("aliyuncs.com"):
+            name = "Aliyun OSS"
+        else:
+            name = hostname
+        sources.append({"name": name, "url": url})
+    if not sources:
+        raise ValueError("patch has no download source")
+    return sources
+
+
+def _patch_record(path: Path, urls: list[str]) -> dict:
     with zipfile.ZipFile(path) as archive:
         manifest = json.loads(archive.read("patch_manifest.json").decode("utf-8-sig"))
     if not isinstance(manifest, dict):
         raise ValueError(f"invalid patch manifest: {path}")
     verify_manifest(manifest, PUBLIC_KEY_FILE)
+    sources = _download_sources(urls)
     return {
         "format": manifest.get("format"),
         "from_version": str(manifest.get("from_version") or ""),
         "to_version": str(manifest.get("to_version") or ""),
         "source_layout_version": int(manifest.get("source_layout_version") or 0),
         "target_layout_version": int(manifest.get("target_layout_version") or 0),
-        "url": url,
+        "url": sources[0]["url"],
+        "urls": [source["url"] for source in sources],
+        "sources": sources,
         "sha256": sha256_file(path).upper(),
         "size": path.stat().st_size,
         "filename": path.name,
@@ -51,6 +79,17 @@ def main() -> int:
     parser.add_argument("--url", default="")
     parser.add_argument("--patch", type=Path, action="append", default=[])
     parser.add_argument("--patch-url", action="append", default=[])
+    parser.add_argument(
+        "--patch-mirror",
+        action="append",
+        default=[],
+        metavar="PATCH_FILENAME=HTTPS_URL",
+    )
+    parser.add_argument(
+        "--channel-status",
+        choices=("auto", "ready", "hold", "awaiting-external-distribution"),
+        default="auto",
+    )
     parser.add_argument("--bridge-url", default="")
     parser.add_argument("--private-key", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=CHANNEL_FILE)
@@ -72,29 +111,61 @@ def main() -> int:
         if package_url.startswith("https://github.com/")
         else ""
     )
-    patches = [
-        _patch_record(path.resolve(), url)
-        for path, url in zip(args.patch, args.patch_url, strict=True)
-    ]
+    mirrors: dict[str, list[str]] = {}
+    for value in args.patch_mirror:
+        filename, separator, url = str(value).partition("=")
+        filename = filename.strip()
+        url = url.strip()
+        if not separator or not filename or not url:
+            parser.error("--patch-mirror must be PATCH_FILENAME=HTTPS_URL")
+        mirrors.setdefault(filename, []).append(url)
+
+    patches = []
+    try:
+        for path, url in zip(args.patch, args.patch_url, strict=True):
+            resolved = path.resolve()
+            patches.append(
+                _patch_record(
+                    resolved,
+                    [url, *mirrors.get(resolved.name, [])],
+                )
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
     for patch in patches:
         if patch["to_version"] != version:
             parser.error(
                 f"patch target {patch['to_version']} does not match channel version {version}"
             )
 
+    if args.channel_status == "auto":
+        channel_status = (
+            "ready"
+            if package_url or patches
+            else "awaiting-external-distribution"
+        )
+    else:
+        channel_status = args.channel_status
+    published_patches = patches if channel_status == "ready" else []
+    incremental_ready = channel_status == "ready" and bool(published_patches)
+
     manifest = {
         "schema_version": 3,
         "channel": "stable",
-        "channel_status": "ready" if package_url else "awaiting-external-distribution",
+        "channel_status": channel_status,
         "version": version,
         "latest_version": version,
         "runtime_layout_version": 3,
         "minimum_runtime_layout_version": 2,
         "minimum_launcher_version": str(runtime.get("minimum_launcher_version") or "1.0.0"),
         "minimum_updater_version": str(runtime.get("minimum_updater_version") or "1.0.0"),
-        "update_strategy": "verified-version-delta-with-full-fallback",
-        "supports_incremental_updates": True,
-        "requires_full_package": False,
+        "update_strategy": (
+            "verified-version-delta-with-full-fallback"
+            if incremental_ready
+            else ("hold" if channel_status == "hold" else "full-package")
+        ),
+        "supports_incremental_updates": incremental_ready,
+        "requires_full_package": not incremental_ready,
         "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
         "release_notes": runtime.get("release_notes") or "",
         "force_update": bool(runtime.get("force_update", False)),
@@ -107,7 +178,7 @@ def main() -> int:
             "size": package.stat().st_size,
             "filename": package.name,
         },
-        "patches": patches,
+        "patches": published_patches,
         "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     signed = sign_manifest(manifest, args.private_key.resolve())
@@ -120,7 +191,8 @@ def main() -> int:
     print(f"wrote {output}")
     print(
         f"package_sha256={signed['package']['sha256']} "
-        f"size={signed['package']['size']} patches={len(patches)}"
+        f"size={signed['package']['size']} patches={len(published_patches)} "
+        f"status={channel_status}"
     )
     return 0
 

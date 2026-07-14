@@ -13,11 +13,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from release_signing import SignatureError, sha256_file, verify_manifest
 
@@ -30,6 +31,18 @@ DELTA_FORMAT = "liveclipper-version-delta-v1"
 UPDATE_AGENT_RELATIVE = Path("updater") / "LiveClipperUpdater.exe"
 UPDATE_PUBLIC_KEY_RELATIVE = Path("updater") / "release_update_public_key.pem"
 INSTALL_MANIFEST = "install_manifest.json"
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+DOWNLOAD_ATTEMPTS_PER_SOURCE = 2
+DOWNLOAD_SOCKET_TIMEOUT = 30
+DOWNLOAD_TOTAL_TIMEOUT = 300
+INACTIVE_CHANNEL_STATES = {
+    "hold",
+    "paused",
+    "disabled",
+    "awaiting-external-distribution",
+}
+
+DownloadProgress = Callable[[int, int, str], None]
 
 
 def _runtime_root() -> Path:
@@ -218,6 +231,7 @@ def _normalize_release(data: dict[str, Any]) -> dict[str, Any]:
     result["version"] = version
     result["latest_version"] = version
     result["schema_version"] = int(result.get("schema_version") or 1)
+    result["channel_status"] = str(result.get("channel_status") or "ready").strip().lower()
     result.setdefault("update_strategy", "verified-version-delta")
     result.setdefault("requires_full_package", False)
     result.setdefault("minimum_updater_version", "1.0.0")
@@ -229,11 +243,56 @@ def _normalize_release(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _channel_is_active(release: dict[str, Any]) -> bool:
+    status = str(release.get("channel_status") or "ready").strip().lower()
+    return status not in INACTIVE_CHANNEL_STATES
+
+
 def _delta_candidates(info: dict[str, Any]) -> list[dict[str, Any]]:
     raw = info.get("patches")
     if isinstance(raw, dict):
         raw = list(raw.values())
     return [item for item in (raw or []) if isinstance(item, dict)]
+
+
+def _patch_sources(patch: dict[str, Any]) -> list[dict[str, str]]:
+    values: list[Any] = []
+    legacy_url = str(patch.get("url") or patch.get("download_url") or "").strip()
+    if legacy_url:
+        values.append({"name": patch.get("source_name") or "", "url": legacy_url})
+    raw_sources = patch.get("sources")
+    if not isinstance(raw_sources, list):
+        raw_sources = patch.get("urls")
+    if isinstance(raw_sources, list):
+        values.extend(raw_sources)
+
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(values, start=1):
+        if isinstance(item, dict):
+            url = str(item.get("url") or item.get("download_url") or "").strip()
+            name = str(item.get("name") or item.get("label") or "").strip()
+        else:
+            url = str(item or "").strip()
+            name = ""
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+        ):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        sources.append(
+            {
+                "name": name or parsed.hostname or f"下载源{index}",
+                "url": url,
+            }
+        )
+    return sources
 
 
 def _select_delta_patch(
@@ -249,16 +308,24 @@ def _select_delta_patch(
             continue
         if str(candidate.get("to_version") or "") != target_version:
             continue
-        url = str(candidate.get("url") or candidate.get("download_url") or "").strip()
+        sources = _patch_sources(candidate)
         sha256 = str(candidate.get("sha256") or "").strip().lower()
         try:
             size = int(candidate.get("size") or 0)
         except Exception:
             size = 0
-        if not url or not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0:
+        if not sources or not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0:
             continue
         result = dict(candidate)
-        result.update({"url": url, "sha256": sha256, "size": size})
+        result.update(
+            {
+                "url": sources[0]["url"],
+                "urls": [source["url"] for source in sources],
+                "sources": sources,
+                "sha256": sha256,
+                "size": size,
+            }
+        )
         return result
     return None
 
@@ -297,6 +364,12 @@ def _manifest_integrity_mismatches(manifest: dict[str, Any]) -> list[str]:
 
 
 def _with_update_route(release: dict[str, Any], local_version: str) -> dict[str, Any]:
+    if not _channel_is_active(release):
+        release["selected_patch"] = None
+        release["supports_incremental_updates"] = False
+        release["requires_full_package"] = True
+        release["update_strategy"] = "hold"
+        return release
     patch = _select_delta_patch(release, local_version)
     supported = bool(
         patch
@@ -314,14 +387,14 @@ def check_update() -> dict[str, Any] | None:
     local_manifest = _local_manifest()
     local_version = _manifest_version(local_manifest)
     remote = _fetch_signed_release(RELEASE_CHANNEL_PATH)
-    if remote:
-        release = _normalize_release(remote)
+    release = _normalize_release(remote) if remote else None
+    if release and _channel_is_active(release):
         if is_newer(_manifest_version(release), local_version):
             return _with_update_route(release, local_version)
 
     mismatches = _manifest_integrity_mismatches(local_manifest)
     if mismatches:
-        repair = _normalize_release(remote or local_manifest)
+        repair = _normalize_release(release or local_manifest)
         repair.update(
             {
                 "repair_required": True,
@@ -339,20 +412,111 @@ def compute_sha256(filepath: str | os.PathLike[str]) -> str:
     return sha256_file(filepath)
 
 
-def download_file(url: str, dest_path: str, progress_callback=None) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "LiveClipper/3"})
-    with urllib.request.urlopen(request, timeout=180, context=_ssl_context()) as response:
-        total = int(response.headers.get("Content-Length") or 0)
-        downloaded = 0
-        with open(dest_path, "wb") as handle:
+def _emit_download_progress(
+    progress_callback: DownloadProgress | None,
+    downloaded: int,
+    total: int,
+    message: str,
+) -> None:
+    if not progress_callback:
+        return
+    try:
+        progress_callback(downloaded, total, message)
+    except TypeError:
+        progress_callback(downloaded, total)  # type: ignore[misc]
+
+
+def _safe_download_error(exc: Exception) -> str:
+    text = str(exc or type(exc).__name__).strip()
+    text = re.sub(r"https?://[^\s；;]+", "download source", text, flags=re.I)
+    return text[:240] or type(exc).__name__
+
+def _download_from_source(
+    url: str,
+    destination: Path,
+    *,
+    expected_size: int,
+    progress_callback: DownloadProgress | None,
+    deadline: float,
+    source_name: str,
+) -> int:
+    offset = destination.stat().st_size if destination.is_file() else 0
+    if expected_size > 0 and offset > expected_size:
+        destination.unlink(missing_ok=True)
+        offset = 0
+    if expected_size > 0 and offset == expected_size:
+        return offset
+
+    headers = {"User-Agent": "LiveClipper/3"}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(
+        request,
+        timeout=DOWNLOAD_SOCKET_TIMEOUT,
+        context=_ssl_context(),
+    ) as response:
+        get_final_url = getattr(response, "geturl", None)
+        final_url = str(get_final_url() if callable(get_final_url) else url)
+        if urllib.parse.urlparse(final_url).scheme.lower() != "https":
+            raise RuntimeError("下载源重定向到不安全地址")
+        status = int(getattr(response, "status", 0) or response.getcode() or 200)
+        if offset and status == 206:
+            content_range = str(response.headers.get("Content-Range") or "")
+            match = re.match(r"bytes\s+(\d+)-\d+/(?:\d+|\*)", content_range, re.I)
+            if not match or int(match.group(1)) != offset:
+                destination.unlink(missing_ok=True)
+                raise RuntimeError("服务器返回的断点位置无效")
+            mode = "ab"
+            downloaded = offset
+        else:
+            mode = "wb"
+            downloaded = 0
+
+        total = expected_size
+        if total <= 0:
+            response_size = int(response.headers.get("Content-Length") or 0)
+            total = downloaded + response_size if response_size else 0
+        _emit_download_progress(
+            progress_callback,
+            downloaded,
+            total,
+            f"正在从 {source_name} 下载",
+        )
+
+        with destination.open(mode) as handle:
             while True:
-                chunk = response.read(1024 * 1024)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("下载超过总时限")
+                chunk = response.read(DOWNLOAD_CHUNK_SIZE)
                 if not chunk:
                     break
                 handle.write(chunk)
                 downloaded += len(chunk)
-                if progress_callback:
-                    progress_callback(downloaded, total)
+                if expected_size > 0 and downloaded > expected_size:
+                    handle.close()
+                    destination.unlink(missing_ok=True)
+                    raise RuntimeError("下载内容超过清单声明大小")
+                _emit_download_progress(
+                    progress_callback,
+                    downloaded,
+                    total,
+                    f"正在从 {source_name} 下载",
+                )
+    return downloaded
+
+
+def download_file(url: str, dest_path: str, progress_callback=None) -> None:
+    destination = Path(dest_path)
+    destination.unlink(missing_ok=True)
+    _download_from_source(
+        url,
+        destination,
+        expected_size=0,
+        progress_callback=progress_callback,
+        deadline=time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT,
+        source_name=urllib.parse.urlparse(url).hostname or "download source",
+    )
 
 
 def _package_url(info: dict[str, Any]) -> str:
@@ -390,34 +554,136 @@ def _download_root(target_version: str) -> Path:
 
 
 def _patch_filename(patch: dict[str, Any]) -> str:
-    url_name = Path(urllib.parse.urlparse(str(patch.get("url") or "")).path).name
-    if url_name.lower().endswith(".zip") and re.fullmatch(r"[A-Za-z0-9_.-]+", url_name):
-        return url_name
+    names = [
+        str(patch.get("filename") or "").strip(),
+        Path(urllib.parse.urlparse(str(patch.get("url") or "")).path).name,
+    ]
+    for name in names:
+        if name.lower().endswith(".zip") and re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+            return name
     return f"LiveClipperPatch_{patch['from_version']}_to_{patch['to_version']}.zip"
 
 
-def _verified_download(patch: dict[str, Any], destination: Path) -> None:
+def _verified_download(
+    patch: dict[str, Any],
+    destination: Path,
+    progress_callback: DownloadProgress | None = None,
+    *,
+    total_timeout: int = DOWNLOAD_TOTAL_TIMEOUT,
+) -> None:
     expected_hash = str(patch["sha256"]).lower()
     expected_size = int(patch["size"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file():
         if destination.stat().st_size == expected_size and sha256_file(destination) == expected_hash:
+            _emit_download_progress(
+                progress_callback,
+                expected_size,
+                expected_size,
+                "已使用本地验证缓存",
+            )
             return
         destination.unlink(missing_ok=True)
+
     temporary = destination.with_suffix(destination.suffix + ".part")
-    temporary.unlink(missing_ok=True)
-    try:
-        download_file(str(patch["url"]), str(temporary))
-        if temporary.stat().st_size != expected_size:
-            raise RuntimeError("增量包大小校验失败")
-        if sha256_file(temporary) != expected_hash:
-            raise RuntimeError("增量包 SHA256 校验失败")
-        os.replace(temporary, destination)
-    finally:
+    if temporary.is_file() and temporary.stat().st_size > expected_size:
+        temporary.unlink(missing_ok=True)
+    if temporary.is_file() and temporary.stat().st_size == expected_size:
+        _emit_download_progress(
+            progress_callback,
+            expected_size,
+            expected_size,
+            "正在校验已下载文件",
+        )
+        if sha256_file(temporary) == expected_hash:
+            os.replace(temporary, destination)
+            _emit_download_progress(
+                progress_callback,
+                expected_size,
+                expected_size,
+                "增量包下载并校验完成",
+            )
+            return
         temporary.unlink(missing_ok=True)
 
+    sources = _patch_sources(patch)
+    if not sources:
+        raise RuntimeError("更新清单没有可用的 HTTPS 下载源")
 
-def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]:
+    deadline = time.monotonic() + max(1, int(total_timeout))
+    errors: list[str] = []
+    for source in sources:
+        source_name = source["name"]
+        for attempt in range(1, DOWNLOAD_ATTEMPTS_PER_SOURCE + 1):
+            if time.monotonic() >= deadline:
+                errors.append("下载超过总时限")
+                break
+            try:
+                _download_from_source(
+                    source["url"],
+                    temporary,
+                    expected_size=expected_size,
+                    progress_callback=progress_callback,
+                    deadline=deadline,
+                    source_name=source_name,
+                )
+                current_size = temporary.stat().st_size if temporary.is_file() else 0
+                if current_size != expected_size:
+                    raise RuntimeError(
+                        f"文件不完整 {current_size}/{expected_size} 字节"
+                    )
+                _emit_download_progress(
+                    progress_callback,
+                    expected_size,
+                    expected_size,
+                    "正在校验增量包",
+                )
+                if sha256_file(temporary) != expected_hash:
+                    temporary.unlink(missing_ok=True)
+                    raise RuntimeError("SHA256 校验失败")
+                os.replace(temporary, destination)
+                _emit_download_progress(
+                    progress_callback,
+                    expected_size,
+                    expected_size,
+                    "增量包下载并校验完成",
+                )
+                return
+            except Exception as exc:
+                errors.append(
+                    f"{source_name} 第{attempt}次: "
+                    f"{type(exc).__name__}: {_safe_download_error(exc)}"
+                )
+                if temporary.is_file() and temporary.stat().st_size > expected_size:
+                    temporary.unlink(missing_ok=True)
+                remaining = deadline - time.monotonic()
+                if attempt < DOWNLOAD_ATTEMPTS_PER_SOURCE and remaining > 0:
+                    time.sleep(min(float(attempt), remaining))
+        if time.monotonic() >= deadline:
+            break
+
+    partial_size = temporary.stat().st_size if temporary.is_file() else 0
+    detail = "；".join(errors[-4:]) or "未知网络错误"
+    raise RuntimeError(
+        f"增量包下载失败，已保留断点 {partial_size}/{expected_size} 字节；{detail}"
+    )
+
+
+def apply_update_headless(
+    version_info: dict[str, Any] | None,
+    progress_callback: DownloadProgress | None = None,
+) -> dict[str, Any]:
     info = _normalize_release(version_info or {})
+    if not _channel_is_active(info):
+        return {
+            "ok": False,
+            "full_package_required": False,
+            "restart_required": False,
+            "version": _manifest_version(info),
+            "updated": [],
+            "failed": [],
+            "msg": "更新通道维护中，请稍后再试。",
+        }
     patch = info.get("selected_patch") if isinstance(info.get("selected_patch"), dict) else None
     if patch is None:
         patch = _select_delta_patch(info)
@@ -431,7 +697,17 @@ def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]
     target_version = _manifest_version(info)
     download_root = _download_root(target_version)
     patch_path = download_root / _patch_filename(patch)
-    _verified_download(patch, patch_path)
+    _verified_download(
+        patch,
+        patch_path,
+        progress_callback=progress_callback,
+    )
+    _emit_download_progress(
+        progress_callback,
+        int(patch["size"]),
+        int(patch["size"]),
+        "增量包已验证，正在启动更新程序",
+    )
 
     agent_copy = download_root / "LiveClipperUpdater.exe"
     key_copy = download_root / "release_update_public_key.pem"
@@ -464,6 +740,12 @@ def apply_update_headless(version_info: dict[str, Any] | None) -> dict[str, Any]
         stderr=subprocess.DEVNULL,
         close_fds=True,
         creationflags=flags,
+    )
+    _emit_download_progress(
+        progress_callback,
+        int(patch["size"]),
+        int(patch["size"]),
+        "更新程序已启动，客户端即将退出",
     )
     return {
         "ok": True,

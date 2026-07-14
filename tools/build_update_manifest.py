@@ -8,6 +8,8 @@ import json
 import time
 from pathlib import Path
 
+from runtime_v3_versions import LAUNCHER_VERSION, UPDATER_VERSION
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "app"
@@ -56,6 +58,7 @@ SOURCE_FILES = [
     ROOT / "tools" / "build_v3_package.py",
     ROOT / "tools" / "build_delta_package.py",
     ROOT / "tools" / "build_bridge_exe.py",
+    ROOT / "tools" / "runtime_v3_versions.py",
     ROOT / "tools" / "liveclipper_launcher.py",
     ROOT / "tools" / "liveclipper_launcher.spec",
     ROOT / "tools" / "liveclipper_update_agent.py",
@@ -106,8 +109,8 @@ def build_manifest(version: str, release_notes: str, force_update: bool = False)
         "supports_incremental_updates": True,
         "requires_full_package": False,
         "requires_full_package_note": "没有匹配当前版本的签名补丁或安装完整性异常时，才需要完整包。",
-        "minimum_launcher_version": "1.0.0",
-        "minimum_updater_version": "1.1.0",
+        "minimum_launcher_version": LAUNCHER_VERSION,
+        "minimum_updater_version": UPDATER_VERSION,
         "release_page_url": RELEASE_PAGE_URL,
         "package_url": "",
         "package_sha256": "",

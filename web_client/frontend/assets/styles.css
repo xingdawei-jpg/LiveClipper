@@ -415,6 +415,33 @@ button {
   white-space: pre-wrap;
 }
 
+.update-card-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  margin-top: 6px;
+}
+
+.update-card-progress[hidden] {
+  display: none;
+}
+
+.update-card-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.update-card-progress span {
+  min-width: 112px;
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+  text-align: right;
+  white-space: nowrap;
+}
+
 .update-card-actions {
   display: flex;
   justify-content: flex-end;

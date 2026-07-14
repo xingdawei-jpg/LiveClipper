@@ -11,9 +11,10 @@ Every Runtime V3 release produces:
 - SHA256 sidecars for the full package, patches, and bridge executable;
 - a one-time embedded bridge when a supported source is Runtime V2.
 
-The full package may be distributed through an external file service. Automatic
-patch URLs must be stable direct HTTPS downloads; an interactive share page is
-not a valid automatic-update URL.
+The full package may be distributed through an external file service. Every
+automatic patch must have at least two stable direct HTTPS downloads in the
+signed channel: GitHub primary and Aliyun OSS fallback. An interactive share
+page is not a valid automatic-update URL.
 
 ## 2. Key handling
 
@@ -48,12 +49,18 @@ not a valid automatic-update URL.
     progress, final pointer state, and first-launch health.
 14. Reject a release if the reference-device patch exceeds 60 seconds, shows no
     visible progress, or rereads unchanged hard-linked runtime files.
-15. Upload package and patch assets, then verify their remote hashes.
-16. Generate and sign release/stable.json.
-17. Publish the signed channel last.
+15. Upload patch assets to GitHub and Aliyun OSS. Verify exact size and SHA256
+    from both direct HTTPS URLs.
+16. Test DNS resolution, download progress, interruption/resume, and source
+    fallback from a separate Windows device and network.
+17. Generate and sign release/stable.json with channel_status=hold. A hold
+    manifest contains no published patch records.
+18. Run the clean-install and exact published-source delta acceptance tests.
+19. Regenerate the signed manifest with channel_status=ready and publish it
+    last.
 
-Publishing the channel before all referenced assets are remotely verifiable is
-forbidden.
+Publishing a ready channel before every referenced source is remotely
+verifiable is forbidden.
 
 ## 4. Package acceptance gates
 
@@ -67,6 +74,10 @@ A release is accepted only when:
 - every omitted runtime payload has identical signed source/target metadata;
 - changed payloads and copy fallbacks are hash-verified;
 - the installed updater meets the channel minimum updater version;
+- the runtime remains open until the patch has passed size and SHA256 checks;
+- the in-app card shows byte and percentage progress during the download;
+- an interrupted download preserves its partial file and resumes with Range;
+- failure of the GitHub source automatically falls back to Aliyun OSS;
 - update progress remains visible from process exit through pointer activation;
 - partial stable-file replacement restores every completed replacement;
 - a clean extracted package starts and reports runtime_layout_version=3;
@@ -93,7 +104,8 @@ The bridge must be tested against the exact published V2 ZIP. It must:
 
 ## 6. Rollout
 
-Use staged release-channel exposure when a new updater or launcher is involved:
+Keep channel_status=hold throughout build and acceptance. Use staged
+release-channel exposure when a new updater or launcher is involved:
 
 1. internal package smoke test;
 2. a small controlled device set;
@@ -104,7 +116,29 @@ Keep direct patches from at least the previous two stable versions when their
 runtime layouts are compatible. Older, damaged, or unsupported installations
 fall back to the full package.
 
-## 7. Rollback
+## 7. Full-package baseline policy
+
+A new full-package baseline is mandatory when the launcher, updater, release
+trust root, runtime layout, or install-state format changes. This is not the
+normal release path.
+
+The baseline sequence is:
+
+1. bump the stable component versions from their single source;
+2. rebuild both stable executables and the frozen business runtime;
+3. assemble and sign a clean V3 full package;
+4. test clean install, polluted AppData, health confirmation, and rollback;
+5. build a synthetic next-version runtime delta from that exact package;
+6. prove the normal delta has zero stable payload files;
+7. apply it with the updater executable from the exact baseline package;
+8. keep the public channel on hold until a separate device passes.
+
+After the baseline is accepted, normal business releases reuse the exact stable
+launcher and updater from that baseline. They publish signed direct runtime
+deltas. Users do not need another full package unless the stable layer changes
+again or their installation is damaged or unsupported.
+
+## 8. Rollback
 
 Do not lower the remote version. For a runtime regression:
 

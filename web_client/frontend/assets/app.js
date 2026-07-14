@@ -38,6 +38,10 @@ const state = {
     info: null,
     message: "\u672a\u68c0\u67e5",
     error: "",
+    stage: "idle",
+    progress: 0,
+    downloaded: 0,
+    total: 0,
   },
   runtime: null,
   liveRoomActivity: {},
@@ -2774,40 +2778,6 @@ async function unbindDevice() {
   await loadLicense();
 }
 
-async function checkUpdate() {
-  const status = $("update-status");
-  if (status) status.value = "正在检查...";
-  const result = await api("/api/update/check");
-  if (!result.update_available) {
-    if (status) status.value = "当前已是最新版本";
-    toast("当前已是最新版本", "success");
-    return;
-  }
-  const update = result.update || {};
-  if (status) status.value = `发现新版本 v${update.version || ""}`;
-  toast(`发现新版本 v${update.version || ""}`, "success");
-}
-
-async function applyUpdate() {
-  const status = $("update-status");
-  if (!confirm("安装更新后需要重启客户端才能生效，继续吗？")) return;
-  if (status) status.value = "正在安装更新...";
-  const result = await api("/api/update/apply", { method: "POST", body: "{}" });
-  if (result.ok) {
-    const message = result.auto_restart
-      ? "更新完成，客户端即将自动重启..."
-      : result.restart_required
-        ? "更新完成，请重启客户端"
-        : "当前已是最新版本";
-    if (status) status.value = message;
-    toast(message, "success");
-    return;
-  } else {
-    if (status) status.value = "更新失败";
-    toast(result.msg || "更新失败", "error");
-  }
-}
-
 async function getRuntimeInfo() {
   if (state.runtime) return state.runtime;
   try {
@@ -2860,6 +2830,20 @@ function renderUpdateState() {
 
   const cardStatus = $("update-card-status");
   if (cardStatus) cardStatus.textContent = message;
+
+  const progressValue = Math.max(0, Math.min(100, Number(update.progress || 0)));
+  const progressWrap = $("update-card-progress-wrap");
+  if (progressWrap) progressWrap.hidden = !update.installing;
+  const progressBar = $("update-card-progress");
+  if (progressBar) progressBar.value = progressValue;
+  const progressText = $("update-card-progress-text");
+  if (progressText) {
+    const downloaded = Number(update.downloaded || 0);
+    const total = Number(update.total || 0);
+    progressText.textContent = total > 0
+      ? progressValue + "%  " + formatFileSize(downloaded) + " / " + formatFileSize(total)
+      : (message || "正在准备下载");
+  }
   const cardVersion = $("update-card-version");
   if (cardVersion) {
     cardVersion.textContent = hasUpdate && version
@@ -2963,6 +2947,20 @@ async function checkUpdate(options = {}) {
   }
 }
 
+async function refreshUpdateProgress() {
+  const result = await api("/api/update/status");
+  setUpdateState({
+    installing: Boolean(result.running),
+    stage: result.stage || state.update.stage || "idle",
+    progress: Number(result.percent || 0),
+    downloaded: Number(result.downloaded || 0),
+    total: Number(result.total || 0),
+    message: result.message || state.update.message,
+    error: result.error || "",
+  });
+  return result;
+}
+
 async function applyUpdate() {
   if (!state.update.available && !state.update.checking) {
     const result = await checkUpdate({ quiet: true });
@@ -2978,7 +2976,7 @@ async function applyUpdate() {
     setUpdateState({
       installing: false,
       error: result.ok ? "" : message,
-      message: result.ok ? "已打开完整包下载页面" : "需要新版完整包",
+      message: result.ok ? "\u5df2\u6253\u5f00\u5b8c\u6574\u5305\u4e0b\u8f7d\u9875\u9762" : "\u9700\u8981\u65b0\u7248\u5b8c\u6574\u5305",
     });
     toast(message, result.ok ? "success" : "warning");
     return { ...result, full_package_required: true };
@@ -2988,31 +2986,58 @@ async function applyUpdate() {
     installing: true,
     checking: false,
     error: "",
-    message: "\u6b63\u5728\u5b89\u88c5\u66f4\u65b0...",
+    stage: "checking",
+    progress: 0,
+    downloaded: 0,
+    total: Number(state.update.info?.patch_size || 0),
+    message: "\u6b63\u5728\u51c6\u5907\u66f4\u65b0...",
   });
-  const result = await api("/api/update/apply", { method: "POST", body: "{}" });
-  if (result.ok) {
-    const message = result.auto_restart
-      ? "\u66f4\u65b0\u5b8c\u6210\uff0c\u5ba2\u6237\u7aef\u5373\u5c06\u81ea\u52a8\u91cd\u542f..."
-      : result.restart_required
-        ? "\u66f4\u65b0\u5b8c\u6210\uff0c\u8bf7\u91cd\u542f\u5ba2\u6237\u7aef"
-        : "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c";
+
+  let pollTimer = null;
+  const poll = () => refreshUpdateProgress().catch(() => null);
+  pollTimer = window.setInterval(poll, 500);
+  poll();
+
+  try {
+    const result = await api("/api/update/apply", { method: "POST", body: "{}" });
+    if (result.ok) {
+      const message = result.auto_restart
+        ? "\u66f4\u65b0\u5df2\u9a8c\u8bc1\uff0c\u5ba2\u6237\u7aef\u5373\u5c06\u81ea\u52a8\u91cd\u542f..."
+        : result.restart_required
+          ? "\u66f4\u65b0\u5df2\u9a8c\u8bc1\uff0c\u8bf7\u91cd\u542f\u5ba2\u6237\u7aef"
+          : "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c";
+      setUpdateState({
+        installing: false,
+        available: false,
+        stage: "complete",
+        progress: 100,
+        message,
+      });
+      toast(message, "success");
+      return result;
+    }
+    const message = result.msg || "\u66f4\u65b0\u5931\u8d25";
     setUpdateState({
       installing: false,
-      available: false,
+      stage: result.full_package_required ? "full-package" : "error",
+      error: message,
       message,
     });
-    toast(message, "success");
+    toast(message, result.full_package_required ? "warning" : "error");
     return result;
+  } catch (error) {
+    const message = error.message || String(error);
+    setUpdateState({
+      installing: false,
+      stage: "error",
+      error: message,
+      message: "\u66f4\u65b0\u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u4e0b\u8f7d\u65ad\u70b9",
+    });
+    toast(message, "error");
+    return { ok: false, msg: message };
+  } finally {
+    if (pollTimer !== null) window.clearInterval(pollTimer);
   }
-  const message = result.msg || "\u66f4\u65b0\u5931\u8d25";
-  setUpdateState({
-    installing: false,
-    error: message,
-    message,
-  });
-  toast(message, "error");
-  return result;
 }
 
 function feedback() {

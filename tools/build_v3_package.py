@@ -18,13 +18,12 @@ if APP_IMPORT_DIR.is_dir() and str(APP_IMPORT_DIR) not in sys.path:
 
 
 from release_signing import sha256_file, sign_manifest
+from runtime_v3_versions import LAUNCHER_VERSION, UPDATER_VERSION
 
 
 RUNTIME_MANIFEST_FORMAT = "liveclipper-runtime-manifest-v1"
 INSTALL_MANIFEST_FORMAT = "liveclipper-install-manifest-v1"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
-LAUNCHER_VERSION = "1.0.0"
-UPDATER_VERSION = "1.1.0"
 RUNTIME_MANIFEST = "runtime_manifest.json"
 INSTALL_MANIFEST = "install_manifest.json"
 
