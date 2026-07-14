@@ -1,0 +1,17 @@
+{
+  "tag": "v2026.7.14.6",
+  "title": "LiveClipper 2026.7.14.6",
+  "notes": "Runtime V3 signed incremental update from 2026.7.14.5 to 2026.7.14.6.\n\n- Treat manually selected preview duration as authoritative when exporting.\n- Allow up to five final seconds of safe duration grace only after clean candidates are exhausted.\n- Keep launcher 1.1.0 and updater 1.2.0 unchanged.",
+  "assets": [
+    {
+      "name": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip",
+      "sha256": "B3280895320CDED709B44D48A7D565AF699F1397AD8BB377E199C968CA4B09F1"
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip.sha256.txt",
+      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip.sha256.txt",
+      "sha256": "19F8C3A15A63103B8F38533B8B658EBEFB0431865F522AF38A78A7E4D2C56062"
+    }
+  ]
+}
