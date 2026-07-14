@@ -1,33 +1,61 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "hold",
-  "version": "2026.7.14.4",
-  "latest_version": "2026.7.14.4",
+  "channel_status": "ready",
+  "version": "2026.7.14.6",
+  "latest_version": "2026.7.14.6",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
-  "minimum_launcher_version": "1.0.0",
-  "minimum_updater_version": "1.1.0",
-  "update_strategy": "hold",
-  "supports_incremental_updates": false,
-  "requires_full_package": true,
-  "requires_full_package_note": "Final full-package baseline is being rebuilt and externally verified. Automatic updates are paused.",
-  "release_notes": "Final full-package baseline is being rebuilt and externally verified. Automatic updates are paused.",
+  "minimum_launcher_version": "1.1.0",
+  "minimum_updater_version": "1.2.0",
+  "update_strategy": "verified-version-delta-with-full-fallback",
+  "supports_incremental_updates": true,
+  "requires_full_package": false,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
+  "release_notes": "AI选片内容不足时最多宽限5秒；预览中手动确认的片单不再因低于自动目标时长而阻止成片。",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "745927B9B061B40DD421B9C022261B5EF922BA4F3E9EF2F0B717449D68EF71B3",
-    "size": 581616322,
-    "filename": "LiveClipperWeb_2026.7.14.4_full_v3_20260714.zip"
+    "sha256": "E2749415D513E1204524E952B0002E8FEB1EED7421B6912DEA8192D8975D0F3D",
+    "size": 631833308,
+    "filename": "package_v3_2026.7.14.6_delta_target.zip"
   },
-  "patches": [],
-  "published_at": "2026-07-14 11:26:52",
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.14.5",
+      "to_version": "2026.7.14.6",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.6/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.6/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip",
+        "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.14.6/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip"
+        },
+        {
+          "name": "Aliyun OSS",
+          "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip"
+        }
+      ],
+      "sha256": "B3280895320CDED709B44D48A7D565AF699F1397AD8BB377E199C968CA4B09F1",
+      "size": 17265482,
+      "filename": "LiveClipperPatch_2026.7.14.5_to_2026.7.14.6_v3.zip",
+      "runtime_payload_files": 4,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-14 13:59:34",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "0Rb64Zeojq25DvxRMZEZWDuszMRRXVkKbNOc3i5RH1JRaNNh/2+PyVTsRwJMvlx0Shd2qTK7jSxjpO5n64W4BA=="
+    "value": "eBHNF5Gqc88/yzirYicuqoXBoqyEwupmLpYVwpExR+zfl3oH0q1yJUVf2Z5Nk7vReXKedyUfbd3H3MouTK5wCg=="
   }
 }
