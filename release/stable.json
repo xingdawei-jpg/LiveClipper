@@ -1,18 +1,18 @@
 {
   "schema_version": 3,
   "channel": "stable",
-  "channel_status": "awaiting-external-distribution",
+  "channel_status": "hold",
   "version": "2026.7.14.4",
   "latest_version": "2026.7.14.4",
   "runtime_layout_version": 3,
   "minimum_runtime_layout_version": 2,
   "minimum_launcher_version": "1.0.0",
   "minimum_updater_version": "1.1.0",
-  "update_strategy": "verified-version-delta-with-full-fallback",
-  "supports_incremental_updates": true,
-  "requires_full_package": false,
-  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
-  "release_notes": "修复增量更新时继承旧版本运行目录环境，导致新版本后端仍加载13.13并被健康检查回滚；冻结运行时现强制绑定自身目录。",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "Final full-package baseline is being rebuilt and externally verified. Automatic updates are paused.",
+  "release_notes": "Final full-package baseline is being rebuilt and externally verified. Automatic updates are paused.",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
@@ -23,25 +23,11 @@
     "size": 581616322,
     "filename": "LiveClipperWeb_2026.7.14.4_full_v3_20260714.zip"
   },
-  "patches": [
-    {
-      "format": "liveclipper-version-delta-v1",
-      "from_version": "2026.7.13.13",
-      "to_version": "2026.7.14.4",
-      "source_layout_version": 3,
-      "target_layout_version": 3,
-      "url": "https://cdn.jsdelivr.net/gh/xingdawei-jpg/LiveClipper@da47e3437dbba25a1d8d1f6f6ac0452a2cd214ab/LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
-      "sha256": "1F2A7CB091D92F5A5C5FEC4D7A59CC575FA533BDF1C890AF97600648D632C981",
-      "size": 17272740,
-      "filename": "LiveClipperPatch_2026.7.13.13_to_2026.7.14.4_v3.zip",
-      "runtime_payload_files": 5,
-      "stable_payload_files": 0
-    }
-  ],
-  "published_at": "2026-07-14 10:40:33",
+  "patches": [],
+  "published_at": "2026-07-14 11:26:52",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "IfjKWvu7iUMm0SFWv26BmQxaEadY3KMmQ6/MZ1qVI4LLBco8ZMuGEPyRZXHaVMGyyWHJ0nCDxolD8YB15lWYDw=="
+    "value": "0Rb64Zeojq25DvxRMZEZWDuszMRRXVkKbNOc3i5RH1JRaNNh/2+PyVTsRwJMvlx0Shd2qTK7jSxjpO5n64W4BA=="
   }
 }
