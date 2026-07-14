@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -6360,6 +6360,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         dedup_summary["category_summary"] = category_summary
         dedup_summary["preference_summary"] = preference_summary
         dedup_summary["topic_coverage_summary"] = topic_coverage_summary
+        dedup_summary["duration_relaxation"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("duration_relaxation") or {}
+        )
         dedup_summary["source_contract"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("source_contract") or {}
         )
@@ -9357,6 +9360,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 ken_burns_enabled=payload.ken_burns_enabled,
                 mirror_enabled=payload.mirror_enabled,
                 kb_intensity=payload.ken_burns_intensity,
+                _user_confirmed_clips=True,
             )
         finally:
             ai_mod.ai_analyze_clips = original_ai_analyze
@@ -9478,6 +9482,9 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         dedup_summary["category_summary"] = category_summary
         dedup_summary["preference_summary"] = preference_summary
         dedup_summary["topic_coverage_summary"] = topic_coverage_summary
+        dedup_summary["duration_relaxation"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("duration_relaxation") or {}
+        )
         _set_task_progress(task_id, 94, "生成预览列表")
         public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)

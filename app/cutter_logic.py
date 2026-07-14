@@ -24,7 +24,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
-from selection_contracts import DurationContract
+from selection_contracts import DurationContract, SHORTAGE_GRACE_SECONDS
 
 # 编码器辅助：优先硬件加速，回退软件编码
 _hw_encoder_checked = False
@@ -952,19 +952,55 @@ def _selection_duration_total(clips):
     return total
 
 
-def _validate_selected_duration_contract(clips, target_duration, speed_factor=1.0, log_fn=None):
+def _selection_shortage_grace_seconds(analysis_metadata):
+    relaxation = dict((analysis_metadata or {}).get("duration_relaxation") or {})
+    if not relaxation.get("applied"):
+        return 0.0
+    try:
+        return min(
+            float(SHORTAGE_GRACE_SECONDS),
+            max(0.0, float(relaxation.get("grace_seconds") or 0.0)),
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _validate_selected_duration_contract(
+    clips,
+    target_duration,
+    speed_factor=1.0,
+    log_fn=None,
+    shortage_grace_seconds=0.0,
+    user_confirmed=False,
+):
     source_total = _selection_duration_total(clips)
     contract = DurationContract.create(target_duration, speed_factor)
-    status = contract.status(source_total)
+    status = contract.status(
+        source_total,
+        shortage_grace_seconds=shortage_grace_seconds,
+    )
     speed = contract.speed_factor
     projected = status["projected_final"]
-    target, low, high = contract.final_target, contract.final_min, contract.final_max
+    target, high = contract.final_target, contract.final_max
+    standard_low = contract.final_min
+    low = float(status["relaxed_low"])
+    accepted = bool(status["accepted"] or (user_confirmed and source_total > 0))
     if log_fn:
         log_fn(
             f"时长合同: 片单原时长{source_total:.1f}s，按{speed:.2f}x预计成片{projected:.1f}s，"
             f"要求{low:.0f}-{high:.0f}s"
         )
-    if not status["accepted"]:
+        if user_confirmed and not status["accepted"]:
+            log_fn(
+                f"手动片单时长确认: 预计成片{projected:.1f}s低于自动下限{low:.0f}s，"
+                "按用户在预览中的最终选择继续成片"
+            )
+        elif status.get("used_shortage_grace"):
+            log_fn(
+                f"内容不足时长弹性: 标准下限{standard_low:.0f}s，"
+                f"本次宽限{float(shortage_grace_seconds):.0f}s后下限{low:.0f}s"
+            )
+    if not accepted:
         raise RuntimeError(
             f"AI未满足时长：片单原时长{source_total:.1f}秒，预计成片{projected:.1f}秒，"
             f"目标{target:.0f}秒（允许{low:.0f}-{high:.0f}秒）"
@@ -974,17 +1010,38 @@ def _validate_selected_duration_contract(clips, target_duration, speed_factor=1.
         "projected_final": projected,
         "target": target,
         "low": low,
+        "standard_low": standard_low,
         "high": high,
+        "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
+        "user_confirmed": bool(user_confirmed),
         "duration_contract": contract.to_dict(),
     }
 
 
-def _validate_actual_duration_contract(actual_duration, target_duration, margin=1.0):
+def _validate_actual_duration_contract(
+    actual_duration,
+    target_duration,
+    margin=1.0,
+    shortage_grace_seconds=0.0,
+    user_confirmed=False,
+):
     contract = DurationContract.create(target_duration, 1.0, acceptance_margin=margin)
-    target, low, high = contract.final_target, contract.final_min, contract.final_max
     actual = max(0.0, float(actual_duration or 0.0))
-    ok = actual > 0 and contract.status(actual)["accepted"]
-    return ok, {"actual": actual, "target": target, "low": low, "high": high}
+    status = contract.status(
+        actual,
+        shortage_grace_seconds=shortage_grace_seconds,
+    )
+    ok = actual > 0 and bool(status["accepted"] or user_confirmed)
+    return ok, {
+        "actual": actual,
+        "target": contract.final_target,
+        "low": float(status["relaxed_low"]),
+        "standard_low": contract.final_min,
+        "high": contract.final_max,
+        "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
+        "used_shortage_grace": bool(status.get("used_shortage_grace")),
+        "user_confirmed": bool(user_confirmed),
+    }
 
 
 def _append_filter(base, extra):
@@ -2088,7 +2145,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                    pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                    _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                    target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
-                   dedup_video_options=None, dedup_audio_options=None, transition_options=None):
+                   dedup_video_options=None, dedup_audio_options=None, transition_options=None,
+                   _user_confirmed_clips=False):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -2497,12 +2555,15 @@ def process_video(video_path, srt_path=None, output_path=None,
             from stt import cleanup_srt; cleanup_srt(temp_srt)
         return False
 
+    _duration_shortage_grace = _selection_shortage_grace_seconds(analysis_metadata)
     if ai_is_enabled():
         _validate_selected_duration_contract(
             ordered_clips,
             target_duration,
             _planned_speed_factor,
             _log,
+            shortage_grace_seconds=_duration_shortage_grace,
+            user_confirmed=_user_confirmed_clips,
         )
 
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
@@ -3247,6 +3308,8 @@ def process_video(video_path, srt_path=None, output_path=None,
         _nosub_duration,
         target_duration,
         margin=1.0,
+        shortage_grace_seconds=_duration_shortage_grace,
+        user_confirmed=_user_confirmed_clips,
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
@@ -3359,6 +3422,8 @@ def process_video(video_path, srt_path=None, output_path=None,
             _actual_dur,
             target_duration,
             margin=1.0,
+            shortage_grace_seconds=_duration_shortage_grace,
+            user_confirmed=_user_confirmed_clips,
         )
         if not _final_duration_ok:
             _duration_error = (
@@ -4877,7 +4942,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
                                 mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, target_duration=target_duration,
                                 dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
-                                transition_options=transition_options)
+                                transition_options=transition_options, _user_confirmed_clips=True)
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn
@@ -4906,6 +4971,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     ai_controls = extra_kwargs.get("ai_controls")
     kb_intensity = extra_kwargs.get("kb_intensity", "中")
     _clips_only = bool(extra_kwargs.get("_clips_only"))
+    _user_confirmed_clips = bool(extra_kwargs.get("_user_confirmed_clips"))
     global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
     _hw_fallback = False
     _hw_encoder_checked = False
@@ -5267,6 +5333,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         shutil.rmtree(tmp, ignore_errors=True)
         raise RuntimeError(failure_message)
 
+    _duration_shortage_grace = _selection_shortage_grace_seconds(analysis_metadata)
     _log(f"AI 选到 {len(ordered_clips)} 个片段")
 
     # Map clips back to source videos
@@ -5512,6 +5579,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         target_duration,
         _planned_speed_factor,
         _log,
+        shortage_grace_seconds=_duration_shortage_grace,
+        user_confirmed=_user_confirmed_clips,
     )
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
@@ -6185,6 +6254,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _nosub_duration,
         target_duration,
         margin=1.0,
+        shortage_grace_seconds=_duration_shortage_grace,
+        user_confirmed=_user_confirmed_clips,
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
@@ -6240,6 +6311,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             _actual_dur,
             target_duration,
             margin=1.0,
+            shortage_grace_seconds=_duration_shortage_grace,
+            user_confirmed=_user_confirmed_clips,
         )
         if not _final_duration_ok:
             _duration_error = (

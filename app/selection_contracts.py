@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 CONTRACT_VERSION = "selection-v1"
+SHORTAGE_GRACE_SECONDS = 5.0
 
 
 def _positive_float(value: Any, default: float) -> float:
@@ -106,17 +107,27 @@ class DurationContract:
     def ai_target_seconds(self) -> int:
         return max(1, int(round(self.source_target)))
 
-    def status(self, source_total: Any) -> dict[str, Any]:
+    def status(self, source_total: Any, *, shortage_grace_seconds: Any = 0.0) -> dict[str, Any]:
         total = max(0.0, float(source_total or 0.0))
         projected_final = total / self.speed_factor
-        accepted_min = max(0.0, self.final_min - self.acceptance_margin)
+        try:
+            shortage_grace = max(0.0, float(shortage_grace_seconds or 0.0))
+        except (TypeError, ValueError):
+            shortage_grace = 0.0
+        relaxed_final_min = max(1.0, self.final_min - shortage_grace)
+        normal_accepted_min = max(0.0, self.final_min - self.acceptance_margin)
+        accepted_min = max(0.0, relaxed_final_min - self.acceptance_margin)
         accepted_max = self.final_max + self.acceptance_margin
+        accepted = accepted_min <= projected_final <= accepted_max
         return {
             "source_total": total,
             "projected_final": projected_final,
             "target": self.final_target,
             "low": self.final_min,
             "high": self.final_max,
+            "relaxed_low": relaxed_final_min,
+            "relaxed_source_low": relaxed_final_min * self.speed_factor,
+            "shortage_grace_seconds": shortage_grace,
             "source_target": self.source_target,
             "source_low": self.source_min,
             "source_high": self.source_max,
@@ -124,7 +135,8 @@ class DurationContract:
             "excess": max(0.0, total - self.source_max),
             "short": projected_final < accepted_min,
             "long": projected_final > accepted_max,
-            "accepted": accepted_min <= projected_final <= accepted_max,
+            "accepted": accepted,
+            "used_shortage_grace": bool(shortage_grace and projected_final < normal_accepted_min and accepted),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -359,11 +371,27 @@ class SelectionResult:
     def success(cls, manifest: SelectionManifest) -> "SelectionResult":
         return cls(status=SelectionStatus.SUCCESS, manifest=manifest)
 
+    @classmethod
+    def partial_insufficient(
+        cls,
+        manifest: SelectionManifest,
+        *,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> "SelectionResult":
+        return cls(
+            status=SelectionStatus.PARTIAL_INSUFFICIENT,
+            manifest=manifest,
+            failure_code="insufficient_content",
+            message=str(message or ""),
+            details=dict(details or {}),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "status": self.status.value,
-            "ok": self.status == SelectionStatus.SUCCESS,
+            "ok": self.status in {SelectionStatus.SUCCESS, SelectionStatus.PARTIAL_INSUFFICIENT},
             "failure_code": self.failure_code,
             "message": self.message,
             "details": dict(self.details or {}),

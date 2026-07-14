@@ -21,6 +21,58 @@ server = importlib.import_module("server")
 
 
 class AiCandidateReliabilityTests(unittest.TestCase):
+    def test_content_shortage_grace_accepts_safe_plan_without_changing_normal_contract(self) -> None:
+        contract = selection_contracts.DurationContract.create(60, 1.15)
+        self.assertFalse(contract.status(52.0)["accepted"])
+        relaxed = contract.status(52.0, shortage_grace_seconds=5)
+        self.assertTrue(relaxed["accepted"])
+        self.assertTrue(relaxed["used_shortage_grace"])
+        self.assertAlmostEqual(relaxed["relaxed_low"], 45.0)
+        self.assertAlmostEqual(relaxed["relaxed_source_low"], 51.75)
+
+    def test_director_shortage_grace_uses_final_seconds_after_speed_projection(self) -> None:
+        contract = selection_contracts.DurationContract.create(60, 1.15)
+        clips = [("hook", "食品口感很新鲜", 0.0, 52.0, 50, 52.0, "口感食欲")]
+        normal = ai_clipper._director_duration_status(clips, 69, contract)
+        relaxed = ai_clipper._director_duration_status(
+            clips,
+            69,
+            contract,
+            shortage_grace_seconds=5,
+        )
+        self.assertFalse(normal["accepted"])
+        self.assertTrue(relaxed["accepted"])
+        self.assertTrue(relaxed["used_shortage_grace"])
+
+    def test_user_confirmed_preview_duration_is_warning_not_failure(self) -> None:
+        clips = [("hook", "用户确认保留的完整片单", 0.0, 72.9, 50, 72.9, "场景搭配")]
+        with self.assertRaises(RuntimeError):
+            cutter_logic._validate_selected_duration_contract(clips, 90, 1.0)
+        selected = cutter_logic._validate_selected_duration_contract(
+            clips,
+            90,
+            1.0,
+            user_confirmed=True,
+        )
+        self.assertTrue(selected["user_confirmed"])
+        self.assertFalse(cutter_logic._validate_actual_duration_contract(72.9, 90)[0])
+        self.assertTrue(
+            cutter_logic._validate_actual_duration_contract(
+                72.9,
+                90,
+                user_confirmed=True,
+            )[0]
+        )
+
+    def test_duration_grace_metadata_is_explicit_and_capped(self) -> None:
+        self.assertEqual(cutter_logic._selection_shortage_grace_seconds({}), 0.0)
+        self.assertEqual(
+            cutter_logic._selection_shortage_grace_seconds({
+                "duration_relaxation": {"applied": True, "grace_seconds": 99},
+            }),
+            5.0,
+        )
+
     def test_incomplete_product_is_removed_without_rejecting_whole_story(self) -> None:
         clips = [
             ("hook", "这件衣服特别修饰肩型", 0.0, 2.0, 50, 2.0, "版型"),

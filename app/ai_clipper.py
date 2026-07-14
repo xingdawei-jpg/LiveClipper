@@ -25,7 +25,7 @@ import unicodedata
 
 from selection_contracts import (
     CandidateSet, DurationContract, SelectionCandidate, SelectionManifest,
-    SelectionRequest, SelectionResult,
+    SelectionRequest, SelectionResult, SHORTAGE_GRACE_SECONDS,
 )
 from category_profiles import iter_vertical_profiles, resolve_vertical_profile
 
@@ -43,6 +43,7 @@ def _begin_analysis_metadata():
         "hook_candidate_summary": {},
         "trim_priorities": {},
         "final_target_duration": None,
+        "duration_relaxation": {},
         "duration_contract": {},
         "candidate_contract": {},
         "selection_manifest": {},
@@ -4078,22 +4079,30 @@ def _director_clip_trim_key(clip):
     return f"{start:.3f}:{end:.3f}:{hashlib.sha1(text.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _director_duration_status(clips, target_duration, duration_contract=None):
+def _director_duration_status(
+    clips, target_duration, duration_contract=None, shortage_grace_seconds=0.0,
+):
     contract = _coerce_duration_contract(
         duration_contract,
         target_duration=target_duration,
         final_target_duration=(duration_contract or {}).get("final_target") if isinstance(duration_contract, dict) else None,
     )
     total = sum(_clip_duration_value(clip) for clip in clips or [])
-    contract_status = contract.status(total)
+    contract_status = contract.status(
+        total,
+        shortage_grace_seconds=shortage_grace_seconds,
+    )
     return {
         "total": float(total),
         "low": float(contract.source_min),
         "high": float(contract.source_max),
-        "gap": float(contract_status["gap"]),
+        "relaxed_low": float(contract_status["relaxed_source_low"]),
+        "gap": max(0.0, float(contract_status["relaxed_source_low"]) - float(total)),
         "severe_gap": 0.0,
         "short": bool(contract_status["short"]),
         "long": bool(contract_status["long"]),
+        "accepted": bool(contract_status["accepted"]),
+        "used_shortage_grace": bool(contract_status["used_shortage_grace"]),
         "projected_final": float(contract_status["projected_final"]),
     }
 
@@ -5489,6 +5498,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_focus_hint = focus_hint
     _director_focus_summary = {}
     _director_fallback_clips = []
+    _director_short_fallback_clips = []
+    _director_short_fallback_status = {}
     _director_last_audit = {}
     _director_best_duration = 0.0
     _director_candidate_count = 0
@@ -5754,6 +5765,25 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 clips,
                 _director_required_sources,
             )
+            _director_relaxed_duration = _director_duration_status(
+                clips,
+                _AI_TARGET_DURATION,
+                _duration_contract,
+                shortage_grace_seconds=SHORTAGE_GRACE_SECONDS,
+            )
+            if (
+                clips
+                and _director_audit.get("duration_short")
+                and not _director_fatal
+                and not _director_missing_sources_now
+                and _director_relaxed_duration.get("accepted")
+                and (
+                    not _director_short_fallback_clips
+                    or _audit_total > float(_director_short_fallback_status.get("total") or 0.0)
+                )
+            ):
+                _director_short_fallback_clips = list(clips)
+                _director_short_fallback_status = dict(_director_relaxed_duration)
             _director_has_hard_issue = bool(
                 _director_fatal
                 or _director_audit.get("duration_short")
@@ -6384,6 +6414,63 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 f"目标下限{_fallback_duration['low']:.0f}s）"
             )
             return _director_fallback_clips
+        if _director_short_fallback_clips:
+            _relaxed_duration = dict(_director_short_fallback_status or {})
+            _relaxation = {
+                "applied": True,
+                "grace_seconds": float(SHORTAGE_GRACE_SECONDS),
+                "reason": "safe_candidates_exhausted",
+                "source_duration": round(float(_relaxed_duration.get("total") or 0.0), 3),
+                "projected_final_duration": round(float(_relaxed_duration.get("projected_final") or 0.0), 3),
+                "standard_final_min": round(float(_duration_contract.final_min), 3),
+                "relaxed_final_min": round(
+                    max(1.0, float(_duration_contract.final_min) - float(SHORTAGE_GRACE_SECONDS)),
+                    3,
+                ),
+                "standard_source_min": round(float(_duration_contract.source_min), 3),
+                "relaxed_source_min": round(float(_relaxed_duration.get("relaxed_low") or 0.0), 3),
+            }
+            _analysis_metadata["duration_relaxation"] = _relaxation
+            _set_last_topic_coverage_summary(_topic_coverage_summary(
+                _director_short_fallback_clips,
+                _current_focus_used_label(),
+                _final_target_duration,
+                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
+            ))
+            if merge_mode:
+                _selected_source_counts = _director_source_counts(_director_short_fallback_clips)
+                _source_distribution = _director_source_distribution_summary(
+                    _director_short_fallback_clips,
+                    _director_required_sources,
+                )
+                _source_contract_summary = dict(_analysis_metadata.get("source_contract") or {})
+                _source_contract_summary["selected_counts"] = dict(sorted(_selected_source_counts.items()))
+                _source_contract_summary["distribution"] = _source_distribution
+                _source_contract_summary["balanced"] = bool(_source_distribution.get("balanced"))
+                _analysis_metadata["source_contract"] = _source_contract_summary
+            _record_history_if_needed(_director_short_fallback_clips)
+            _selection_manifest = SelectionManifest.from_clips(
+                _director_short_fallback_clips,
+                candidate_digest=str((_analysis_metadata.get("candidate_contract") or {}).get("digest") or ""),
+                duration_contract=_duration_contract,
+            )
+            _analysis_metadata["selection_manifest"] = _selection_manifest.to_dict()
+            _partial_message = (
+                f"有效内容不足，已使用{SHORTAGE_GRACE_SECONDS:.0f}秒弹性时长保留完整片单"
+            )
+            _analysis_metadata["selection_result"] = SelectionResult.partial_insufficient(
+                _selection_manifest,
+                message=_partial_message,
+                details=_relaxation,
+            ).to_dict()
+            _log(
+                f"AI时长弹性: 安全候选已用尽，保留"
+                f"{len(_director_short_fallback_clips)}段/{_relaxed_duration.get('total', 0):.1f}s原片，"
+                f"预计成片{_relaxed_duration.get('projected_final', 0):.1f}s；"
+                f"标准下限{_duration_contract.final_min:.0f}s，"
+                f"内容不足宽限下限{_relaxation['relaxed_final_min']:.0f}s"
+            )
+            return _director_short_fallback_clips
         _final_issues = list(_director_last_audit.get("issues") or [])
         _duration_low = float(
             _director_last_audit.get("duration_low")

@@ -5796,6 +5796,12 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const total = rawTotal / durationSpeedFactor;
   const riskByIndex = new Map();
   const warnings = [];
+  const durationRelaxation = dedupSummary.duration_relaxation || {};
+  if (durationRelaxation.applied) {
+    const grace = Number(durationRelaxation.grace_seconds || 5);
+    const projected = Number(durationRelaxation.projected_final_duration || total);
+    warnings.push(`有效内容不足，已按${grace.toFixed(0)}秒弹性时长保留；预计成片${projected.toFixed(1)}s。`);
+  }
   const preferenceEligibleClips = preferenceLabel ? clips.filter((clip) => clipEligibleForPreference(clip)) : [];
   const preferenceHitCount = preferenceEligibleClips.filter((clip) => clipMatchesPreference(clip, preferenceLabel)).length;
   if (preferenceLabel && !Object.prototype.hasOwnProperty.call(topicCoverage.topic_counts || {}, preferenceLabel)) {
