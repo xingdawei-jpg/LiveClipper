@@ -17,6 +17,9 @@ import uvicorn
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 RUNTIME_LAYOUT_VERSION = 3
+LAUNCHER_HEALTH_REPORT_TIMEOUT = 30.0
+LAUNCHER_HEALTH_REQUEST_TIMEOUT = 4.0
+LAUNCHER_HEALTH_RETRY_DELAY = 0.5
 LEGACY_RUNTIME_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 
 if getattr(sys, "frozen", False):
@@ -138,55 +141,145 @@ def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
     return False
 
 
-def _report_launcher_health(port: int) -> bool:
+def _launcher_health_destination(destination_text: str, token: str) -> Path:
+    destination = Path(destination_text).resolve()
+    if destination.name != f"{token}.json":
+        raise ValueError("health receipt filename does not match launcher token")
+    if destination.parent.name.lower() != "launcher_health":
+        raise ValueError("health receipt is outside the launcher health directory")
+    if destination.parent.parent.name.lower() != "liveclipper":
+        raise ValueError("health receipt directory is outside LiveClipper data")
+    return destination
+
+
+def _write_launcher_health_diagnostic(destination: Path | None, message: str) -> None:
+    candidates: list[Path] = []
+    if destination is not None:
+        candidates.extend(
+            [
+                destination.parent / "runtime-health.log",
+                destination.parent.parent / "update_logs" / "runtime-health.log",
+            ]
+        )
+    fallback = Path(
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or Path.home()
+    ) / "LiveClipper" / "update_logs" / "runtime-health.log"
+    candidates.append(fallback)
+
+    written: set[str] = set()
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n"
+    for path in candidates:
+        key = os.path.normcase(str(path))
+        if key in written:
+            continue
+        written.add(key)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+        except Exception:
+            continue
+
+
+def _report_launcher_health(
+    port: int,
+    report_timeout: float = LAUNCHER_HEALTH_REPORT_TIMEOUT,
+) -> bool:
     token = str(os.environ.get("LIVECLIPPER_HEALTH_TOKEN") or "").strip()
     destination_text = str(os.environ.get("LIVECLIPPER_HEALTH_FILE") or "").strip()
     expected_version = str(os.environ.get("LIVECLIPPER_ACTIVE_VERSION") or "").strip()
     if not token or not destination_text or not expected_version:
         return False
+
+    destination: Path | None = None
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/api/runtime",
-            timeout=4,
-        ) as response:
-            runtime = json.loads(response.read().decode("utf-8-sig"))
-        integrity = runtime.get("runtime_integrity") if isinstance(runtime, dict) else {}
-        healthy = bool(
-            isinstance(runtime, dict)
-            and runtime.get("version") == expected_version
-            and int(runtime.get("runtime_layout_version") or 0) == RUNTIME_LAYOUT_VERSION
-            and runtime.get("code_source") == "bundled"
-            and isinstance(integrity, dict)
-            and integrity.get("ok") is True
+        destination = _launcher_health_destination(destination_text, token)
+    except Exception as exc:
+        _write_launcher_health_diagnostic(
+            destination,
+            f"health receipt rejected before reporting: {type(exc).__name__}: {exc}",
         )
-        if not healthy:
-            return False
-        data_root = Path(
-            os.environ.get("LOCALAPPDATA")
-            or os.environ.get("APPDATA")
-            or Path.home()
-        ) / "LiveClipper" / "launcher_health"
-        data_root = data_root.resolve()
-        destination = Path(destination_text).resolve()
-        destination.relative_to(data_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
-        receipt = {
-            "token": token,
-            "version": expected_version,
-            "runtime_integrity_ok": True,
-            "pid": os.getpid(),
-            "port": port,
-            "reported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        temporary.write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, destination)
-        return True
-    except Exception:
         return False
+
+    deadline = time.monotonic() + max(1.0, float(report_timeout))
+    attempt = 0
+    last_error = "unknown error"
+    while time.monotonic() < deadline:
+        attempt += 1
+        temporary = destination.with_name(destination.name + f".tmp-{os.getpid()}")
+        try:
+            remaining = max(0.5, deadline - time.monotonic())
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/runtime",
+                timeout=min(LAUNCHER_HEALTH_REQUEST_TIMEOUT, remaining),
+            ) as response:
+                runtime = json.loads(response.read().decode("utf-8-sig"))
+            integrity = runtime.get("runtime_integrity") if isinstance(runtime, dict) else {}
+            healthy = bool(
+                isinstance(runtime, dict)
+                and runtime.get("version") == expected_version
+                and int(runtime.get("runtime_layout_version") or 0) == RUNTIME_LAYOUT_VERSION
+                and runtime.get("code_source") == "bundled"
+                and isinstance(integrity, dict)
+                and integrity.get("ok") is True
+            )
+            if not healthy:
+                actual = {
+                    "version": runtime.get("version") if isinstance(runtime, dict) else None,
+                    "runtime_layout_version": (
+                        runtime.get("runtime_layout_version") if isinstance(runtime, dict) else None
+                    ),
+                    "code_source": runtime.get("code_source") if isinstance(runtime, dict) else None,
+                    "runtime_integrity": integrity,
+                }
+                raise RuntimeError(
+                    "runtime validation failed: "
+                    + json.dumps(actual, ensure_ascii=False, separators=(",", ":"))
+                )
+
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            receipt = {
+                "token": token,
+                "version": expected_version,
+                "runtime_integrity_ok": True,
+                "pid": os.getpid(),
+                "port": port,
+                "reported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "attempt": attempt,
+            }
+            temporary.unlink(missing_ok=True)
+            temporary.write_text(
+                json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            confirmed = json.loads(temporary.read_text(encoding="utf-8-sig"))
+            if confirmed.get("token") != token or confirmed.get("version") != expected_version:
+                raise RuntimeError("health receipt read-back validation failed")
+            os.replace(temporary, destination)
+            _write_launcher_health_diagnostic(
+                destination,
+                f"health receipt confirmed for {expected_version} on attempt {attempt}",
+            )
+            return True
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            temporary.unlink(missing_ok=True)
+            _write_launcher_health_diagnostic(
+                destination,
+                f"health attempt {attempt} failed for {expected_version}: {last_error}",
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(LAUNCHER_HEALTH_RETRY_DELAY, remaining))
+
+    _write_launcher_health_diagnostic(
+        destination,
+        f"health reporting exhausted after {attempt} attempts for {expected_version}: {last_error}",
+    )
+    return False
 
 
 def _show_startup_error(port: int) -> None:

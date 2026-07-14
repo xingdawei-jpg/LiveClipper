@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.7.14.2",
-  "version": "2026.7.14.2",
-  "latest_version": "2026.7.14.2",
+  "build_id": "2026.7.14.3",
+  "version": "2026.7.14.3",
+  "latest_version": "2026.7.14.3",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -39,7 +39,7 @@
     "web_client/tools/douyin_chrome_live_poc.py"
   ],
   "source_files": {
-    "web_client/desktop.py": "3f90f8655bf56a801faaa4f0f92359dd9412d699f7af83e9c6a6c25a9c544f80",
+    "web_client/desktop.py": "659552a9390588aa196be07f58a15570d75beacb05677f0d1d61daad1bcad09c",
     "web_client/server.py": "c2ca9d9576708b192e67521d05c718e55fc29bf28dbab2b41b823591fc0f72e0",
     "web_client/liveclipper_web.spec": "846ff7f966d80e8ce582157953248ee6d2d699e55bb9d63ddce8fb17b51af329",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
@@ -92,9 +92,9 @@
     "app/updater.py": "39d308d3cd2f00a42319739d1c2d1165c17431dbd15d2aced70b51f0a5428e24",
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b"
   },
-  "release_notes": "修复慢速电脑更新后误回滚：旧更新备份清理改为启动后后台延迟执行，不再阻塞45秒健康确认。",
-  "update_message": "修复慢速电脑更新后误回滚：旧更新备份清理改为启动后后台延迟执行，不再阻塞45秒健康确认。",
+  "release_notes": "修复 Runtime V3 更新后健康回执单次超时导致的误回滚；增加回执重试、路径兼容和持久诊断日志。",
+  "update_message": "修复 Runtime V3 更新后健康回执单次超时导致的误回滚；增加回执重试、路径兼容和持久诊断日志。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-14 07:54:15"
+  "updated_at": "2026-07-14 08:54:35"
 }

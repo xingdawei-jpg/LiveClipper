@@ -25,7 +25,41 @@ def _load_updater():
     return module
 
 
+def _load_desktop():
+    path = ROOT / "web_client" / "desktop.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location("liveclipper_test_desktop", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _JsonResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
 class ReleaseArchitectureTests(unittest.TestCase):
+    @staticmethod
+    def _healthy_runtime(version: str) -> dict[str, object]:
+        return {
+            "version": version,
+            "runtime_layout_version": 3,
+            "code_source": "bundled",
+            "runtime_integrity": {"ok": True, "checked": 9, "mismatched": []},
+        }
+
     def test_manifest_declares_runtime_v3(self) -> None:
         manifest = json.loads((ROOT / "app" / "version.json").read_text(encoding="utf-8-sig"))
         self.assertEqual(manifest["schema_version"], 3)
@@ -199,6 +233,82 @@ class ReleaseArchitectureTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("LIVECLIPPER_INSTALL_ROOT", launcher_tool)
+
+    def test_launcher_health_retries_after_transient_runtime_timeout(self) -> None:
+        desktop = _load_desktop()
+        version = "2026.7.14.3"
+        token = "a" * 32
+        with tempfile.TemporaryDirectory() as temp:
+            local = Path(temp) / "local"
+            destination = local / "LiveClipper" / "launcher_health" / f"{token}.json"
+            calls = 0
+
+            def delayed_runtime(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise TimeoutError("simulated first health timeout")
+                return _JsonResponse(self._healthy_runtime(version))
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LOCALAPPDATA": str(local),
+                        "LIVECLIPPER_HEALTH_TOKEN": token,
+                        "LIVECLIPPER_HEALTH_FILE": str(destination),
+                        "LIVECLIPPER_ACTIVE_VERSION": version,
+                    },
+                    clear=False,
+                ),
+                patch.object(desktop.urllib.request, "urlopen", side_effect=delayed_runtime),
+                patch.object(desktop.time, "sleep", return_value=None),
+            ):
+                self.assertTrue(desktop._report_launcher_health(8765, report_timeout=2.0))
+
+            self.assertEqual(calls, 2)
+            receipt = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["version"], version)
+            self.assertEqual(receipt["attempt"], 2)
+            diagnostic = destination.parent / "runtime-health.log"
+            self.assertIn("attempt 1 failed", diagnostic.read_text(encoding="utf-8"))
+            self.assertIn("confirmed", diagnostic.read_text(encoding="utf-8"))
+
+    def test_launcher_health_accepts_launcher_owned_path_from_another_data_root(self) -> None:
+        desktop = _load_desktop()
+        version = "2026.7.14.3"
+        token = "b" * 32
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            child_local = base / "child-local"
+            launcher_data = base / "launcher-local" / "LiveClipper"
+            destination = launcher_data / "launcher_health" / f"{token}.json"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LOCALAPPDATA": str(child_local),
+                        "LIVECLIPPER_HEALTH_TOKEN": token,
+                        "LIVECLIPPER_HEALTH_FILE": str(destination),
+                        "LIVECLIPPER_ACTIVE_VERSION": version,
+                    },
+                    clear=False,
+                ),
+                patch.object(
+                    desktop.urllib.request,
+                    "urlopen",
+                    return_value=_JsonResponse(self._healthy_runtime(version)),
+                ),
+            ):
+                self.assertTrue(desktop._report_launcher_health(8765, report_timeout=1.0))
+            self.assertTrue(destination.is_file())
+
+    def test_launcher_health_rejects_a_non_token_receipt_filename(self) -> None:
+        desktop = _load_desktop()
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "LiveClipper" / "launcher_health" / "wrong.json"
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                desktop._launcher_health_destination(str(destination), "c" * 32)
 
 
 if __name__ == "__main__":
