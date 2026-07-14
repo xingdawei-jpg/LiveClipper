@@ -41,6 +41,19 @@ INSTALL_MANIFEST = "install_manifest.json"
 STATE_FILE = "current.json"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,79}$")
+RUNTIME_OWNED_ENV = (
+    "LIVECLIPPER_BUNDLE_DIR",
+    "LIVECLIPPER_FROZEN",
+    "LIVECLIPPER_CODE_SOURCE",
+    "LIVECLIPPER_LEGACY_OVERLAYS_PRESENT",
+    "LIVECLIPPER_INSTALL_ROOT",
+    "LIVECLIPPER_ACTIVE_VERSION",
+    "LIVECLIPPER_RUNTIME_LAYOUT",
+    "LIVECLIPPER_LAUNCHER_VERSION",
+    "LIVECLIPPER_HEALTH_FILE",
+    "LIVECLIPPER_HEALTH_TOKEN",
+    "LIVECLIPPER_ROLLBACK_REASON",
+)
 ProgressCallback = Callable[[int, str], None]
 
 
@@ -78,6 +91,13 @@ def _target_path(root: Path, relative: str) -> Path:
 
 def _manifest_path(root: Path, validated_relative: str) -> Path:
     return root / Path(*PurePosixPath(validated_relative).parts)
+
+
+def _launcher_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in RUNTIME_OWNED_ENV:
+        env.pop(name, None)
+    return env
 
 
 def _data_root() -> Path:
@@ -648,6 +668,7 @@ def apply_patch(
             subprocess.Popen(
                 [str(launcher)],
                 cwd=str(install_root),
+                env=_launcher_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

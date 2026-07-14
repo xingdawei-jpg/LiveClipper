@@ -25,20 +25,21 @@ LEGACY_RUNTIME_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClippe
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal"))
     REPO_ROOT = BUNDLE_DIR
-    os.environ.setdefault("LIVECLIPPER_BUNDLE_DIR", str(BUNDLE_DIR))
-    os.environ.setdefault("LIVECLIPPER_FROZEN", "1")
-    os.environ.setdefault("LIVECLIPPER_CODE_SOURCE", "bundled")
+    os.environ["LIVECLIPPER_BUNDLE_DIR"] = str(BUNDLE_DIR)
+    os.environ["LIVECLIPPER_FROZEN"] = "1"
+    os.environ["LIVECLIPPER_CODE_SOURCE"] = "bundled"
 else:
     BUNDLE_DIR = MODULE_WEB_DIR.parent
     REPO_ROOT = MODULE_WEB_DIR.parent
-    os.environ.setdefault("LIVECLIPPER_CODE_SOURCE", "source")
+    os.environ.pop("LIVECLIPPER_BUNDLE_DIR", None)
+    os.environ.pop("LIVECLIPPER_FROZEN", None)
+    os.environ["LIVECLIPPER_CODE_SOURCE"] = "source"
 
-os.environ.setdefault("LIVECLIPPER_RUNTIME_LAYOUT", str(RUNTIME_LAYOUT_VERSION))
-os.environ.setdefault(
-    "LIVECLIPPER_LEGACY_OVERLAYS_PRESENT",
+os.environ["LIVECLIPPER_RUNTIME_LAYOUT"] = str(RUNTIME_LAYOUT_VERSION)
+os.environ["LIVECLIPPER_LEGACY_OVERLAYS_PRESENT"] = (
     "1"
     if any((LEGACY_RUNTIME_ROOT / name).exists() for name in ("app", "web_client", "tools"))
-    else "0",
+    else "0"
 )
 
 

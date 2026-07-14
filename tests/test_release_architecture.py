@@ -157,6 +157,25 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertFalse(updater._set_installed_version("9999.1.1"))
         self.assertEqual(updater._get_installed_version(), manifest["version"])
 
+    def test_frozen_updater_ignores_an_inherited_old_bundle_dir(self) -> None:
+        updater = _load_updater()
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            old_bundle = base / "versions" / "2026.7.13.13" / "_internal"
+            new_bundle = base / "versions" / "2026.7.14.4" / "_internal"
+            old_bundle.mkdir(parents=True)
+            new_bundle.mkdir(parents=True)
+            with (
+                patch.dict(
+                    os.environ,
+                    {"LIVECLIPPER_BUNDLE_DIR": str(old_bundle)},
+                    clear=False,
+                ),
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "_MEIPASS", str(new_bundle), create=True),
+            ):
+                self.assertEqual(updater._runtime_root(), new_bundle.resolve())
+
     def test_updater_uses_configured_bundle_manifest(self) -> None:
         updater = _load_updater()
         previous = os.environ.get("LIVECLIPPER_BUNDLE_DIR")
@@ -233,6 +252,62 @@ class ReleaseArchitectureTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("LIVECLIPPER_INSTALL_ROOT", launcher_tool)
+
+    def test_frozen_desktop_replaces_an_inherited_old_bundle_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            old_bundle = base / "versions" / "2026.7.13.13" / "_internal"
+            new_bundle = base / "versions" / "2026.7.14.4" / "_internal"
+            old_bundle.mkdir(parents=True)
+            new_bundle.mkdir(parents=True)
+            with (
+                patch.dict(
+                    os.environ,
+                    {"LIVECLIPPER_BUNDLE_DIR": str(old_bundle)},
+                    clear=False,
+                ),
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "_MEIPASS", str(new_bundle), create=True),
+            ):
+                desktop = _load_desktop()
+                self.assertEqual(desktop.BUNDLE_DIR.resolve(), new_bundle.resolve())
+                self.assertEqual(
+                    Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve(),
+                    new_bundle.resolve(),
+                )
+                self.assertEqual(os.environ["LIVECLIPPER_CODE_SOURCE"], "bundled")
+
+    def test_frozen_server_ignores_an_inherited_old_bundle_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            old_bundle = Path(temp) / "versions" / "2026.7.13.13" / "_internal"
+            old_bundle.mkdir(parents=True)
+            env = os.environ.copy()
+            env["LIVECLIPPER_BUNDLE_DIR"] = str(old_bundle)
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import json,sys;"
+                    f"sys.frozen=True;sys._MEIPASS={str(ROOT)!r};"
+                    f"sys.path.insert(0,{str(ROOT / 'web_client')!r});"
+                    "import server;"
+                    "print(json.dumps({'bundle':str(server.BUNDLE_DIR),"
+                    "'app':str(server.APP_DIR),'version':server._load_version()}))"
+                ),
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=True,
+            )
+            runtime = json.loads(completed.stdout.strip().splitlines()[-1])
+            self.assertEqual(Path(runtime["bundle"]).resolve(), ROOT.resolve())
+            self.assertEqual(Path(runtime["app"]).resolve(), (ROOT / "app").resolve())
+            self.assertNotEqual(runtime["version"], "2026.7.13.13")
 
     def test_launcher_health_retries_after_transient_runtime_timeout(self) -> None:
         desktop = _load_desktop()

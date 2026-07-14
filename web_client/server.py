@@ -33,20 +33,22 @@ from pydantic import BaseModel, Field
 RUNTIME_LAYOUT_VERSION = 3
 USER_DATA_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
+IS_FROZEN_RUNTIME = bool(getattr(sys, "frozen", False))
 ENV_BUNDLE_DIR = Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve() if os.environ.get("LIVECLIPPER_BUNDLE_DIR") else None
 
-if ENV_BUNDLE_DIR and ENV_BUNDLE_DIR.exists():
-    BUNDLE_DIR = ENV_BUNDLE_DIR
+if IS_FROZEN_RUNTIME:
+    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)).resolve()
+    os.environ["LIVECLIPPER_BUNDLE_DIR"] = str(BUNDLE_DIR)
     REPO_ROOT = BUNDLE_DIR
-elif getattr(sys, "frozen", False):
-    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+elif ENV_BUNDLE_DIR and ENV_BUNDLE_DIR.exists():
+    BUNDLE_DIR = ENV_BUNDLE_DIR
     REPO_ROOT = BUNDLE_DIR
 else:
     BUNDLE_DIR = MODULE_WEB_DIR.parent
     REPO_ROOT = MODULE_WEB_DIR.parent
 
 
-if ENV_BUNDLE_DIR or getattr(sys, "frozen", False):
+if IS_FROZEN_RUNTIME or (ENV_BUNDLE_DIR and ENV_BUNDLE_DIR.exists()):
     WEB_DIR = (BUNDLE_DIR / "web_client").resolve()
     APP_DIR = (BUNDLE_DIR / "app").resolve()
     CODE_SOURCE = "bundled"

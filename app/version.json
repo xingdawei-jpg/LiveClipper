@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.7.14.3",
-  "version": "2026.7.14.3",
-  "latest_version": "2026.7.14.3",
+  "build_id": "2026.7.14.4",
+  "version": "2026.7.14.4",
+  "latest_version": "2026.7.14.4",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -39,8 +39,8 @@
     "web_client/tools/douyin_chrome_live_poc.py"
   ],
   "source_files": {
-    "web_client/desktop.py": "659552a9390588aa196be07f58a15570d75beacb05677f0d1d61daad1bcad09c",
-    "web_client/server.py": "c2ca9d9576708b192e67521d05c718e55fc29bf28dbab2b41b823591fc0f72e0",
+    "web_client/desktop.py": "e281e4019c697d87ee46a68374884594b6f64bb099dddc7a4c3d8cb3f4e426b6",
+    "web_client/server.py": "bb0cac8281612d7477dd75a5cb335700318adb1e20a86b82e06f3f518d299a67",
     "web_client/liveclipper_web.spec": "846ff7f966d80e8ce582157953248ee6d2d699e55bb9d63ddce8fb17b51af329",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
     "tools/build_update_manifest.py": "520dcdefd702783b1a567fa1603630eb58eea1f1c09f64e0dd32d4f84e51b3e0",
@@ -48,9 +48,9 @@
     "tools/build_v3_package.py": "8a581d43706c3de19d8fd767a007c30a4ea026112bb60fa44ba74d731043b5fe",
     "tools/build_delta_package.py": "5ba47af9ef889e48bdaca2749a0a387ff3551fa006f2de2a02ee0e3b09bb8a49",
     "tools/build_bridge_exe.py": "1b414edd29a5dbdb4e011c6d8a18fc4cdcf29bf5cf6e98313752f11bf6561810",
-    "tools/liveclipper_launcher.py": "2c6c5c3067da84bf68f75634e64ef4706496c3d60c6d6c2ff1f94659a5ade672",
+    "tools/liveclipper_launcher.py": "7fb9fd867c4f79ec0cbf1b27f6647337e2d292bf71aea54dbff851f1ec8daa48",
     "tools/liveclipper_launcher.spec": "2f194c2a24d1eafbc6226c19b5ad503704832019c1188b7c6d981b1db303e1a6",
-    "tools/liveclipper_update_agent.py": "a599732b71fe1b385ca1085c940c049c9d3bfb7573aad524df615926b1a9a48c",
+    "tools/liveclipper_update_agent.py": "c105c436957828b62b97ad7850fcda7bdacaff7addc127a41781d9877e5e0ad0",
     "tools/liveclipper_update_agent.spec": "e5d2d1331e3d751a93a7d010f3314f8202dfede97615f285029b61396868a6ce",
     "app/ai_clipper.py": "3b4359ebfbdb7b30d63ad48fd1abb142bf1e09bde0e38143687fd87f5503e671",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
@@ -89,12 +89,12 @@
     "app/stt.py": "272c9a3a17a7e9ff6d9beac9ea53c809b1031bceff41f34fe78ec015fcaeef02",
     "app/tighten.py": "67c35024481a5e920f88f16c03eb7d43e0306976d84abf7db8539a7cee85959f",
     "app/trim_long.py": "daab5d0f39173d0d1e8cff150c6de8248835442bf21a8ff51b215411db18604e",
-    "app/updater.py": "39d308d3cd2f00a42319739d1c2d1165c17431dbd15d2aced70b51f0a5428e24",
+    "app/updater.py": "1e3d8a5940d62eaa9f6fe42855591da06b6a6d5ebba50432002581201f857f01",
     "app/volcengine_asr.py": "2c30d11555c4623dcde75d257654e44cd18f167cf104083b134e730ebfb54e0b"
   },
-  "release_notes": "修复 Runtime V3 更新后健康回执单次超时导致的误回滚；增加回执重试、路径兼容和持久诊断日志。",
-  "update_message": "修复 Runtime V3 更新后健康回执单次超时导致的误回滚；增加回执重试、路径兼容和持久诊断日志。",
+  "release_notes": "修复增量更新时继承旧版本运行目录环境，导致新版本后端仍加载13.13并被健康检查回滚；冻结运行时现强制绑定自身目录。",
+  "update_message": "修复增量更新时继承旧版本运行目录环境，导致新版本后端仍加载13.13并被健康检查回滚；冻结运行时现强制绑定自身目录。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-14 08:54:35"
+  "updated_at": "2026-07-14 09:51:46"
 }

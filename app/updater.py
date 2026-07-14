@@ -33,13 +33,13 @@ INSTALL_MANIFEST = "install_manifest.json"
 
 
 def _runtime_root() -> Path:
-    configured = os.environ.get("LIVECLIPPER_BUNDLE_DIR")
-    if configured:
-        return Path(configured).resolve()
     if getattr(sys, "frozen", False):
         return Path(
             getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent / "_internal")
         ).resolve()
+    configured = os.environ.get("LIVECLIPPER_BUNDLE_DIR")
+    if configured:
+        return Path(configured).resolve()
     return Path(__file__).resolve().parent.parent
 
 

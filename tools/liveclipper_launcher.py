@@ -28,6 +28,19 @@ STATE_FILE = "current.json"
 RUNTIME_MANIFEST = "runtime_manifest.json"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,79}$")
+RUNTIME_OWNED_ENV = (
+    "LIVECLIPPER_BUNDLE_DIR",
+    "LIVECLIPPER_FROZEN",
+    "LIVECLIPPER_CODE_SOURCE",
+    "LIVECLIPPER_LEGACY_OVERLAYS_PRESENT",
+    "LIVECLIPPER_INSTALL_ROOT",
+    "LIVECLIPPER_ACTIVE_VERSION",
+    "LIVECLIPPER_RUNTIME_LAYOUT",
+    "LIVECLIPPER_LAUNCHER_VERSION",
+    "LIVECLIPPER_HEALTH_FILE",
+    "LIVECLIPPER_HEALTH_TOKEN",
+    "LIVECLIPPER_ROLLBACK_REASON",
+)
 
 
 class LaunchError(RuntimeError):
@@ -162,6 +175,8 @@ def _launch(
     rollback_reason: str = "",
 ) -> subprocess.Popen:
     env = os.environ.copy()
+    for name in RUNTIME_OWNED_ENV:
+        env.pop(name, None)
     env.update(
         {
             "LIVECLIPPER_INSTALL_ROOT": str(root),

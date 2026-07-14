@@ -498,6 +498,57 @@ class RuntimeV3UpdateTests(unittest.TestCase):
             self.assertEqual((install_root / "stable-one.bin").read_bytes(), b"old-stable-one.bin")
             self.assertEqual((install_root / "stable-two.bin").read_bytes(), b"old-stable-two.bin")
 
+    def test_launcher_removes_inherited_runtime_environment(self) -> None:
+        inherited = {name: "stale" for name in liveclipper_launcher.RUNTIME_OWNED_ENV}
+        with (
+            patch.dict(os.environ, inherited, clear=False),
+            patch.object(
+                liveclipper_launcher.subprocess,
+                "Popen",
+                return_value=object(),
+            ) as spawn,
+        ):
+            liveclipper_launcher._launch(
+                Path(r"C:\LiveClipper"),
+                "2026.7.14.4",
+                Path(r"C:\LiveClipper\versions\2026.7.14.4\LiveClipperWeb.exe"),
+            )
+        child_env = spawn.call_args.kwargs["env"]
+        self.assertNotIn("LIVECLIPPER_BUNDLE_DIR", child_env)
+        self.assertNotIn("LIVECLIPPER_HEALTH_TOKEN", child_env)
+        self.assertEqual(child_env["LIVECLIPPER_ACTIVE_VERSION"], "2026.7.14.4")
+        self.assertEqual(child_env["LIVECLIPPER_INSTALL_ROOT"], r"C:\LiveClipper")
+
+    def test_launcher_sets_only_the_current_health_context(self) -> None:
+        inherited = {name: "stale" for name in liveclipper_launcher.RUNTIME_OWNED_ENV}
+        health_file = Path(r"C:\Local\LiveClipper\launcher_health\new-token.json")
+        with (
+            patch.dict(os.environ, inherited, clear=False),
+            patch.object(
+                liveclipper_launcher.subprocess,
+                "Popen",
+                return_value=object(),
+            ) as spawn,
+        ):
+            liveclipper_launcher._launch(
+                Path(r"C:\LiveClipper"),
+                "2026.7.14.4",
+                Path(r"C:\LiveClipper\versions\2026.7.14.4\LiveClipperWeb.exe"),
+                health_file=health_file,
+                health_token="new-token",
+            )
+        child_env = spawn.call_args.kwargs["env"]
+        self.assertEqual(child_env["LIVECLIPPER_HEALTH_TOKEN"], "new-token")
+        self.assertEqual(child_env["LIVECLIPPER_HEALTH_FILE"], str(health_file))
+        self.assertNotIn("LIVECLIPPER_BUNDLE_DIR", child_env)
+
+    def test_update_agent_removes_inherited_runtime_environment(self) -> None:
+        inherited = {name: "stale" for name in liveclipper_update_agent.RUNTIME_OWNED_ENV}
+        with patch.dict(os.environ, inherited, clear=False):
+            child_env = liveclipper_update_agent._launcher_environment()
+        for name in liveclipper_update_agent.RUNTIME_OWNED_ENV:
+            self.assertNotIn(name, child_env)
+
     @unittest.skipUnless(os.name == "nt", "launcher rollback test uses a Windows executable")
     def test_pending_runtime_without_health_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
