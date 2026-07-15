@@ -5,12 +5,12 @@
   "assets": [
     {
       "name": "LiveClipperWeb_2026.7.15.1_full_baseline_v3_20260715.zip",
-      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperWeb_2026.7.15.1_full_baseline_v3_20260715.zip",
+      "size": 581650891,
       "sha256": "3F8BB2DB275D73E2192B3F84C03717FBFE2485BD6DFA70439A1CF957898D77C4"
     },
     {
       "name": "LiveClipperWeb_2026.7.15.1_full_baseline_v3_20260715.zip.sha256.txt",
-      "url": "https://lc-update.oss-cn-beijing.aliyuncs.com/LiveClipperWeb_2026.7.15.1_full_baseline_v3_20260715.zip.sha256.txt",
+      "size": 124,
       "sha256": "D8DBEEDBDC2EC9345A4D47182A0013A5C42979A5EC73FFF9B93CC706B1AEDF56"
     }
   ]
