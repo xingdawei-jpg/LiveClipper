@@ -69,6 +69,7 @@ for required_path in required_runtime_paths:
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from category_profiles import resolve_vertical_profile
 from ai_model_config import (
     DEEPSEEK_DEFAULT_BASE_URL,
     DEEPSEEK_DEFAULT_MODEL,
@@ -1421,6 +1422,7 @@ def _preview_cache_key(mode: str, paths: list[Path], payload: Any, srt_path: str
         "videos": [_file_signature(path) for path in paths],
         "sidecar_srt": [_file_signature(path.with_suffix(".srt")) for path in paths if path.with_suffix(".srt").exists()],
         "srt": _file_signature(Path(srt_path)) if srt_path else {},
+        "primary_category": getattr(payload, "primary_category", ""),
         "category": getattr(payload, "category", ""),
         "focus_hint": getattr(payload, "focus_hint", ""),
         "target": target_duration,
@@ -1649,6 +1651,7 @@ class SmartCutPayload(BaseModel):
     video_paths: list[str] = Field(default_factory=list)
     srt_path: str = ""
     output_dir: str = ""
+    primary_category: str = "服饰内衣"
     category: str = "自动检测"
     focus_hint: str = "自动"
     ai_controls: dict[str, Any] = Field(default_factory=dict)
@@ -1675,6 +1678,7 @@ class SmartCutPayload(BaseModel):
 class MixPayload(BaseModel):
     video_paths: list[str] = Field(default_factory=list)
     output_dir: str = ""
+    primary_category: str = "服饰内衣"
     category: str = "自动检测"
     versions: int = Field(default=1, ge=1, le=20)
     duration: int = Field(default=60, ge=10, le=600)
@@ -4757,13 +4761,63 @@ def _preview_feedback_log_path() -> Path:
     return _safe_user_child("ai_feedback", "preview_selection_feedback.jsonl")
 
 
+_AUTO_CATEGORY_VALUES = {"", "自动", "自动检测", "自动识别", "auto"}
+
+
+def _is_auto_category_value(value: Any) -> bool:
+    return str(value or "").strip() in _AUTO_CATEGORY_VALUES
+
+
+def _payload_primary_category(payload: Any) -> str:
+    return str(getattr(payload, "primary_category", "") or "").strip()
+
+
+def _payload_explicit_category(payload: Any) -> str:
+    category = str(getattr(payload, "category", "") or "").strip()
+    return "" if _is_auto_category_value(category) else category
+
+
+def _force_category_for_payload(payload: Any) -> str | None:
+    explicit = _payload_explicit_category(payload)
+    if explicit:
+        return explicit
+    primary = _payload_primary_category(payload)
+    if _is_auto_category_value(primary):
+        return None
+    profile = resolve_vertical_profile(primary)
+    if profile and profile.family == "clothing":
+        return None
+    if profile:
+        return profile.key
+    return primary or None
+
+
+def _preview_category_for_payload(payload: Any) -> str:
+    return _payload_explicit_category(payload) or _force_category_for_payload(payload) or _payload_primary_category(payload)
+
+
+def _preferred_category_for_payload(payload: Any, category_summary: dict[str, Any]) -> str:
+    return _payload_explicit_category(payload) or _force_category_for_payload(payload) or str((category_summary or {}).get("main_category") or "")
+
+
+def _payload_ai_controls(payload: Any) -> dict[str, Any]:
+    controls = dict(getattr(payload, "ai_controls", {}) or {})
+    primary = _payload_primary_category(payload)
+    if primary and not _is_auto_category_value(primary):
+        controls.setdefault("primary_category", primary)
+    return controls
+
+
 def _feedback_category_bucket(category: Any) -> str:
     text = str(category or "").strip()
+    if not text or _is_auto_category_value(text):
+        return "general"
+    profile = resolve_vertical_profile(text)
+    if profile:
+        return profile.feedback_bucket
     if "食品" in text or "生鲜" in text:
         return "food_fresh"
-    if text and text not in {"自动", "自动检测", "auto"}:
-        return "clothing"
-    return "general"
+    return "clothing"
 
 
 def _feedback_scope_key(scope: str, category: Any = "") -> str:
@@ -5805,7 +5859,7 @@ def _preview_clip_parts_for_video(
 
 
 def _preview_clip_cache_signature(preview_parts: list[Any], source_sig: str) -> str:
-    pieces = [source_sig]
+    pieces = [source_sig, "render-pretrim-v2"]
     for part in preview_parts:
         info = _clip_public(0, part)
         pieces.append(
@@ -5818,25 +5872,54 @@ def _preview_clip_cache_signature(preview_parts: list[Any], source_sig: str) -> 
 def _render_preview_clip_range(cut_video: Path, start: float, duration: float, target: Path) -> None:
     input_seek = max(0.0, start - 2.0)
     output_seek = max(0.0, start - input_seek)
-    cmd = [
-        _ffmpeg_cmd(),
-        "-y",
-        "-fflags",
-        "+genpts",
-        "-ss",
-        f"{input_seek:.3f}",
-        "-i",
-        str(cut_video),
-    ]
-    if output_seek > 0.001:
-        cmd += ["-ss", f"{output_seek:.3f}"]
-    cmd += [
-        "-t",
-        f"{duration:.3f}",
-        "-avoid_negative_ts",
-        "make_zero",
-        "-vf",
-        "scale='min(480,iw)':-2,scale=trunc(iw/2)*2:trunc(ih/2)*2,setpts=PTS-STARTPTS",
+    input_duration = max(0.3, duration + output_seek + 0.25)
+    video_filter = (
+        f"trim=start={output_seek:.3f}:duration={duration:.3f},"
+        "setpts=PTS-STARTPTS,"
+        "scale='min(480,iw)':-2,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    )
+    audio_filter = (
+        f"atrim=start={output_seek:.3f}:duration={duration:.3f},"
+        "asetpts=PTS-STARTPTS,"
+        "aresample=async=1:first_pts=0"
+    )
+
+    def _base_cmd() -> list[str]:
+        cmd = [_ffmpeg_cmd(), "-y"]
+        if cut_video.suffix.lower() in {".ts", ".mts", ".m2ts"}:
+            cmd += ["-fflags", "+genpts"]
+        cmd += [
+            "-ss",
+            f"{input_seek:.3f}",
+            "-i",
+            str(cut_video),
+            "-t",
+            f"{input_duration:.3f}",
+        ]
+        return cmd
+
+    def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=500, detail="生成片段预览超时，请稍后重试。") from exc
+
+    cmd = _base_cmd() + [
+        "-filter_complex",
+        f"[0:v]{video_filter}[v];[0:a]{audio_filter}[a]",
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
         "-c:v",
         "libx264",
         "-preset",
@@ -5853,21 +5936,49 @@ def _render_preview_clip_range(cut_video: Path, start: float, duration: float, t
         "44100",
         "-ac",
         "2",
-        "-af",
-        "aresample=async=1:first_pts=0",
         "-movflags",
         "+faststart",
         str(target),
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=120, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=500, detail="生成片段预览超时，请稍后重试。") from exc
-    if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
-        err = (proc.stderr or "").strip().splitlines()[-3:]
-        detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
-        raise HTTPException(status_code=500, detail=f"生成片段预览失败：{detail}")
+    proc = _run(cmd)
+    if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
+        return
+
+    err_text = proc.stderr or ""
+    audio_missing = any(
+        marker in err_text
+        for marker in ("matches no streams", "Stream specifier ':a'", "matches no streams.")
+    )
+    if audio_missing:
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        video_only_cmd = _base_cmd() + [
+            "-filter_complex",
+            f"[0:v]{video_filter}[v]",
+            "-map",
+            "[v]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "26",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ]
+        proc = _run(video_only_cmd)
+        if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
+            return
+
+    err = (proc.stderr or "").strip().splitlines()[-3:]
+    detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
+    raise HTTPException(status_code=500, detail=f"生成片段预览失败：{detail}")
 
 
 def _concat_preview_clip_parts(part_paths: list[Path], target: Path) -> None:
@@ -6124,9 +6235,9 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=70),
             cancel_event=_task_cancel_event(task_id),
-            force_category=None if payload.category in ("", "自动检测", "自动检测") else payload.category,
+            force_category=_force_category_for_payload(payload),
             focus_hint=payload.focus_hint,
-            ai_controls=payload.ai_controls,
+            ai_controls=_payload_ai_controls(payload),
             target_duration=payload.duration,
             num_versions=payload.versions,
             pip_path=pip_path or "",
@@ -6217,9 +6328,9 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     subtitle_overlay=payload.subtitle_overlay,
                     log_fn=_task_log_fn(task_id, scope, base=group_base + 5, span=max(8, group_span * 0.88)),
                     cancel_event=_task_cancel_event(task_id),
-                    force_category=None if payload.category in ("", "自动检测", "自动检测") else payload.category,
+                    force_category=_force_category_for_payload(payload),
                     focus_hint=payload.focus_hint,
-                    ai_controls=payload.ai_controls,
+                    ai_controls=_payload_ai_controls(payload),
                     target_duration=payload.duration,
                     num_versions=payload.versions,
                     pip_path=pip_path or "",
@@ -6312,8 +6423,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         status="running",
         message="正在生成混剪 AI 选片预览。",
         created_at=time.time(),
-        category=payload.category,
-        feedback_scope=_feedback_scope_key("mix", payload.category),
+        category=_preview_category_for_payload(payload),
+        feedback_scope=_feedback_scope_key("mix", _preview_category_for_payload(payload)),
         target_duration=payload.duration,
         clips=[],
     )
@@ -6339,9 +6450,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=66),
             cancel_event=_task_cancel_event(task_id),
-            force_category=None if payload.category in ("", "自动检测") else payload.category,
+            force_category=_force_category_for_payload(payload),
             focus_hint=payload.focus_hint,
-            ai_controls=payload.ai_controls,
+            ai_controls=_payload_ai_controls(payload),
             target_duration=payload.duration,
             num_versions=payload.versions,
             pip_path="",
@@ -6369,7 +6480,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             payload.focus_hint,
         )
         word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
-        preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
+        preferred_category = _preferred_category_for_payload(payload, category_summary)
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
             str(cutter_mod._multi_result_cache.get("srt_text") or ""),
@@ -9133,13 +9244,13 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                         recoverable_errors=total_videos > 1,
                     ),
                     cancel_event=_task_cancel_event(task_id),
-                    force_category=None if payload.category in ("", "自动检测") else payload.category,
+                    force_category=_force_category_for_payload(payload),
                     pip_path=pip_path,
                     pip_size=payload.pip_size,
                     pip_opacity=payload.pip_opacity,
                     pip_pos=payload.pip_pos,
                     focus_hint=payload.focus_hint,
-                    ai_controls=payload.ai_controls,
+                    ai_controls=_payload_ai_controls(payload),
                     mirror_enabled=payload.mirror_enabled,
                     smart_crop_enabled=payload.smart_crop_enabled,
                     crop_level=payload.crop_level,
@@ -9383,9 +9494,9 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 subtitle_overlay=payload.subtitle_overlay,
                 log_fn=_task_log_fn(task_id, scope, base=34, span=54),
                 cancel_event=_task_cancel_event(task_id),
-                force_category=None if payload.category in ("", "自动检测") else payload.category,
+                force_category=_force_category_for_payload(payload),
                 focus_hint=payload.focus_hint,
-                ai_controls=payload.ai_controls,
+                ai_controls=_payload_ai_controls(payload),
                 target_duration=payload.duration,
                 num_versions=1,
                 pip_path=pip_path or "",
@@ -9435,8 +9546,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         status="running",
         message="正在生成 AI 选片预览。",
         created_at=time.time(),
-        category=payload.category,
-        feedback_scope=_feedback_scope_key("smart", payload.category),
+        category=_preview_category_for_payload(payload),
+        feedback_scope=_feedback_scope_key("smart", _preview_category_for_payload(payload)),
         target_duration=payload.target_duration,
         clips=[],
     )
@@ -9469,7 +9580,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             subtitle_overlay=payload.subtitle_overlay,
             log_fn=_task_log_fn(task_id, scope, base=18, span=66),
             cancel_event=_task_cancel_event(task_id),
-            force_category=None if payload.category in ("", "自动检测") else payload.category,
+            force_category=_force_category_for_payload(payload),
             _clips_only=True,
             focus_hint=payload.focus_hint,
             smart_crop_enabled=payload.smart_crop_enabled,
@@ -9478,7 +9589,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             target_duration=payload.target_duration,
             mirror_enabled=payload.mirror_enabled,
             kb_intensity=payload.ken_burns_intensity,
-            ai_controls=payload.ai_controls,
+            ai_controls=_payload_ai_controls(payload),
         )
         if not result:
             raise RuntimeError("AI 选片预览失败。")
@@ -9493,7 +9604,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             payload.focus_hint,
         )
         word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
-        preferred_category = payload.category if payload.category not in ("", "自动检测", "自动") else str(category_summary.get("main_category") or "")
+        preferred_category = _preferred_category_for_payload(payload, category_summary)
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
             srt_text,

@@ -41,6 +41,8 @@ RUNTIME_MANIFEST = "runtime_manifest.json"
 INSTALL_MANIFEST = "install_manifest.json"
 STATE_FILE = "current.json"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
+CHAIN_PLAN_FORMAT = "liveclipper-update-chain-plan-v1"
+DISK_SPACE_BUFFER_BYTES = 128 * 1024 * 1024
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,79}$")
 RUNTIME_OWNED_ENV = (
     "LIVECLIPPER_BUNDLE_DIR",
@@ -715,6 +717,364 @@ def apply_patch(
             pass
 
 
+def _manifest_total_size(manifest: dict[str, Any]) -> int:
+    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    total = 0
+    for meta in files.values():
+        if isinstance(meta, dict):
+            try:
+                total += max(0, int(meta.get("size") or 0))
+            except Exception:
+                pass
+    return total
+
+
+def _require_free_space(path: Path, required_bytes: int, label: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(path).free
+    except Exception:
+        return
+    if free < required_bytes:
+        needed_mb = required_bytes // (1024 * 1024)
+        free_mb = free // (1024 * 1024)
+        raise UpdateError(f"not enough disk space for {label}: need {needed_mb} MB, free {free_mb} MB")
+
+
+def _cleanup_incomplete_work_roots(install_root: Path) -> None:
+    update_root = install_root / ".lc-update"
+    if not update_root.is_dir():
+        return
+    for child in update_root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+    try:
+        update_root.rmdir()
+    except OSError:
+        pass
+
+
+def _load_chain_plan(plan_path: Path) -> dict[str, Any]:
+    plan = _load_json(plan_path)
+    if plan.get("format") != CHAIN_PLAN_FORMAT:
+        raise UpdateError("unsupported chain plan format")
+    if int(plan.get("schema_version") or 0) != 1:
+        raise UpdateError("unsupported chain plan schema")
+    patches = plan.get("patches")
+    if not isinstance(patches, list) or not patches:
+        raise UpdateError("chain plan has no patches")
+    return plan
+
+
+def _validate_chain_install_manifest(
+    manifest: dict[str, Any],
+    public_key: Path,
+    to_version: str,
+) -> dict[str, Any]:
+    target_install_manifest = manifest.get("target_install_manifest")
+    if not isinstance(target_install_manifest, dict):
+        raise UpdateError("patch install manifest is missing")
+    verify_manifest(target_install_manifest, public_key)
+    if target_install_manifest.get("format") != INSTALL_MANIFEST_FORMAT:
+        raise UpdateError("unsupported install manifest format")
+    if _safe_version(target_install_manifest.get("initial_version")) != to_version:
+        raise UpdateError("install manifest version mismatch")
+    stable_result = target_install_manifest.get("files")
+    if not isinstance(stable_result, dict) or stable_result != manifest.get("stable_result_files"):
+        raise UpdateError("install manifest stable files do not match patch")
+    return target_install_manifest
+
+
+def _load_chain_patch(
+    raw: dict[str, Any],
+    public_key: Path,
+    expected_from: str,
+    plan_root: Path,
+) -> dict[str, Any]:
+    path_value = str(raw.get("path") or raw.get("filename") or "")
+    if not path_value:
+        raise UpdateError("chain patch path is missing")
+    patch_path = Path(path_value)
+    if not patch_path.is_absolute():
+        patch_path = plan_root / patch_path
+    patch_path = patch_path.resolve()
+    expected_sha256 = str(raw.get("sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise UpdateError("chain patch SHA256 is invalid")
+    if not patch_path.is_file():
+        raise UpdateError(f"chain patch is missing: {patch_path.name}")
+    if sha256_file(patch_path) != expected_sha256:
+        raise UpdateError("patch archive SHA256 mismatch")
+    expected_size = int(raw.get("size") or 0)
+    if expected_size <= 0 or patch_path.stat().st_size != expected_size:
+        raise UpdateError("patch archive size mismatch")
+
+    manifest = _load_patch(patch_path, public_key)
+    from_version = _safe_version(manifest.get("from_version"))
+    to_version = _safe_version(manifest.get("to_version"))
+    if from_version != expected_from:
+        raise UpdateError("patch chain source version mismatch")
+    if from_version != str(raw.get("from_version") or "") or to_version != str(raw.get("to_version") or ""):
+        raise UpdateError("patch manifest does not match chain plan")
+    if int(manifest.get("source_layout_version") or 0) != 3:
+        raise UpdateError("chain updates require a Runtime V3 source")
+    stable_payload = manifest.get("stable_payload") or {}
+    if not isinstance(stable_payload, dict):
+        raise UpdateError("stable payload must be an object")
+    if stable_payload:
+        raise UpdateError("chain patch cannot replace stable components")
+
+    source_manifest = manifest.get("source_runtime_manifest")
+    target_manifest = manifest.get("target_runtime_manifest")
+    if not isinstance(source_manifest, dict) or not isinstance(target_manifest, dict):
+        raise UpdateError("patch runtime manifests are missing")
+    source_files = _validate_runtime_manifest(source_manifest, public_key, from_version)
+    target_files = _validate_runtime_manifest(target_manifest, public_key, to_version)
+    runtime_payload = manifest.get("runtime_payload") or {}
+    _validate_runtime_plan(source_files, target_files, runtime_payload)
+    target_install_manifest = _validate_chain_install_manifest(manifest, public_key, to_version)
+    return {
+        "path": patch_path,
+        "sha256": expected_sha256,
+        "from_version": from_version,
+        "to_version": to_version,
+        "manifest": manifest,
+        "source_manifest": source_manifest,
+        "target_manifest": target_manifest,
+        "target_install_manifest": target_install_manifest,
+        "source_files": source_files,
+        "target_files": target_files,
+    }
+
+
+def _write_chain_state(path: Path, **state: Any) -> None:
+    payload = {
+        "schema_version": 1,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **state,
+    }
+    _atomic_write_json(path, payload)
+
+
+def apply_patch_chain(
+    plan_path: Path,
+    install_root: Path,
+    public_key: Path,
+    *,
+    launch_after: bool = True,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    plan_path = plan_path.resolve()
+    install_root = install_root.resolve()
+    _emit_progress(progress, 1, "validating patch chain")
+    plan = _load_chain_plan(plan_path)
+    raw_patches = [item for item in plan.get("patches") or [] if isinstance(item, dict)]
+    if not raw_patches:
+        raise UpdateError("chain plan has no patch records")
+
+    expected_from = _safe_version(plan.get("source_version") or raw_patches[0].get("from_version"))
+    loaded: list[dict[str, Any]] = []
+    for raw in raw_patches:
+        item = _load_chain_patch(raw, public_key, expected_from, plan_path.parent)
+        loaded.append(item)
+        expected_from = item["to_version"]
+    final_version = _safe_version(plan.get("target_version") or loaded[-1]["to_version"])
+    if final_version != loaded[-1]["to_version"]:
+        raise UpdateError("chain plan target version mismatch")
+
+    source_layout, source_root, local_source_manifest, old_state = _detect_source(
+        install_root,
+        loaded[0]["from_version"],
+        public_key,
+    )
+    if source_layout != 3 or local_source_manifest is None:
+        raise UpdateError("chain updates require an installed Runtime V3 source")
+    if canonical_manifest_bytes(local_source_manifest) != canonical_manifest_bytes(loaded[0]["source_manifest"]):
+        raise UpdateError("installed source runtime manifest does not match this chain")
+    for previous, current in zip(loaded, loaded[1:]):
+        if canonical_manifest_bytes(previous["target_manifest"]) != canonical_manifest_bytes(current["source_manifest"]):
+            raise UpdateError("patch chain runtime manifests are not contiguous")
+
+    required_space = max(_manifest_total_size(item["target_manifest"]) for item in loaded)
+    _require_free_space(install_root, required_space + DISK_SPACE_BUFFER_BYTES, "patch chain staging")
+
+    _cleanup_incomplete_work_roots(install_root)
+    transaction_id = uuid.uuid4().hex[:8]
+    backup_id = f"{loaded[0]['from_version']}_to_{final_version}_{int(time.time())}_{transaction_id}"
+    work_root = install_root / ".lc-update" / transaction_id
+    versions_root = install_root / "versions"
+    backup = _data_root() / "update_backups" / backup_id
+    runtime_root = work_root / "runtime"
+    stable_staging = work_root / "stable"
+    chain_state = work_root / "chain_state.json"
+    versions_root.mkdir(parents=True, exist_ok=True)
+    backup.mkdir(parents=True, exist_ok=False)
+    work_root.mkdir(parents=True, exist_ok=False)
+
+    state_path = install_root / STATE_FILE
+    old_state_bytes = state_path.read_bytes() if state_path.is_file() else None
+    stable_operations: list[tuple[str, bool]] = []
+    state_switched = False
+    final_target: Path | None = None
+    final_existed = (versions_root / final_version).exists()
+    try:
+        current_source_root = source_root
+        current_source_manifest = loaded[0]["source_manifest"]
+        final_staging: Path | None = None
+        for index, item in enumerate(loaded, start=1):
+            if canonical_manifest_bytes(current_source_manifest) != canonical_manifest_bytes(item["source_manifest"]):
+                raise UpdateError("patch chain source manifest mismatch")
+            stage = runtime_root / f"{index:02d}-{item['to_version']}"
+            progress_start = 8 + round(72 * (index - 1) / len(loaded))
+            progress_end = 8 + round(72 * index / len(loaded))
+            _write_chain_state(
+                chain_state,
+                transaction_id=transaction_id,
+                stage="staging-runtime",
+                patch_index=index,
+                patch_count=len(loaded),
+                from_version=item["from_version"],
+                to_version=item["to_version"],
+            )
+            with zipfile.ZipFile(item["path"]) as archive:
+                _construct_runtime(
+                    archive,
+                    current_source_root,
+                    stage,
+                    item["target_manifest"],
+                    public_key,
+                    item["manifest"].get("runtime_payload") or {},
+                    progress=progress,
+                    progress_start=progress_start,
+                    progress_end=progress_end,
+                )
+            _verify_runtime_directory(stage, item["target_manifest"], public_key)
+            current_source_root = stage.resolve()
+            current_source_manifest = item["target_manifest"]
+            final_staging = stage
+            _write_chain_state(
+                chain_state,
+                transaction_id=transaction_id,
+                stage="runtime-staged",
+                patch_index=index,
+                patch_count=len(loaded),
+                to_version=item["to_version"],
+            )
+        if final_staging is None:
+            raise UpdateError("chain produced no final runtime")
+
+        final_manifest = loaded[-1]["target_manifest"]
+        final_install_manifest = loaded[-1]["target_install_manifest"]
+        final_target = _install_version_directory(
+            versions_root,
+            final_staging,
+            final_version,
+            final_manifest,
+            public_key,
+        )
+        _emit_progress(progress, 82, "final runtime directory is ready")
+
+        install_manifest_path = stable_staging / INSTALL_MANIFEST
+        _atomic_write_json(install_manifest_path, final_install_manifest)
+        install_manifest_meta = {
+            "sha256": sha256_file(install_manifest_path),
+            "size": install_manifest_path.stat().st_size,
+        }
+        effective_stable_payload = {INSTALL_MANIFEST: install_manifest_meta}
+        _emit_progress(progress, 86, "updating install manifest")
+        _apply_stable_files(
+            install_root,
+            stable_staging,
+            effective_stable_payload,
+            backup,
+            stable_operations,
+        )
+        _verify_stable_result(
+            install_root,
+            loaded[-1]["manifest"].get("stable_result_files") or {},
+        )
+        installed_manifest = _load_json(install_root / INSTALL_MANIFEST)
+        verify_manifest(installed_manifest, public_key)
+        if canonical_manifest_bytes(installed_manifest) != canonical_manifest_bytes(final_install_manifest):
+            raise UpdateError("installed manifest does not match final patch")
+        _emit_progress(progress, 94, "chain integrity verified")
+
+        state = {
+            "schema_version": 1,
+            "runtime_layout_version": 3,
+            "current_version": final_version,
+            "previous_version": loaded[0]["from_version"],
+            "pending": True,
+            "generation": int((old_state or {}).get("generation") or 0) + 1,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source_layout_version": 3,
+            "patch_chain_length": len(loaded),
+        }
+        _atomic_write_json(state_path, state)
+        state_switched = True
+        _emit_progress(progress, 98, "version pointer switched")
+
+        launcher = install_root / DEFAULT_ENTRYPOINT
+        if launch_after:
+            flags = 0
+            if os.name == "nt":
+                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+                    subprocess,
+                    "DETACHED_PROCESS",
+                    0,
+                )
+            subprocess.Popen(
+                [str(launcher)],
+                cwd=str(install_root),
+                env=_launcher_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=flags,
+            )
+        result = {
+            "from_version": loaded[0]["from_version"],
+            "to_version": final_version,
+            "source_layout_version": 3,
+            "target_layout_version": 3,
+            "target_runtime": str(final_target),
+            "pending_health_confirmation": True,
+            "patch_chain_length": len(loaded),
+            "patches": [f"{item['from_version']}->{item['to_version']}" for item in loaded],
+            "runtime_payload_files": sum(len(item["manifest"].get("runtime_payload") or {}) for item in loaded),
+            "stable_payload_files": 0,
+        }
+        _atomic_write_json(backup / "transaction.json", result)
+        _write_log(
+            f"staged patch chain {result['from_version']} -> {result['to_version']}; "
+            f"patches={result['patch_chain_length']}"
+        )
+        _emit_progress(progress, 100, "update complete; starting new version")
+        return result
+    except Exception:
+        if state_switched:
+            try:
+                if old_state_bytes is None:
+                    state_path.unlink(missing_ok=True)
+                else:
+                    restore = state_path.with_name(state_path.name + ".rollback")
+                    restore.write_bytes(old_state_bytes)
+                    os.replace(restore, state_path)
+            except Exception as exc:
+                _write_log(f"state rollback failed: {exc}")
+        _restore_stable_files(install_root, backup, stable_operations)
+        if final_target is not None and not final_existed and final_target.exists():
+            shutil.rmtree(final_target, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(work_root, ignore_errors=True)
+        try:
+            work_root.parent.rmdir()
+        except OSError:
+            pass
+
+
 def _candidate_patch_paths() -> list[Path]:
     bundle_value = getattr(sys, "_MEIPASS", "")
     if bundle_value:
@@ -732,17 +1092,9 @@ def _candidate_patch_paths() -> list[Path]:
     return list(dict.fromkeys(path.resolve() for path in candidates if path.is_file()))
 
 
-def _interactive_paths(args: argparse.Namespace) -> tuple[Path, Path]:
-    if args.patch:
-        patch = Path(args.patch).resolve()
-    else:
-        candidates = _candidate_patch_paths()
-        if len(candidates) != 1:
-            raise UpdateError("place exactly one LiveClipper patch beside the bridge updater")
-        patch = candidates[0]
-
+def _resolve_install_root(args: argparse.Namespace) -> Path:
     if args.install_root:
-        return patch, Path(args.install_root).resolve()
+        return Path(args.install_root).resolve()
     candidates = [
         Path.cwd(),
         Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent,
@@ -751,18 +1103,29 @@ def _interactive_paths(args: argparse.Namespace) -> tuple[Path, Path]:
         if (root / STATE_FILE).is_file() or (
             (root / DEFAULT_ENTRYPOINT).is_file() and (root / "_internal").is_dir()
         ):
-            return patch, root.resolve()
+            return root.resolve()
 
     import tkinter as tk
     from tkinter import filedialog
 
     window = tk.Tk()
     window.withdraw()
-    selected = filedialog.askdirectory(title="选择 LiveClipperWeb 程序文件夹")
+    selected = filedialog.askdirectory(title="Select LiveClipperWeb install directory")
     window.destroy()
     if not selected:
-        raise UpdateError("未选择 LiveClipperWeb 程序文件夹")
-    return patch, Path(selected).resolve()
+        raise UpdateError("LiveClipperWeb install directory was not selected")
+    return Path(selected).resolve()
+
+
+def _interactive_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.patch:
+        patch = Path(args.patch).resolve()
+    else:
+        candidates = _candidate_patch_paths()
+        if len(candidates) != 1:
+            raise UpdateError("place exactly one LiveClipper patch beside the bridge updater")
+        patch = candidates[0]
+    return patch, _resolve_install_root(args)
 
 
 def _show_message(title: str, message: str, error: bool = False) -> None:
@@ -815,29 +1178,40 @@ def _make_progress_callback(
 
 def _execute_update(
     args: argparse.Namespace,
-    patch: Path,
+    patch: Path | None,
     install_root: Path,
     public_key: Path,
     events: queue.Queue[tuple[str, Any]] | None = None,
 ) -> dict[str, Any]:
     progress = _make_progress_callback(events)
     try:
-        progress(0, "正在等待 LiveClipper 安全退出")
+        progress(0, "waiting for LiveClipper to exit safely")
         _wait_for_process(args.wait_pid)
-        result = apply_patch(
-            patch,
-            install_root,
-            public_key,
-            expected_patch_sha256=args.expected_patch_sha256,
-            launch_after=not args.no_launch,
-            progress=progress,
-        )
-        _write_update_status("complete", 100, "更新完成，正在启动新版本")
+        if args.plan:
+            result = apply_patch_chain(
+                Path(args.plan),
+                install_root,
+                public_key,
+                launch_after=not args.no_launch,
+                progress=progress,
+            )
+        else:
+            if patch is None:
+                raise UpdateError("patch path is missing")
+            result = apply_patch(
+                patch,
+                install_root,
+                public_key,
+                expected_patch_sha256=args.expected_patch_sha256,
+                launch_after=not args.no_launch,
+                progress=progress,
+            )
+        _write_update_status("complete", 100, "update complete; starting new version")
         if events is not None:
             events.put(("done", result))
         return result
     except Exception as exc:
-        message = f"更新失败：{exc}"
+        message = f"update failed: {exc}"
         _write_update_status("failed", 0, message)
         if events is not None:
             events.put(("error", message))
@@ -846,7 +1220,7 @@ def _execute_update(
 
 def _run_progress_window(
     args: argparse.Namespace,
-    patch: Path,
+    patch: Path | None,
     install_root: Path,
     public_key: Path,
 ) -> int:
@@ -928,6 +1302,7 @@ def _run_progress_window(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply a signed LiveClipper version update.")
     parser.add_argument("--patch", default="")
+    parser.add_argument("--plan", default="")
     parser.add_argument("--install-root", default="")
     parser.add_argument("--public-key", default="")
     parser.add_argument("--wait-pid", type=int, default=0)
@@ -937,7 +1312,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--show-progress", action="store_true")
     args = parser.parse_args(argv)
     try:
-        patch, install_root = _interactive_paths(args)
+        if args.plan:
+            patch = None
+            install_root = _resolve_install_root(args)
+        else:
+            patch, install_root = _interactive_paths(args)
         public_key = _public_key_path(args.public_key, install_root)
         if args.show_progress:
             try:

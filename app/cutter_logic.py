@@ -591,6 +591,48 @@ def _append_seek_input_args(cmd, video_path, start, accurate=False):
     return cmd
 
 
+def _preview_exact_seek_window(start, duration):
+    try:
+        start_value = max(0.0, float(start))
+    except Exception:
+        start_value = 0.0
+    try:
+        duration_value = max(0.2, float(duration))
+    except Exception:
+        duration_value = 0.2
+    input_seek = max(0.0, start_value - 2.0)
+    filter_start = max(0.0, start_value - input_seek)
+    input_duration = max(0.3, duration_value + filter_start + 0.25)
+    return input_seek, filter_start, input_duration
+
+
+def _preview_exact_cut_cmd(ffmpeg, video_path, start, duration, video_filter, audio_filter, output_path, vcodec_args, fps=None):
+    input_seek, filter_start, input_duration = _preview_exact_seek_window(start, duration)
+    duration_value = max(0.2, float(duration))
+    vf = (
+        f"trim=start={filter_start:.3f}:duration={duration_value:.3f},"
+        f"setpts=PTS-STARTPTS,{video_filter}"
+    )
+    af = (
+        f"atrim=start={filter_start:.3f}:duration={duration_value:.3f},"
+        f"{audio_filter}"
+    )
+    cmd = [ffmpeg, "-y"]
+    if _is_ts_like_video(video_path):
+        cmd += ["-fflags", "+genpts"]
+    cmd += ["-ss", f"{input_seek:.3f}", "-i", video_path, "-t", f"{input_duration:.3f}"]
+    cmd += _stable_cfr_output_args(fps)
+    cmd += list(vcodec_args or _intermediate_software_vcodec_args())
+    cmd += [
+        "-filter_complex", f"[0:v]{vf}[v];[0:a]{af}[a]",
+        "-map", "[v]", "-map", "[a]",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-shortest", "-movflags", "+faststart", output_path,
+    ]
+    return cmd
+
+
 def _remux_ts_for_editing(video_path, temp_dir, ffmpeg, log_fn=None):
     """Normalize TS-family files to an edit-friendly MP4 before ASR/cutting."""
     if not _is_ts_like_video(video_path):
@@ -2898,19 +2940,24 @@ def process_video(video_path, srt_path=None, output_path=None,
             )
             _log("[T] VF: " + combined_vf[:200])
 
-            cmd = [ffmpeg, "-y"]
-            # 精确预览子句优先准确 seek；普通整段仍用快速 seek 控制耗时。
-            _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
-            cmd += ["-t", f"{clip_duration:.3f}"]
-            cmd += ["-fflags", "+genpts"]
-            cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-            cmd += _intermediate_vcodec_args()
-            cmd += ["-vf", combined_vf]
-            cmd += ["-pix_fmt", "yuv420p"]
-            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
-                   "-af", _audio_filter, "-shortest"]
-            cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
-            cmd += [temp_file]
+            if _preview_exact:
+                cmd = _preview_exact_cut_cmd(
+                    ffmpeg, video_path, start, clip_duration, combined_vf,
+                    _audio_filter, temp_file, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
+                )
+            else:
+                cmd = [ffmpeg, "-y"]
+                _append_seek_input_args(cmd, video_path, start, accurate=False)
+                cmd += ["-t", f"{clip_duration:.3f}"]
+                cmd += ["-fflags", "+genpts"]
+                cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+                cmd += _intermediate_vcodec_args()
+                cmd += ["-vf", combined_vf]
+                cmd += ["-pix_fmt", "yuv420p"]
+                cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+                       "-af", _audio_filter, "-shortest"]
+                cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+                cmd += [temp_file]
             _log(f"[T] [{time.strftime('%H:%M:%S')}] Popen start")
 
             try:
@@ -5843,20 +5890,24 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             )
         )
 
-        cmd = [ffmpeg, "-y"]
-        _append_seek_input_args(cmd, vp, start, accurate=preview_exact)
-        cmd += ["-t", f"{duration:.3f}"]
-        # 去掉最后的淡入淡出避免音频被切（原afade去掉）
-        # 改用精准截断：提前0.15s开始保证帧对齐
-        cmd += ["-fflags", "+genpts"]
-        cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-        cmd += _intermediate_vcodec_args()
-        cmd += ["-vf", combined_vf]
-        cmd += ["-pix_fmt", "yuv420p"]
-        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
-               "-af", _mix_audio_filter, "-shortest"]
-        cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
-        cmd += [out_clip]
+        if preview_exact:
+            cmd = _preview_exact_cut_cmd(
+                ffmpeg, vp, start, duration, combined_vf,
+                _mix_audio_filter, out_clip, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
+            )
+        else:
+            cmd = [ffmpeg, "-y"]
+            _append_seek_input_args(cmd, vp, start, accurate=False)
+            cmd += ["-t", f"{duration:.3f}"]
+            cmd += ["-fflags", "+genpts"]
+            cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+            cmd += _intermediate_vcodec_args()
+            cmd += ["-vf", combined_vf]
+            cmd += ["-pix_fmt", "yuv420p"]
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+                   "-af", _mix_audio_filter, "-shortest"]
+            cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+            cmd += [out_clip]
 
         try:
             proc = _register_process(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

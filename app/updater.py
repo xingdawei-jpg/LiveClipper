@@ -17,6 +17,7 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,6 +42,9 @@ INACTIVE_CHANNEL_STATES = {
     "disabled",
     "awaiting-external-distribution",
 }
+CHAIN_PLAN_FORMAT = "liveclipper-update-chain-plan-v1"
+MAX_PATCH_CHAIN_LENGTH = 8
+DISK_SPACE_BUFFER_BYTES = 128 * 1024 * 1024
 
 DownloadProgress = Callable[[int, int, str], None]
 
@@ -295,38 +299,107 @@ def _patch_sources(patch: dict[str, Any]) -> list[dict[str, str]]:
     return sources
 
 
+def _normalize_delta_patch(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    if str(candidate.get("format") or "") != DELTA_FORMAT:
+        return None
+    from_version = str(candidate.get("from_version") or "").strip()
+    to_version = str(candidate.get("to_version") or "").strip()
+    if not from_version or not to_version or from_version == to_version:
+        return None
+    sources = _patch_sources(candidate)
+    sha256 = str(candidate.get("sha256") or "").strip().lower()
+    try:
+        size = int(candidate.get("size") or 0)
+    except Exception:
+        size = 0
+    if not sources or not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0:
+        return None
+    result = dict(candidate)
+    result.update(
+        {
+            "from_version": from_version,
+            "to_version": to_version,
+            "url": sources[0]["url"],
+            "urls": [source["url"] for source in sources],
+            "sources": sources,
+            "sha256": sha256,
+            "size": size,
+        }
+    )
+    return result
+
+
+def _normalized_delta_candidates(info: dict[str, Any]) -> list[dict[str, Any]]:
+    patches: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for candidate in _delta_candidates(info):
+        patch = _normalize_delta_patch(candidate)
+        if patch is None:
+            continue
+        key = (patch["from_version"], patch["to_version"], patch["sha256"])
+        if key in seen:
+            continue
+        seen.add(key)
+        patches.append(patch)
+    return patches
+
+
 def _select_delta_patch(
     info: dict[str, Any],
     local_version: str | None = None,
 ) -> dict[str, Any] | None:
     source_version = str(local_version or _get_installed_version())
     target_version = _manifest_version(info)
-    for candidate in _delta_candidates(info):
-        if str(candidate.get("format") or "") != DELTA_FORMAT:
+    for candidate in _normalized_delta_candidates(info):
+        if candidate["from_version"] == source_version and candidate["to_version"] == target_version:
+            return candidate
+    return None
+
+
+def _max_patch_chain_length(info: dict[str, Any]) -> int:
+    policy = info.get("patch_policy") if isinstance(info.get("patch_policy"), dict) else {}
+    try:
+        value = int(policy.get("max_chain_depth") or policy.get("max_patch_chain_length") or 0)
+    except Exception:
+        value = 0
+    return max(1, min(value or MAX_PATCH_CHAIN_LENGTH, MAX_PATCH_CHAIN_LENGTH))
+
+
+def _select_delta_chain(
+    info: dict[str, Any],
+    local_version: str | None = None,
+) -> list[dict[str, Any]] | None:
+    source_version = str(local_version or _get_installed_version())
+    target_version = _manifest_version(info)
+    if source_version == target_version:
+        return []
+
+    direct = _select_delta_patch(info, source_version)
+    if direct is not None:
+        return [direct]
+
+    max_depth = _max_patch_chain_length(info)
+    edges: dict[str, list[dict[str, Any]]] = {}
+    for patch in _normalized_delta_candidates(info):
+        edges.setdefault(patch["from_version"], []).append(patch)
+
+    queue: list[tuple[str, list[dict[str, Any]]]] = [(source_version, [])]
+    best_depth: dict[str, int] = {source_version: 0}
+    while queue:
+        version, path = queue.pop(0)
+        if len(path) >= max_depth:
             continue
-        if str(candidate.get("from_version") or "") != source_version:
-            continue
-        if str(candidate.get("to_version") or "") != target_version:
-            continue
-        sources = _patch_sources(candidate)
-        sha256 = str(candidate.get("sha256") or "").strip().lower()
-        try:
-            size = int(candidate.get("size") or 0)
-        except Exception:
-            size = 0
-        if not sources or not re.fullmatch(r"[0-9a-f]{64}", sha256) or size <= 0:
-            continue
-        result = dict(candidate)
-        result.update(
-            {
-                "url": sources[0]["url"],
-                "urls": [source["url"] for source in sources],
-                "sources": sources,
-                "sha256": sha256,
-                "size": size,
-            }
-        )
-        return result
+        for patch in edges.get(version, []):
+            next_version = patch["to_version"]
+            if any(item["from_version"] == next_version for item in path):
+                continue
+            next_path = [*path, patch]
+            if next_version == target_version:
+                return next_path
+            previous_depth = best_depth.get(next_version)
+            if previous_depth is None or len(next_path) < previous_depth:
+                best_depth[next_version] = len(next_path)
+                queue.append((next_version, next_path))
     return None
 
 
@@ -366,20 +439,24 @@ def _manifest_integrity_mismatches(manifest: dict[str, Any]) -> list[str]:
 def _with_update_route(release: dict[str, Any], local_version: str) -> dict[str, Any]:
     if not _channel_is_active(release):
         release["selected_patch"] = None
+        release["selected_patches"] = []
+        release["patch_chain_length"] = 0
         release["supports_incremental_updates"] = False
         release["requires_full_package"] = True
         release["update_strategy"] = "hold"
         return release
-    patch = _select_delta_patch(release, local_version)
+    patches = _select_delta_chain(release, local_version)
     supported = bool(
-        patch
+        patches
         and delta_runtime_supported()
         and _updater_meets_minimum(release)
     )
-    release["selected_patch"] = patch
+    release["selected_patch"] = patches[0] if patches and len(patches) == 1 else None
+    release["selected_patches"] = patches or []
+    release["patch_chain_length"] = len(patches or [])
     release["supports_incremental_updates"] = supported
     release["requires_full_package"] = not supported
-    release["update_strategy"] = "verified-version-delta" if supported else "full-package"
+    release["update_strategy"] = "verified-version-delta-chain" if supported else "full-package"
     return release
 
 
@@ -669,6 +746,115 @@ def _verified_download(
     )
 
 
+def _load_patch_manifest_from_archive(patch_path: Path, public_key: Path) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(patch_path) as archive:
+            manifest = json.loads(archive.read("patch_manifest.json").decode("utf-8-sig"))
+    except Exception as exc:
+        raise RuntimeError(f"invalid patch archive: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError("patch manifest is not an object")
+    verify_manifest(manifest, public_key)
+    return manifest
+
+
+def _verify_signed_patch_manifest(
+    patch: dict[str, Any],
+    patch_path: Path,
+    public_key: Path,
+    expected_from: str,
+) -> dict[str, Any]:
+    expected_hash = str(patch["sha256"]).lower()
+    expected_size = int(patch["size"])
+    if patch_path.stat().st_size != expected_size:
+        raise RuntimeError("patch size does not match release channel")
+    if sha256_file(patch_path) != expected_hash:
+        raise RuntimeError("patch SHA256 does not match release channel")
+    manifest = _load_patch_manifest_from_archive(patch_path, public_key)
+    if manifest.get("format") != DELTA_FORMAT:
+        raise RuntimeError("unsupported patch format")
+    if int(manifest.get("schema_version") or 0) != 3:
+        raise RuntimeError("unsupported patch schema")
+    from_version = str(manifest.get("from_version") or "")
+    to_version = str(manifest.get("to_version") or "")
+    if from_version != expected_from:
+        raise RuntimeError("patch chain source version mismatch")
+    if from_version != patch["from_version"] or to_version != patch["to_version"]:
+        raise RuntimeError("patch version does not match release channel")
+    if int(manifest.get("target_layout_version") or 0) != RUNTIME_LAYOUT_VERSION:
+        raise RuntimeError("patch target is not Runtime V3")
+    for field_name, version in (
+        ("source_runtime_manifest", from_version),
+        ("target_runtime_manifest", to_version),
+    ):
+        runtime_manifest = manifest.get(field_name)
+        if not isinstance(runtime_manifest, dict):
+            raise RuntimeError(f"patch missing {field_name}")
+        verify_manifest(runtime_manifest, public_key)
+        if str(runtime_manifest.get("version") or "") != version:
+            raise RuntimeError(f"{field_name} version mismatch")
+    install_manifest = manifest.get("target_install_manifest")
+    if not isinstance(install_manifest, dict):
+        raise RuntimeError("patch missing target install manifest")
+    verify_manifest(install_manifest, public_key)
+    if str(install_manifest.get("initial_version") or "") != to_version:
+        raise RuntimeError("install manifest version mismatch")
+    if install_manifest.get("files") != manifest.get("stable_result_files"):
+        raise RuntimeError("install manifest stable result mismatch")
+    stable_payload = manifest.get("stable_payload") or {}
+    if not isinstance(stable_payload, dict):
+        raise RuntimeError("stable payload must be an object")
+    if stable_payload:
+        raise RuntimeError("Runtime V3 chain patch cannot replace stable components")
+    return manifest
+
+
+def _runtime_manifest_total_size(manifest: dict[str, Any]) -> int:
+    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    total = 0
+    for meta in files.values():
+        if isinstance(meta, dict):
+            try:
+                total += max(0, int(meta.get("size") or 0))
+            except Exception:
+                pass
+    return total
+
+
+def _require_free_space(path: Path, required_bytes: int, label: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(path).free
+    except Exception:
+        return
+    if free < required_bytes:
+        needed_mb = required_bytes // (1024 * 1024)
+        free_mb = free // (1024 * 1024)
+        raise RuntimeError(f"not enough disk space for {label}: need {needed_mb} MB, free {free_mb} MB")
+
+
+def _write_chain_plan(
+    download_root: Path,
+    target_version: str,
+    source_version: str,
+    entries: list[dict[str, Any]],
+) -> Path:
+    plan = {
+        "schema_version": 1,
+        "format": CHAIN_PLAN_FORMAT,
+        "source_version": source_version,
+        "target_version": target_version,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "patches": entries,
+    }
+    plan_path = download_root / "chain_plan.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = plan_path.with_name(plan_path.name + ".tmp")
+    temporary.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, plan_path)
+    return plan_path
+
+
 def apply_update_headless(
     version_info: dict[str, Any] | None,
     progress_callback: DownloadProgress | None = None,
@@ -682,58 +868,116 @@ def apply_update_headless(
             "version": _manifest_version(info),
             "updated": [],
             "failed": [],
-            "msg": "更新通道维护中，请稍后再试。",
+            "msg": "Update channel is temporarily on hold.",
         }
-    patch = info.get("selected_patch") if isinstance(info.get("selected_patch"), dict) else None
-    if patch is None:
-        patch = _select_delta_patch(info)
-    if patch is None:
+    patches = info.get("selected_patches") if isinstance(info.get("selected_patches"), list) else None
+    if patches is None:
+        selected_patch = info.get("selected_patch") if isinstance(info.get("selected_patch"), dict) else None
+        patches = [selected_patch] if selected_patch is not None else (_select_delta_chain(info) or [])
+    patches = [patch for patch in patches if isinstance(patch, dict)]
+    if not patches:
         return _full_package_result(info)
     if not delta_runtime_supported():
-        return _full_package_result(info, "当前客户端不是 Runtime V3，请使用架构桥接包完成本次升级。")
+        return _full_package_result(info, "Runtime V3 is required for signed delta updates.")
     if not _updater_meets_minimum(info):
-        return _full_package_result(info, "当前更新器版本过旧，请安装一次完整包后再使用增量更新。")
+        return _full_package_result(info, "The installed updater is too old; install the full package once.")
 
     target_version = _manifest_version(info)
+    source_version = str(patches[0].get("from_version") or _get_installed_version())
     download_root = _download_root(target_version)
-    patch_path = download_root / _patch_filename(patch)
-    _verified_download(
-        patch,
-        patch_path,
-        progress_callback=progress_callback,
+    total_size = sum(int(patch["size"]) for patch in patches)
+    _require_free_space(download_root, total_size + DISK_SPACE_BUFFER_BYTES, "patch download")
+
+    public_key = _release_public_key_path()
+    completed_bytes = 0
+    expected_from = source_version
+    downloaded_entries: list[dict[str, Any]] = []
+    manifests: list[dict[str, Any]] = []
+    for index, patch in enumerate(patches, start=1):
+        patch_path = download_root / _patch_filename(patch)
+
+        def chain_progress(done: int, _total: int, message: str, *, base: int = completed_bytes, item: int = index) -> None:
+            _emit_download_progress(
+                progress_callback,
+                min(total_size, base + done),
+                total_size,
+                f"patch {item}/{len(patches)}: {message}",
+            )
+
+        _verified_download(
+            patch,
+            patch_path,
+            progress_callback=chain_progress,
+        )
+        manifest = _verify_signed_patch_manifest(
+            patch,
+            patch_path,
+            public_key,
+            expected_from,
+        )
+        manifests.append(manifest)
+        downloaded_entries.append(
+            {
+                "from_version": patch["from_version"],
+                "to_version": patch["to_version"],
+                "path": str(patch_path),
+                "filename": patch_path.name,
+                "sha256": str(patch["sha256"]).lower(),
+                "size": int(patch["size"]),
+                "sources": patch.get("sources") or [],
+            }
+        )
+        completed_bytes += int(patch["size"])
+        expected_from = str(patch["to_version"])
+
+    apply_space = max(
+        [_runtime_manifest_total_size(manifest.get("target_runtime_manifest") or {}) for manifest in manifests]
+        or [0]
     )
+    _require_free_space(_install_root(), apply_space + DISK_SPACE_BUFFER_BYTES, "patch staging")
     _emit_download_progress(
         progress_callback,
-        int(patch["size"]),
-        int(patch["size"]),
-        "增量包已验证，正在启动更新程序",
+        total_size,
+        total_size,
+        "all patches downloaded and verified; starting updater",
     )
 
+    plan_path = _write_chain_plan(download_root, target_version, source_version, downloaded_entries)
     agent_copy = download_root / "LiveClipperUpdater.exe"
     key_copy = download_root / "release_update_public_key.pem"
     shutil.copy2(_update_agent_path(), agent_copy)
-    shutil.copy2(_release_public_key_path(), key_copy)
+    shutil.copy2(public_key, key_copy)
     flags = 0
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-            subprocess, "DETACHED_PROCESS", 0
+            subprocess,
+            "DETACHED_PROCESS",
+            0,
         )
+    command = [
+        str(agent_copy),
+        "--install-root",
+        str(_install_root()),
+        "--public-key",
+        str(key_copy),
+        "--wait-pid",
+        str(os.getpid()),
+        "--non-interactive",
+        "--show-progress",
+    ]
+    if len(downloaded_entries) == 1:
+        command.extend(
+            [
+                "--patch",
+                downloaded_entries[0]["path"],
+                "--expected-patch-sha256",
+                downloaded_entries[0]["sha256"],
+            ]
+        )
+    else:
+        command.extend(["--plan", str(plan_path)])
     subprocess.Popen(
-        [
-            str(agent_copy),
-            "--patch",
-            str(patch_path),
-            "--install-root",
-            str(_install_root()),
-            "--public-key",
-            str(key_copy),
-            "--wait-pid",
-            str(os.getpid()),
-            "--expected-patch-sha256",
-            str(patch["sha256"]),
-            "--non-interactive",
-            "--show-progress",
-        ],
+        command,
         cwd=str(download_root),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -743,9 +987,9 @@ def apply_update_headless(
     )
     _emit_download_progress(
         progress_callback,
-        int(patch["size"]),
-        int(patch["size"]),
-        "更新程序已启动，客户端即将退出",
+        total_size,
+        total_size,
+        "updater started; client will exit",
     )
     return {
         "ok": True,
@@ -754,10 +998,12 @@ def apply_update_headless(
         "exit_required": True,
         "restart_required": True,
         "version": target_version,
-        "patch_size": int(patch["size"]),
+        "patch_size": total_size,
+        "patch_count": len(downloaded_entries),
+        "patch_chain": [f"{entry['from_version']}->{entry['to_version']}" for entry in downloaded_entries],
         "updated": [],
         "failed": [],
-        "msg": "增量包已验证，客户端即将退出；更新进度窗口会持续显示，完成后自动启动新版本。",
+        "msg": "Patches verified; updater will apply them and restart LiveClipper.",
     }
 
 
@@ -806,4 +1052,5 @@ __all__ = [
     "parse_version",
     "_get_installed_version",
     "_select_delta_patch",
+    "_select_delta_chain",
 ]

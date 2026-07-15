@@ -96,6 +96,24 @@
                 <button class="button button-muted" data-action="open-path" data-target="output-dir">打开</button>
               </div>
             </div>
+            <div class="field-row">
+              <label for="sc-primary-category">一级类目</label>
+                <select id="sc-primary-category" data-primary-category="sc">
+                  <option selected>服饰内衣</option>
+                  <option>生鲜</option>
+                  <option>食品饮料</option>
+                  <option>美妆</option>
+                  <option>个护家清</option>
+                  <option>鞋靴箱包</option>
+                  <option>钟表配饰</option>
+                  <option>母婴宠物</option>
+                  <option>图书教育</option>
+                  <option>智能家居</option>
+                  <option>3C数码家电</option>
+                  <option>运动户外</option>
+                  <option>鲜花园艺</option>
+                </select>
+            </div>
             <div class="panel-actions">
               <button class="button button-danger" data-action="stop-scope" data-scope="smart-cut">停止</button>
               <button class="button button-secondary" data-action="start-smart-preview">AI选片预览</button>
@@ -287,6 +305,15 @@
                   <option value="fast">快速促单</option>
                   <option value="gentle">温柔讲解</option>
                   <option value="food_fresh">食品/生鲜</option>
+                  <option value="food_packaged">食品饮料</option>
+                  <option value="beauty">美妆护肤</option>
+                  <option value="personal_care">个护家清</option>
+                  <option value="household">家居百货</option>
+                  <option value="electronics">3C数码家电</option>
+                  <option value="mother_baby_pet">母婴宠物</option>
+                  <option value="books_education">图书教育</option>
+                  <option value="sports_outdoor">运动户外</option>
+                  <option value="flowers_garden">鲜花园艺</option>
                 </select>
                 <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="sc">保存</button>
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
@@ -294,7 +321,7 @@
             </div>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="sc-category">主推品类</label>
+                <label for="sc-category">AI主品类</label>
                 <select id="sc-category">
                   <option>自动检测</option>
                   <option>上衣</option>
@@ -304,6 +331,15 @@
                   <option>套装</option>
                   <option>鞋子</option>
                   <option>食品/生鲜</option>
+                  <option>食品饮料</option>
+                  <option>美妆护肤</option>
+                  <option>个护家清</option>
+                  <option>家居百货</option>
+                  <option>3C数码家电</option>
+                  <option>母婴宠物</option>
+                  <option>图书教育</option>
+                  <option>运动户外</option>
+                  <option>鲜花园艺</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -326,6 +362,45 @@
                   <option>场景吃法</option>
                 </select>
               </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="sc-secondary-category">二级类目</label>
+                <select id="sc-secondary-category">
+                  <option selected>自动识别</option>
+                  <option>新鲜水果</option>
+                  <option>精选肉类</option>
+                  <option>冷饮冻食</option>
+                  <option>粮油速食</option>
+                  <option>传统滋补</option>
+                  <option>休闲零食</option>
+                  <option>彩妆香水</option>
+                  <option>化妆工具</option>
+                  <option>美容护肤</option>
+                  <option>个人护理</option>
+                  <option>家庭清洁</option>
+                  <option>女装</option>
+                  <option>男装</option>
+                  <option>女鞋</option>
+                  <option>箱包</option>
+                  <option>家纺好物</option>
+                  <option>家具家装</option>
+                  <option>家电好货</option>
+                  <option>影音智能</option>
+                  <option>手机</option>
+                  <option>大家电</option>
+                  <option>电脑办公</option>
+                  <option>户外旅行</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-leaf-category">细分类目</label>
+                <input id="sc-leaf-category" type="text" placeholder="自动识别，可填芒果/口红">
+              </div>
+            </div>
+            <div class="field-row compact advanced-param">
+              <label for="sc-main-product">主商品锁定</label>
+              <input id="sc-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
@@ -359,7 +434,7 @@
             </div>
             <div class="field-row field-row-stack advanced-param">
               <label>主卖点优先</label>
-              <div class="chip-grid chip-grid-14">
+              <div class="chip-grid chip-grid-14" data-ai-chip-group="sc-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="面料质感"> 面料质感</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="品质细节"> 品质细节</label>
@@ -388,7 +463,7 @@
             </div>
             <div class="field-row field-row-stack advanced-param">
               <label>不要选这些</label>
-              <div class="chip-grid">
+              <div class="chip-grid" data-ai-chip-group="sc-avoid">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="价格"> 价格</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="尺码"> 尺码</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="库存"> 库存</label>
@@ -496,6 +571,24 @@
                 <button class="button button-secondary" data-action="pick-directory" data-target="mix-output-dir">浏览</button>
                 <button class="button button-muted" data-action="open-path" data-target="mix-output-dir">打开</button>
               </div>
+            </div>
+            <div class="field-row">
+              <label for="mix-primary-category">一级类目</label>
+                <select id="mix-primary-category" data-primary-category="mix">
+                  <option selected>服饰内衣</option>
+                  <option>生鲜</option>
+                  <option>食品饮料</option>
+                  <option>美妆</option>
+                  <option>个护家清</option>
+                  <option>鞋靴箱包</option>
+                  <option>钟表配饰</option>
+                  <option>母婴宠物</option>
+                  <option>图书教育</option>
+                  <option>智能家居</option>
+                  <option>3C数码家电</option>
+                  <option>运动户外</option>
+                  <option>鲜花园艺</option>
+                </select>
             </div>
             <div class="panel-actions">
               <button class="button button-danger" data-action="stop-scope" data-scope="mix">停止</button>
@@ -685,6 +778,15 @@
                   <option value="fast">快速促单</option>
                   <option value="gentle">温柔讲解</option>
                   <option value="food_fresh">食品/生鲜</option>
+                  <option value="food_packaged">食品饮料</option>
+                  <option value="beauty">美妆护肤</option>
+                  <option value="personal_care">个护家清</option>
+                  <option value="household">家居百货</option>
+                  <option value="electronics">3C数码家电</option>
+                  <option value="mother_baby_pet">母婴宠物</option>
+                  <option value="books_education">图书教育</option>
+                  <option value="sports_outdoor">运动户外</option>
+                  <option value="flowers_garden">鲜花园艺</option>
                 </select>
                 <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="mix">保存</button>
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
@@ -692,7 +794,7 @@
             </div>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="mix-category">主推品类</label>
+                <label for="mix-category">AI主品类</label>
                 <select id="mix-category">
                   <option>自动检测</option>
                   <option>上衣</option>
@@ -702,6 +804,15 @@
                   <option>套装</option>
                   <option>鞋子</option>
                   <option>食品/生鲜</option>
+                  <option>食品饮料</option>
+                  <option>美妆护肤</option>
+                  <option>个护家清</option>
+                  <option>家居百货</option>
+                  <option>3C数码家电</option>
+                  <option>母婴宠物</option>
+                  <option>图书教育</option>
+                  <option>运动户外</option>
+                  <option>鲜花园艺</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -724,6 +835,45 @@
                   <option>场景吃法</option>
                 </select>
               </div>
+            </div>
+            <div class="field-pair advanced-param">
+              <div class="field-row compact">
+                <label for="mix-secondary-category">二级类目</label>
+                <select id="mix-secondary-category">
+                  <option selected>自动识别</option>
+                  <option>新鲜水果</option>
+                  <option>精选肉类</option>
+                  <option>冷饮冻食</option>
+                  <option>粮油速食</option>
+                  <option>传统滋补</option>
+                  <option>休闲零食</option>
+                  <option>彩妆香水</option>
+                  <option>化妆工具</option>
+                  <option>美容护肤</option>
+                  <option>个人护理</option>
+                  <option>家庭清洁</option>
+                  <option>女装</option>
+                  <option>男装</option>
+                  <option>女鞋</option>
+                  <option>箱包</option>
+                  <option>家纺好物</option>
+                  <option>家具家装</option>
+                  <option>家电好货</option>
+                  <option>影音智能</option>
+                  <option>手机</option>
+                  <option>大家电</option>
+                  <option>电脑办公</option>
+                  <option>户外旅行</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-leaf-category">细分类目</label>
+                <input id="mix-leaf-category" type="text" placeholder="自动识别，可填芒果/口红">
+              </div>
+            </div>
+            <div class="field-row compact advanced-param">
+              <label for="mix-main-product">主商品锁定</label>
+              <input id="mix-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
@@ -757,7 +907,7 @@
             </div>
             <div class="field-row field-row-stack advanced-param">
               <label>主卖点优先</label>
-              <div class="chip-grid chip-grid-14">
+              <div class="chip-grid chip-grid-14" data-ai-chip-group="mix-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="面料质感"> 面料质感</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="品质细节"> 品质细节</label>
@@ -786,7 +936,7 @@
             </div>
             <div class="field-row field-row-stack advanced-param">
               <label>不要选这些</label>
-              <div class="chip-grid">
+              <div class="chip-grid" data-ai-chip-group="mix-avoid">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="价格"> 价格</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="尺码"> 尺码</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="库存"> 库存</label>

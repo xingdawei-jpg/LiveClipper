@@ -2446,6 +2446,10 @@ def _normalize_ai_controls(ai_controls=None):
         return result
 
     return {
+        "primary_category": _clean_text(ai_controls.get("primary_category")),
+        "secondary_category": _clean_text(ai_controls.get("secondary_category")),
+        "leaf_category": _clean_text(ai_controls.get("leaf_category")),
+        "main_product": _clean_text(ai_controls.get("main_product")),
         "goal": _clean_text(ai_controls.get("goal")),
         "selling_points": _normalize_focus_list(_clean_list(ai_controls.get("selling_points"))),
         "avoid": _clean_list(ai_controls.get("avoid")),
@@ -2510,6 +2514,21 @@ def _build_ai_controls_lines(ai_controls=None):
     }
 
     lines = []
+    primary_category = controls.get("primary_category")
+    secondary_category = controls.get("secondary_category")
+    leaf_category = controls.get("leaf_category")
+    main_product = controls.get("main_product")
+    if primary_category:
+        lines.append(f"本次一级类目锁定为：{primary_category}；二级/细分可自动识别，但不得套用其他一级类目的卖点语言。")
+    if secondary_category or leaf_category:
+        parts = []
+        if secondary_category:
+            parts.append(f"二级类目={secondary_category}")
+        if leaf_category:
+            parts.append(f"细分类目={leaf_category}")
+        lines.append("本次细分类目参考：" + "，".join(parts) + "；用于卖点维度和关键词加权，识别不确定时仍以字幕里的主商品为准。")
+    if main_product:
+        lines.append(f"本次主商品手动锁定为：{main_product}；同一条成片只能围绕该商品，不得混入其他同类商品片段。")
     goal = controls.get("goal")
     if goal:
         lines.append(goal_map.get(goal, f"本次成片目标：{goal}。"))
@@ -12945,6 +12964,13 @@ _CONTENT_SAFETY_PATTERNS = (
     ("ASR识别残留", re.compile(r"(?:身高|体重|腰围|胸围)[^，。！？!?]{0,12}(?i:asr)")),
     ("CTA链接引导", re.compile(r"(?:上|挂|放)(?:个|下)?(?:链|连)接")),
     ("效果承诺:包出片", re.compile(r"包出片")),
+    (
+        "赔付承诺:超范围包赔",
+        re.compile(
+            r"(?:(?:包?赔|赔付)[^，。！？!?]{0,6}(?:到底|到满意|到你满意)|"
+            r"(?:无限|一直|全程|兜底)[^，。！？!?]{0,6}(?:包?赔|赔付))"
+        ),
+    ),
     ("材质安全宣称:母婴级", re.compile(r"母婴(?:店)?级(?:别)?")),
     ("效果承诺:夸张藏肉斤数", re.compile(r"(?:藏|遮)(?:掉|住)?[^，。！？!?]{0,12}(?:十几二十|十几|二十|几十|\d{1,2})斤")),
     ("效果承诺:全给藏掉", re.compile(r"(?:全(?:部)?|都)(?:给你|给)?(?:藏|遮)(?:掉|住)")),
@@ -13716,15 +13742,25 @@ CATEGORY_PROMPT_RULES = {
 
 def _install_vertical_category_profiles():
     """Register verticals once; unknown categories still fall back to general AI rules."""
+
+    def _extend_unique(target, key, values):
+        if not values:
+            return
+        current = list(target.get(key, []))
+        seen = set(current)
+        for value in values:
+            if value and value not in seen:
+                current.append(value)
+                seen.add(value)
+        target[key] = current
+
     for profile in iter_vertical_profiles():
-        if profile.product_keywords:
-            PRODUCT_CATEGORIES.setdefault(profile.key, list(profile.product_keywords))
-        if profile.filename_keywords:
-            FILENAME_CATEGORY_KEYWORDS.setdefault(profile.key, list(profile.filename_keywords))
+        _extend_unique(PRODUCT_CATEGORIES, profile.key, profile.product_keywords)
+        _extend_unique(FILENAME_CATEGORY_KEYWORDS, profile.key, profile.filename_keywords)
         if profile.focus_order:
-            CATEGORY_FOCUS_ORDER.setdefault(profile.key, list(profile.focus_order))
+            CATEGORY_FOCUS_ORDER[profile.key] = list(profile.focus_order)
         if profile.prompt_rule:
-            CATEGORY_PROMPT_RULES.setdefault(profile.key, profile.prompt_rule)
+            CATEGORY_PROMPT_RULES[profile.key] = profile.prompt_rule
 
 
 _install_vertical_category_profiles()

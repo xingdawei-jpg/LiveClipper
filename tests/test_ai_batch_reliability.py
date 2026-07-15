@@ -552,9 +552,17 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertIn("美妆护肤", beauty_overlay)
         self.assertIn("医疗功效", beauty_overlay)
 
+    def test_multi_industry_category_profiles_include_mother_baby_pet(self) -> None:
+        self.assertEqual(ai_clipper._normalize_forced_category("宠物用品"), "母婴宠物")
+        self.assertEqual(ai_clipper._feedback_category_bucket("宠物用品"), "mother_baby_pet")
+        self.assertEqual(ai_clipper.infer_category_from_filename("猫粮宠物零食新品.mp4"), "母婴宠物")
+        pet_overlay = ai_clipper._category_system_overlay("母婴宠物")
+        self.assertIn("母婴宠物", pet_overlay)
+        self.assertIn("宠物疾病治愈", pet_overlay)
+
     def test_unknown_future_category_uses_general_semantics_not_a_false_clothing_profile(self) -> None:
-        self.assertIsNone(ai_clipper._normalize_forced_category("宠物用品"))
-        self.assertEqual(ai_clipper._feedback_category_bucket("宠物用品"), "general")
+        self.assertIsNone(ai_clipper._normalize_forced_category("量子摆件"))
+        self.assertEqual(ai_clipper._feedback_category_bucket("量子摆件"), "general")
 
     def test_neutral_filler_cannot_hide_incomplete_hook_start(self) -> None:
         candidates, total = ai_clipper._collect_hook_candidates_from_entries(

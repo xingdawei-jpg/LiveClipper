@@ -118,7 +118,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
         )
         self.assertTrue(manifest["supports_incremental_updates"])
         self.assertFalse(manifest["requires_full_package"])
-        self.assertEqual(manifest["minimum_updater_version"], "1.2.0")
+        self.assertEqual(manifest["minimum_updater_version"], "1.3.0")
         self.assertEqual(manifest["files"], {})
         self.assertIn("签名补丁", manifest["requires_full_package_note"])
         self.assertNotRegex(manifest["release_notes"], r"[Ãæ]")
@@ -144,6 +144,136 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertIsNone(updater._select_delta_patch(info, "2026.7.13.10"))
         self.assertFalse(updater.delta_runtime_supported())
 
+    def test_updater_plans_patch_chains_and_prefers_direct_patch(self) -> None:
+        updater = _load_updater()
+        chain_info = {
+            "version": "2026.7.13.14",
+            "patches": [
+                {
+                    "format": updater.DELTA_FORMAT,
+                    "from_version": "2026.7.13.11",
+                    "to_version": "2026.7.13.12",
+                    "url": "https://example.invalid/a.zip",
+                    "sha256": "a" * 64,
+                    "size": 10,
+                },
+                {
+                    "format": updater.DELTA_FORMAT,
+                    "from_version": "2026.7.13.12",
+                    "to_version": "2026.7.13.13",
+                    "url": "https://example.invalid/b.zip",
+                    "sha256": "b" * 64,
+                    "size": 11,
+                },
+                {
+                    "format": updater.DELTA_FORMAT,
+                    "from_version": "2026.7.13.13",
+                    "to_version": "2026.7.13.14",
+                    "url": "https://example.invalid/c.zip",
+                    "sha256": "c" * 64,
+                    "size": 12,
+                },
+            ],
+        }
+        chain = updater._select_delta_chain(chain_info, "2026.7.13.11")
+        self.assertEqual(
+            [(item["from_version"], item["to_version"]) for item in chain],
+            [
+                ("2026.7.13.11", "2026.7.13.12"),
+                ("2026.7.13.12", "2026.7.13.13"),
+                ("2026.7.13.13", "2026.7.13.14"),
+            ],
+        )
+
+        direct_info = dict(chain_info)
+        direct_info["patches"] = [
+            *chain_info["patches"],
+            {
+                "format": updater.DELTA_FORMAT,
+                "from_version": "2026.7.13.11",
+                "to_version": "2026.7.13.14",
+                "url": "https://example.invalid/direct.zip",
+                "sha256": "d" * 64,
+                "size": 13,
+            },
+        ]
+        direct = updater._select_delta_chain(direct_info, "2026.7.13.11")
+        self.assertEqual(len(direct), 1)
+        self.assertEqual(direct[0]["to_version"], "2026.7.13.14")
+
+    def test_apply_update_headless_hands_multi_patch_plan_to_agent(self) -> None:
+        updater = _load_updater()
+        patches = [
+            {
+                "format": updater.DELTA_FORMAT,
+                "from_version": "2026.7.13.11",
+                "to_version": "2026.7.13.12",
+                "url": "https://example.invalid/a.zip",
+                "sha256": "a" * 64,
+                "size": 10,
+            },
+            {
+                "format": updater.DELTA_FORMAT,
+                "from_version": "2026.7.13.12",
+                "to_version": "2026.7.13.13",
+                "url": "https://example.invalid/b.zip",
+                "sha256": "b" * 64,
+                "size": 11,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            download_root = base / "downloads"
+            install_root = base / "install"
+            install_root.mkdir()
+            agent = install_root / "updater.exe"
+            key = install_root / "release_update_public_key.pem"
+            agent.write_bytes(b"agent")
+            key.write_bytes(b"key")
+            manifests = [
+                {"target_runtime_manifest": {"files": {"a.bin": {"size": 1}}}},
+                {"target_runtime_manifest": {"files": {"b.bin": {"size": 1}}}},
+            ]
+            with (
+                patch.object(updater, "delta_runtime_supported", return_value=True),
+                patch.object(updater, "_updater_meets_minimum", return_value=True),
+                patch.object(updater, "_download_root", return_value=download_root),
+                patch.object(updater, "_install_root", return_value=install_root),
+                patch.object(updater, "_update_agent_path", return_value=agent),
+                patch.object(updater, "_release_public_key_path", return_value=key),
+                patch.object(updater, "_require_free_space"),
+                patch.object(updater, "_verified_download") as download,
+                patch.object(updater, "_verify_signed_patch_manifest", side_effect=manifests),
+                patch.object(updater.subprocess, "Popen") as popen,
+            ):
+                result = updater.apply_update_headless(
+                    {
+                        "version": "2026.7.13.13",
+                        "selected_patches": patches,
+                    }
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["patch_count"], 2)
+            self.assertEqual(download.call_count, 2)
+            command = popen.call_args.args[0]
+            self.assertIn("--plan", command)
+            self.assertNotIn("--patch", command)
+            plan_path = Path(command[command.index("--plan") + 1])
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(plan["format"], updater.CHAIN_PLAN_FORMAT)
+            self.assertEqual(len(plan["patches"]), 2)
+
+    def test_download_space_preflight_fails_before_download(self) -> None:
+        updater = _load_updater()
+
+        class Usage:
+            free = 10
+
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(updater.shutil, "disk_usage", return_value=Usage()):
+                with self.assertRaisesRegex(RuntimeError, "not enough disk space"):
+                    updater._require_free_space(Path(temp), 1024 * 1024, "test")
+
     def test_stable_component_versions_have_one_source(self) -> None:
         versions = _load_tool("runtime_v3_versions")
         launcher = _load_tool("liveclipper_launcher")
@@ -151,7 +281,7 @@ class ReleaseArchitectureTests(unittest.TestCase):
         package_builder = _load_tool("build_v3_package")
         manifest_builder = _load_tool("build_update_manifest")
         self.assertEqual(versions.LAUNCHER_VERSION, "1.1.0")
-        self.assertEqual(versions.UPDATER_VERSION, "1.2.0")
+        self.assertEqual(versions.UPDATER_VERSION, "1.3.0")
         self.assertEqual(launcher.LAUNCHER_VERSION, versions.LAUNCHER_VERSION)
         self.assertEqual(agent.UPDATER_VERSION, versions.UPDATER_VERSION)
         self.assertEqual(package_builder.LAUNCHER_VERSION, versions.LAUNCHER_VERSION)
@@ -175,6 +305,34 @@ class ReleaseArchitectureTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             builder._download_sources(["http://example.invalid/patch.zip"])
+
+    def test_rollup_planner_flags_long_patch_chains(self) -> None:
+        planner = _load_tool("plan_delta_rollups")
+        channel = {
+            "version": "2026.7.13.14",
+            "patches": [
+                {"from_version": "2026.7.13.11", "to_version": "2026.7.13.12"},
+                {"from_version": "2026.7.13.12", "to_version": "2026.7.13.13"},
+                {"from_version": "2026.7.13.13", "to_version": "2026.7.13.14"},
+            ],
+        }
+        result = planner.plan_rollups(channel, rollup_after_versions=2)
+        self.assertEqual(
+            result["rollups_required"],
+            [
+                {
+                    "from_version": "2026.7.13.11",
+                    "to_version": "2026.7.13.14",
+                    "chain_length": 3,
+                    "chain": [
+                        "2026.7.13.11",
+                        "2026.7.13.12",
+                        "2026.7.13.13",
+                        "2026.7.13.14",
+                    ],
+                }
+            ],
+        )
 
     def test_update_progress_frontend_backend_contract(self) -> None:
         server = (ROOT / "web_client" / "server.py").read_text(encoding="utf-8")

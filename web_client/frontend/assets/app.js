@@ -69,6 +69,354 @@ const state = {
   },
 };
 
+
+const primaryCategoryToAiCategory = {
+  "服饰内衣": "自动检测",
+  "生鲜": "食品/生鲜",
+  "食品饮料": "食品饮料",
+  "美妆": "美妆护肤",
+  "个护家清": "个护家清",
+  "鞋靴箱包": "自动检测",
+  "钟表配饰": "自动检测",
+  "母婴宠物": "母婴宠物",
+  "图书教育": "图书教育",
+  "智能家居": "家居百货",
+  "3C数码家电": "3C数码家电",
+  "运动户外": "运动户外",
+  "鲜花园艺": "鲜花园艺",
+};
+
+const categoryAiProfiles = {
+  "服饰内衣": {
+    preset_keys: ["viral", "slim", "quality", "commute", "fast", "gentle"],
+    focus: ["自动", "版型显瘦", "面料质感", "尺寸长度", "穿着体验", "品质细节", "工艺细节", "颜色氛围", "场景搭配", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺"],
+    secondary: ["自动识别", "女装", "男装", "内衣", "女鞋", "箱包", "钟表配饰"],
+    goal: ["自动", "爆款种草", "专业讲解", "显瘦转化", "质感高级", "快速促单"],
+    hook: ["自动", "痛点开头", "上身效果开头", "爆点金句开头", "主播强推荐开头", "细节近景开头", "不强制Hook"],
+    ending: ["自动", "尺码引导", "信任背书", "场景收尾", "自然结束", "不要促单"],
+    selling: ["版型显瘦", "面料质感", "品质细节", "颜色氛围", "场景搭配", "穿着体验", "性价比", "情绪感染", "流行趋势", "紧迫稀缺", "尺寸长度", "工艺细节", "对比优势"],
+    avoid: ["价格", "尺码", "库存", "闲聊", "搭配其他品", "重复卖点"],
+    default_focus: "版型显瘦",
+    default_goal: "爆款种草",
+    default_hook: "上身效果开头",
+    default_ending: "场景收尾",
+    default_selling: ["版型显瘦", "面料质感", "场景搭配"],
+    default_avoid: ["价格", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：背心、垂感、通勤",
+  },
+  "食品/生鲜": {
+    preset_keys: ["food_fresh"],
+    focus: ["自动", "口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法", "性价比", "对比优势", "情绪感染", "紧迫稀缺"],
+    secondary: ["自动识别", "新鲜水果", "精选肉类", "水产海鲜", "蔬菜蛋品", "冷饮冻食", "预制菜", "农产品"],
+    goal: ["自动", "食欲种草", "新鲜转化", "囤货转化", "专业讲解", "快速促单"],
+    hook: ["自动", "试吃反应开头", "切开爆汁开头", "开箱近景开头", "产地品质开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "发货保鲜", "坏果包赔", "囤货收尾", "复购背书", "自然结束", "不要促单"],
+    selling: ["口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法", "性价比", "对比优势", "情绪感染", "紧迫稀缺"],
+    avoid: ["保健功效", "医疗功效", "无限赔付承诺", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "口感食欲",
+    default_goal: "食欲种草",
+    default_hook: "试吃反应开头",
+    default_ending: "发货保鲜",
+    default_selling: ["口感食欲", "新鲜品质", "发货保鲜", "场景吃法"],
+    default_avoid: ["保健功效", "无限赔付承诺", "闲聊", "重复卖点"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：蟠桃、冷链、爆汁、坏果包赔",
+  },
+  "食品饮料": {
+    preset_keys: ["food_packaged"],
+    focus: ["自动", "口感食欲", "配料品质", "规格分量", "食用场景", "方便省心", "囤货理由", "发货保鲜", "性价比", "对比优势"],
+    secondary: ["自动识别", "粮油速食", "休闲零食", "饮料冲调", "传统滋补", "方便速食", "酒水饮料"],
+    goal: ["自动", "食欲种草", "囤货转化", "专业讲解", "快速促单"],
+    hook: ["自动", "试吃反应开头", "开箱近景开头", "痛点开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "囤货收尾", "复购背书", "信任背书", "自然结束", "不要促单"],
+    selling: ["口感食欲", "配料品质", "规格分量", "食用场景", "方便省心", "囤货理由", "发货保鲜", "性价比", "对比优势"],
+    avoid: ["保健功效", "医疗功效", "无限赔付承诺", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "口感食欲",
+    default_goal: "食欲种草",
+    default_hook: "试吃反应开头",
+    default_ending: "囤货收尾",
+    default_selling: ["口感食欲", "配料品质", "食用场景", "囤货理由"],
+    default_avoid: ["保健功效", "无限赔付承诺", "闲聊", "重复卖点"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：低糖、独立包装、办公室",
+  },
+  "美妆护肤": {
+    preset_keys: ["beauty"],
+    focus: ["自动", "使用效果", "肤感质地", "颜色妆效", "成分特点", "适用人群", "使用方法", "持妆体验", "场景搭配", "对比优势"],
+    secondary: ["自动识别", "彩妆香水", "美容护肤", "化妆工具", "美发护发"],
+    goal: ["自动", "爆款种草", "专业讲解", "质感高级", "快速促单"],
+    hook: ["自动", "上脸试色开头", "使用前后开头", "质地近景开头", "痛点开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "使用方法", "信任背书", "场景收尾", "自然结束", "不要促单"],
+    selling: ["使用效果", "肤感质地", "颜色妆效", "成分特点", "适用人群", "使用方法", "持妆体验", "场景搭配", "对比优势"],
+    avoid: ["医疗功效", "绝对承诺", "前后夸大", "价格长段", "闲聊", "跨商品混讲"],
+    default_focus: "使用效果",
+    default_goal: "爆款种草",
+    default_hook: "上脸试色开头",
+    default_ending: "使用方法",
+    default_selling: ["使用效果", "肤感质地", "颜色妆效", "使用方法"],
+    default_avoid: ["医疗功效", "绝对承诺", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：口红、哑光、不卡粉",
+  },
+  "个护家清": {
+    preset_keys: ["personal_care"],
+    focus: ["自动", "功能效果", "使用体验", "成分特点", "适用人群", "使用方法", "规格容量", "场景痛点", "对比优势"],
+    secondary: ["自动识别", "个人护理", "家庭清洁", "纸品湿巾", "衣物清洁", "口腔护理", "身体护理"],
+    goal: ["自动", "痛点转化", "专业讲解", "囤货转化", "快速促单"],
+    hook: ["自动", "痛点开头", "使用演示开头", "细节近景开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "使用方法", "囤货收尾", "信任背书", "自然结束", "不要促单"],
+    selling: ["功能效果", "使用体验", "成分特点", "适用人群", "使用方法", "规格容量", "场景痛点", "对比优势"],
+    avoid: ["医疗功效", "绝对安全", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "功能效果",
+    default_goal: "痛点转化",
+    default_hook: "痛点开头",
+    default_ending: "使用方法",
+    default_selling: ["功能效果", "使用体验", "场景痛点", "规格容量"],
+    default_avoid: ["医疗功效", "绝对安全", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：去污、留香、家庭装",
+  },
+  "家居百货": {
+    preset_keys: ["household"],
+    focus: ["自动", "功能效果", "使用演示", "材质做工", "规格容量", "适用场景", "清洁维护", "耐用体验", "对比优势"],
+    secondary: ["自动识别", "家纺好物", "家具家装", "家电好货", "家居优选", "餐厨优选", "日用百货"],
+    goal: ["自动", "痛点转化", "专业讲解", "囤货转化", "快速促单"],
+    hook: ["自动", "痛点开头", "使用演示开头", "细节近景开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "场景收尾", "使用方法", "信任背书", "自然结束", "不要促单"],
+    selling: ["功能效果", "使用演示", "材质做工", "规格容量", "适用场景", "清洁维护", "耐用体验", "对比优势"],
+    avoid: ["绝对承诺", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "使用演示",
+    default_goal: "痛点转化",
+    default_hook: "使用演示开头",
+    default_ending: "场景收尾",
+    default_selling: ["功能效果", "使用演示", "适用场景", "材质做工"],
+    default_avoid: ["绝对承诺", "闲聊", "重复卖点"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：收纳、省空间、不粘锅",
+  },
+  "3C数码家电": {
+    preset_keys: ["electronics"],
+    focus: ["自动", "功能参数", "使用演示", "性能体验", "适配场景", "外观质感", "安装使用", "售后保障", "对比优势"],
+    secondary: ["自动识别", "3C数码配件", "影音智能", "手机", "大家电", "电脑办公", "厨房家电", "生活电器"],
+    goal: ["自动", "专业讲解", "爆款种草", "快速促单", "质感高级"],
+    hook: ["自动", "参数亮点开头", "使用演示开头", "痛点开头", "细节近景开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "售后保障", "使用方法", "信任背书", "自然结束", "不要促单"],
+    selling: ["功能参数", "使用演示", "性能体验", "适配场景", "外观质感", "安装使用", "售后保障", "对比优势"],
+    avoid: ["虚构参数", "绝对性能", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "功能参数",
+    default_goal: "专业讲解",
+    default_hook: "参数亮点开头",
+    default_ending: "售后保障",
+    default_selling: ["功能参数", "使用演示", "适配场景", "售后保障"],
+    default_avoid: ["虚构参数", "绝对性能", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：续航、降噪、安装",
+  },
+  "母婴宠物": {
+    preset_keys: ["mother_baby_pet"],
+    focus: ["自动", "适用对象", "安全材质", "使用场景", "功能效果", "规格容量", "喂养护理", "使用方法", "对比优势"],
+    secondary: ["自动识别", "母婴用品", "宝宝食品", "儿童用品", "宠物食品", "宠物用品", "猫狗用品"],
+    goal: ["自动", "专业讲解", "痛点转化", "囤货转化", "快速促单"],
+    hook: ["自动", "痛点开头", "使用演示开头", "适用对象开头", "细节近景开头", "不强制Hook"],
+    ending: ["自动", "使用方法", "囤货收尾", "信任背书", "自然结束", "不要促单"],
+    selling: ["适用对象", "安全材质", "使用场景", "功能效果", "规格容量", "喂养护理", "使用方法", "对比优势"],
+    avoid: ["医疗功效", "绝对安全", "夸大成长效果", "价格长段", "闲聊", "跨商品混讲"],
+    default_focus: "适用对象",
+    default_goal: "专业讲解",
+    default_hook: "适用对象开头",
+    default_ending: "使用方法",
+    default_selling: ["适用对象", "安全材质", "使用场景", "规格容量"],
+    default_avoid: ["医疗功效", "绝对安全", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：纸尿裤、适口性、猫砂",
+  },
+  "图书教育": {
+    preset_keys: ["books_education"],
+    focus: ["自动", "适用人群", "内容价值", "学习场景", "版本规格", "使用方法", "套装赠品", "复购理由"],
+    secondary: ["自动识别", "图书", "童书绘本", "教辅练习", "课程音像", "学习用品", "文具书包"],
+    goal: ["自动", "专业讲解", "种草转化", "快速促单"],
+    hook: ["自动", "适用人群开头", "痛点开头", "内容亮点开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "使用方法", "套装赠品", "信任背书", "自然结束", "不要促单"],
+    selling: ["适用人群", "内容价值", "学习场景", "版本规格", "使用方法", "套装赠品", "复购理由"],
+    avoid: ["保证提分", "包过承诺", "焦虑恐吓", "价格长段", "闲聊", "跨商品混讲"],
+    default_focus: "内容价值",
+    default_goal: "专业讲解",
+    default_hook: "内容亮点开头",
+    default_ending: "使用方法",
+    default_selling: ["适用人群", "内容价值", "学习场景", "版本规格"],
+    default_avoid: ["保证提分", "包过承诺", "焦虑恐吓"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：绘本、同步练、错题",
+  },
+  "运动户外": {
+    preset_keys: ["sports_outdoor"],
+    focus: ["自动", "使用场景", "功能效果", "材质做工", "规格尺寸", "运动体验", "便携体验", "安全注意", "对比优势"],
+    secondary: ["自动识别", "运动服饰", "健身训练", "户外旅行", "露营装备", "骑行用品", "球类用品"],
+    goal: ["自动", "场景种草", "专业讲解", "快速促单"],
+    hook: ["自动", "场景开头", "使用演示开头", "痛点开头", "细节近景开头", "不强制Hook"],
+    ending: ["自动", "场景收尾", "使用方法", "信任背书", "自然结束", "不要促单"],
+    selling: ["使用场景", "功能效果", "材质做工", "规格尺寸", "运动体验", "便携体验", "安全注意", "对比优势"],
+    avoid: ["绝对安全", "医疗康复", "夸大保护", "价格长段", "闲聊", "跨商品混讲"],
+    default_focus: "使用场景",
+    default_goal: "场景种草",
+    default_hook: "场景开头",
+    default_ending: "场景收尾",
+    default_selling: ["使用场景", "功能效果", "运动体验", "便携体验"],
+    default_avoid: ["绝对安全", "医疗康复", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：露营、防水、透气",
+  },
+  "鲜花园艺": {
+    preset_keys: ["flowers_garden"],
+    focus: ["自动", "品相状态", "养护方法", "使用场景", "规格数量", "发货包装", "花期状态", "情绪氛围"],
+    secondary: ["自动识别", "鲜花花束", "绿植盆栽", "多肉花卉", "种子种苗", "园艺资材", "园艺工具"],
+    goal: ["自动", "场景种草", "专业讲解", "快速促单"],
+    hook: ["自动", "品相近景开头", "场景开头", "养护方法开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "养护方法", "发货包装", "场景收尾", "自然结束", "不要促单"],
+    selling: ["品相状态", "养护方法", "使用场景", "规格数量", "发货包装", "花期状态", "情绪氛围"],
+    avoid: ["保证成活", "绝对花期", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "品相状态",
+    default_goal: "场景种草",
+    default_hook: "品相近景开头",
+    default_ending: "发货包装",
+    default_selling: ["品相状态", "养护方法", "使用场景", "发货包装"],
+    default_avoid: ["保证成活", "绝对花期", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：玫瑰、花期、醒花",
+  },
+};
+
+const autoCategoryValues = new Set(["", "自动", "自动检测", "自动识别", "auto"]);
+
+function isAutoCategoryValue(value) {
+  return autoCategoryValues.has(String(value || "").trim());
+}
+
+function primaryCategoryValue(prefix) {
+  return $(`${prefix}-primary-category`)?.value || "服饰内衣";
+}
+
+function aiCategoryForPrimary(primary) {
+  return primaryCategoryToAiCategory[String(primary || "").trim()] || "自动检测";
+}
+
+const clothingAiCategoryValues = new Set(["自动检测", "服饰内衣", "上衣", "裤子", "裙子", "外套", "套装", "鞋子"]);
+
+function categoryAiProfileKey(category, primary) {
+  const categoryText = String(category || "").trim();
+  const primaryText = String(primary || "").trim();
+  const mapped = isAutoCategoryValue(categoryText) ? aiCategoryForPrimary(primaryText) : categoryText;
+  const value = isAutoCategoryValue(mapped) ? primaryText : mapped;
+  if (categoryAiProfiles[value]) return value;
+  if (clothingAiCategoryValues.has(value) || ["服饰内衣", "鞋靴箱包", "钟表配饰"].includes(primaryText)) return "服饰内衣";
+  if (value.includes("生鲜") || value.includes("水果") || value.includes("冷饮冻食") || value.includes("农产品")) return "食品/生鲜";
+  if (value.includes("食品") || value.includes("零食") || value.includes("饮料") || value.includes("粮油") || value.includes("滋补")) return "食品饮料";
+  if (value.includes("美妆") || value.includes("护肤") || value.includes("彩妆") || value.includes("香水")) return "美妆护肤";
+  if (value.includes("个护") || value.includes("家清") || value.includes("清洁") || value.includes("洗护")) return "个护家清";
+  if (value.includes("家居") || value.includes("百货") || value.includes("家具") || value.includes("家纺") || value.includes("餐厨")) return "家居百货";
+  if (value.includes("3C") || value.includes("数码") || value.includes("家电") || value.includes("手机") || value.includes("电脑")) return "3C数码家电";
+  if (value.includes("母婴") || value.includes("宠物")) return "母婴宠物";
+  if (value.includes("图书") || value.includes("教育") || value.includes("学习")) return "图书教育";
+  if (value.includes("运动") || value.includes("户外")) return "运动户外";
+  if (value.includes("鲜花") || value.includes("园艺") || value.includes("绿植")) return "鲜花园艺";
+  return "服饰内衣";
+}
+
+function currentCategoryAiProfile(prefix) {
+  const key = categoryAiProfileKey($(`${prefix}-category`)?.value, primaryCategoryValue(prefix));
+  return { key, profile: categoryAiProfiles[key] || categoryAiProfiles["服饰内衣"] };
+}
+
+function replaceSelectOptions(id, values, preferredValue) {
+  const select = $(id);
+  if (!select || !Array.isArray(values) || !values.length) return;
+  const wanted = preferredValue !== undefined ? String(preferredValue || "") : String(select.value || "");
+  select.textContent = "";
+  values.forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  });
+  const hasWanted = Array.from(select.options).some((option) => option.value === wanted || option.textContent.trim() === wanted);
+  select.value = hasWanted ? wanted : values[0];
+}
+
+function renderAiChipGroup(prefix, kind, values, selectedValues) {
+  const controlName = `${prefix}-${kind}`;
+  const grid = document.querySelector(`[data-ai-chip-group="${controlName}"]`);
+  if (!grid || !Array.isArray(values)) return;
+  const selected = new Set(Array.isArray(selectedValues) ? selectedValues : checkedControlValues(controlName));
+  grid.textContent = "";
+  values.forEach((value) => {
+    const label = document.createElement("label");
+    label.className = "check-item";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.aiControl = controlName;
+    input.value = value;
+    input.checked = selected.has(value);
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(` ${value}`));
+    grid.appendChild(label);
+  });
+}
+
+function refreshAiPresetVisibility(prefix, profile) {
+  const select = $(`${prefix}-ai-preset`);
+  if (!select || !profile) return;
+  const allowed = new Set(["custom", ...(profile.preset_keys || [])]);
+  Array.from(select.options).forEach((option) => {
+    const isCustomPreset = option.dataset.customPreset === "1" || String(option.value || "").startsWith("custom-");
+    const visible = isCustomPreset || allowed.has(option.value);
+    option.hidden = !visible;
+    option.disabled = !visible;
+  });
+  if (select.selectedOptions[0]?.disabled) select.value = "custom";
+}
+
+function refreshCategoryAiControls(prefix, options = {}) {
+  const { profile } = currentCategoryAiProfile(prefix);
+  if (!profile) return;
+  const preferDefaults = Boolean(options.preferDefaults);
+  replaceSelectOptions(`${prefix}-focus`, profile.focus, options.preferredFocus ?? (preferDefaults ? profile.default_focus : undefined));
+  replaceSelectOptions(`${prefix}-secondary-category`, profile.secondary, options.preferredSecondary ?? (preferDefaults ? "自动识别" : undefined));
+  replaceSelectOptions(`${prefix}-goal`, profile.goal, options.preferredGoal ?? (preferDefaults ? profile.default_goal : undefined));
+  replaceSelectOptions(`${prefix}-hook-style`, profile.hook, options.preferredHook ?? (preferDefaults ? profile.default_hook : undefined));
+  replaceSelectOptions(`${prefix}-ending-style`, profile.ending, options.preferredEnding ?? (preferDefaults ? profile.default_ending : undefined));
+  renderAiChipGroup(prefix, "selling", profile.selling, options.selectedSelling ?? (preferDefaults ? profile.default_selling : undefined));
+  renderAiChipGroup(prefix, "avoid", profile.avoid, options.selectedAvoid ?? (preferDefaults ? profile.default_avoid : undefined));
+  const customInput = $(`${prefix}-selling-custom`);
+  if (customInput && profile.custom_placeholder) customInput.placeholder = profile.custom_placeholder;
+  refreshAiPresetVisibility(prefix, profile);
+  const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
+  if (panel) updatePanelSummary(panel);
+}
+
+function syncPrimaryCategory(prefix, options = {}) {
+  const primary = primaryCategoryValue(prefix);
+  const select = $(`${prefix}-category`);
+  if (!select) return;
+  const mapped = aiCategoryForPrimary(primary);
+  const canAutoUpdate = options.force || select.dataset.autoCategory === "1" || isAutoCategoryValue(select.value);
+  if (canAutoUpdate) {
+    setSelectIfPresent(`${prefix}-category`, mapped);
+    select.dataset.autoCategory = "1";
+  }
+  const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
+  if (panel) updatePanelSummary(panel);
+}
+
+function bindCategoryControls() {
+  ["sc", "mix"].forEach((prefix) => {
+    const primary = $(`${prefix}-primary-category`);
+    const category = $(`${prefix}-category`);
+    if (primary) {
+      primary.addEventListener("change", () => {
+        syncPrimaryCategory(prefix, { force: true });
+      });
+    }
+    if (category) {
+      category.dataset.autoCategory = isAutoCategoryValue(category.value) ? "1" : "0";
+      category.addEventListener("change", () => {
+        category.dataset.autoCategory = "0";
+        refreshCategoryAiControls(prefix, { preferDefaults: true });
+      });
+    }
+    syncPrimaryCategory(prefix);
+  });
+}
+
 const settingFields = {
   api_key: "s-api-key",
   base_url: "s-base-url",
@@ -157,9 +505,13 @@ const featurePreferenceGroups = {
       "sc-pip-size",
       "sc-pip-opacity",
       "sc-pip-pos",
+      "sc-primary-category",
       "sc-ai-preset",
       "sc-category",
       "sc-focus",
+      "sc-secondary-category",
+      "sc-leaf-category",
+      "sc-main-product",
       "sc-goal",
       "sc-hook-style",
       "sc-selling-custom",
@@ -202,9 +554,13 @@ const featurePreferenceGroups = {
       "mix-pip-size",
       "mix-pip-opacity",
       "mix-pip-pos",
+      "mix-primary-category",
       "mix-ai-preset",
       "mix-category",
       "mix-focus",
+      "mix-secondary-category",
+      "mix-leaf-category",
+      "mix-main-product",
       "mix-goal",
       "mix-hook-style",
       "mix-selling-custom",
@@ -386,14 +742,133 @@ const aiPresets = {
   },
   food_fresh: {
     label: "食品/生鲜",
+    primary_category: "生鲜",
     category: "食品/生鲜",
+    secondary_category: "新鲜水果",
     goal: "食欲种草",
     focus: "口感食欲",
     hook: "试吃反应开头",
     ending: "发货保鲜",
     strictness: "标准",
     selling: ["口感食欲", "新鲜品质", "发货保鲜", "场景吃法"],
-    avoid: ["价格", "闲聊", "保健功效", "重复卖点"],
+    avoid: ["保健功效", "无限赔付承诺", "闲聊", "重复卖点"],
+  },
+  food_packaged: {
+    label: "食品饮料",
+    primary_category: "食品饮料",
+    category: "食品饮料",
+    secondary_category: "休闲零食",
+    goal: "食欲种草",
+    focus: "口感食欲",
+    hook: "试吃反应开头",
+    ending: "囤货收尾",
+    strictness: "标准",
+    selling: ["口感食欲", "配料品质", "食用场景", "囤货理由"],
+    avoid: ["保健功效", "无限赔付承诺", "闲聊", "重复卖点"],
+  },
+  beauty: {
+    label: "美妆护肤",
+    primary_category: "美妆",
+    category: "美妆护肤",
+    secondary_category: "美容护肤",
+    goal: "爆款种草",
+    focus: "使用效果",
+    hook: "上脸试色开头",
+    ending: "使用方法",
+    strictness: "标准",
+    selling: ["使用效果", "肤感质地", "颜色妆效", "使用方法"],
+    avoid: ["医疗功效", "绝对承诺", "闲聊"],
+  },
+  personal_care: {
+    label: "个护家清",
+    primary_category: "个护家清",
+    category: "个护家清",
+    secondary_category: "个人护理",
+    goal: "痛点转化",
+    focus: "功能效果",
+    hook: "痛点开头",
+    ending: "使用方法",
+    strictness: "标准",
+    selling: ["功能效果", "使用体验", "场景痛点", "规格容量"],
+    avoid: ["医疗功效", "绝对安全", "闲聊"],
+  },
+  household: {
+    label: "家居百货",
+    primary_category: "智能家居",
+    category: "家居百货",
+    secondary_category: "家居优选",
+    goal: "痛点转化",
+    focus: "使用演示",
+    hook: "使用演示开头",
+    ending: "场景收尾",
+    strictness: "标准",
+    selling: ["功能效果", "使用演示", "适用场景", "材质做工"],
+    avoid: ["绝对承诺", "闲聊", "重复卖点"],
+  },
+  electronics: {
+    label: "3C数码家电",
+    primary_category: "3C数码家电",
+    category: "3C数码家电",
+    secondary_category: "3C数码配件",
+    goal: "专业讲解",
+    focus: "功能参数",
+    hook: "参数亮点开头",
+    ending: "售后保障",
+    strictness: "标准",
+    selling: ["功能参数", "使用演示", "适配场景", "售后保障"],
+    avoid: ["虚构参数", "绝对性能", "闲聊"],
+  },
+  mother_baby_pet: {
+    label: "母婴宠物",
+    primary_category: "母婴宠物",
+    category: "母婴宠物",
+    secondary_category: "自动识别",
+    goal: "专业讲解",
+    focus: "适用对象",
+    hook: "适用对象开头",
+    ending: "使用方法",
+    strictness: "标准",
+    selling: ["适用对象", "安全材质", "使用场景", "规格容量"],
+    avoid: ["医疗功效", "绝对安全", "闲聊"],
+  },
+  books_education: {
+    label: "图书教育",
+    primary_category: "图书教育",
+    category: "图书教育",
+    secondary_category: "图书",
+    goal: "专业讲解",
+    focus: "内容价值",
+    hook: "内容亮点开头",
+    ending: "使用方法",
+    strictness: "标准",
+    selling: ["适用人群", "内容价值", "学习场景", "版本规格"],
+    avoid: ["保证提分", "包过承诺", "焦虑恐吓"],
+  },
+  sports_outdoor: {
+    label: "运动户外",
+    primary_category: "运动户外",
+    category: "运动户外",
+    secondary_category: "户外旅行",
+    goal: "场景种草",
+    focus: "使用场景",
+    hook: "场景开头",
+    ending: "场景收尾",
+    strictness: "标准",
+    selling: ["使用场景", "功能效果", "运动体验", "便携体验"],
+    avoid: ["绝对安全", "医疗康复", "闲聊"],
+  },
+  flowers_garden: {
+    label: "鲜花园艺",
+    primary_category: "鲜花园艺",
+    category: "鲜花园艺",
+    secondary_category: "鲜花花束",
+    goal: "场景种草",
+    focus: "品相状态",
+    hook: "品相近景开头",
+    ending: "发货包装",
+    strictness: "标准",
+    selling: ["品相状态", "养护方法", "使用场景", "发货包装"],
+    avoid: ["保证成活", "绝对花期", "闲聊"],
   },
 };
 
@@ -404,12 +879,13 @@ document.addEventListener("DOMContentLoaded", () => {
   bindLiveRoomFilters();
   bindActions();
   syncVideoSplitMode();
+  setupCollapsiblePanels();
+  setupAdvancedParamToggles();
   bindAiPresetControls();
+  bindCategoryControls();
   bindPreviewControls();
   bindFeaturePreferenceAutoSave();
   bindDedupCustomControls();
-  setupCollapsiblePanels();
-  setupAdvancedParamToggles();
   setupLogProgressBars();
   bindPreviewModalShortcuts();
   loadLiveRooms();
@@ -798,6 +1274,7 @@ function logPanelForScope(scope) {
 
 function bindAiPresetControls() {
   refreshAiPresetOptions();
+  ["sc", "mix"].forEach((prefix) => refreshCategoryAiControls(prefix));
   document.querySelectorAll("[data-ai-preset]").forEach((select) => {
     select.addEventListener("change", () => {
       applyAiPreset(select.dataset.aiPreset, select.value);
@@ -805,11 +1282,12 @@ function bindAiPresetControls() {
   });
 
   ["sc", "mix"].forEach((prefix) => {
-    [`${prefix}-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`].forEach((id) => {
+    [`${prefix}-primary-category`, `${prefix}-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
       $(id)?.addEventListener("change", () => markAiPresetCustom(prefix));
     });
-    document.querySelectorAll(`[data-ai-control="${prefix}-selling"], [data-ai-control="${prefix}-avoid"]`).forEach((input) => {
-      input.addEventListener("change", () => markAiPresetCustom(prefix));
+    document.body.addEventListener("change", (event) => {
+      const control = event.target?.dataset?.aiControl;
+      if (control === `${prefix}-selling` || control === `${prefix}-avoid`) markAiPresetCustom(prefix);
     });
     $(`${prefix}-selling-custom`)?.addEventListener("input", () => markAiPresetCustom(prefix));
   });
@@ -861,8 +1339,28 @@ function applyAiPreset(prefix, presetKey) {
   if (!prefix || presetKey === "custom") return;
   const preset = allAiPresets()[presetKey];
   if (!preset) return;
+  setSelectIfPresent(`${prefix}-primary-category`, preset.primary_category);
+  const categorySelect = $(`${prefix}-category`);
+  if (categorySelect && preset.category !== undefined) {
+    categorySelect.dataset.autoCategory = isAutoCategoryValue(preset.category) ? "1" : "0";
+  }
   setSelectIfPresent(`${prefix}-category`, preset.category);
+  syncPrimaryCategory(prefix);
+  refreshCategoryAiControls(prefix, {
+    preferredFocus: preset.focus,
+    preferredSecondary: preset.secondary_category,
+    preferredGoal: preset.goal,
+    preferredHook: preset.hook,
+    preferredEnding: preset.ending,
+    selectedSelling: preset.selling,
+    selectedAvoid: preset.avoid,
+  });
   setSelectIfPresent(`${prefix}-focus`, preset.focus);
+  setSelectIfPresent(`${prefix}-secondary-category`, preset.secondary_category);
+  const leafInput = $(`${prefix}-leaf-category`);
+  if (leafInput && preset.leaf_category !== undefined) leafInput.value = preset.leaf_category || "";
+  const mainProductInput = $(`${prefix}-main-product`);
+  if (mainProductInput && preset.main_product !== undefined) mainProductInput.value = preset.main_product || "";
   setSelectIfPresent(`${prefix}-goal`, preset.goal);
   setSelectIfPresent(`${prefix}-hook-style`, preset.hook);
   setSelectIfPresent(`${prefix}-ending-style`, preset.ending);
@@ -871,6 +1369,8 @@ function applyAiPreset(prefix, presetKey) {
   setCheckedValues(`${prefix}-avoid`, preset.avoid);
   const customInput = $(`${prefix}-selling-custom`);
   if (customInput) customInput.value = (preset.selling_custom || []).join("，");
+  const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
+  if (panel) updatePanelSummary(panel);
   toast(`已套用「${preset.label}」选片预设`, "success");
 }
 
@@ -886,7 +1386,11 @@ function customSellingValues(prefix) {
 function collectCurrentAiPreset(prefix, label) {
   return {
     label,
+    primary_category: $(`${prefix}-primary-category`)?.value || "服饰内衣",
     category: $(`${prefix}-category`)?.value || "自动检测",
+    secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
+    leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
+    main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
     focus: $(`${prefix}-focus`)?.value || "自动",
     hook: $(`${prefix}-hook-style`)?.value || "自动",
@@ -909,6 +1413,7 @@ function saveCurrentAiPreset(prefix) {
   refreshAiPresetOptions();
   const select = $(`${prefix}-ai-preset`);
   if (select) select.value = key;
+  refreshCategoryAiControls(prefix);
   toast(`已保存「${custom[key].label}」`, "success");
 }
 
@@ -927,6 +1432,7 @@ function deleteCurrentAiPreset(prefix) {
   writeCustomAiPresets(custom);
   refreshAiPresetOptions();
   select.value = "custom";
+  refreshCategoryAiControls(prefix);
   toast("已删除自定义预设", "success");
 }
 
@@ -993,6 +1499,8 @@ function applyControlGroup(group, saved) {
   if (!saved || typeof saved !== "object") return;
   const values = saved.values || {};
   group.ids.forEach((id) => setControlValue(id, values[id]));
+  (group.prefixes || []).forEach((prefix) => refreshCategoryAiControls(prefix));
+  group.ids.forEach((id) => setControlValue(id, values[id]));
   const ai = saved.ai || {};
   (group.prefixes || []).forEach((prefix) => {
     if (Array.isArray(ai[`${prefix}-selling`])) setCheckedValues(`${prefix}-selling`, ai[`${prefix}-selling`]);
@@ -1010,9 +1518,13 @@ function refreshPipPool(prefix) {
 }
 
 function refreshFeaturePreferenceUi() {
-  document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => updatePanelSummary(panel));
   ["sc", "mix", "dedup"].forEach((prefix) => refreshPipPool(prefix));
-  ["sc", "mix"].forEach((prefix) => refreshDedupCustomVisibility(prefix));
+  ["sc", "mix"].forEach((prefix) => {
+    syncPrimaryCategory(prefix);
+    refreshCategoryAiControls(prefix);
+    refreshDedupCustomVisibility(prefix);
+  });
+  document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => updatePanelSummary(panel));
 }
 
 async function loadFeaturePreferences() {
@@ -1911,6 +2423,7 @@ function updatePanelSummary(panel) {
     }
   } else if (kind === "ai") {
     const preset = fieldText(`${prefix}-ai-preset`, "自定义");
+    const primary = fieldText(`${prefix}-primary-category`, "");
     const category = fieldText(`${prefix}-category`, "自动");
     const focus = fieldText(`${prefix}-focus`, "自动");
     const goal = fieldText(`${prefix}-goal`, "自动");
@@ -1920,7 +2433,7 @@ function updatePanelSummary(panel) {
       selling.length ? `优先${selling.slice(0, 3).join("、")}` : "",
       avoid.length ? `排除${avoid.slice(0, 2).join("、")}` : "",
     ].filter(Boolean).join(" · ");
-    text = `${preset} · ${category} · ${focus} · ${goal}${ruleText ? ` · ${ruleText}` : ""}`;
+    text = `${preset} · ${primary ? `${primary} · ` : ""}${category} · ${focus} · ${goal}${ruleText ? ` · ${ruleText}` : ""}`;
   }
   summary.textContent = text;
   button.textContent = panel.classList.contains("is-collapsed") ? "展开" : "收起";
@@ -3614,6 +4127,10 @@ function collectAiControls(prefix) {
     selling = selling.concat(customWords);
   }
   return {
+    primary_category: $(`${prefix}-primary-category`)?.value || "服饰内衣",
+    secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
+    leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
+    main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
     selling_points: selling,
     avoid: checkedControlValues(`${prefix}-avoid`),
@@ -3720,6 +4237,7 @@ function collectSmartPayload(options = {}) {
     video_paths: videoPaths,
     srt_path: $("srt-path").value.trim(),
     output_dir: $("output-dir").value.trim(),
+    primary_category: $("sc-primary-category").value,
     category: $("sc-category").value,
     focus_hint: $("sc-focus").value,
     ai_controls: collectAiControls("sc"),
@@ -6096,6 +6614,7 @@ function collectFeaturePayload(feature) {
     return {
       video_paths: getLines("mix-video-paths"),
       output_dir: $("mix-output-dir").value.trim(),
+      primary_category: $("mix-primary-category").value,
       category: $("mix-category").value,
       versions: Number($("mix-versions").value || 1),
       duration: Number($("mix-duration").value || 60),

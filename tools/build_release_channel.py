@@ -91,6 +91,8 @@ def main() -> int:
         default="auto",
     )
     parser.add_argument("--bridge-url", default="")
+    parser.add_argument("--max-chain-depth", type=int, default=8)
+    parser.add_argument("--rollup-after-versions", type=int, default=2)
     parser.add_argument("--private-key", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=CHANNEL_FILE)
     args = parser.parse_args()
@@ -171,6 +173,11 @@ def main() -> int:
         "force_update": bool(runtime.get("force_update", False)),
         "release_page_url": release_page,
         "bridge_url": args.bridge_url,
+        "patch_policy": {
+            "graph_version": 1,
+            "max_chain_depth": max(1, int(args.max_chain_depth)),
+            "rollup_after_versions": max(1, int(args.rollup_after_versions)),
+        },
         "package": {
             "format": "zip",
             "url": package_url,

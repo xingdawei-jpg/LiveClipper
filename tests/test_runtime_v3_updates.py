@@ -104,6 +104,18 @@ class RuntimeV3UpdateTests(unittest.TestCase):
             archive.extractall(destination)
         return destination / "LiveClipperWeb"
 
+    def _chain_entry(self, patch_path: Path) -> dict[str, object]:
+        with zipfile.ZipFile(patch_path) as archive:
+            manifest = json.loads(archive.read("patch_manifest.json").decode("utf-8-sig"))
+        return {
+            "path": str(patch_path),
+            "filename": patch_path.name,
+            "from_version": str(manifest["from_version"]),
+            "to_version": str(manifest["to_version"]),
+            "sha256": sha256_file(patch_path),
+            "size": patch_path.stat().st_size,
+        }
+
     def test_v2_bridge_builds_current_and_previous_versions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp) / ("long-install-root-" + "x" * 55)
@@ -212,6 +224,187 @@ class RuntimeV3UpdateTests(unittest.TestCase):
                 ),
                 "after",
             )
+
+    def test_v3_patch_chain_applies_atomically_to_final_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            stable = self._stable_files(base)
+            v11 = self._v3_zip(base, "2026.7.13.11", "one", "v11.zip", stable)
+            v12 = self._v3_zip(base, "2026.7.13.12", "two", "v12.zip", stable)
+            v13 = self._v3_zip(base, "2026.7.13.13", "three", "v13.zip", stable)
+            v14 = self._v3_zip(base, "2026.7.13.14", "four", "v14.zip", stable)
+            patches = []
+            for source, target, name in (
+                (v11, v12, "p11-12.zip"),
+                (v12, v13, "p12-13.zip"),
+                (v13, v14, "p13-14.zip"),
+            ):
+                patch_zip = base / name
+                build_delta_package.build_patch(
+                    source,
+                    target,
+                    patch_zip,
+                    self.private_key,
+                    self.public_key,
+                )
+                patches.append(self._chain_entry(patch_zip))
+            plan = {
+                "schema_version": 1,
+                "format": liveclipper_update_agent.CHAIN_PLAN_FORMAT,
+                "source_version": "2026.7.13.11",
+                "target_version": "2026.7.13.14",
+                "patches": patches,
+            }
+            plan_path = base / "chain_plan.json"
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+            install_root = self._extract(v11, base / "install")
+            with patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": str(base / "local-data")},
+                clear=False,
+            ):
+                result = liveclipper_update_agent.apply_patch_chain(
+                    plan_path,
+                    install_root,
+                    self.public_key,
+                    launch_after=False,
+                )
+            self.assertEqual(result["from_version"], "2026.7.13.11")
+            self.assertEqual(result["to_version"], "2026.7.13.14")
+            self.assertEqual(result["patch_chain_length"], 3)
+            state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["current_version"], "2026.7.13.14")
+            self.assertEqual(state["previous_version"], "2026.7.13.11")
+            self.assertTrue(state["pending"])
+            install_manifest = json.loads((install_root / "install_manifest.json").read_text(encoding="utf-8"))
+            verify_manifest(install_manifest, self.public_key)
+            self.assertEqual(install_manifest["initial_version"], "2026.7.13.14")
+            self.assertEqual(
+                (install_root / "versions" / "2026.7.13.14" / "_internal" / "changed.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "four",
+            )
+            self.assertFalse((install_root / ".lc-update").exists())
+
+    def test_chain_failure_before_pointer_switch_keeps_current_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            stable = self._stable_files(base)
+            v11 = self._v3_zip(base, "2026.7.13.11", "one", "v11.zip", stable)
+            v12 = self._v3_zip(base, "2026.7.13.12", "two", "v12.zip", stable)
+            v13 = self._v3_zip(base, "2026.7.13.13", "three", "v13.zip", stable)
+            patches = []
+            for source, target, name in (
+                (v11, v12, "p11-12.zip"),
+                (v12, v13, "p12-13.zip"),
+            ):
+                patch_zip = base / name
+                build_delta_package.build_patch(
+                    source,
+                    target,
+                    patch_zip,
+                    self.private_key,
+                    self.public_key,
+                )
+                patches.append(self._chain_entry(patch_zip))
+            plan_path = base / "chain_plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "format": liveclipper_update_agent.CHAIN_PLAN_FORMAT,
+                        "source_version": "2026.7.13.11",
+                        "target_version": "2026.7.13.13",
+                        "patches": patches,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            install_root = self._extract(v11, base / "install")
+            original_state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
+            real_construct = liveclipper_update_agent._construct_runtime
+            calls = 0
+
+            def fail_second_construct(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise liveclipper_update_agent.UpdateError("simulated chain failure")
+                return real_construct(*args, **kwargs)
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(base / "local-data")}, clear=False):
+                with patch.object(
+                    liveclipper_update_agent,
+                    "_construct_runtime",
+                    side_effect=fail_second_construct,
+                ):
+                    with self.assertRaisesRegex(liveclipper_update_agent.UpdateError, "simulated"):
+                        liveclipper_update_agent.apply_patch_chain(
+                            plan_path,
+                            install_root,
+                            self.public_key,
+                            launch_after=False,
+                        )
+            state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
+            self.assertEqual(state, original_state)
+            self.assertFalse((install_root / "versions" / "2026.7.13.13").exists())
+            self.assertFalse((install_root / ".lc-update").exists())
+
+    def test_chain_rejects_stable_payload_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            stable = self._stable_files(base)
+            v11 = self._v3_zip(base, "2026.7.13.11", "one", "v11.zip", stable)
+            v12 = self._v3_zip(base, "2026.7.13.12", "two", "v12.zip", stable)
+            patch_zip = base / "p11-12.zip"
+            build_delta_package.build_patch(
+                v11,
+                v12,
+                patch_zip,
+                self.private_key,
+                self.public_key,
+            )
+            bad_patch = base / "bad-stable-payload.zip"
+            with zipfile.ZipFile(patch_zip) as source_archive:
+                manifest = json.loads(source_archive.read("patch_manifest.json").decode("utf-8-sig"))
+                manifest["stable_payload"] = {
+                    "updater/LiveClipperUpdater.exe": {
+                        "archive": "payload/stable/updater/LiveClipperUpdater.exe",
+                        "sha256": "0" * 64,
+                        "size": 1,
+                    }
+                }
+                manifest = sign_manifest(manifest, self.private_key)
+                with zipfile.ZipFile(bad_patch, "w", compression=zipfile.ZIP_DEFLATED) as target_archive:
+                    for info in source_archive.infolist():
+                        if info.filename != "patch_manifest.json":
+                            target_archive.writestr(info, source_archive.read(info.filename))
+                    target_archive.writestr("patch_manifest.json", json.dumps(manifest, ensure_ascii=False))
+            entry = self._chain_entry(bad_patch)
+            plan_path = base / "chain_plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "format": liveclipper_update_agent.CHAIN_PLAN_FORMAT,
+                        "source_version": "2026.7.13.11",
+                        "target_version": "2026.7.13.12",
+                        "patches": [entry],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            install_root = self._extract(v11, base / "install")
+            with self.assertRaisesRegex(liveclipper_update_agent.UpdateError, "stable components"):
+                liveclipper_update_agent.apply_patch_chain(
+                    plan_path,
+                    install_root,
+                    self.public_key,
+                    launch_after=False,
+                )
+            state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["current_version"], "2026.7.13.11")
 
     def test_v3_to_v3_patch_rejects_stable_component_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
