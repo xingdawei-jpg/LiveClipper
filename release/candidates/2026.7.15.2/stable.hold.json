@@ -1,0 +1,61 @@
+{
+  "schema_version": 3,
+  "channel": "stable",
+  "channel_status": "hold",
+  "version": "2026.7.15.2",
+  "latest_version": "2026.7.15.2",
+  "runtime_layout_version": 3,
+  "minimum_runtime_layout_version": 2,
+  "minimum_launcher_version": "1.1.0",
+  "minimum_updater_version": "1.3.0",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
+  "release_notes": "修复设置保存与授权激活可靠性；新增多行业品类（含母婴宠物）及混剪素材组管理和视频缩略图。",
+  "force_update": false,
+  "release_page_url": "",
+  "bridge_url": "",
+  "patch_policy": {
+    "graph_version": 1,
+    "max_chain_depth": 8,
+    "rollup_after_versions": 2
+  },
+  "package": {
+    "format": "zip",
+    "url": "",
+    "sha256": "FE3D7C53BAA69BF1F89E793457DE712466C4330BF327613071AC0978371FE274",
+    "size": 508149204,
+    "filename": "LiveClipperWeb_2026.7.15.2_full_v3_20260717_wv2.zip"
+  },
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.1",
+      "to_version": "2026.7.15.2",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip"
+        }
+      ],
+      "sha256": "B1DCBDCC657DC35964510644440906D49D89D7C75BC6C31C8A1D47187211A011",
+      "size": 17376044,
+      "filename": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip",
+      "runtime_payload_files": 11,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-17 13:33:54",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "e489293f17704e2f",
+    "value": "Jqt8wkfvjpOdIXxVJCKer7NBuP7pUOEwrCSmo5xr0gjtFJLDnKJP/X25CU2u1rEKT0hl5rju+AXcqfgBGGgVBg=="
+  }
+}

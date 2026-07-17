@@ -1,0 +1,19 @@
+{
+    "tag":  "v2026.7.15.2",
+    "title":  "LiveClipper 2026.7.15.2",
+    "notes":  "Signed Runtime V3 incremental update from 2026.7.15.1 to 2026.7.15.2.\n\n- Fix settings persistence and activation reliability.\n- Add multi-industry category support, including mother-and-baby and pet profiles, plus mix source-group management and video thumbnails.\n- Bundle and verify the fixed WebView2 runtime so extracted packages keep the desktop window even on systems without a system WebView2 installation.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
+    "assets":  [
+                   {
+                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip",
+                       "sha256":  "B1DCBDCC657DC35964510644440906D49D89D7C75BC6C31C8A1D47187211A011",
+                       "size":  17376044
+                   },
+                   {
+                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip.sha256.txt",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2.zip.sha256.txt",
+                       "sha256":  "6A214E7353C5BA246C7C548CB77BC030D6FFE05CCF1C670BDE023C5554D14951",
+                       "size":  122
+                   }
+               ]
+}
