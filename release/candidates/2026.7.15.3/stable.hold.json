@@ -2,6 +2,7 @@
   "schema_version": 3,
   "channel": "stable",
   "channel_status": "hold",
+  "release_type": "business_runtime",
   "version": "2026.7.15.3",
   "latest_version": "2026.7.15.3",
   "runtime_layout_version": 3,
@@ -11,7 +12,7 @@
   "update_strategy": "hold",
   "supports_incremental_updates": false,
   "requires_full_package": true,
-  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
+  "requires_full_package_note": "当前安装版本没有匹配的签名补丁，请使用最近一次人工分发的完整包后再更新。",
   "release_notes": "新增智能成片与混剪成片时长容差选择；修复仅超出零点几秒即判失败；混剪来源配额补足失败后降级告警并继续成片；批量混剪单组失败后继续处理后续素材组。",
   "force_update": false,
   "release_page_url": "",
@@ -24,9 +25,9 @@
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "85E77FB114A639BCBA05486E01948AF344DF18C6A35C519E194EAB877EC5A029",
-    "size": 581664718,
-    "filename": "LiveClipperWeb_2026.7.15.3_full_v3_20260717_wv2_ffmpeg.zip"
+    "sha256": "",
+    "size": 0,
+    "filename": ""
   },
   "patches": [
     {
@@ -74,10 +75,10 @@
       "stable_payload_files": 0
     }
   ],
-  "published_at": "2026-07-17 23:19:27",
+  "published_at": "2026-07-18 02:25:27",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "P/NpcxDruCA85byZRZpDKhntGYEvbx1IONKEBmaE6J9EnwF7wJgL8JqZ2eNfweRJjI0XzBvu9FN30uuHyl6LBQ=="
+    "value": "BbPeeNlUckRgkkS+kYkBevj8eFyGj+/beLZyTQXZrtUCDTXryzlJcuolVNfj7hdeTfvQ8P0fF5LNBxSNsCtiDQ=="
   }
 }

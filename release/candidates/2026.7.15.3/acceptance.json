@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "version": "2026.7.15.3",
+  "candidate_sha256": "74611E57EE681ED239870093BB8356B4E210FA689DE1F62F27EECC96A94B2AE8",
+  "release_type": "business_runtime",
+  "source_commit": "c5ce2b0eb01d78f096c7fa0e376bf388819e3734",
+  "gates": {
+    "cross_window_sync": "pass",
+    "source_tests": "pass",
+    "manifest_signatures": "pass",
+    "zip_integrity": "pass",
+    "security_audit": "pass",
+    "github_download_hash": "pass",
+    "exact_baseline_update": "pass",
+    "failure_rollback": "pass",
+    "post_update_runtime_integrity": "pass",
+    "user_data_preserved": "pass"
+  },
+  "evidence": {
+    "cross_window_sync": {
+      "result": "Candidate built from clean detached worktree at source_commit; only candidate metadata changed.",
+      "excluded_main_worktree": [
+        "app/license_client.py",
+        "app/license_guard.py",
+        "tests/fixtures/",
+        "tests/test_license_timeout_failopen.py",
+        "tools/shadow_auth_*.py"
+      ]
+    },
+    "source_tests": {
+      "command": "python -m unittest discover -s tests -p test_*.py -v",
+      "result": "141 passed; 2 deployment-backend-only tests skipped"
+    },
+    "manifest_signatures": {
+      "command": "python tools/release_preflight.py --phase candidate --manifest release/candidates/2026.7.15.3/stable.hold.json --patch <15.2-to-15.3> --patch <15.1-to-15.3>",
+      "result": "PASS; candidate and both patch manifests verified with release key e489293f17704e2f"
+    },
+    "zip_integrity": {
+      "result": "Candidate preflight validated both patch ZIPs and payload manifests",
+      "assets": {
+        "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip": {
+          "size": 17311596,
+          "sha256": "34E6F8C5041286B3500A020E0855F83F12188872C875FF04A7B1FA7CC20C3A32"
+        },
+        "LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip": {
+          "size": 17377122,
+          "sha256": "05C88040DD87A84F850952FEAB6614F63720EF9D6ABDE0587AD3245BC9714E5F"
+        }
+      }
+    },
+    "security_audit": {
+      "command": "python tools/audit_release_security.py --strict <both patch ZIPs>",
+      "result": "Release security audit passed; both patches contain zero stable-component payload files"
+    },
+    "github_download_hash": {
+      "source": "release_build/2026.7.15.3/github_redownload_20260717_2340",
+      "result": "Both GitHub re-downloads match the candidate sizes and SHA256 values"
+    },
+    "exact_baseline_update": {
+      "source": "release_build/2026.7.15.3/upgrade_from_15.2_success_20260717_2330/LiveClipperWeb/current.json",
+      "result": "2026.7.15.2 upgraded to 2026.7.15.3; previous_version=2026.7.15.2; pending=false"
+    },
+    "failure_rollback": {
+      "source": "release_build/2026.7.15.3/upgrade_from_15.2_reject_20260717_2333/LiveClipperWeb/current.json",
+      "result": "Wrong expected patch SHA256 was rejected; current_version remained 2026.7.15.2 and no 2026.7.15.3 runtime directory was created"
+    },
+    "post_update_runtime_integrity": {
+      "source": "release_build/2026.7.15.3/upgrade_from_15.2_success_20260717_2330/LiveClipperWeb/versions/2026.7.15.3/runtime_manifest.json",
+      "result": "2241 of 2241 runtime files present; 0 missing; 0 SHA256 mismatches"
+    },
+    "user_data_preserved": {
+      "result": "User markers survived both successful and rejected update paths",
+      "success_marker": "keep-user-data-15.2-to-15.3",
+      "rejected_update_marker": "keep-on-rejected-update"
+    }
+  }
+}
