@@ -12,7 +12,7 @@
   "supports_incremental_updates": false,
   "requires_full_package": true,
   "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
-  "release_notes": "修复设置保存与授权激活可靠性；新增多行业品类（含母婴宠物）及混剪素材组管理和视频缩略图。",
+  "release_notes": "修复设置保存与授权激活可靠性；新增多行业品类、混剪素材组管理和视频缩略图；新增智能成片与混剪时长容差；修复仅超出零点几秒即判失败、来源补足失败后阻断成片和批量单组失败后停止的问题；完整包固定携带 WebView2 与 FFmpeg 工具。",
   "force_update": false,
   "release_page_url": "",
   "bridge_url": "",
@@ -24,9 +24,9 @@
   "package": {
     "format": "zip",
     "url": "",
-    "sha256": "808D77311F70EDB8C18CA20165CE08C9B70B4E617970EEDA76612596C009C69D",
-    "size": 581665011,
-    "filename": "LiveClipperWeb_2026.7.15.2_full_v3_20260717_wv2_ffmpeg.zip"
+    "sha256": "57DE60461632FBDD09035E1871919D8C82E8438F181211A7E69C466E1183CE52",
+    "size": 581666294,
+    "filename": "LiveClipperWeb_2026.7.15.2_full_v3_20260717_ai_batch_wv2_ffmpeg.zip"
   },
   "patches": [
     {
@@ -35,27 +35,27 @@
       "to_version": "2026.7.15.2",
       "source_layout_version": 3,
       "target_layout_version": 3,
-      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip",
       "urls": [
-        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip"
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip"
       ],
       "sources": [
         {
           "name": "GitHub",
-          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip"
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip"
         }
       ],
-      "sha256": "FFDB1E4D487E656A93ADA64CC078A9D19265FD4F76337EDA31C4B2F0D18538DE",
-      "size": 17377683,
-      "filename": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip",
+      "sha256": "425D70F699D586A0BF94B827CAB33497563E3634633325F2FDF45F28F5CE10B4",
+      "size": 17378828,
+      "filename": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip",
       "runtime_payload_files": 11,
       "stable_payload_files": 0
     }
   ],
-  "published_at": "2026-07-17 15:17:27",
+  "published_at": "2026-07-17 22:36:43",
   "signature": {
     "algorithm": "ed25519",
     "key_id": "e489293f17704e2f",
-    "value": "ptBVqpnhnRRiwPt2XURwEsb1hXD/csumeZuaQThk2TTDojb61T3gYUtBxjEulxvFVlEoYm11Rn1MjrBClvWVDA=="
+    "value": "3l82yIuVCaZIUALm/f1Wl1lhJR0EoWPgj0zv/laDHXe80kngGIQ8d57/+Bnbcmz/0tJ8hQBnoDD4LR37S5VkCQ=="
   }
 }

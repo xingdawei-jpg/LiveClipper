@@ -1,19 +1,19 @@
 {
     "tag":  "v2026.7.15.2",
     "title":  "LiveClipper 2026.7.15.2",
-    "notes":  "Signed Runtime V3 incremental update from 2026.7.15.1 to 2026.7.15.2.\n\n- Fix settings persistence and activation reliability.\n- Add multi-industry category support, including mother-and-baby and pet profiles, plus mix source-group management and video thumbnails.\n- Bundle and verify the fixed WebView2 runtime and ffmpeg/ffprobe tools so extracted packages retain the desktop window and media processing on clean PCs.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
+    "notes":  "Signed Runtime V3 incremental update from 2026.7.15.1 to 2026.7.15.2.\n\n- Fix settings persistence and activation reliability.\n- Add multi-industry category support, mix source-group management, and video thumbnails.\n- Add selectable duration tolerance to Smart Cut and Mix Cut.\n- Treat sub-second duration overflow as a warning within the technical margin.\n- Continue rendering after source-quota repair is exhausted, and continue batch processing after one group fails.\n- Bundle and verify the fixed WebView2 runtime and ffmpeg/ffprobe tools.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
     "assets":  [
                    {
-                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip",
-                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip",
-                       "sha256":  "FFDB1E4D487E656A93ADA64CC078A9D19265FD4F76337EDA31C4B2F0D18538DE",
-                       "size":  17377683
+                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip",
+                       "sha256":  "425D70F699D586A0BF94B827CAB33497563E3634633325F2FDF45F28F5CE10B4",
+                       "size":  17378828
                    },
                    {
-                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip.sha256.txt",
-                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_wv2_ffmpeg.zip.sha256.txt",
-                       "sha256":  "DDD5C1CA3BE057E97E716A1F16A0E06EFFEA4DB15D6B558110579FB43A560CBB",
-                       "size":  129
+                       "name":  "LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip.sha256.txt",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.2/LiveClipperPatch_2026.7.15.1_to_2026.7.15.2_v3_ai_batch_wv2_ffmpeg.zip.sha256.txt",
+                       "sha256":  "1D8CF46DACE1F97E72F71102DD7335662C3030191DD9B4ED2D9EA0AA411C2A98",
+                       "size":  137
                    }
                ]
 }
