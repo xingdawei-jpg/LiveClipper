@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import sys
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from release_signing import sha256_file, sign_manifest, verify_manifest
+from release_signing import sign_manifest, verify_manifest
 
 STABLE_FILE = ROOT / "release" / "stable.json"
 PUBLIC_KEY_FILE = ROOT / "app" / "release_update_public_key.pem"
@@ -39,6 +40,16 @@ def _version_key(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
 
+def candidate_manifest_sha256(candidate: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        candidate,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest().upper()
+
+
 def validate_acceptance(
     candidate_path: Path,
     candidate: dict[str, Any],
@@ -49,7 +60,7 @@ def validate_acceptance(
     if acceptance.get("version") != version:
         raise ValueError("acceptance version differs from candidate")
     expected_candidate_hash = str(acceptance.get("candidate_sha256") or "").upper()
-    actual_candidate_hash = sha256_file(candidate_path).upper()
+    actual_candidate_hash = candidate_manifest_sha256(candidate)
     if expected_candidate_hash != actual_candidate_hash:
         raise ValueError("acceptance is not bound to this exact candidate manifest")
     release_type = str(acceptance.get("release_type") or "")
@@ -156,15 +167,22 @@ def promote(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", type=Path, required=True)
-    parser.add_argument("--acceptance", type=Path, required=True)
-    parser.add_argument("--private-key", type=Path, required=True)
+    parser.add_argument("--acceptance", type=Path)
+    parser.add_argument("--private-key", type=Path)
+    parser.add_argument("--print-candidate-sha256", action="store_true")
     parser.add_argument("--confirm-publish-ready", action="store_true")
     args = parser.parse_args()
+    candidate_path = args.candidate.resolve()
+    if args.print_candidate_sha256:
+        print(candidate_manifest_sha256(_load_json(candidate_path)))
+        return 0
+    if args.acceptance is None or args.private_key is None:
+        parser.error("promotion requires --acceptance and --private-key")
     if not args.confirm_publish_ready:
         parser.error("promotion requires --confirm-publish-ready")
 
     signed = promote(
-        args.candidate.resolve(),
+        candidate_path,
         args.acceptance.resolve(),
         args.private_key.resolve(),
     )

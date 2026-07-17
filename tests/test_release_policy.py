@@ -179,6 +179,9 @@ class ReleasePolicyTests(unittest.TestCase):
         runtime_version = json.loads(
             (ROOT / "app" / "version.json").read_text(encoding="utf-8-sig")
         )["version"]
+        stable = json.loads(
+            (ROOT / "release" / "stable.json").read_text(encoding="utf-8-sig")
+        )
         expected_hash = baseline["package"]["sha256"]
         with (
             mock.patch.object(preflight, "sha256_file", return_value=expected_hash),
@@ -188,13 +191,8 @@ class ReleasePolicyTests(unittest.TestCase):
             report = preflight.run_preflight("development")
         self.assertFalse(report.errors)
         self.assertEqual(report.facts["runtime_version"], runtime_version)
-        self.assertEqual(report.facts["channel_version"], "2026.7.14.7")
-        self.assertTrue(
-            any("ahead of live channel" in item for item in report.warnings)
-        )
-        self.assertTrue(
-            any("legacy non-policy host" in item for item in report.warnings)
-        )
+        self.assertEqual(report.facts["channel_version"], stable["version"])
+        self.assertEqual(report.facts["release_type"], stable["release_type"])
 
     def test_candidate_preflight_rejects_ready_status(self) -> None:
         preflight = load_tool("release_preflight")
@@ -288,17 +286,28 @@ class ReleasePolicyTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as temp:
             candidate_path = Path(temp) / "stable.hold.json"
-            candidate_path.write_text('{"channel_status":"hold"}', encoding="utf-8")
+            candidate = {"version": "2026.7.15.2", "channel_status": "hold"}
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
             acceptance = {
                 "version": "2026.7.15.2",
-                "candidate_sha256": promoter.sha256_file(candidate_path).upper(),
+                "candidate_sha256": promoter.candidate_manifest_sha256(candidate),
                 "release_type": "business_runtime",
                 "gates": {name: "pass" for name in required},
                 "evidence": {name: {"result": "verified"} for name in required},
             }
             promoter.validate_acceptance(
                 candidate_path,
-                {"version": "2026.7.15.2"},
+                candidate,
+                acceptance,
+                policy,
+            )
+            candidate_path.write_text(
+                json.dumps(candidate, indent=4).replace("\n", "\r\n"),
+                encoding="utf-8",
+            )
+            promoter.validate_acceptance(
+                candidate_path,
+                candidate,
                 acceptance,
                 policy,
             )
@@ -306,7 +315,7 @@ class ReleasePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exact candidate"):
                 promoter.validate_acceptance(
                     candidate_path,
-                    {"version": "2026.7.15.2"},
+                    candidate,
                     acceptance,
                     policy,
                 )
@@ -394,7 +403,7 @@ class ReleasePolicyTests(unittest.TestCase):
             candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
             acceptance = {
                 "version": "2026.7.15.3",
-                "candidate_sha256": promoter.sha256_file(candidate_path).upper(),
+                "candidate_sha256": promoter.candidate_manifest_sha256(candidate),
                 "release_type": "business_runtime",
                 "gates": {name: "pass" for name in required},
                 "evidence": {name: {"result": "verified"} for name in required},

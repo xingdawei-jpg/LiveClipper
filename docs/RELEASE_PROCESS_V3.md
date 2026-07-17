@@ -164,7 +164,7 @@ full_baseline 额外要求：
 2. GitHub patch Release 已通过 workflow。
 3. business_runtime 的 GitHub 回下载 hash 已通过；full_baseline 另外要求百度网盘回下载 hash。
 4. 源码 commit、候选 manifest、包和补丁版本完全一致。
-5. 计算 stable.hold.json 的 SHA256，写入 acceptance.json 的 candidate_sha256。
+5. 计算 stable.hold.json 的规范化内容 SHA256，写入 acceptance.json 的 candidate_sha256；禁止使用文件字节哈希，避免 Windows/Git 换行转换破坏绑定。
 6. 使用 promote_release_channel.py 从同一签名 hold 候选生成 ready stable。
 7. 运行 publish preflight。
 8. 确认工作树除 release/stable.json 和候选证据外没有其他变化。
@@ -172,7 +172,7 @@ full_baseline 额外要求：
 10. 核对远端 main、GitHub API 和签名清单，最后才通知用户“更新已发布”。
 
 ~~~powershell
-Get-FileHash release\candidates\<版本>\stable.hold.json -Algorithm SHA256
+python tools\promote_release_channel.py --candidate release\candidates\<版本>\stable.hold.json --print-candidate-sha256
 python tools\promote_release_channel.py --candidate release\candidates\<版本>\stable.hold.json --acceptance release\candidates\<版本>\acceptance.json --private-key <仓库外私钥路径> --confirm-publish-ready
 # business_runtime 不传 --package；full_baseline 必须传 --package
 python tools\release_preflight.py --phase publish --manifest release\stable.json --patch release_dist\<补丁>.zip --acceptance release\candidates\<版本>\acceptance.json

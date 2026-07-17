@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "version": "REPLACE_WITH_VERSION",
-  "candidate_sha256": "REPLACE_WITH_HOLD_MANIFEST_SHA256",
+  "candidate_sha256": "REPLACE_WITH_CANONICAL_HOLD_MANIFEST_SHA256",
   "release_type": "business_runtime",
   "gates": {
     "cross_window_sync": "pending",
