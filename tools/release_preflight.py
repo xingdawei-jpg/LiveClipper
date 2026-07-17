@@ -153,11 +153,19 @@ def inspect_full_zip(
                     f"{root}/versions/{actual_version}/_internal/"
                     "webview2_runtime/msedgewebview2.exe"
                 ),
+                (
+                    f"{root}/versions/{actual_version}/_internal/"
+                    "ffmpeg/ffmpeg.exe"
+                ),
+                (
+                    f"{root}/versions/{actual_version}/_internal/"
+                    "ffmpeg/ffprobe.exe"
+                ),
             }
             if not required.issubset(names):
                 report.error(
-                    f"{path.name}: stable package files or fixed WebView2 "
-                    "runtime are missing"
+                    f"{path.name}: stable package files, fixed WebView2 runtime, "
+                    "or bundled FFmpeg tools are missing"
                 )
             if full_test:
                 bad = archive.testzip()

@@ -29,6 +29,10 @@ FIXED_WEBVIEW2_RUNTIME = (
     / "webview2_runtime"
     / "msedgewebview2.exe"
 )
+BUNDLED_MEDIA_TOOLS = (
+    Path("_internal") / "ffmpeg" / "ffmpeg.exe",
+    Path("_internal") / "ffmpeg" / "ffprobe.exe",
+)
 RUNTIME_MANIFEST = "runtime_manifest.json"
 INSTALL_MANIFEST = "install_manifest.json"
 
@@ -154,6 +158,7 @@ def assemble(
     required_runtime_files = (
         runtime_dir / DEFAULT_ENTRYPOINT,
         runtime_dir / FIXED_WEBVIEW2_RUNTIME,
+        *(runtime_dir / path for path in BUNDLED_MEDIA_TOOLS),
     )
     missing_runtime_files = [
         str(path.relative_to(runtime_dir))

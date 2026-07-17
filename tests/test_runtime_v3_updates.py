@@ -44,6 +44,10 @@ class RuntimeV3UpdateTests(unittest.TestCase):
         webview2 = runtime / "_internal" / "webview2_runtime"
         webview2.mkdir(parents=True)
         (webview2 / "msedgewebview2.exe").write_bytes(b"fixed-webview-runtime")
+        ffmpeg = runtime / "_internal" / "ffmpeg"
+        ffmpeg.mkdir(parents=True)
+        (ffmpeg / "ffmpeg.exe").write_bytes(b"bundled-ffmpeg")
+        (ffmpeg / "ffprobe.exe").write_bytes(b"bundled-ffprobe")
         (runtime / "LiveClipperWeb.exe").write_bytes(b"fake-runtime-executable")
         (runtime / "_internal" / "base.txt").write_text("shared-runtime-data", encoding="utf-8")
         (runtime / "_internal" / "changed.txt").write_text(marker, encoding="utf-8")
@@ -83,6 +87,28 @@ class RuntimeV3UpdateTests(unittest.TestCase):
                     self.private_key,
                     base,
                 )
+
+    def test_v3_package_requires_bundled_ffmpeg_and_ffprobe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            runtime = self._runtime(base, "2026.7.15.2", "target")
+            media_dir = runtime / "_internal" / "ffmpeg"
+            (media_dir / "ffmpeg.exe").unlink()
+            (media_dir / "ffprobe.exe").unlink()
+            stable = self._stable_files(base)
+            with self.assertRaises(FileNotFoundError) as context:
+                build_v3_package.assemble(
+                    runtime,
+                    base / "package",
+                    stable[0],
+                    stable[1],
+                    self.public_key,
+                    self.private_key,
+                    base,
+                )
+            message = str(context.exception).replace("\\", "/")
+            self.assertIn("_internal/ffmpeg/ffmpeg.exe", message)
+            self.assertIn("_internal/ffmpeg/ffprobe.exe", message)
 
     def _stable_files(self, root: Path) -> tuple[Path, Path]:
         launcher = root / "LiveClipperLauncher.exe"

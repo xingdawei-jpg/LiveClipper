@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -166,6 +167,51 @@ class ReleasePolicyTests(unittest.TestCase):
                 )
         self.assertTrue(
             any("candidate channel must be hold" in item for item in report.errors)
+        )
+
+    def test_full_package_preflight_requires_bundled_media_tools(self) -> None:
+        preflight = load_tool("release_preflight")
+        version = "2026.7.15.2"
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "full.zip"
+            root = "LiveClipperWeb"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr(
+                    f"{root}/current.json",
+                    json.dumps({"current_version": version}),
+                )
+                archive.writestr(
+                    f"{root}/install_manifest.json",
+                    json.dumps(
+                        {
+                            "launcher_version": "1.1.0",
+                            "updater_version": "1.3.0",
+                        }
+                    ),
+                )
+                archive.writestr(
+                    f"{root}/versions/{version}/runtime_manifest.json",
+                    json.dumps({"version": version}),
+                )
+                for relative in (
+                    "LiveClipperWeb.exe",
+                    "updater/LiveClipperUpdater.exe",
+                    "updater/release_update_public_key.pem",
+                    f"versions/{version}/_internal/webview2_runtime/msedgewebview2.exe",
+                ):
+                    archive.writestr(f"{root}/{relative}", b"fixture")
+            report = preflight.Report("candidate")
+            with mock.patch.object(preflight, "verify_signed"):
+                preflight.inspect_full_zip(
+                    report,
+                    package,
+                    version,
+                    "1.1.0",
+                    "1.3.0",
+                    full_test=True,
+                )
+        self.assertTrue(
+            any("bundled FFmpeg tools are missing" in item for item in report.errors)
         )
 
     def test_channel_builder_cannot_generate_ready_directly(self) -> None:

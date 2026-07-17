@@ -17,7 +17,15 @@ APP_DIR = os.path.join(ROOT_DIR, "app")
 TOOLS_DIR = os.path.join(ROOT_DIR, "tools")
 WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
-FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
+DEFAULT_FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
+FFMPEG_DIR = os.path.abspath(
+    os.environ.get("LIVECLIPPER_FFMPEG_DIR", "").strip()
+    or DEFAULT_FFMPEG_DIR
+)
+FFMPEG_REQUIRED_FILES = (
+    "ffmpeg.exe",
+    "ffprobe.exe",
+)
 ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
 WEBVIEW2_RUNTIME_NAME = (
     "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64"
@@ -56,6 +64,24 @@ def _require_fixed_webview2_runtime():
             f"missing {', '.join(missing)} in {WEBVIEW2_RUNTIME_DIR}"
         )
     return WEBVIEW2_RUNTIME_DIR
+
+
+def _require_ffmpeg_binaries():
+    missing = [
+        name
+        for name in FFMPEG_REQUIRED_FILES
+        if not os.path.isfile(os.path.join(FFMPEG_DIR, name))
+    ]
+    if missing:
+        raise RuntimeError(
+            "Bundled FFmpeg tools are required for a desktop package; "
+            f"missing {', '.join(missing)} in {FFMPEG_DIR}"
+        )
+    return [
+        (os.path.join(FFMPEG_DIR, name), "ffmpeg")
+        for name in FFMPEG_REQUIRED_FILES
+    ]
+
 
 def _existing(items):
     return [(src, dest) for src, dest in items if src and os.path.exists(src)]
@@ -147,10 +173,7 @@ datas += _existing([
     (certifi_pem if certifi_pem else "", "certifi"),
 ])
 
-binaries = _existing([
-    (os.path.join(FFMPEG_DIR, "ffmpeg.exe"), "ffmpeg"),
-    (os.path.join(FFMPEG_DIR, "ffprobe.exe"), "ffmpeg"),
-])
+binaries = _require_ffmpeg_binaries()
 
 a = Analysis(
     [os.path.join(WEB_DIR, "desktop.py")],
