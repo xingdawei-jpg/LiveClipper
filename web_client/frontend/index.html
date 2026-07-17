@@ -147,6 +147,17 @@
                 </select>
               </div>
             </div>
+            <div class="field-row compact">
+              <label for="sc-duration-tolerance">时长容差</label>
+              <select id="sc-duration-tolerance">
+                <option value="auto" selected>自动</option>
+                <option value="5">±5秒</option>
+                <option value="10">±10秒</option>
+                <option value="15">±15秒</option>
+                <option value="20">±20秒</option>
+                <option value="30">±30秒</option>
+              </select>
+            </div>
             <div class="field-row advanced-param">
               <label for="sc-dedup">去重强度</label>
               <select id="sc-dedup">
@@ -621,6 +632,17 @@
                   <option>3</option>
                 </select>
               </div>
+            </div>
+            <div class="field-row compact">
+              <label for="mix-duration-tolerance">时长容差</label>
+              <select id="mix-duration-tolerance">
+                <option value="auto" selected>自动</option>
+                <option value="5">±5秒</option>
+                <option value="10">±10秒</option>
+                <option value="15">±15秒</option>
+                <option value="20">±20秒</option>
+                <option value="30">±30秒</option>
+              </select>
             </div>
             <div class="field-row advanced-param">
               <label for="mix-dedup">去重强度</label>
@@ -1947,6 +1969,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260713-smart-batch-recovery" defer></script>
+  <script src="/assets/app.js?v=20260717-duration-batch-reliability" defer></script>
 </body>
 </html>

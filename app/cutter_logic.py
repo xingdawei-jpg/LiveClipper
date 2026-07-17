@@ -961,18 +961,33 @@ def _planned_output_speed_factor(dedup_preset="medium", video_options=None):
     return 1.0
 
 
-def _selection_duration_contract(target_duration, dedup_preset="medium", video_options=None):
+def _selection_duration_contract(
+    target_duration,
+    dedup_preset="medium",
+    video_options=None,
+    duration_tolerance=None,
+):
     speed = _planned_output_speed_factor(dedup_preset, video_options)
-    return DurationContract.create(target_duration, speed)
+    return DurationContract.create(target_duration, speed, tolerance=duration_tolerance)
 
 
-def _ai_target_duration_for_final_duration(target_duration, dedup_preset="medium", video_options=None):
-    contract = _selection_duration_contract(target_duration, dedup_preset, video_options)
+def _ai_target_duration_for_final_duration(
+    target_duration,
+    dedup_preset="medium",
+    video_options=None,
+    duration_tolerance=None,
+):
+    contract = _selection_duration_contract(
+        target_duration,
+        dedup_preset,
+        video_options,
+        duration_tolerance,
+    )
     return max(10, contract.ai_target_seconds), contract.speed_factor
 
 
-def _final_duration_contract(target_duration):
-    contract = DurationContract.create(target_duration, 1.0)
+def _final_duration_contract(target_duration, duration_tolerance=None):
+    contract = DurationContract.create(target_duration, 1.0, tolerance=duration_tolerance)
     return contract.final_target, contract.final_min, contract.final_max
 
 
@@ -1014,9 +1029,14 @@ def _validate_selected_duration_contract(
     log_fn=None,
     shortage_grace_seconds=0.0,
     user_confirmed=False,
+    duration_tolerance=None,
 ):
     source_total = _selection_duration_total(clips)
-    contract = DurationContract.create(target_duration, speed_factor)
+    contract = DurationContract.create(
+        target_duration,
+        speed_factor,
+        tolerance=duration_tolerance,
+    )
     status = contract.status(
         source_total,
         shortage_grace_seconds=shortage_grace_seconds,
@@ -1067,8 +1087,14 @@ def _validate_actual_duration_contract(
     margin=1.0,
     shortage_grace_seconds=0.0,
     user_confirmed=False,
+    duration_tolerance=None,
 ):
-    contract = DurationContract.create(target_duration, 1.0, acceptance_margin=margin)
+    contract = DurationContract.create(
+        target_duration,
+        1.0,
+        tolerance=duration_tolerance,
+        acceptance_margin=margin,
+    )
     actual = max(0.0, float(actual_duration or 0.0))
     status = contract.status(
         actual,
@@ -2189,7 +2215,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                    _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                    target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
                    dedup_video_options=None, dedup_audio_options=None, transition_options=None,
-                   _user_confirmed_clips=False):
+                   _user_confirmed_clips=False, duration_tolerance=None):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -2215,14 +2241,18 @@ def process_video(video_path, srt_path=None, output_path=None,
     # ---- 运行日志 ----
     global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
     old_dur, old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
-    TARGET_DURATION = target_duration
-    TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)  # 自适应容差：60→10, 30→5, 90→15
-    _log(f"目标时长: {target_duration}秒 (容差{max(5, target_duration // 6)}秒)")
     _duration_contract = _selection_duration_contract(
         target_duration,
         dedup_preset,
         dedup_video_options,
+        duration_tolerance,
     )
+    TARGET_DURATION = target_duration
+    TARGET_DURATION_TOLERANCE = max(
+        0.0,
+        _duration_contract.final_max - _duration_contract.final_target,
+    )
+    _log(f"目标时长: {target_duration}秒 (容差{TARGET_DURATION_TOLERANCE:g}秒)")
     _ai_target_duration = _duration_contract.ai_target_seconds
     _planned_speed_factor = _duration_contract.speed_factor
     if abs(_planned_speed_factor - 1.0) > 0.01:
@@ -2607,6 +2637,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log,
             shortage_grace_seconds=_duration_shortage_grace,
             user_confirmed=_user_confirmed_clips,
+            duration_tolerance=duration_tolerance,
         )
 
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
@@ -3358,6 +3389,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         margin=1.0,
         shortage_grace_seconds=_duration_shortage_grace,
         user_confirmed=_user_confirmed_clips,
+        duration_tolerance=duration_tolerance,
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
@@ -3472,6 +3504,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             margin=1.0,
             shortage_grace_seconds=_duration_shortage_grace,
             user_confirmed=_user_confirmed_clips,
+            duration_tolerance=duration_tolerance,
         )
         if not _final_duration_ok:
             _duration_error = (
@@ -4795,7 +4828,8 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                         num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                         target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
-                        dedup_video_options=None, dedup_audio_options=None, transition_options=None):
+                        dedup_video_options=None, dedup_audio_options=None, transition_options=None,
+                        duration_tolerance=None):
     """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
     策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
@@ -4809,7 +4843,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     
     _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
@@ -4821,7 +4855,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -4833,7 +4867,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                  force_category, cancel_event,
                   pip_path, pip_size, pip_opacity, pip_pos,
                   _asr_only=True,
-                  smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                  smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     
     _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
@@ -4845,7 +4879,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -4859,7 +4893,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     if _recorded_srt_text:
         from ai_clipper import ai_analyze_multi_versions
         _log("🎬 多版本: AI重新选片（3个独立方案）...")
-        multi_result = ai_analyze_multi_versions(_recorded_srt_text, log_fn=_log, force_category=force_category, focus_hint=focus_hint, num_versions=num_versions, ai_controls=ai_controls, target_duration=target_duration)
+        multi_result = ai_analyze_multi_versions(_recorded_srt_text, log_fn=_log, force_category=force_category, focus_hint=focus_hint, num_versions=num_versions, ai_controls=ai_controls, target_duration=target_duration, duration_tolerance=duration_tolerance)
     else:
         multi_result = {"versions": []}
     versions_data = multi_result.get("versions", [])
@@ -4872,7 +4906,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     
     if len(versions_data) < 1:
         _log("无有效版本，输出单版本")
@@ -4880,7 +4914,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
@@ -4912,6 +4946,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             pip_path, pip_size, pip_opacity, pip_pos,
             smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
             mirror_enabled=mirror_enabled, kb_intensity=kb_intensity,
+            target_duration=target_duration, duration_tolerance=duration_tolerance,
             dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
             transition_options=transition_options
         )
@@ -4937,7 +4972,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                  pip_size=0.15, pip_opacity=0.03, pip_pos="右下",
                                  smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                                   mirror_enabled=None, kb_intensity="中", target_duration=60,
-                                  dedup_video_options=None, dedup_audio_options=None, transition_options=None):
+                                  dedup_video_options=None, dedup_audio_options=None, transition_options=None,
+                                  duration_tolerance=None):
     """Process a single version with pre-determined clips (bypass AI selection)"""
     import time as _time
     from ai_clipper import is_enabled as ai_is_enabled
@@ -4990,7 +5026,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                 smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
                                 mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, target_duration=target_duration,
                                 dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
-                                transition_options=transition_options, _user_confirmed_clips=True)
+                                transition_options=transition_options, _user_confirmed_clips=True,
+                                duration_tolerance=duration_tolerance)
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn
@@ -5001,7 +5038,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                        pip_path="auto", pip_size=0.15, pip_opacity=0.03, pip_pos="\u53f3\u4e0a",
                        smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                        target_duration=60, focus_hint="\u81ea\u52a8", num_versions=1,
-                       srt_path=None, force_category=None, **extra_kwargs):
+                       srt_path=None, force_category=None, duration_tolerance=None, **extra_kwargs):
 
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -5263,6 +5300,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         target_duration,
         dedup_preset,
         dedup_video_options,
+        duration_tolerance,
     )
     _ai_target_duration = _duration_contract.ai_target_seconds
     _planned_speed_factor = _duration_contract.speed_factor
@@ -5290,6 +5328,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 num_versions=num_versions,
                 ai_controls=ai_controls,
                 target_duration=_ai_target_duration,
+                duration_tolerance=duration_tolerance,
             )
             versions_data = list((multi_result or {}).get("versions") or [])
         except Exception as e:
@@ -5335,6 +5374,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                         crop_level=crop_level,
                         ken_burns_enabled=ken_burns_enabled,
                         target_duration=target_duration,
+                        duration_tolerance=duration_tolerance,
                         focus_hint=focus_hint,
                         num_versions=1,
                         srt_path=srt_path,
@@ -5629,6 +5669,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _log,
         shortage_grace_seconds=_duration_shortage_grace,
         user_confirmed=_user_confirmed_clips,
+        duration_tolerance=duration_tolerance,
     )
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
@@ -6308,6 +6349,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         margin=1.0,
         shortage_grace_seconds=_duration_shortage_grace,
         user_confirmed=_user_confirmed_clips,
+        duration_tolerance=duration_tolerance,
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
@@ -6365,6 +6407,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             margin=1.0,
             shortage_grace_seconds=_duration_shortage_grace,
             user_confirmed=_user_confirmed_clips,
+            duration_tolerance=duration_tolerance,
         )
         if not _final_duration_ok:
             _duration_error = (
@@ -6383,7 +6426,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _report_old_dur, _report_old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
     try:
         TARGET_DURATION = target_duration
-        TARGET_DURATION_TOLERANCE = max(5, target_duration // 6)
+        _report_duration_contract = DurationContract.create(
+            target_duration,
+            1.0,
+            tolerance=duration_tolerance,
+        )
+        TARGET_DURATION_TOLERANCE = max(
+            0.0,
+            _report_duration_contract.final_max - _report_duration_contract.final_target,
+        )
         _report = _build_cut_report(sorted_clips, len(sorted_clips), len(sorted_clips), final, final_mb)
         _print_cut_report(_report, _log)
     finally:

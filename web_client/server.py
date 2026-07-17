@@ -1656,6 +1656,7 @@ class SmartCutPayload(BaseModel):
     focus_hint: str = "自动"
     ai_controls: dict[str, Any] = Field(default_factory=dict)
     target_duration: int = Field(default=60, ge=10, le=600)
+    duration_tolerance: float | None = Field(default=None, ge=0, le=120)
     versions: int = Field(default=1, ge=1, le=20)
     dedup_preset: str = "medium"
     video: dict[str, Any] = Field(default_factory=dict)
@@ -1682,6 +1683,7 @@ class MixPayload(BaseModel):
     category: str = "自动检测"
     versions: int = Field(default=1, ge=1, le=20)
     duration: int = Field(default=60, ge=10, le=600)
+    duration_tolerance: float | None = Field(default=None, ge=0, le=120)
     focus_hint: str = "自动"
     ai_controls: dict[str, Any] = Field(default_factory=dict)
     dedup_preset: str = "medium"
@@ -6328,6 +6330,7 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             focus_hint=payload.focus_hint,
             ai_controls=_payload_ai_controls(payload),
             target_duration=payload.duration,
+            duration_tolerance=payload.duration_tolerance,
             num_versions=payload.versions,
             pip_path=pip_path or "",
             pip_size=payload.pip_size,
@@ -6421,6 +6424,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     focus_hint=payload.focus_hint,
                     ai_controls=_payload_ai_controls(payload),
                     target_duration=payload.duration,
+                    duration_tolerance=payload.duration_tolerance,
                     num_versions=payload.versions,
                     pip_path=pip_path or "",
                     pip_size=payload.pip_size,
@@ -6515,6 +6519,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         category=_preview_category_for_payload(payload),
         feedback_scope=_feedback_scope_key("mix", _preview_category_for_payload(payload)),
         target_duration=payload.duration,
+        duration_tolerance=payload.duration_tolerance,
         clips=[],
     )
     emit_log("info", "混剪 AI 选片预览任务已启动。", scope)
@@ -6543,6 +6548,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             focus_hint=payload.focus_hint,
             ai_controls=_payload_ai_controls(payload),
             target_duration=payload.duration,
+            duration_tolerance=payload.duration_tolerance,
             num_versions=payload.versions,
             pip_path="",
             pip_size=payload.pip_size,
@@ -6660,6 +6666,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             category=preferred_category,
             feedback_scope=_feedback_scope_key("mix", preferred_category),
             target_duration=payload.duration,
+            duration_tolerance=payload.duration_tolerance,
             srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
@@ -9345,6 +9352,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     crop_level=payload.crop_level,
                     ken_burns_enabled=payload.ken_burns_enabled,
                     target_duration=payload.target_duration,
+                    duration_tolerance=payload.duration_tolerance,
                 )
                 if version_count > 1:
                     result = process_video_multi(
@@ -9587,6 +9595,7 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
                 focus_hint=payload.focus_hint,
                 ai_controls=_payload_ai_controls(payload),
                 target_duration=payload.duration,
+                duration_tolerance=payload.duration_tolerance,
                 num_versions=1,
                 pip_path=pip_path or "",
                 pip_size=payload.pip_size,
@@ -9638,6 +9647,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         category=_preview_category_for_payload(payload),
         feedback_scope=_feedback_scope_key("smart", _preview_category_for_payload(payload)),
         target_duration=payload.target_duration,
+        duration_tolerance=payload.duration_tolerance,
         clips=[],
     )
     emit_log("info", "AI 选片预览任务已启动。", scope)
@@ -9676,6 +9686,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             crop_level=payload.crop_level,
             ken_burns_enabled=payload.ken_burns_enabled,
             target_duration=payload.target_duration,
+            duration_tolerance=payload.duration_tolerance,
             mirror_enabled=payload.mirror_enabled,
             kb_intensity=payload.ken_burns_intensity,
             ai_controls=_payload_ai_controls(payload),
@@ -9772,6 +9783,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             category=preferred_category,
             feedback_scope=_feedback_scope_key("smart", preferred_category),
             target_duration=payload.target_duration,
+            duration_tolerance=payload.duration_tolerance,
             srt_path=resolved_srt,
             srt_text=srt_text,
             raw_clips=raw_clips,
@@ -9841,6 +9853,7 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
             mirror_enabled=payload.mirror_enabled,
             kb_intensity=payload.ken_burns_intensity,
             target_duration=payload.target_duration,
+            duration_tolerance=payload.duration_tolerance,
             dedup_video_options=payload.video,
             dedup_audio_options=payload.audio,
             transition_options=payload.transition,

@@ -22,6 +22,78 @@ volcengine_asr = importlib.import_module("volcengine_asr")
 
 
 class AiCandidateReliabilityTests(unittest.TestCase):
+    def test_custom_duration_tolerance_is_preserved_across_contract_validation(self) -> None:
+        contract = selection_contracts.DurationContract.create(60, 1.0, tolerance=15)
+        self.assertEqual((contract.final_min, contract.final_max), (45.0, 75.0))
+        self.assertEqual(contract.to_dict()["tolerance"], 15.0)
+        self.assertEqual(
+            selection_contracts.DurationContract.coerce(contract.to_dict()),
+            contract,
+        )
+        self.assertTrue(contract.status(75.0)["accepted"])
+        self.assertFalse(contract.status(75.8)["accepted"])
+        self.assertEqual(ai_clipper._multi_version_target_bounds(30, 30), (1, 60.0))
+
+        clips = [("product", "完整卖点片段", 0.0, 44.5, 50, 44.5)]
+        accepted = cutter_logic._validate_selected_duration_contract(
+            clips,
+            60,
+            duration_tolerance=15,
+        )
+        self.assertEqual((accepted["low"], accepted["high"]), (45.0, 75.0))
+
+    def test_duration_fraction_inside_acceptance_margin_is_warning_not_failure(self) -> None:
+        contract = selection_contracts.DurationContract.create(60, 1.0)
+        clips = [
+            ("hook", "这件上衣穿上很显精神。", 0.0, 3.0, 50, 3.0, "版型"),
+            ("product", "肩线和轮廓都很利落，日常穿着很舒服。", 3.0, 66.1, 50, 63.1, "版型"),
+            ("close", "这一身通勤穿很耐看。", 66.1, 70.1, 50, 4.0, "场景"),
+        ]
+        _safe, audit = ai_clipper._director_hard_audit(
+            clips,
+            60,
+            8,
+            duration_contract=contract,
+        )
+        self.assertFalse(audit["duration_long"])
+        self.assertFalse(any("超过目标上限" in issue for issue in audit["issues"]))
+        self.assertTrue(any("超过目标上限" in warning for warning in audit["warnings"]))
+
+    def test_duration_fraction_outside_acceptance_margin_remains_failure(self) -> None:
+        contract = selection_contracts.DurationContract.create(60, 1.0)
+        clips = [
+            ("hook", "这件上衣穿上很显精神。", 0.0, 3.0, 50, 3.0, "版型"),
+            ("product", "肩线和轮廓都很利落，日常穿着很舒服。", 3.0, 66.8, 50, 63.8, "版型"),
+            ("close", "这一身通勤穿很耐看。", 66.8, 70.8, 50, 4.0, "场景"),
+        ]
+        _safe, audit = ai_clipper._director_hard_audit(
+            clips,
+            60,
+            8,
+            duration_contract=contract,
+        )
+        self.assertTrue(audit["duration_long"])
+        self.assertTrue(any("超过目标上限" in issue for issue in audit["issues"]))
+
+    def test_mix_source_quota_repairs_then_warns_instead_of_failing(self) -> None:
+        clips = [
+            ("hook", "[V1]这件上衣穿上很显精神。", 0.0, 3.0, 50, 3.0, "版型"),
+            ("product", "[V1]肩线和轮廓都很利落。", 3.0, 8.0, 50, 5.0, "版型"),
+        ]
+        requirements = {"[V1]": 1, "[V2]": 1}
+        self.assertEqual(
+            ai_clipper._director_source_quota_action(clips, requirements, 0, 2),
+            "repair",
+        )
+        self.assertEqual(
+            ai_clipper._director_source_quota_action(clips, requirements, 1, 2),
+            "warn",
+        )
+        self.assertEqual(
+            ai_clipper._director_source_quota_action(clips, {"[V1]": 1}, 0, 2),
+            "satisfied",
+        )
+
     def test_content_shortage_grace_accepts_safe_plan_without_changing_normal_contract(self) -> None:
         contract = selection_contracts.DurationContract.create(60, 1.15)
         self.assertFalse(contract.status(52.0)["accepted"])
@@ -911,6 +983,25 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertIn(entries[3][2], [clip[1] for clip in expanded])
 
 class BatchSummaryReliabilityTests(unittest.TestCase):
+    def test_payload_models_accept_optional_duration_tolerance(self) -> None:
+        self.assertEqual(server.SmartCutPayload(duration_tolerance=15).duration_tolerance, 15)
+        self.assertEqual(server.MixPayload(duration_tolerance=20).duration_tolerance, 20)
+        self.assertIsNone(server.SmartCutPayload().duration_tolerance)
+        self.assertIsNone(server.MixPayload().duration_tolerance)
+        source = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('duration_tolerance: selectedDurationTolerance("sc")', source)
+        self.assertIn('duration_tolerance: selectedDurationTolerance("mix")', source)
+
+    def test_legacy_mix_batch_does_not_rethrow_one_group_failure(self) -> None:
+        source = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        body = source.split("async function submitMixBatchLegacyQueue", 1)[1].split(
+            "async function waitForTaskComplete",
+            1,
+        )[0]
+        self.assertIn('await runPreflight("mix", singlePayload, "mix")', body)
+        self.assertIn("组失败并跳过", body)
+        self.assertNotIn("throw error;", body)
+
     def test_final_preview_keeps_ai_preference_separate_from_concrete_mainline(self) -> None:
         result = server._preview_final_preference_summary(
             {
@@ -935,10 +1026,16 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
                 video = root / f"v{index}.mp4"
                 video.write_bytes(b"video")
                 videos.append(video)
-            payload = server.SmartCutPayload(video_paths=[str(item) for item in videos], output_dir=str(root))
+            payload = server.SmartCutPayload(
+                video_paths=[str(item) for item in videos],
+                output_dir=str(root),
+                duration_tolerance=15,
+            )
             task_id = server._new_task("smart-cut", "智能成片")
+            seen_tolerances = []
 
-            def fake_process(video_path, **_kwargs):
+            def fake_process(video_path, **kwargs):
+                seen_tolerances.append(kwargs.get("duration_tolerance"))
                 if Path(video_path).stem == "v2":
                     raise RuntimeError("有效内容不足：可用候选5条，最佳片单16.5秒，目标至少58秒")
                 return {"ok": True}
@@ -963,6 +1060,7 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
             self.assertEqual(task["batch_succeeded"], 2)
             self.assertEqual(task["batch_failed"], 1)
             self.assertEqual(task["batch_insufficient"], 1)
+            self.assertEqual(seen_tolerances, [15, 15, 15])
 
     def test_mix_worker_keeps_two_successes_after_third_group_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -972,12 +1070,18 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
                 video = root / f"g{index}.mp4"
                 video.write_bytes(b"video")
                 groups.append(server.MixBatchGroup(name=f"第{index}组", video_paths=[str(video)]))
-            payload = server.MixBatchPayload(groups=groups, output_dir=str(root))
+            payload = server.MixBatchPayload(
+                groups=groups,
+                output_dir=str(root),
+                duration_tolerance=20,
+            )
             task_id = server._new_task("mix", "批量混剪")
             calls = {"count": 0}
+            seen_tolerances = []
 
-            def fake_mix(*_args, **_kwargs):
+            def fake_mix(*_args, **kwargs):
                 calls["count"] += 1
+                seen_tolerances.append(kwargs.get("duration_tolerance"))
                 if calls["count"] == 3:
                     raise RuntimeError("有效内容不足：可用候选5条，最佳片单16.5秒，目标至少58秒")
                 return True
@@ -1000,6 +1104,7 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
             self.assertEqual(task["batch_insufficient"], 1)
             self.assertIn("成功 2/3", task["message"])
             self.assertIn("内容不足 1", task["message"])
+            self.assertEqual(seen_tolerances, [20, 20, 20])
 
     def test_mix_summary_fields_survive_output_history(self) -> None:
         task = {

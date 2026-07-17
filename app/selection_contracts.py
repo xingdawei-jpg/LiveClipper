@@ -76,6 +76,7 @@ class DurationContract:
             contract = cls.create(
                 target,
                 speed,
+                tolerance=value.get("tolerance"),
                 acceptance_margin=value.get("acceptance_margin", 0.75),
             )
             required = (
@@ -145,6 +146,7 @@ class DurationContract:
             "final_target": self.final_target,
             "final_min": self.final_min,
             "final_max": self.final_max,
+            "tolerance": max(0.0, self.final_max - self.final_target),
             "speed_factor": self.speed_factor,
             "source_target": self.source_target,
             "source_min": self.source_min,

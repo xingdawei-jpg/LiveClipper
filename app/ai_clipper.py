@@ -982,13 +982,20 @@ def _multi_version_total_duration(clips):
     return sum(_clip_duration_value(c) for c in clips or [])
 
 
-def _multi_version_target_bounds(target_duration):
+def _multi_version_target_bounds(target_duration, duration_tolerance=None):
     try:
         target = int(target_duration or 60)
     except Exception:
         target = 60
-    tolerance = max(5, target // 6)
-    lower_floor = 5 if target <= 20 else 12 if target <= 30 else 25
+    try:
+        tolerance = (
+            max(0.0, float(duration_tolerance))
+            if duration_tolerance is not None
+            else max(5, target // 6)
+        )
+    except (TypeError, ValueError):
+        tolerance = max(5, target // 6)
+    lower_floor = 1 if duration_tolerance is not None else 5 if target <= 20 else 12 if target <= 30 else 25
     return max(lower_floor, target - tolerance), target + tolerance
 
 
@@ -4315,6 +4322,16 @@ def _director_source_deficits(clips, required_sources):
     }
 
 
+def _director_source_quota_action(clips, required_sources, attempt, max_attempts):
+    if not _director_source_deficits(clips, required_sources):
+        return "satisfied"
+    try:
+        has_retry = int(attempt) + 1 < max(1, int(max_attempts))
+    except (TypeError, ValueError):
+        has_retry = False
+    return "repair" if has_retry else "warn"
+
+
 def _director_missing_sources(clips, required_sources):
     return sorted(_director_source_deficits(clips, required_sources))
 
@@ -5136,10 +5153,14 @@ def _director_hard_audit(
         else:
             warnings.append(duration_message)
     elif total_duration > high:
-        issues.append(
-            f"总时长{total_duration:.1f}s超过目标上限{high:.0f}s，"
-            f"至少需删除约{total_duration - high:.0f}s的低优先级完整Product"
-        )
+        duration_message = f"总时长{total_duration:.1f}s超过目标上限{high:.0f}s"
+        if duration_status["long"]:
+            issues.append(
+                f"{duration_message}，"
+                f"至少需删除约{total_duration - high:.1f}s的低优先级完整Product"
+            )
+        else:
+            warnings.append(duration_message)
 
     seen_text = set()
     duplicate_count = 0
@@ -5948,7 +5969,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 clips
                 and _director_audit.get("duration_short")
                 and not _director_fatal
-                and not _director_missing_sources_now
                 and _director_relaxed_duration.get("accepted")
                 and (
                     not _director_short_fallback_clips
@@ -5960,7 +5980,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             _director_has_hard_issue = bool(
                 _director_fatal
                 or _director_audit.get("duration_short")
-                or _director_missing_sources_now
             )
             if clips and not _director_has_hard_issue and not _director_fallback_clips:
                 _director_fallback_clips = list(clips)
@@ -6019,6 +6038,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     clips,
                     _director_required_sources,
                 )
+                _source_quota_action = _director_source_quota_action(
+                    clips,
+                    _director_required_sources,
+                    attempt,
+                    _max_attempts,
+                )
                 _source_issue = (
                     "混剪来源配额不足:"
                     + "、".join(
@@ -6027,17 +6052,16 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     )
                 )
                 _director_last_audit = dict(_director_audit or {})
-                _director_last_audit["issues"] = list(
-                    _director_last_audit.get("issues") or []
+                _director_last_audit["warnings"] = list(
+                    _director_last_audit.get("warnings") or []
                 ) + [_source_issue]
-                if attempt + 1 < _max_attempts:
+                if _source_quota_action == "repair":
                     _director_stage = "混剪来源增量补足"
                     _director_expand_source_clips = list(clips)
                     _director_trim_source_clips = None
                     _log(f"AI叙事质检: {_source_issue}，锁定现有叙事，仅补缺失来源Product")
                     continue
-                _log(f"AI叙事质检未通过: {_source_issue}")
-                break
+                _log(f"AI叙事提示: {_source_issue}；已完成自动补足尝试，保留当前安全片单继续成片")
 
             _source_distribution = _director_source_distribution_summary(
                 clips,
@@ -6528,7 +6552,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
 
     if _director_mode:
         if _director_fallback_clips:
-            _fallback_duration = _director_duration_status(_director_fallback_clips, _AI_TARGET_DURATION)
+            _fallback_duration = _director_duration_status(
+                _director_fallback_clips,
+                _AI_TARGET_DURATION,
+                _duration_contract,
+            )
             _set_last_topic_coverage_summary(_topic_coverage_summary(
                 _director_fallback_clips,
                 _current_focus_used_label(),
@@ -8568,7 +8596,16 @@ def _parse_multi_version_data(data, log_fn, srt_entries=None, forbidden_indices=
     return {"versions": result_versions}
 
 
-def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_hint=None, num_versions=3, ai_controls=None, target_duration=60):
+def ai_analyze_multi_versions(
+    srt_text,
+    log_fn=None,
+    force_category=None,
+    focus_hint=None,
+    num_versions=3,
+    ai_controls=None,
+    target_duration=60,
+    duration_tolerance=None,
+):
     """多版本AI选片：1次AI调用直接出3个独立叙事方案，减少2/3成本和时间
     返回: {"versions": [{angle, clips}, ...]}
     """
@@ -8814,6 +8851,7 @@ def ai_analyze_multi_versions(srt_text, log_fn=None, force_category=None, focus_
             vi=vi, num_versions=num_versions,
             hook_candidates_hint=_hook_hint,
             target_duration=target_duration,
+            duration_tolerance=duration_tolerance,
             used_version_notes=_used_version_notes,
         )
 
@@ -9100,7 +9138,8 @@ def _parse_time(t):
 # ============================================================
 def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, angle_hint,
                         used_indices, srt_entries, log_fn, vi=0, num_versions=3,
-                        hook_candidates_hint=None, target_duration=60, used_version_notes=None):
+                        hook_candidates_hint=None, target_duration=60, used_version_notes=None,
+                        duration_tolerance=None):
     """编排AI调用：根据给定的focus角度，从素材池中选片段并编排成完整叙事方案
     返回: 7元组clips列表，或空列表
     """
@@ -9129,7 +9168,7 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
             _material_map[_idx] = _c
 
     _material_text = "\n".join(_material_lines)
-    _target_min, _target_max = _multi_version_target_bounds(target_duration)
+    _target_min, _target_max = _multi_version_target_bounds(target_duration, duration_tolerance)
 
     _hook_types_hint = (
         "Hook类型(用不同类型):\n"

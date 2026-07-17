@@ -691,6 +691,7 @@ const featurePreferenceGroups = {
     ids: [
       "output-dir",
       "sc-duration",
+      "sc-duration-tolerance",
       "sc-versions",
       "sc-dedup",
       "sc-dedup-crop",
@@ -739,6 +740,7 @@ const featurePreferenceGroups = {
     ids: [
       "mix-output-dir",
       "mix-duration",
+      "mix-duration-tolerance",
       "mix-versions",
       "mix-dedup",
       "mix-dedup-crop",
@@ -2611,6 +2613,7 @@ function updatePanelSummary(panel) {
   let text = "";
   if (kind === "params") {
     const duration = fieldText(`${prefix}-duration`);
+    const tolerance = fieldText(`${prefix}-duration-tolerance`, "自动");
     const versions = fieldText(`${prefix}-versions`);
     const dedup = fieldText(`${prefix}-dedup`);
     const flags = [
@@ -2619,7 +2622,7 @@ function updatePanelSummary(panel) {
       checkedText(`${prefix}-kenburns`, "缩放"),
       checkedText(`${prefix}-mirror`, "镜像"),
     ].filter(Boolean).join("、") || "基础模式";
-    text = `${duration} · ${versions}版 · ${dedup}去重 · ${flags}`;
+    text = `${duration} · 容差${tolerance} · ${versions}版 · ${dedup}去重 · ${flags}`;
   } else if (kind === "pip") {
     const mode = fieldText(`${prefix}-pip-mode`, "关闭");
     if ($( `${prefix}-pip-mode`)?.value === "off") {
@@ -4583,6 +4586,13 @@ function bindDedupCustomControls() {
   });
 }
 
+function selectedDurationTolerance(prefix) {
+  const raw = $(`${prefix}-duration-tolerance`)?.value;
+  if (!raw || raw === "auto") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 function collectSmartPayload(options = {}) {
   const requireVideos = options.requireVideos === true;
   const videoPaths = getVideoPaths();
@@ -4599,6 +4609,7 @@ function collectSmartPayload(options = {}) {
     focus_hint: $("sc-focus").value,
     ai_controls: collectAiControls("sc"),
     target_duration: Number($("sc-duration").value || 60),
+    duration_tolerance: selectedDurationTolerance("sc"),
     versions: Number($("sc-versions").value || 1),
     dedup_preset: normalizeDedupPresetValue($("sc-dedup").value),
     mirror_enabled: $("sc-mirror").checked,
@@ -5469,9 +5480,6 @@ async function submitMixBatch(payload, groups) {
 async function submitMixBatchLegacyQueue(basePayload, groups) {
   const cleanGroups = groups.map((group, index) => normalizeMixGroup(group, index)).filter((group) => group.video_paths.length);
   if (!cleanGroups.length) throw new Error("请至少保存 1 个混剪素材组。");
-  for (const group of cleanGroups) {
-    await runPreflight("mix", mixSingleGroupPayload(basePayload, group), "mix");
-  }
 
   toast(`兼容模式：将按顺序提交 ${cleanGroups.length} 组混剪`, "warning");
   appendLog("mix", {
@@ -5481,6 +5489,7 @@ async function submitMixBatchLegacyQueue(basePayload, groups) {
   });
 
   const completed = [];
+  const failed = [];
   const totalGroups = cleanGroups.length;
   setLegacyBatchProgress("mix", {
     total: totalGroups,
@@ -5496,7 +5505,9 @@ async function submitMixBatchLegacyQueue(basePayload, groups) {
     setLegacyBatchProgress("mix", {
       total: totalGroups,
       done: index,
+      succeeded: completed.length,
       current: index + 1,
+      failed: failed.length,
       status: "running",
       label: group.name,
       labelText: `批量混剪 ${index + 1}/${totalGroups}`,
@@ -5508,6 +5519,7 @@ async function submitMixBatchLegacyQueue(basePayload, groups) {
       message: `兼容模式提交第 ${index + 1}/${cleanGroups.length} 组：${group.name}`,
     });
     try {
+      await runPreflight("mix", singlePayload, "mix");
       const result = await api("/api/mix/start", {
         method: "POST",
         body: JSON.stringify(singlePayload),
@@ -5522,30 +5534,42 @@ async function submitMixBatchLegacyQueue(basePayload, groups) {
       setLegacyBatchProgress("mix", {
         total: totalGroups,
         done: index + 1,
+        succeeded: completed.length,
         current: index + 1 < totalGroups ? index + 2 : 0,
+        failed: failed.length,
         status: index + 1 === totalGroups ? "completed" : "running",
-        labelText: index + 1 === totalGroups ? "批量混剪完成" : "批量混剪",
+        labelText: index + 1 === totalGroups
+          ? (failed.length ? "批量混剪完成（有失败）" : "批量混剪完成")
+          : "批量混剪",
         percent: Math.round(((index + 1) / totalGroups) * 100),
       });
     } catch (error) {
+      const reason = error?.message || String(error || "未知错误");
+      failed.push({ name: group.name, reason });
+      appendLog("mix", {
+        time: new Date().toLocaleTimeString(),
+        level: "error",
+        message: `兼容模式第 ${index + 1}/${totalGroups} 组失败并跳过：${group.name}，${reason}`,
+      });
       setLegacyBatchProgress("mix", {
         total: totalGroups,
-        done: completed.length,
-        current: 0,
-        failed: 1,
-        status: "failed",
-        labelText: "批量混剪失败",
-        percent: Math.round((completed.length / totalGroups) * 100),
+        done: index + 1,
+        succeeded: completed.length,
+        current: index + 1 < totalGroups ? index + 2 : 0,
+        failed: failed.length,
+        status: index + 1 === totalGroups ? "completed" : "running",
+        labelText: index + 1 === totalGroups ? "批量混剪完成（有失败）" : "批量混剪",
+        percent: Math.round(((index + 1) / totalGroups) * 100),
       });
-      throw error;
     }
   }
 
-  toast(`兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组`, "success");
+  const summary = `兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组，失败 ${failed.length} 组`;
+  toast(summary, failed.length ? "warning" : "success");
   appendLog("mix", {
     time: new Date().toLocaleTimeString(),
-    level: "success",
-    message: `兼容模式混剪完成：成功 ${completed.length}/${cleanGroups.length} 组。`,
+    level: failed.length ? "warning" : "success",
+    message: `${summary}。`,
   });
   refreshTasks();
 }
@@ -6976,6 +7000,7 @@ function collectFeaturePayload(feature) {
       category: backendCategoryForPrimary(primaryCategory),
       versions: Number($("mix-versions").value || 1),
       duration: Number($("mix-duration").value || 60),
+      duration_tolerance: selectedDurationTolerance("mix"),
       focus_hint: $("mix-focus").value,
       ai_controls: collectAiControls("mix"),
       dedup_preset: normalizeDedupPresetValue($("mix-dedup").value),

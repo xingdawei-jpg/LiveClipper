@@ -12,7 +12,10 @@ sys.path.insert(0, str(ROOT / "app"))
 
 
 license_client = importlib.import_module("license_client")
-license_feishu_backend = importlib.import_module("license_feishu_backend")
+try:
+    license_feishu_backend = importlib.import_module("license_feishu_backend")
+except ModuleNotFoundError:
+    license_feishu_backend = None
 
 
 class LicenseActivationReliabilityTests(unittest.TestCase):
@@ -50,6 +53,7 @@ class LicenseActivationReliabilityTests(unittest.TestCase):
             license_client._ACTIVATE_REQUEST_TIMEOUT_SECONDS,
         )
 
+    @unittest.skipUnless(license_feishu_backend is not None, "deployment backend module is unavailable")
     def test_recent_successful_verify_skips_background_bitable_write(self) -> None:
         now = 1_800_000_000
         fields = {
@@ -68,6 +72,7 @@ class LicenseActivationReliabilityTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         background.assert_not_called()
 
+    @unittest.skipUnless(license_feishu_backend is not None, "deployment backend module is unavailable")
     def test_stale_successful_verify_keeps_a_periodic_bitable_write(self) -> None:
         now = 1_800_000_000
         fields = {
