@@ -44,11 +44,11 @@
     "web_client/liveclipper_web.spec": "512c01764b95d5087bc0bd5991b1b63e3cf8d5e1588a2b9520c9e37dcf355239",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
     "tools/build_update_manifest.py": "8b1fc63f81af3e76db97c16a84b37c229ed9984ac7ad20a8ba76249501fa4625",
-    "tools/build_release_channel.py": "5830af46b83fff0b8a8b0526bc0d3bc59c76a874797b540440e425507eb60c9e",
-    "tools/release_preflight.py": "a213a2cdcde15f5994e25a15856415645845ff21c97bcea270a47228dd44df5a",
-    "tools/promote_release_channel.py": "95f387b6060b28a05f561781ff7ccd34233d892dd02509dace558d8d891b5bd4",
+    "tools/build_release_channel.py": "6002405f55f2b60092173e4507c708a8451a34b9aebdb90e6e66a70b1a13578a",
+    "tools/release_preflight.py": "d16b2b7e47809b9c6712b44cdf0f18af793a776c9bb9cebce0f6a76a6e7addbb",
+    "tools/promote_release_channel.py": "3eb59b6c36db4d13b6ad5478d7537375c277dd116991c097e4cdb94d0ac81d21",
     "tools/build_v3_package.py": "1cbf2e0d9ed5003a88059f76f734bf65fff5894e2a195cdc09c139273de208ab",
-    "tools/build_delta_package.py": "5ba47af9ef889e48bdaca2749a0a387ff3551fa006f2de2a02ee0e3b09bb8a49",
+    "tools/build_delta_package.py": "d1aa9d8f95b8db38febaa6e3fdda7c0d6bcd7d2d455412c8fb554dfcb6e27e37",
     "tools/build_bridge_exe.py": "1b414edd29a5dbdb4e011c6d8a18fc4cdcf29bf5cf6e98313752f11bf6561810",
     "tools/runtime_v3_versions.py": "517b519f08f35143bf4edddd6c366c329b206e44eb7d0747bab76ccda3fd2153",
     "tools/liveclipper_launcher.py": "f41a884427ab379bbace1d8a26983d908d827943dde7196a0650179137b26e21",
@@ -99,5 +99,5 @@
   "update_message": "新增智能成片与混剪成片时长容差选择；修复仅超出零点几秒即判失败；混剪来源配额补足失败后降级告警并继续成片；批量混剪单组失败后继续处理后续素材组。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-17 22:56:56"
+  "updated_at": "2026-07-18 02:10:29"
 }
