@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.7.15.2",
-  "version": "2026.7.15.2",
-  "latest_version": "2026.7.15.2",
+  "build_id": "2026.7.15.3",
+  "version": "2026.7.15.3",
+  "latest_version": "2026.7.15.3",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -95,9 +95,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "057cd7d076620e339123245f1bd41baca3a77422ba7ad129cd24cfa6d30b4902"
   },
-  "release_notes": "修复设置保存与授权激活可靠性；新增多行业品类、混剪素材组管理和视频缩略图；新增智能成片与混剪时长容差；修复仅超出零点几秒即判失败、来源补足失败后阻断成片和批量单组失败后停止的问题；完整包固定携带 WebView2 与 FFmpeg 工具。",
-  "update_message": "修复设置保存与授权激活可靠性；新增多行业品类、混剪素材组管理和视频缩略图；新增智能成片与混剪时长容差；修复仅超出零点几秒即判失败、来源补足失败后阻断成片和批量单组失败后停止的问题；完整包固定携带 WebView2 与 FFmpeg 工具。",
+  "release_notes": "新增智能成片与混剪成片时长容差选择；修复仅超出零点几秒即判失败；混剪来源配额补足失败后降级告警并继续成片；批量混剪单组失败后继续处理后续素材组。",
+  "update_message": "新增智能成片与混剪成片时长容差选择；修复仅超出零点几秒即判失败；混剪来源配额补足失败后降级告警并继续成片；批量混剪单组失败后继续处理后续素材组。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-17 22:13:17"
+  "updated_at": "2026-07-17 22:56:56"
 }
