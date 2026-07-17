@@ -19,13 +19,43 @@ WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
 FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
 ICON_FILE = os.path.join(ROOT_DIR, "assets", "liveclipper.ico")
-WEBVIEW2_RUNTIME_DIR = os.path.join(
+WEBVIEW2_RUNTIME_NAME = (
+    "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64"
+)
+DEFAULT_WEBVIEW2_RUNTIME_DIR = os.path.join(
     ROOT_DIR,
     "vendor",
     "webview2_runtime_x64",
-    "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64",
+    WEBVIEW2_RUNTIME_NAME,
+)
+WEBVIEW2_RUNTIME_DIR = os.path.abspath(
+    os.environ.get("LIVECLIPPER_WEBVIEW2_RUNTIME_DIR", "").strip()
+    or DEFAULT_WEBVIEW2_RUNTIME_DIR
+)
+WEBVIEW2_REQUIRED_FILES = (
+    "msedgewebview2.exe",
+    "icudtl.dat",
+    "msedge_elf.dll",
 )
 
+
+def _require_fixed_webview2_runtime():
+    if os.path.basename(WEBVIEW2_RUNTIME_DIR) != WEBVIEW2_RUNTIME_NAME:
+        raise RuntimeError(
+            "LIVECLIPPER_WEBVIEW2_RUNTIME_DIR must point to the pinned "
+            f"{WEBVIEW2_RUNTIME_NAME} directory: {WEBVIEW2_RUNTIME_DIR}"
+        )
+    missing = [
+        name
+        for name in WEBVIEW2_REQUIRED_FILES
+        if not os.path.isfile(os.path.join(WEBVIEW2_RUNTIME_DIR, name))
+    ]
+    if missing:
+        raise RuntimeError(
+            "Fixed WebView2 Runtime is required for a desktop package; "
+            f"missing {', '.join(missing)} in {WEBVIEW2_RUNTIME_DIR}"
+        )
+    return WEBVIEW2_RUNTIME_DIR
 
 def _existing(items):
     return [(src, dest) for src, dest in items if src and os.path.exists(src)]
@@ -104,7 +134,7 @@ certifi_pem = _module_file("certifi", "cacert.pem")
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
 datas += _existing([(ICON_FILE, "assets")])
-datas += _existing([(WEBVIEW2_RUNTIME_DIR, "webview2_runtime")])
+datas += [(_require_fixed_webview2_runtime(), "webview2_runtime")]
 datas += _app_datas()
 datas += _tool_datas()
 datas += _existing([

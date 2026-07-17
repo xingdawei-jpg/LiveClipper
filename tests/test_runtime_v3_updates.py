@@ -41,6 +41,9 @@ class RuntimeV3UpdateTests(unittest.TestCase):
     def _runtime(self, root: Path, version: str, marker: str) -> Path:
         runtime = root / f"runtime-{version}"
         (runtime / "_internal" / "app").mkdir(parents=True)
+        webview2 = runtime / "_internal" / "webview2_runtime"
+        webview2.mkdir(parents=True)
+        (webview2 / "msedgewebview2.exe").write_bytes(b"fixed-webview-runtime")
         (runtime / "LiveClipperWeb.exe").write_bytes(b"fake-runtime-executable")
         (runtime / "_internal" / "base.txt").write_text("shared-runtime-data", encoding="utf-8")
         (runtime / "_internal" / "changed.txt").write_text(marker, encoding="utf-8")
@@ -63,6 +66,23 @@ class RuntimeV3UpdateTests(unittest.TestCase):
             runtime / "_internal" / "app" / "release_update_public_key.pem",
         )
         return runtime
+
+    def test_v3_package_requires_fixed_webview2_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            runtime = self._runtime(base, "2026.7.15.2", "target")
+            (runtime / "_internal" / "webview2_runtime" / "msedgewebview2.exe").unlink()
+            stable = self._stable_files(base)
+            with self.assertRaisesRegex(FileNotFoundError, "webview2_runtime"):
+                build_v3_package.assemble(
+                    runtime,
+                    base / "package",
+                    stable[0],
+                    stable[1],
+                    self.public_key,
+                    self.private_key,
+                    base,
+                )
 
     def _stable_files(self, root: Path) -> tuple[Path, Path]:
         launcher = root / "LiveClipperLauncher.exe"

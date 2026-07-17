@@ -41,13 +41,13 @@
   "source_files": {
     "web_client/desktop.py": "e281e4019c697d87ee46a68374884594b6f64bb099dddc7a4c3d8cb3f4e426b6",
     "web_client/server.py": "bf9768d61a10e78795423334e3c5365b0755e7d3228270ab05d7fb5e3732d270",
-    "web_client/liveclipper_web.spec": "846ff7f966d80e8ce582157953248ee6d2d699e55bb9d63ddce8fb17b51af329",
+    "web_client/liveclipper_web.spec": "0b5af046b92422926f202c5ae57c434dacdb8c980488d2033325d7b5bb599536",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
     "tools/build_update_manifest.py": "8b1fc63f81af3e76db97c16a84b37c229ed9984ac7ad20a8ba76249501fa4625",
     "tools/build_release_channel.py": "5830af46b83fff0b8a8b0526bc0d3bc59c76a874797b540440e425507eb60c9e",
-    "tools/release_preflight.py": "b1ffff4bc6545338e9a71f813c1b8e0617b32f89e2c07cf4fdfb3b3b81239be0",
+    "tools/release_preflight.py": "1dbe3bafd10baf8a494711cb2cb35fc452c27ed0cb0a9aba45e6c01ee7e2d5b8",
     "tools/promote_release_channel.py": "95f387b6060b28a05f561781ff7ccd34233d892dd02509dace558d8d891b5bd4",
-    "tools/build_v3_package.py": "23b07492b62df0f1eebce01a53fd2b729f77bbb69bb39cd25df0ec15f03b84f9",
+    "tools/build_v3_package.py": "a392a1c0dbf1fb1f89fa48405b3d4423d63a16eb4ae95bf04ce103e02348a0ac",
     "tools/build_delta_package.py": "5ba47af9ef889e48bdaca2749a0a387ff3551fa006f2de2a02ee0e3b09bb8a49",
     "tools/build_bridge_exe.py": "1b414edd29a5dbdb4e011c6d8a18fc4cdcf29bf5cf6e98313752f11bf6561810",
     "tools/runtime_v3_versions.py": "517b519f08f35143bf4edddd6c366c329b206e44eb7d0747bab76ccda3fd2153",
@@ -99,5 +99,5 @@
   "update_message": "修复设置保存与授权激活可靠性；新增多行业品类（含母婴宠物）及混剪素材组管理和视频缩略图。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-17 12:20:43"
+  "updated_at": "2026-07-17 13:06:44"
 }

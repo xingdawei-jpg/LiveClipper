@@ -47,6 +47,7 @@ python tools\release_preflight.py --phase development
 标准顺序：
 
 1. 用 web_client/liveclipper_web.spec 干净构建 frozen runtime。
+   The PyInstaller input must contain the pinned WebView2 runtime; a missing runtime is a build failure, never a browser-fallback release.
 2. 普通业务版本从 release/baselines.json 当前基线复用 launcher、updater 和公钥的精确字节。
 3. 新基线才重新构建稳定组件。
 4. 用 tools/build_v3_package.py 组装 V3 目录并签名。

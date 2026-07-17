@@ -149,9 +149,16 @@ def inspect_full_zip(
                 f"{root}/LiveClipperWeb.exe",
                 f"{root}/updater/LiveClipperUpdater.exe",
                 f"{root}/updater/release_update_public_key.pem",
+                (
+                    f"{root}/versions/{actual_version}/_internal/"
+                    "webview2_runtime/msedgewebview2.exe"
+                ),
             }
             if not required.issubset(names):
-                report.error(f"{path.name}: stable package files are missing")
+                report.error(
+                    f"{path.name}: stable package files or fixed WebView2 "
+                    "runtime are missing"
+                )
             if full_test:
                 bad = archive.testzip()
                 if bad:

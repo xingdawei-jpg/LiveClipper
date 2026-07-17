@@ -24,6 +24,11 @@ from runtime_v3_versions import LAUNCHER_VERSION, UPDATER_VERSION
 RUNTIME_MANIFEST_FORMAT = "liveclipper-runtime-manifest-v1"
 INSTALL_MANIFEST_FORMAT = "liveclipper-install-manifest-v1"
 DEFAULT_ENTRYPOINT = "LiveClipperWeb.exe"
+FIXED_WEBVIEW2_RUNTIME = (
+    Path("_internal")
+    / "webview2_runtime"
+    / "msedgewebview2.exe"
+)
 RUNTIME_MANIFEST = "runtime_manifest.json"
 INSTALL_MANIFEST = "install_manifest.json"
 
@@ -146,6 +151,20 @@ def assemble(
     repo_root: Path,
 ) -> str:
     runtime_dir = runtime_dir.resolve()
+    required_runtime_files = (
+        runtime_dir / DEFAULT_ENTRYPOINT,
+        runtime_dir / FIXED_WEBVIEW2_RUNTIME,
+    )
+    missing_runtime_files = [
+        str(path.relative_to(runtime_dir))
+        for path in required_runtime_files
+        if not path.is_file()
+    ]
+    if missing_runtime_files:
+        raise FileNotFoundError(
+            "runtime is not a self-contained desktop build; missing "
+            + ", ".join(missing_runtime_files)
+        )
     output_root = output_root.resolve()
     if output_root.exists():
         raise FileExistsError(f"output already exists: {output_root}")
