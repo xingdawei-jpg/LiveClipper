@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "version": "2026.7.15.3",
-  "candidate_sha256": "74611E57EE681ED239870093BB8356B4E210FA689DE1F62F27EECC96A94B2AE8",
+  "candidate_sha256": "BF6F51E7C758EE9E9A01B71039FCADAB6DF281D233CF3DF049DBB6069BBA843D",
   "release_type": "business_runtime",
-  "source_commit": "c5ce2b0eb01d78f096c7fa0e376bf388819e3734",
+  "source_commit": "397654f4a08aaf21ede721aef7c98a1171f5ffcf",
   "gates": {
     "cross_window_sync": "pass",
     "source_tests": "pass",
