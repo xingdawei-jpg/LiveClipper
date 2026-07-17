@@ -23,7 +23,7 @@ VERSION_FILE = ROOT / "app" / "version.json"
 CHANNEL_FILE = ROOT / "release" / "stable.json"
 PUBLIC_KEY_FILE = ROOT / "app" / "release_update_public_key.pem"
 RELEASE_POLICY_FILE = ROOT / "release" / "release_policy.json"
-GITHUB_REPO = "xingdawei-jpg/LiveClipper"
+RELEASE_TYPES = {"business_runtime", "full_baseline"}
 
 
 def _release_policy() -> dict:
@@ -128,9 +128,41 @@ def _patch_record(path: Path, urls: list[str]) -> dict:
     }
 
 
+def _resolve_release_type(value: str, patch_count: int) -> str:
+    release_type = str(value or "").strip()
+    if not release_type:
+        release_type = "business_runtime" if patch_count else "full_baseline"
+    if release_type not in RELEASE_TYPES:
+        raise ValueError(f"invalid release type: {release_type}")
+    return release_type
+
+
+def _validate_release_shape(
+    release_type: str,
+    *,
+    package_present: bool,
+    patch_count: int,
+) -> None:
+    if release_type == "business_runtime":
+        if package_present:
+            raise ValueError("business_runtime must not include a full package")
+        if patch_count < 1:
+            raise ValueError("business_runtime requires at least one signed patch")
+    if release_type == "full_baseline":
+        if not package_present:
+            raise ValueError("full_baseline requires a full package")
+        if patch_count:
+            raise ValueError("full_baseline cannot contain ordinary runtime patches")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the signed Runtime V3 stable channel.")
-    parser.add_argument("package", type=Path)
+    parser.add_argument("package", type=Path, nargs="?")
+    parser.add_argument(
+        "--release-type",
+        choices=tuple(sorted(RELEASE_TYPES)),
+        default="",
+    )
     parser.add_argument("--url", default="")
     parser.add_argument("--patch", type=Path, action="append", default=[])
     parser.add_argument("--patch-url", action="append", default=[])
@@ -147,22 +179,29 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    package = args.package.resolve()
-    if not package.is_file():
+    package = args.package.resolve() if args.package else None
+    if package is not None and not package.is_file():
         parser.error(f"package not found: {package}")
+    if package is None and args.url:
+        parser.error("--url requires a full package")
     if len(args.patch) != len(args.patch_url):
         parser.error("each --patch must have a matching --patch-url")
+    try:
+        release_type = _resolve_release_type(args.release_type, len(args.patch))
+        _validate_release_shape(
+            release_type,
+            package_present=package is not None,
+            patch_count=len(args.patch),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     runtime = json.loads(VERSION_FILE.read_text(encoding="utf-8-sig"))
     version = str(runtime.get("version") or runtime.get("latest_version") or "")
     if not version:
         parser.error("app/version.json has no version")
     package_url = args.url
-    release_page = (
-        f"https://github.com/{GITHUB_REPO}/releases/tag/v{version}"
-        if package_url.startswith("https://github.com/")
-        else ""
-    )
+    release_page = ""
 
     patches = []
     try:
@@ -196,10 +235,18 @@ def main() -> int:
         parser.error(str(exc))
     incremental_ready = False
 
+    package_record = {
+        "format": "zip",
+        "url": package_url,
+        "sha256": sha256_file(package).upper() if package else "",
+        "size": package.stat().st_size if package else 0,
+        "filename": package.name if package else "",
+    }
     manifest = {
         "schema_version": 3,
         "channel": "stable",
         "channel_status": channel_status,
+        "release_type": release_type,
         "version": version,
         "latest_version": version,
         "runtime_layout_version": 3,
@@ -213,7 +260,11 @@ def main() -> int:
         ),
         "supports_incremental_updates": incremental_ready,
         "requires_full_package": not incremental_ready,
-        "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
+        "requires_full_package_note": (
+            "当前安装版本没有匹配的签名补丁，请使用最近一次人工分发的完整包后再更新。"
+            if release_type == "business_runtime"
+            else "本次为完整基线更新，请使用百度网盘完整包。"
+        ),
         "release_notes": runtime.get("release_notes") or "",
         "force_update": bool(runtime.get("force_update", False)),
         "release_page_url": release_page,
@@ -223,13 +274,7 @@ def main() -> int:
             "max_chain_depth": max(1, int(args.max_chain_depth)),
             "rollup_after_versions": max(1, int(args.rollup_after_versions)),
         },
-        "package": {
-            "format": "zip",
-            "url": package_url,
-            "sha256": sha256_file(package).upper(),
-            "size": package.stat().st_size,
-            "filename": package.name,
-        },
+        "package": package_record,
         "patches": patches,
         "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -241,7 +286,7 @@ def main() -> int:
     )
     print(f"wrote {output}")
     print(
-        f"package_sha256={signed['package']['sha256']} "
+        f"release_type={release_type} package_sha256={signed['package']['sha256'] or '-'} "
         f"size={signed['package']['size']} patches={len(patches)} "
         f"status={channel_status}"
     )

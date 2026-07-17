@@ -130,6 +130,18 @@ class RuntimeV3UpdateTests(unittest.TestCase):
         filename: str,
         stable: tuple[Path, Path],
     ) -> Path:
+        package_root = self._v3_package(base, version, marker, stable)
+        output = base / filename
+        build_v3_package.build_zip(package_root, output)
+        return output
+
+    def _v3_package(
+        self,
+        base: Path,
+        version: str,
+        marker: str,
+        stable: tuple[Path, Path],
+    ) -> Path:
         runtime = self._runtime(base, version, marker)
         package_root = base / f"package-{version}"
         build_v3_package.assemble(
@@ -141,9 +153,7 @@ class RuntimeV3UpdateTests(unittest.TestCase):
             self.private_key,
             base,
         )
-        output = base / filename
-        build_v3_package.build_zip(package_root, output)
-        return output
+        return package_root
 
     def _extract(self, archive_path: Path, destination: Path) -> Path:
         with zipfile.ZipFile(archive_path) as archive:
@@ -270,6 +280,36 @@ class RuntimeV3UpdateTests(unittest.TestCase):
                 ),
                 "after",
             )
+
+    def test_v3_patch_accepts_unzipped_target_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            stable = self._stable_files(base)
+            source_zip = self._v3_zip(
+                base,
+                "2026.7.13.21",
+                "before",
+                "source-v3.zip",
+                stable,
+            )
+            target_package = self._v3_package(
+                base,
+                "2026.7.13.22",
+                "after",
+                stable,
+            )
+            patch_zip = base / "directory-target-patch.zip"
+            summary = build_delta_package.build_patch(
+                source_zip,
+                target_package,
+                patch_zip,
+                self.private_key,
+                self.public_key,
+            )
+            self.assertEqual(summary["from_version"], "2026.7.13.21")
+            self.assertEqual(summary["to_version"], "2026.7.13.22")
+            self.assertEqual(summary["stable_payload_files"], 0)
+            self.assertTrue(patch_zip.is_file())
 
     def test_v3_patch_chain_applies_atomically_to_final_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

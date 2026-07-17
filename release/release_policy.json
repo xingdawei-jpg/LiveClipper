@@ -35,6 +35,18 @@
     "publish_last": true,
     "auto_status_forbidden": true
   },
+  "release_types": {
+    "business_runtime": {
+      "new_full_package_required": false,
+      "full_package_forbidden": true,
+      "signed_patch_required": true
+    },
+    "full_baseline": {
+      "new_full_package_required": true,
+      "full_package_forbidden": false,
+      "signed_patch_required": false
+    }
+  },
   "baseline": {
     "registry": "release/baselines.json",
     "stable_files": [
@@ -57,20 +69,20 @@
       "source_tests",
       "manifest_signatures",
       "zip_integrity",
-      "security_audit",
-      "extracted_runtime",
-      "clean_install",
-      "user_data_preserved",
-      "baidu_download_hash"
+      "security_audit"
     ],
     "business_runtime": [
       "github_download_hash",
       "exact_baseline_update",
-      "interruption_resume",
       "failure_rollback",
-      "post_update_runtime_integrity"
+      "post_update_runtime_integrity",
+      "user_data_preserved"
     ],
     "full_baseline": [
+      "extracted_runtime",
+      "clean_install",
+      "user_data_preserved",
+      "baidu_download_hash",
       "polluted_appdata",
       "stable_component_integrity",
       "synthetic_next_delta",

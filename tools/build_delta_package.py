@@ -11,6 +11,7 @@ import shutil
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 APP_IMPORT_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -53,6 +54,28 @@ def _safe_relative(value: str) -> str:
 class PackageView:
     def __init__(self, path: Path):
         self.path = path.resolve()
+        self.archive: zipfile.ZipFile | None = None
+        self.root_path: Path | None = None
+        self._files: dict[str, Path] = {}
+        self._hashes: dict[str, str] = {}
+        if self.path.is_dir():
+            self.root_path = self._directory_root(self.path)
+            self.root = self.root_path.name
+            root_resolved = self.root_path.resolve()
+            for item in sorted(self.root_path.rglob("*")):
+                if not item.is_file():
+                    continue
+                resolved = item.resolve()
+                try:
+                    relative = _safe_relative(resolved.relative_to(root_resolved).as_posix())
+                except ValueError as exc:
+                    raise PackageError(f"directory package escapes its root: {item}") from exc
+                self._files[relative] = resolved
+            self._infos = {
+                relative: SimpleNamespace(file_size=item.stat().st_size)
+                for relative, item in self._files.items()
+            }
+            return
         self.archive = zipfile.ZipFile(self.path)
         file_names = [
             _safe_relative(info.filename)
@@ -64,19 +87,41 @@ class PackageView:
             raise PackageError(f"package must contain one root directory: {self.path}")
         self.root = next(iter(roots))
         self._infos = {name: self.archive.getinfo(name) for name in file_names}
-        self._hashes: dict[str, str] = {}
+
+    @staticmethod
+    def _directory_root(path: Path) -> Path:
+        markers = ("current.json", "_internal/app/version.json")
+        if any((path / marker).is_file() for marker in markers):
+            return path
+        candidates = [
+            item
+            for item in path.iterdir()
+            if item.is_dir() and any((item / marker).is_file() for marker in markers)
+        ]
+        if len(candidates) != 1:
+            raise PackageError(f"directory package must contain one runtime root: {path}")
+        return candidates[0]
 
     def close(self) -> None:
-        self.archive.close()
+        if self.archive is not None:
+            self.archive.close()
 
     def _name(self, relative: str) -> str:
         relative = _safe_relative(relative)
         return (PurePosixPath(self.root) / relative).as_posix()
 
     def has(self, relative: str) -> bool:
+        if self.root_path is not None:
+            return _safe_relative(relative) in self._files
         return self._name(relative) in self._infos
 
-    def info(self, relative: str) -> zipfile.ZipInfo:
+    def info(self, relative: str) -> Any:
+        if self.root_path is not None:
+            name = _safe_relative(relative)
+            try:
+                return self._infos[name]
+            except KeyError as exc:
+                raise PackageError(f"package file is missing: {relative}") from exc
         name = self._name(relative)
         try:
             return self._infos[name]
@@ -84,6 +129,13 @@ class PackageView:
             raise PackageError(f"package file is missing: {relative}") from exc
 
     def read(self, relative: str) -> bytes:
+        if self.root_path is not None:
+            name = _safe_relative(relative)
+            try:
+                return self._files[name].read_bytes()
+            except KeyError as exc:
+                raise PackageError(f"package file is missing: {relative}") from exc
+        assert self.archive is not None
         return self.archive.read(self._name(relative))
 
     def json(self, relative: str) -> dict[str, Any]:
@@ -93,20 +145,46 @@ class PackageView:
         return data
 
     def sha256(self, relative: str) -> str:
-        name = self._name(relative)
+        name = _safe_relative(relative) if self.root_path is not None else self._name(relative)
         cached = self._hashes.get(name)
         if cached:
             return cached
         digest = hashlib.sha256()
-        with self.archive.open(name) as handle:
+        if self.root_path is not None:
+            handle = self._files[name].open("rb")
+        else:
+            assert self.archive is not None
+            handle = self.archive.open(name)
+        with handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         result = digest.hexdigest().lower()
         self._hashes[name] = result
         return result
 
+    def provenance_sha256(self) -> str:
+        if self.root_path is None:
+            return sha256_file(self.path)
+        digest = hashlib.sha256()
+        for relative in self.files_under():
+            info = self.info(relative)
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(info.file_size).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(self.sha256(relative).encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
     def files_under(self, prefix: str = "") -> list[str]:
         clean = _safe_relative(prefix) if prefix else ""
+        if self.root_path is not None:
+            directory_prefix = clean.rstrip("/") + "/" if clean else ""
+            return sorted(
+                name[len(directory_prefix) :]
+                for name in self._files
+                if name.startswith(directory_prefix)
+            )
         archive_prefix = (PurePosixPath(self.root) / clean).as_posix().rstrip("/")
         if clean:
             archive_prefix += "/"
@@ -119,7 +197,12 @@ class PackageView:
         return sorted(result)
 
     def stream_to(self, relative: str, output: zipfile.ZipFile, archive_name: str) -> None:
-        with self.archive.open(self._name(relative)) as source, output.open(archive_name, "w") as target:
+        if self.root_path is not None:
+            source_handle = self._files[_safe_relative(relative)].open("rb")
+        else:
+            assert self.archive is not None
+            source_handle = self.archive.open(self._name(relative))
+        with source_handle as source, output.open(archive_name, "w") as target:
             shutil.copyfileobj(source, target, length=1024 * 1024)
 
 
@@ -143,6 +226,8 @@ def _runtime_descriptor(
         return 3, version, prefix, manifest
 
     version_data = package.json("_internal/app/version.json")
+    if package.path.is_dir():
+        raise PackageError("legacy Runtime V2 source must be a ZIP archive")
     version = _safe_version(version_data.get("version") or version_data.get("latest_version"))
     files: dict[str, dict[str, object]] = {}
     for relative in package.files_under():
@@ -275,8 +360,8 @@ def build_patch(
                 "to_version": to_version,
                 "source_layout_version": source_layout,
                 "target_layout_version": 3,
-                "source_package_sha256": sha256_file(source.path),
-                "target_package_sha256": sha256_file(target.path),
+                "source_package_sha256": source.provenance_sha256(),
+                "target_package_sha256": target.provenance_sha256(),
                 "source_runtime_manifest": source_manifest,
                 "target_runtime_manifest": target_manifest,
                 "target_install_manifest": install_manifest,

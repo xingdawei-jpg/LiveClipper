@@ -55,6 +55,9 @@ def validate_acceptance(
     release_type = str(acceptance.get("release_type") or "")
     if release_type not in {"business_runtime", "full_baseline"}:
         raise ValueError("invalid acceptance release_type")
+    candidate_release_type = str(candidate.get("release_type") or release_type)
+    if candidate_release_type != release_type:
+        raise ValueError("acceptance release_type differs from candidate")
     gate_policy = policy.get("acceptance_gates")
     gates = acceptance.get("gates")
     evidence = acceptance.get("evidence")
@@ -71,6 +74,38 @@ def validate_acceptance(
             raise ValueError(f"acceptance gate is not pass: {gate}")
         if not evidence.get(gate):
             raise ValueError(f"acceptance evidence is missing: {gate}")
+
+
+def validate_candidate_distribution(
+    candidate: dict[str, Any],
+    release_type: str,
+    policy: dict[str, Any],
+) -> None:
+    package = candidate.get("package")
+    patches = candidate.get("patches")
+    if not isinstance(package, dict) or not isinstance(patches, list):
+        raise ValueError("candidate package/patch structure is invalid")
+    package_url = str(package.get("url") or "")
+    if release_type == "business_runtime":
+        if any(
+            (
+                package_url,
+                str(package.get("sha256") or ""),
+                str(package.get("filename") or ""),
+                package.get("size"),
+            )
+        ):
+            raise ValueError("business_runtime must not include a full package")
+        if not patches:
+            raise ValueError("business_runtime requires at least one signed patch")
+    elif release_type == "full_baseline":
+        if not package_url:
+            raise ValueError("full_baseline requires the Baidu full-package URL")
+        if patches:
+            raise ValueError("full_baseline cannot contain ordinary runtime patches")
+    else:
+        raise ValueError("invalid acceptance release_type")
+    _validate_distribution_policy(package_url, patches, policy)
 
 
 def promote(
@@ -97,20 +132,12 @@ def promote(
     if _version_key(version) <= _version_key(current_version):
         raise ValueError("candidate must be newer than the live stable channel")
 
-    package = candidate.get("package")
-    patches = candidate.get("patches")
-    if not isinstance(package, dict) or not isinstance(patches, list):
-        raise ValueError("candidate package/patch structure is invalid")
-    if not str(package.get("url") or ""):
-        raise ValueError("accepted candidate must include the Baidu full-package URL")
-    _validate_distribution_policy(
-        str(package.get("url") or ""),
-        patches,
-        policy,
-    )
+    release_type = str(acceptance.get("release_type") or "")
+    validate_candidate_distribution(candidate, release_type, policy)
     validate_acceptance(candidate_path, candidate, acceptance, policy)
 
     ready = dict(candidate)
+    ready["release_type"] = release_type
     ready["channel_status"] = "ready"
     ready["supports_incremental_updates"] = bool(patches)
     ready["requires_full_package"] = not bool(patches)

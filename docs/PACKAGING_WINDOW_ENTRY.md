@@ -70,7 +70,7 @@ python tools\release_preflight.py --phase development
 ## 发布类型
 
 - launcher、updater、公钥、信任根、布局或安装状态格式变化：新全量基线，只通过百度网盘分发全量包。
-- 仅业务 runtime 变化：百度网盘全量修复包 + GitHub 签名 delta。
+- 仅业务 runtime 变化：只构建并发布 GitHub 签名 delta，不新建全量 ZIP，不要求百度网盘。
 - 单台电脑的本地配置或权限问题：先单机修复，不立即发布全体版本。
 
 GitHub Release 禁止上传全量 ZIP。自动补丁只使用 GitHub HTTPS Release URL，不再要求 OSS。
@@ -90,12 +90,11 @@ GitHub Release 禁止上传全量 ZIP。自动补丁只使用 GitHub HTTPS Relea
 - 纳入和排除文件；
 - 版本、build ID、launcher 和 updater 版本；
 - 当前正式基线与线上 stable 版本；
-- 全量包和补丁路径、大小、SHA256；
+- 本次 release_type 和对应发布资产的路径、大小、SHA256；
 - 签名、ZIP 和安全审计；
-- 解压包真实 /api/runtime 和进程归属；
-- 干净/污染 AppData；
-- 精确基线更新、多版本链、中断恢复和回滚；
-- 百度网盘和 GitHub 重新下载验证；
+- business_runtime 的真实旧版本升级、错误补丁拒绝、回滚、用户数据和更新后 runtime 完整性；
+- full_baseline 的解压包 /api/runtime、进程归属和干净/污染 AppData；
+- business_runtime 的 GitHub 回下载验证；full_baseline 另含百度网盘回下载验证；
 - acceptance.json 结果；
 - stable 最后发布的 commit；
 - 未测试和人工确认项。

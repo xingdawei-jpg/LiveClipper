@@ -42,22 +42,22 @@ python tools\release_preflight.py --phase development
 
 禁止从脏源码或旧 dist 构建正式包。
 
-## 4. 构建全量包
+## 4. 构建目标运行时
 
-标准顺序：
+所有发布都从干净 commit 构建 frozen runtime 和 Runtime V3 staging。business_runtime 到此为止，不生成新的全量 ZIP；只有 full_baseline 执行下面的完整包步骤：
 
 1. 用 web_client/liveclipper_web.spec 干净构建 frozen runtime。
    The PyInstaller input must contain the pinned WebView2 runtime; a missing runtime is a build failure, never a browser-fallback release.
    It must also contain _internal/ffmpeg/ffmpeg.exe and _internal/ffmpeg/ffprobe.exe; either missing tool is a build failure, never an external-installation fallback release.
-2. 普通业务版本从 release/baselines.json 当前基线复用 launcher、updater 和公钥的精确字节。
+2. 从 release/baselines.json 当前基线复用 launcher、updater 和公钥的精确字节。
 3. 新基线才重新构建稳定组件。
-4. 用 tools/build_v3_package.py 组装 V3 目录并签名。
+4. 用 tools/build_v3_package.py 组装 V3 staging 并签名。
 5. 检查根 launcher、current.json、install_manifest.json、updater 和 versions/<版本>。
 6. 确认没有松散业务 Python 文件。
 7. 运行 tools/audit_release_security.py。
-8. 新建 ZIP，不复用旧 ZIP；运行 zipfile.testzip。
-9. 生成 .sha256.txt。
-10. 解压到全新目录，以临时 AppData 启动目标 EXE。
+8. full_baseline 新建 ZIP，不复用旧 ZIP；运行 zipfile.testzip。
+9. full_baseline 生成 .sha256.txt。
+10. full_baseline 解压到全新目录，以临时 AppData 启动目标 EXE。
 
 /api/runtime 验收必须核对返回端口的进程属于刚解压的 EXE，并确认 active_runtime_dir 指向解压目录内 versions/<版本>。
 
@@ -66,7 +66,7 @@ python tools\release_preflight.py --phase development
 business_runtime 必须：
 
 1. 使用 release/baselines.json 当前基线的精确全量包作为 source。
-2. 使用本次最终 V3 包作为 target。
+2. 使用本次最终 V3 staging 目录作为 target；build_delta_package.py 支持目录，不要求先压制全量 ZIP。
 3. 运行 tools/build_delta_package.py。
 4. 复验外层 SHA256、patch manifest 签名、source/target runtime manifest 和 payload。
 5. stable_payload_files 必须等于 0。
@@ -88,15 +88,20 @@ full_baseline 不允许从旧稳定层生成普通 delta。必须先通过全量
 - channel_status 必须为 hold；
 - 候选可以包含完整 patch 图；
 - live release/stable.json 保持不变；
-- package 元数据指向本次全量 ZIP；
+- business_runtime 的 package 元数据为空，full_baseline 的 package 元数据指向本次全量 ZIP；
 - patch source 只能是 github.com HTTPS Release URL；
 - minimum launcher/updater 必须与目标 runtime 和 release 类型一致。
 
 生成并检查：
 
 ~~~powershell
-python tools\build_release_channel.py release_dist\<全量包>.zip --url https://pan.baidu.com/<人工分享地址> --patch release_dist\<补丁>.zip --patch-url https://github.com/<仓库>/releases/download/<tag>/<补丁>.zip --channel-status hold --private-key <仓库外私钥路径> --output release\candidates\<版本>\stable.hold.json
-python tools\release_preflight.py --phase candidate --manifest release\candidates\<版本>\stable.hold.json --package release_dist\<全量包>.zip --patch release_dist\<补丁>.zip
+# 普通业务更新
+python tools\build_release_channel.py --release-type business_runtime --patch release_dist\<补丁>.zip --patch-url https://github.com/<仓库>/releases/download/<tag>/<补丁>.zip --channel-status hold --private-key <仓库外私钥路径> --output release\candidates\<版本>\stable.hold.json
+python tools\release_preflight.py --phase candidate --manifest release\candidates\<版本>\stable.hold.json --patch release_dist\<补丁>.zip
+
+# 新全量基线
+python tools\build_release_channel.py release_dist\<全量包>.zip --release-type full_baseline --url https://pan.baidu.com/<人工分享地址> --channel-status hold --private-key <仓库外私钥路径> --output release\candidates\<版本>\stable.hold.json
+python tools\release_preflight.py --phase candidate --manifest release\candidates\<版本>\stable.hold.json --package release_dist\<全量包>.zip
 ~~~
 
 build_release_channel.py 不能生成 ready，也不能写 release/stable.json。任何 error 都阻止上传。
@@ -104,6 +109,8 @@ build_release_channel.py 不能生成 ready，也不能写 release/stable.json�
 ## 7. 分发
 
 ### 全量包
+
+本节只适用于 full_baseline。business_runtime 跳过百度网盘。
 
 - 上传百度网盘，不上传 GitHub Release。
 - 同时提供 .sha256.txt。
@@ -125,26 +132,22 @@ build_release_channel.py 不能生成 ready，也不能写 release/stable.json�
 
 - 签名、SHA256、大小、ZIP；
 - 安全审计和无松散业务 Python；
-- 干净 AppData 启动；
-- 污染 AppData 不加载旧代码；
-- /api/runtime 版本、目录、launcher/updater；
 - 授权、AI 配置、ASR 配置和输出路径保持；
-- Windows 文件阻止/共享盘复制后的启动说明；
-- 百度网盘下载 hash。
 
 business_runtime 额外要求：
 
-- 当前正式基线到目标版本；
-- 三个以上版本的补丁链；
-- 第一个和最后一个补丁下载中断恢复；
-- GitHub 失败后的可恢复错误；
-- 损坏补丁、错误签名、错误 source version；
-- 下载前和安装前磁盘不足；
-- 中途失败和完整回滚；
+- 一个仍受支持的真实旧版本到目标版本；
+- GitHub 回下载后的大小、SHA256 和 ZIP 完整性；
+- 错误补丁拒绝、失败回滚和用户数据保持；
 - 更新后 runtime manifest 文件完整性。
+
+补丁链、断点续传、签名错误和磁盘不足由 source test suite 持续覆盖；只有 updater、launcher 或安装事务代码变化时，才重复对应的人工端到端矩阵。
 
 full_baseline 额外要求：
 
+- 百度网盘下载 hash；
+- 干净/污染 AppData 和 /api/runtime；
+- Windows 文件阻止/共享盘复制后的启动说明；
 - launcher/updater/公钥 hash；
 - 旧版本不能通过普通 delta 覆盖稳定层；
 - clean install、首次健康确认和回滚；
@@ -159,7 +162,7 @@ full_baseline 额外要求：
 
 1. acceptance.json 所有必需 gate 为 pass。
 2. GitHub patch Release 已通过 workflow。
-3. 百度网盘重新下载 hash 已通过。
+3. business_runtime 的 GitHub 回下载 hash 已通过；full_baseline 另外要求百度网盘回下载 hash。
 4. 源码 commit、候选 manifest、包和补丁版本完全一致。
 5. 计算 stable.hold.json 的 SHA256，写入 acceptance.json 的 candidate_sha256。
 6. 使用 promote_release_channel.py 从同一签名 hold 候选生成 ready stable。
@@ -171,7 +174,8 @@ full_baseline 额外要求：
 ~~~powershell
 Get-FileHash release\candidates\<版本>\stable.hold.json -Algorithm SHA256
 python tools\promote_release_channel.py --candidate release\candidates\<版本>\stable.hold.json --acceptance release\candidates\<版本>\acceptance.json --private-key <仓库外私钥路径> --confirm-publish-ready
-python tools\release_preflight.py --phase publish --manifest release\stable.json --package release_dist\<全量包>.zip --patch release_dist\<补丁>.zip --acceptance release\candidates\<版本>\acceptance.json
+# business_runtime 不传 --package；full_baseline 必须传 --package
+python tools\release_preflight.py --phase publish --manifest release\stable.json --patch release_dist\<补丁>.zip --acceptance release\candidates\<版本>\acceptance.json
 ~~~
 
 raw.githubusercontent.com 可能有 CDN 延迟。先以 git ls-remote、origin/main 和 GitHub API 为准。

@@ -492,12 +492,20 @@ def run_preflight(
             or channel.get("minimum_updater_version") != baseline.get("updater_version")
         )
     )
+    declared_release_type = str(channel.get("release_type") or "").strip()
+    inferred_release_type = "full_baseline" if stable_changed else "business_runtime"
+    release_type = declared_release_type or inferred_release_type
+    report.facts["release_type"] = release_type
+    if release_type not in {"business_runtime", "full_baseline"}:
+        report.error("invalid channel release_type")
+    elif phase != "development" and not declared_release_type:
+        report.error("candidate/publish channel must declare release_type")
+    if release_type == "business_runtime" and stable_changed:
+        report.error("business_runtime cannot change stable components")
     github_spec = ROOT / "release" / "github" / f"v{channel_version}.json"
     require_patch_spec = (
         phase != "development"
-        and baseline
-        and channel_version != baseline.get("version")
-        and not stable_changed
+        and release_type == "business_runtime"
     )
     if github_spec.is_file():
         spec = load_json(github_spec)
@@ -526,27 +534,48 @@ def run_preflight(
     }
     if phase != "development":
         package_record = channel.get("package")
-        if not isinstance(package_record, dict) or package_path is None:
-            report.error("candidate/publish requires --package")
-        elif validate_artifact(report, package_path, package_record, "full package"):
-            inspect_full_zip(
-                report,
-                package_path,
-                channel_version,
-                str(channel.get("minimum_launcher_version") or ""),
-                str(channel.get("minimum_updater_version") or ""),
-                full_test=True,
+        package_url = (
+            str(package_record.get("url") or "")
+            if isinstance(package_record, dict)
+            else ""
+        )
+        package_has_payload = bool(
+            isinstance(package_record, dict)
+            and any(
+                (
+                    package_url,
+                    str(package_record.get("sha256") or ""),
+                    str(package_record.get("filename") or ""),
+                    package_record.get("size"),
+                )
             )
+        )
+        if release_type == "full_baseline":
+            if not isinstance(package_record, dict) or package_path is None:
+                report.error("full_baseline candidate/publish requires --package")
+            elif validate_artifact(report, package_path, package_record, "full package"):
+                inspect_full_zip(
+                    report,
+                    package_path,
+                    channel_version,
+                    str(channel.get("minimum_launcher_version") or ""),
+                    str(channel.get("minimum_updater_version") or ""),
+                    full_test=True,
+                )
+        elif not isinstance(package_record, dict):
+            report.error("business_runtime package metadata is invalid")
+        elif package_path is not None or package_has_payload:
+            report.error("business_runtime must not include a full package")
         provided = {path.name: path for path in (patch_paths or [])}
         if set(provided) != set(patches):
             report.error("--patch files must exactly match channel patches")
         for name, record in patches.items():
             if name in provided:
                 validate_patch_zip(report, provided[name], record)
-        if stable_changed and patches:
-            report.error("stable-component baseline change cannot contain patches")
-        if baseline and not stable_changed and channel_version != baseline.get("version") and not patches:
-            report.error("business-runtime release requires a baseline patch")
+        if release_type == "full_baseline" and patches:
+            report.error("full_baseline cannot contain ordinary runtime patches")
+        if release_type == "business_runtime" and not patches:
+            report.error("business_runtime release requires at least one signed patch")
 
     if phase == "publish":
         if acceptance_path is None:
@@ -559,6 +588,8 @@ def run_preflight(
                     report.error("acceptance version differs from channel")
                 if release_type not in {"business_runtime", "full_baseline"}:
                     report.error("invalid acceptance release_type")
+                if release_type != str(channel.get("release_type") or ""):
+                    report.error("acceptance release_type differs from channel")
                 required = [
                     *(policy.get("acceptance_gates", {}).get("always") or []),
                     *(policy.get("acceptance_gates", {}).get(release_type) or []),

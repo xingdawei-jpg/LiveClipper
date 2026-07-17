@@ -6,7 +6,7 @@
 
 1. 只从 C:\Users\周美彤\Documents\GitHub\LiveClipper 构建。
 2. 发布前必须执行 Cross-Window Sync Gate，逐项确认已修改和未跟踪文件。
-3. 开发完成不等于已经发布。没有正式包、远端下载验证和 stable 通道发布，用户就没有收到更新。
+3. 开发完成不等于已经发布。普通业务更新没有签名补丁、远端下载验证和 stable 通道发布，用户就没有收到更新；新全量基线还必须完成百度网盘验证。
 4. app/version.json、稳定组件版本、正式基线和线上通道是四种不同状态，禁止互相代替。
 5. 稳定 launcher、updater、公钥、信任根或安装布局变化时，必须建立新全量基线，禁止放进普通增量包。
 6. 普通业务版本的增量包必须包含零个稳定组件 payload。
@@ -59,13 +59,13 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 必须产出：
 
-- 新的完整修复包，上传百度网盘；
-- 从当前正式基线到目标版本的签名 delta；
+- 最终 frozen runtime 和 Runtime V3 staging 目录，不要求生成或上传新的全量 ZIP；
+- 从当前正式基线或当前受支持版本到目标版本的签名 delta；
 - 仍受支持且路径过长的旧基线直达目标版本 rollup；
 - GitHub 补丁 Release；
 - 候选 hold 清单和最终 ready stable 清单。
 
-普通 delta 的 stable_payload_files 必须为 0。
+普通 delta 的 stable_payload_files 必须为 0。新用户继续使用最近一次人工分发并验证过的完整包，启动后再通过 signed delta 升到最新业务版本。普通业务更新不得因为没有新的百度网盘全量包而被阻止。
 
 ### 新全量基线
 
@@ -91,12 +91,12 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 4. 升级业务版本；仅在稳定层变化时升级 launcher/updater。
 5. 重新生成 app/version.json，确认所有 runtime hash 与最终源码一致。
 6. 提交发布源码，但不修改 release/stable.json。
-7. 从该干净 commit 构建 frozen runtime、V3 目录和全量 ZIP。
-8. 生成签名 delta、ZIP 校验文件和 release/candidates/<版本>/stable.hold.json。
-9. 运行 tools/release_preflight.py --phase candidate。
-10. 上传全量 ZIP 到百度网盘；上传补丁到 GitHub Release。
-11. 从百度网盘和 GitHub 重新下载，核对大小、SHA256 和 ZIP 完整性。
-12. 在独立 Windows 环境完成全量包、精确旧基线增量、中断恢复、失败回滚和 /api/runtime 验收。
+7. 从该干净 commit 构建 frozen runtime 和 V3 staging；只有 full_baseline 才生成全量 ZIP。
+8. business_runtime 直接从精确旧包和目标 staging 生成签名 delta；full_baseline 生成完整包和基线登记材料。
+9. 生成校验文件和 release/candidates/<版本>/stable.hold.json，运行 candidate preflight。
+10. business_runtime 只上传补丁到 GitHub Release；full_baseline 只把全量 ZIP 上传百度网盘。
+11. business_runtime 从 GitHub 重新下载补丁；full_baseline 另外从百度网盘重新下载全量包，核对大小、SHA256 和 ZIP。
+12. business_runtime 完成一次精确旧版本升级、失败回滚、用户数据保持和更新后 runtime 完整性；full_baseline 另外完成干净/污染 AppData、首次启动和健康回滚。
 13. 填写 release/candidates/<版本>/acceptance.json，所有必需 gate 都必须是 pass。
 14. 把 hold 候选 SHA256 写入 acceptance.json，使用 tools/promote_release_channel.py 从该候选生成 ready stable。
 15. 运行 tools/release_preflight.py --phase publish；通过后只提交并推送 release/stable.json。
@@ -118,6 +118,8 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 ### 百度网盘全量包
 
+以下规则只适用于 full_baseline。普通 business_runtime 不生成或上传新的全量包。
+
 - 上传原始全量 ZIP 和 .sha256.txt。
 - 分享页可以用于人工下载，但不能作为自动补丁 URL。
 - 下载后的 ZIP 必须与本地正式包大小和 SHA256 完全一致。
@@ -135,18 +137,23 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 ## 9. 必须保留的验收证据
 
+所有发布都保留：
+
 - Cross-Window Sync Gate 文件清单；
 - 版本、build ID、launcher/updater 版本；
-- 全量包和每个补丁的路径、大小、SHA256；
+- 每个本次发布资产的路径、大小、SHA256；
 - 签名、manifest、ZIP 和安全审计结果；
-- 解压后由目标 EXE 所属进程返回的 /api/runtime；
-- 干净 AppData 和污染 AppData 启动结果；
+- 对应 release_type 要求的目标运行时或完整包运行结果；
 - 15.1 精确基线到目标版本的真实更新结果；
-- 多版本链、断点续传、损坏补丁、签名错误、磁盘不足和回滚；
+- 错误补丁拒绝、失败回滚和用户数据保持结果；
 - 更新后 runtime 文件完整性；
-- 百度网盘和 GitHub 重新下载后的 hash；
+- GitHub 重新下载后的 hash；
 - 用户设置、授权、AI/ASR 配置和输出目录保持结果；
 - stable 最后发布的 commit 和远端内容。
+
+full_baseline 另外保留：全量包路径和 SHA256、百度网盘回下载 hash、干净/污染 AppData、目标 EXE 的 /api/runtime、稳定组件完整性和首次启动健康回滚。
+
+补丁链、断点续传、签名错误和磁盘不足由 source test suite 持续覆盖；只有 updater、launcher 或安装事务代码变化时，才重复对应的人工端到端矩阵。
 
 只写“测试通过”不算证据，必须记录命令、输入包、输出版本和 hash。
 

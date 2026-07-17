@@ -62,6 +62,27 @@ class ReleasePolicyTests(unittest.TestCase):
             policy["distribution"]["automatic_patch"]["minimum_sources"],
             1,
         )
+        self.assertFalse(
+            policy["release_types"]["business_runtime"]["new_full_package_required"]
+        )
+        self.assertTrue(
+            policy["release_types"]["business_runtime"]["full_package_forbidden"]
+        )
+        self.assertTrue(
+            policy["release_types"]["business_runtime"]["signed_patch_required"]
+        )
+        self.assertTrue(
+            policy["release_types"]["full_baseline"]["new_full_package_required"]
+        )
+        self.assertNotIn("baidu_download_hash", policy["acceptance_gates"]["always"])
+        self.assertNotIn(
+            "baidu_download_hash",
+            policy["acceptance_gates"]["business_runtime"],
+        )
+        self.assertIn(
+            "baidu_download_hash",
+            policy["acceptance_gates"]["full_baseline"],
+        )
 
     def test_current_baseline_is_registered_with_exact_stable_versions(self) -> None:
         registry = json.loads(
@@ -116,6 +137,39 @@ class ReleasePolicyTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "not allowed"):
             builder._validate_distribution_policy("", [oss_patch], policy)
+
+    def test_channel_builder_separates_business_patch_and_full_baseline(self) -> None:
+        builder = load_tool("build_release_channel")
+        self.assertEqual(builder._resolve_release_type("", 1), "business_runtime")
+        self.assertEqual(builder._resolve_release_type("", 0), "full_baseline")
+        builder._validate_release_shape(
+            "business_runtime",
+            package_present=False,
+            patch_count=1,
+        )
+        with self.assertRaisesRegex(ValueError, "must not include a full package"):
+            builder._validate_release_shape(
+                "business_runtime",
+                package_present=True,
+                patch_count=1,
+            )
+        with self.assertRaisesRegex(ValueError, "at least one signed patch"):
+            builder._validate_release_shape(
+                "business_runtime",
+                package_present=False,
+                patch_count=0,
+            )
+        builder._validate_release_shape(
+            "full_baseline",
+            package_present=True,
+            patch_count=0,
+        )
+        with self.assertRaisesRegex(ValueError, "requires a full package"):
+            builder._validate_release_shape(
+                "full_baseline",
+                package_present=False,
+                patch_count=0,
+            )
 
     def test_development_preflight_accepts_registered_split_state(self) -> None:
         preflight = load_tool("release_preflight")
@@ -256,6 +310,55 @@ class ReleasePolicyTests(unittest.TestCase):
                     acceptance,
                     policy,
                 )
+
+    def test_promotion_only_requires_baidu_package_for_full_baseline(self) -> None:
+        promoter = load_tool("promote_release_channel")
+        policy = json.loads(
+            (ROOT / "release" / "release_policy.json").read_text(encoding="utf-8")
+        )
+        patch = {
+            "filename": "LiveClipperPatch_1_to_2_v3.zip",
+            "sources": [
+                {
+                    "name": "GitHub",
+                    "url": "https://github.com/example/repo/releases/download/v2/patch.zip",
+                }
+            ],
+        }
+        promoter.validate_candidate_distribution(
+            {"package": {"url": ""}, "patches": [patch]},
+            "business_runtime",
+            policy,
+        )
+        with self.assertRaisesRegex(ValueError, "must not include a full package"):
+            promoter.validate_candidate_distribution(
+                {
+                    "package": {"url": "https://pan.baidu.com/s/example"},
+                    "patches": [patch],
+                },
+                "business_runtime",
+                policy,
+            )
+        with self.assertRaisesRegex(ValueError, "at least one signed patch"):
+            promoter.validate_candidate_distribution(
+                {"package": {"url": ""}, "patches": []},
+                "business_runtime",
+                policy,
+            )
+        promoter.validate_candidate_distribution(
+            {
+                "package": {"url": "https://pan.baidu.com/s/example"},
+                "patches": [],
+            },
+            "full_baseline",
+            policy,
+        )
+        with self.assertRaisesRegex(ValueError, "Baidu full-package URL"):
+            promoter.validate_candidate_distribution(
+                {"package": {"url": ""}, "patches": []},
+                "full_baseline",
+                policy,
+            )
 
     def test_github_workflow_rejects_full_package_assets_and_tests_zip(self) -> None:
         workflow = (
