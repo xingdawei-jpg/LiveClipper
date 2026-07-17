@@ -360,6 +360,83 @@ class ReleasePolicyTests(unittest.TestCase):
                 policy,
             )
 
+    def test_business_candidate_promotes_to_incremental_ready_channel(self) -> None:
+        promoter = load_tool("promote_release_channel")
+        policy = json.loads(
+            (ROOT / "release" / "release_policy.json").read_text(encoding="utf-8")
+        )
+        required = [
+            *policy["acceptance_gates"]["always"],
+            *policy["acceptance_gates"]["business_runtime"],
+        ]
+        candidate = {
+            "version": "2026.7.15.3",
+            "latest_version": "2026.7.15.3",
+            "channel_status": "hold",
+            "release_type": "business_runtime",
+            "package": {"url": "", "sha256": "", "filename": "", "size": 0},
+            "patches": [
+                {
+                    "filename": "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3.zip",
+                    "sources": [
+                        {
+                            "name": "GitHub",
+                            "url": "https://github.com/example/repo/releases/download/v2026.7.15.3/patch.zip",
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT / "release" / "candidates") as temp:
+            root = Path(temp)
+            candidate_path = root / "stable.hold.json"
+            acceptance_path = root / "acceptance.json"
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+            acceptance = {
+                "version": "2026.7.15.3",
+                "candidate_sha256": promoter.sha256_file(candidate_path).upper(),
+                "release_type": "business_runtime",
+                "gates": {name: "pass" for name in required},
+                "evidence": {name: {"result": "verified"} for name in required},
+            }
+            acceptance_path.write_text(json.dumps(acceptance), encoding="utf-8")
+
+            def load_manifest(path: Path) -> dict:
+                resolved = Path(path).resolve()
+                if resolved == candidate_path.resolve():
+                    return candidate
+                if resolved == acceptance_path.resolve():
+                    return acceptance
+                if resolved == promoter.STABLE_FILE.resolve():
+                    return {"version": "2026.7.14.7"}
+                raise AssertionError(f"unexpected manifest path: {path}")
+
+            with (
+                mock.patch.object(promoter, "_load_json", side_effect=load_manifest),
+                mock.patch.object(promoter, "verify_manifest"),
+                mock.patch.object(
+                    promoter,
+                    "sign_manifest",
+                    side_effect=lambda payload, _key: {
+                        **payload,
+                        "signature": {"algorithm": "ed25519", "value": "test"},
+                    },
+                ),
+            ):
+                ready = promoter.promote(
+                    candidate_path,
+                    acceptance_path,
+                    root / "private-key.pem",
+                )
+
+        self.assertEqual(ready["channel_status"], "ready")
+        self.assertTrue(ready["supports_incremental_updates"])
+        self.assertFalse(ready["requires_full_package"])
+        self.assertEqual(
+            ready["update_strategy"],
+            "verified-version-delta-with-full-fallback",
+        )
+
     def test_github_workflow_rejects_full_package_assets_and_tests_zip(self) -> None:
         workflow = (
             ROOT / ".github" / "workflows" / "publish-incremental-release.yml"

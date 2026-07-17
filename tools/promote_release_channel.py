@@ -139,11 +139,12 @@ def promote(
     ready = dict(candidate)
     ready["release_type"] = release_type
     ready["channel_status"] = "ready"
-    ready["supports_incremental_updates"] = bool(patches)
-    ready["requires_full_package"] = not bool(patches)
+    has_patches = bool(candidate.get("patches"))
+    ready["supports_incremental_updates"] = has_patches
+    ready["requires_full_package"] = not has_patches
     ready["update_strategy"] = (
         "verified-version-delta-with-full-fallback"
-        if patches
+        if has_patches
         else "full-package"
     )
     ready["published_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
