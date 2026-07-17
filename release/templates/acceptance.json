@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "version": "REPLACE_WITH_VERSION",
+  "candidate_sha256": "REPLACE_WITH_HOLD_MANIFEST_SHA256",
+  "release_type": "business_runtime",
+  "gates": {
+    "cross_window_sync": "pending",
+    "source_tests": "pending",
+    "manifest_signatures": "pending",
+    "zip_integrity": "pending",
+    "security_audit": "pending",
+    "extracted_runtime": "pending",
+    "clean_install": "pending",
+    "user_data_preserved": "pending",
+    "baidu_download_hash": "pending",
+    "github_download_hash": "pending",
+    "exact_baseline_update": "pending",
+    "interruption_resume": "pending",
+    "failure_rollback": "pending",
+    "post_update_runtime_integrity": "pending",
+    "polluted_appdata": "pending",
+    "stable_component_integrity": "pending",
+    "synthetic_next_delta": "pending",
+    "first_launch_health_rollback": "pending"
+  },
+  "evidence": {}
+}

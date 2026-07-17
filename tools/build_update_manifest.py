@@ -55,6 +55,8 @@ SOURCE_FILES = [
     APP_DIR / "release_signing.py",
     ROOT / "tools" / "build_update_manifest.py",
     ROOT / "tools" / "build_release_channel.py",
+    ROOT / "tools" / "release_preflight.py",
+    ROOT / "tools" / "promote_release_channel.py",
     ROOT / "tools" / "build_v3_package.py",
     ROOT / "tools" / "build_delta_package.py",
     ROOT / "tools" / "build_bridge_exe.py",

@@ -16,6 +16,7 @@ _LAST_TOPIC_COVERAGE_SUMMARY = {}
 _LAST_SELECTION_FAILURE = {}
 import os
 import sys
+import time
 from contextvars import ContextVar
 import ssl
 import urllib.request
@@ -2098,19 +2099,38 @@ def _friendly_msg(err_str):
 # 设置管理
 # ============================================================
 
+_LAST_SETTINGS_SAVE_ERROR = ""
+
 
 def _get_base_path():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+
+def _settings_backup_path(path):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return f"{path}.invalid-{stamp}-{os.getpid()}.bak"
+
+
+def _load_settings_dict(path):
+    with open(path, "r", encoding="utf-8-sig") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("settings root must be a JSON object")
+    return data
+
+
+def get_last_settings_save_error():
+    return _LAST_SETTINGS_SAVE_ERROR
+
+
 def load_settings():
     # 优先读用户数据目录（用户保存的设置），其次读打包目录
     try:
         from config import SETTINGS_PATH as _user_path
         if os.path.exists(_user_path):
-            with open(_user_path, "r", encoding="utf-8-sig") as f:
-                return _normalize_ai_model_defaults(json.load(f))
+            return _normalize_ai_model_defaults(_load_settings_dict(_user_path))
     except Exception:
         pass
     path = os.path.join(_get_base_path(), "ai_settings.json")
@@ -2377,25 +2397,53 @@ def _normalize_focus_list(values):
 
 
 def save_settings(settings):
+    global _LAST_SETTINGS_SAVE_ERROR
     # 写入用户数据目录（可写），非打包目录（可能只读）
     try:
         from config import SETTINGS_PATH as _save_path
     except ImportError:
         _save_path = os.path.join(_get_base_path(), "ai_settings.json")
+    temp_path = ""
     try:
+        _LAST_SETTINGS_SAVE_ERROR = ""
         settings = _normalize_ai_model_defaults(settings)
+        parent = os.path.dirname(os.path.abspath(_save_path))
+        os.makedirs(parent, exist_ok=True)
         existing = {}
         if os.path.exists(_save_path):
-            with open(_save_path, "r", encoding="utf-8-sig") as f:
-                existing = json.load(f)
+            try:
+                existing = _load_settings_dict(_save_path)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                backup_path = _settings_backup_path(_save_path)
+                os.replace(_save_path, backup_path)
         existing.update(settings)
-        with open(_save_path, "w", encoding="utf-8") as f:
+        temp_path = os.path.join(
+            parent,
+            f".{os.path.basename(_save_path)}.{os.getpid()}.{os.urandom(4).hex()}.tmp",
+        )
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(existing, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, _save_path)
+        temp_path = ""
+        _load_settings_dict(_save_path)
         return True
-    except Exception as e:
+    except Exception as exc:
+        if isinstance(exc, (PermissionError, FileNotFoundError, OSError)):
+            _LAST_SETTINGS_SAVE_ERROR = "用户数据目录不可写，请检查保存位置或磁盘状态"
+        else:
+            _LAST_SETTINGS_SAVE_ERROR = "配置文件写入失败，请重试"
         import traceback
         traceback.print_exc()
         return False
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 def _default_settings():
     return {

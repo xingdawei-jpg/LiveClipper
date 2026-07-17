@@ -1,155 +1,188 @@
 # LiveClipper Release Process V3
 
-## 1. Release artifacts
+本文件是 Runtime V3 可执行发布步骤。政策见 docs/RELEASE_POLICY.md，机器规则见 release/release_policy.json。
 
-Every Runtime V3 release produces:
+## 1. 发布前状态
 
-- a signed immutable runtime manifest;
-- a V3 full package for clean installation and repair;
-- one signed direct patch for every supported source version;
-- a signed stable-channel manifest;
-- SHA256 sidecars for the full package, patches, and bridge executable;
-- a one-time embedded bridge when a supported source is Runtime V2.
+先执行 docs/PACKAGING_WINDOW_ENTRY.md 的 Cross-Window Sync Gate，并运行：
 
-The full package may be distributed through an external file service. Every
-automatic patch must have at least two stable direct HTTPS downloads in the
-signed channel: GitHub primary and Aliyun OSS fallback. An interactive share
-page is not a valid automatic-update URL.
+~~~powershell
+python tools\release_preflight.py --phase development
+~~~
 
-## 2. Key handling
+必须明确区分：
 
-- Generate one dedicated Ed25519 release key pair.
-- Commit only app/release_update_public_key.pem.
-- Keep the private key outside the repository and release directories.
-- Back up the private key securely; losing it prevents authenticated updates.
-- A key rotation requires a release signed by the old key that installs the new
-  trust root before releases signed only by the new key are published.
+- 源码运行时版本；
+- 当前全量基线；
+- 线上 stable 版本；
+- launcher/updater 版本；
+- 本次候选是否改变稳定层。
 
-## 3. Build order
+当前登记基线从 release/baselines.json 读取，禁止凭文件夹日期或记忆选择增量源。
 
-1. Confirm a clean tracked worktree and review release inputs.
-2. Run Python compilation, frontend syntax checks, and unit tests.
-3. Generate app/version.json with tools/build_update_manifest.py.
-4. Build the frozen business runtime with web_client/liveclipper_web.spec.
-5. For a normal V3 runtime release, extract and reuse the exact launcher,
-   updater, and update public key from the supported source package. Rebuilding
-   unchanged one-file executables changes their hashes and would turn them into
-   unsafe self-update payloads.
-6. Build new launcher/updater binaries only for a separately tested signed
-   bridge or full-package stable-layer migration.
-7. Assemble the V3 directory with tools/build_v3_package.py.
-8. Run the release security audit and verify no loose business Python files.
-9. ZIP the assembled package and run zipfile.testzip().
-10. Build direct patches with tools/build_delta_package.py. A V3-to-V3 patch
-    must contain zero stable-component payload files.
-11. For a V2 source, build the embedded bridge with tools/build_bridge_exe.py.
-12. Exercise bridge, normal delta, interruption, tamper, and rollback tests.
-13. Run one patch with the updater executable from the exact published source
-    ZIP, not only the Python-level updater tests. Record elapsed time, durable
-    progress, final pointer state, and first-launch health.
-14. Reject a release if the reference-device patch exceeds 60 seconds, shows no
-    visible progress, or rereads unchanged hard-linked runtime files.
-15. Upload patch assets to GitHub and Aliyun OSS. Verify exact size and SHA256
-    from both direct HTTPS URLs.
-16. Test DNS resolution, download progress, interruption/resume, and source
-    fallback from a separate Windows device and network.
-17. Generate and sign release/stable.json with channel_status=hold. A hold
-    manifest contains no published patch records.
-18. Run the clean-install and exact published-source delta acceptance tests.
-19. Regenerate the signed manifest with channel_status=ready and publish it
-    last.
+## 2. 密钥
 
-Publishing a ready channel before every referenced source is remotely
-verifiable is forbidden.
+- Ed25519 私钥只能位于仓库和 release 输出目录之外。
+- Git 只提交 app/release_update_public_key.pem。
+- 私钥路径通过 --private-key 参数传入，不写入脚本、文档、日志或 PowerShell 历史模板。
+- 公钥轮换必须建立新全量基线，并由旧信任根完成迁移验证。
+- 正式签名后必须立即用包内同一公钥复验。
 
-## 4. Package acceptance gates
+## 3. 冻结源码和版本
 
-A release is accepted only when:
+1. 审核所有修改和未跟踪文件。
+2. 运行 Python 编译、JavaScript 语法和完整测试。
+3. 决定 release_type：business_runtime 或 full_baseline。
+4. 选择未使用的新业务版本。
+5. 只有 full_baseline 且稳定组件真实变化时才修改 tools/runtime_v3_versions.py。
+6. 最后生成 app/version.json。
+7. 再次运行 git diff；若 runtime 文件在 manifest 之后变化，重新生成 manifest。
+8. 提交发布源码，不包含 release/stable.json。
+9. 确认构建使用的 HEAD 与 runtime_manifest.source_commit 一致。
 
-- the root executable is the stable launcher;
-- current.json points to an existing signed version directory;
-- the runtime contains no loose business Python duplicates;
-- runtime and install signatures verify with the committed public key;
-- every runtime and stable file matches its signed manifest;
-- every omitted runtime payload has identical signed source/target metadata;
-- changed payloads and copy fallbacks are hash-verified;
-- the installed updater meets the channel minimum updater version;
-- the runtime remains open until the patch has passed size and SHA256 checks;
-- the in-app card shows byte and percentage progress during the download;
-- an interrupted download preserves its partial file and resumes with Range;
-- failure of the GitHub source automatically falls back to Aliyun OSS;
-- update progress remains visible from process exit through pointer activation;
-- partial stable-file replacement restores every completed replacement;
-- a clean extracted package starts and reports runtime_layout_version=3;
-- /api/runtime reports the expected active directory and version;
-- polluted legacy AppData code directories remain ignored;
-- an incorrect source version is rejected before activation;
-- a corrupt payload or signature is rejected before activation;
-- interruption before pointer switch leaves the current version untouched;
-- failed first-launch health switches back to the previous version;
-- one failed batch item still allows later batch items to continue.
+禁止从脏源码或旧 dist 构建正式包。
 
-## 5. V2 bridge acceptance gates
+## 4. 构建全量包
 
-The bridge must be tested against the exact published V2 ZIP. It must:
+标准顺序：
 
-- reject modified or unsupported V2 installations;
-- avoid downloading unchanged runtime files;
-- preserve a signed previous V2 runtime directory;
-- produce and verify the target V3 runtime directory;
-- install and verify the signed stable install manifest;
-- keep the root executable path stable for existing shortcuts;
-- leave user data and configured output/material paths unchanged;
-- support automatic rollback to the retained V2 runtime.
+1. 用 web_client/liveclipper_web.spec 干净构建 frozen runtime。
+2. 普通业务版本从 release/baselines.json 当前基线复用 launcher、updater 和公钥的精确字节。
+3. 新基线才重新构建稳定组件。
+4. 用 tools/build_v3_package.py 组装 V3 目录并签名。
+5. 检查根 launcher、current.json、install_manifest.json、updater 和 versions/<版本>。
+6. 确认没有松散业务 Python 文件。
+7. 运行 tools/audit_release_security.py。
+8. 新建 ZIP，不复用旧 ZIP；运行 zipfile.testzip。
+9. 生成 .sha256.txt。
+10. 解压到全新目录，以临时 AppData 启动目标 EXE。
 
-## 6. Rollout
+/api/runtime 验收必须核对返回端口的进程属于刚解压的 EXE，并确认 active_runtime_dir 指向解压目录内 versions/<版本>。
 
-Keep channel_status=hold throughout build and acceptance. Use staged
-release-channel exposure when a new updater or launcher is involved:
+## 5. 构建增量
 
-1. internal package smoke test;
-2. a small controlled device set;
-3. broader rollout after update and rollback logs are clean;
-4. full stable rollout.
+business_runtime 必须：
 
-Keep direct patches from at least the previous two stable versions when their
-runtime layouts are compatible. Older, damaged, or unsupported installations
-fall back to the full package.
+1. 使用 release/baselines.json 当前基线的精确全量包作为 source。
+2. 使用本次最终 V3 包作为 target。
+3. 运行 tools/build_delta_package.py。
+4. 复验外层 SHA256、patch manifest 签名、source/target runtime manifest 和 payload。
+5. stable_payload_files 必须等于 0。
+6. 补丁 URL 使用 GitHub Release 的 HTTPS URL。
+7. 当某个受支持版本到 latest 超过 2 条边时生成直达 rollup。
+8. updater 1.3.0 必须在安装前下载并验证整条链，完成后只切换一次 current.json。
 
-## 7. Full-package baseline policy
+full_baseline 不允许从旧稳定层生成普通 delta。必须先通过全量包迁移，再用该新基线做合成下一版本 delta 测试。
 
-A new full-package baseline is mandatory when the launcher, updater, release
-trust root, runtime layout, or install-state format changes. This is not the
-normal release path.
+## 6. 候选清单
 
-The baseline sequence is:
+候选路径：
 
-1. bump the stable component versions from their single source;
-2. rebuild both stable executables and the frozen business runtime;
-3. assemble and sign a clean V3 full package;
-4. test clean install, polluted AppData, health confirmation, and rollback;
-5. build a synthetic next-version runtime delta from that exact package;
-6. prove the normal delta has zero stable payload files;
-7. apply it with the updater executable from the exact baseline package;
-8. keep the public channel on hold until a separate device passes.
+    release/candidates/<版本>/stable.hold.json
+    release/candidates/<版本>/acceptance.json
 
-After the baseline is accepted, normal business releases reuse the exact stable
-launcher and updater from that baseline. They publish signed direct runtime
-deltas. Users do not need another full package unless the stable layer changes
-again or their installation is damaged or unsupported.
+生成候选时：
 
-## 8. Rollback
+- channel_status 必须为 hold；
+- 候选可以包含完整 patch 图；
+- live release/stable.json 保持不变；
+- package 元数据指向本次全量 ZIP；
+- patch source 只能是 github.com HTTPS Release URL；
+- minimum launcher/updater 必须与目标 runtime 和 release 类型一致。
 
-Do not lower the remote version. For a runtime regression:
+生成并检查：
 
-- let affected pending launches roll back automatically;
-- stop channel rollout;
-- fix the code and publish a higher version;
-- retain the previous signed runtime until the replacement is healthy.
+~~~powershell
+python tools\build_release_channel.py release_dist\<全量包>.zip --url https://pan.baidu.com/<人工分享地址> --patch release_dist\<补丁>.zip --patch-url https://github.com/<仓库>/releases/download/<tag>/<补丁>.zip --channel-status hold --private-key <仓库外私钥路径> --output release\candidates\<版本>\stable.hold.json
+python tools\release_preflight.py --phase candidate --manifest release\candidates\<版本>\stable.hold.json --package release_dist\<全量包>.zip --patch release_dist\<补丁>.zip
+~~~
 
-User-data migrations remain backward compatible for one retained release or
-provide their own transactional backup and restore procedure.
+build_release_channel.py 不能生成 ready，也不能写 release/stable.json。任何 error 都阻止上传。
 
-When the launcher or updater binary changes, publish a new full package and make
-that package the next incremental baseline. Do not attempt to replace a running
-stable updater through a normal V3-to-V3 delta.
+## 7. 分发
+
+### 全量包
+
+- 上传百度网盘，不上传 GitHub Release。
+- 同时提供 .sha256.txt。
+- 从百度网盘重新下载一份，复验大小、SHA256 和 ZIP。
+- 共享盘用户先复制 ZIP 到本机、解除文件阻止、解压到新目录。
+
+### 自动补丁
+
+- GitHub Release 仅上传 LiveClipperPatch_*.zip 和对应 .sha256.txt。
+- release/github/v<版本>.json 资产列表不得包含 full 或 baseline ZIP。
+- 发布后等待 GitHub Actions 验证资产集合、大小、SHA256 和 ZIP 完整性。
+- 从 GitHub Release URL 重新下载补丁用于真实升级验收。
+
+仅创建 tag、仅推送 commit、仅上传百度网盘或仅生成本地 ZIP，都不等于发布完成。
+
+## 8. 验收矩阵
+
+所有版本：
+
+- 签名、SHA256、大小、ZIP；
+- 安全审计和无松散业务 Python；
+- 干净 AppData 启动；
+- 污染 AppData 不加载旧代码；
+- /api/runtime 版本、目录、launcher/updater；
+- 授权、AI 配置、ASR 配置和输出路径保持；
+- Windows 文件阻止/共享盘复制后的启动说明；
+- 百度网盘下载 hash。
+
+business_runtime 额外要求：
+
+- 当前正式基线到目标版本；
+- 三个以上版本的补丁链；
+- 第一个和最后一个补丁下载中断恢复；
+- GitHub 失败后的可恢复错误；
+- 损坏补丁、错误签名、错误 source version；
+- 下载前和安装前磁盘不足；
+- 中途失败和完整回滚；
+- 更新后 runtime manifest 文件完整性。
+
+full_baseline 额外要求：
+
+- launcher/updater/公钥 hash；
+- 旧版本不能通过普通 delta 覆盖稳定层；
+- clean install、首次健康确认和回滚；
+- 从该基线构造合成下一版本 delta，stable payload 为 0；
+- exact baseline updater 成功应用合成 delta。
+
+每个结果写入 acceptance.json，证据字段记录命令、输入文件、hash、设备和 /api/runtime 摘要。
+
+## 9. 发布 stable
+
+验收完成后：
+
+1. acceptance.json 所有必需 gate 为 pass。
+2. GitHub patch Release 已通过 workflow。
+3. 百度网盘重新下载 hash 已通过。
+4. 源码 commit、候选 manifest、包和补丁版本完全一致。
+5. 计算 stable.hold.json 的 SHA256，写入 acceptance.json 的 candidate_sha256。
+6. 使用 promote_release_channel.py 从同一签名 hold 候选生成 ready stable。
+7. 运行 publish preflight。
+8. 确认工作树除 release/stable.json 和候选证据外没有其他变化。
+9. 单独提交并推送 release/stable.json。
+10. 核对远端 main、GitHub API 和签名清单，最后才通知用户“更新已发布”。
+
+~~~powershell
+Get-FileHash release\candidates\<版本>\stable.hold.json -Algorithm SHA256
+python tools\promote_release_channel.py --candidate release\candidates\<版本>\stable.hold.json --acceptance release\candidates\<版本>\acceptance.json --private-key <仓库外私钥路径> --confirm-publish-ready
+python tools\release_preflight.py --phase publish --manifest release\stable.json --package release_dist\<全量包>.zip --patch release_dist\<补丁>.zip --acceptance release\candidates\<版本>\acceptance.json
+~~~
+
+raw.githubusercontent.com 可能有 CDN 延迟。先以 git ls-remote、origin/main 和 GitHub API 为准。
+
+## 10. 回滚和紧急停止
+
+- 验收前失败：删除候选 staging，live stable 不变。
+- ready 发布后发现问题：停止通道，不降低版本，发布更高修复版本。
+- current.json 切换前失败：旧版本保持不变。
+- 首次健康失败：launcher 自动恢复 previous。
+- 用户配置迁移必须向后兼容；不可逆迁移需要独立事务备份。
+- 单台电脑配置损坏时只备份 ai_settings.json 或 user_data_location.json，禁止删除整个 LiveClipper AppData。
+
+## 11. 最终报告
+
+报告格式必须按 docs/PACKAGING_WINDOW_ENTRY.md。未测试项目必须直接列出；缺少远端下载、解压运行或真实升级证据时，状态只能是“未发布”或“候选 hold”。

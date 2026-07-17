@@ -72,11 +72,15 @@ The updater runs from a temporary copy after the business runtime exits. It:
    identical, without rereading the same NTFS file object;
 6. hashes every changed payload and every copy fallback before activation;
 7. records durable progress and shows a visible progress window;
-8. updates stable launcher/updater files with a per-file rollback journal;
-9. verifies the signed install manifest and stable-file result;
-10. atomically writes current.json with pending=true and starts the launcher.
+8. rejects ordinary patch plans that contain launcher, updater, public-key, or
+   trust-root payloads;
+9. verifies every staged intermediate runtime and the final runtime;
+10. atomically writes current.json once, with pending=true, and starts the
+    launcher.
 
-It never patches an active version in place.
+It never patches an active version in place. It downloads and verifies the
+entire selected patch chain before the business runtime exits, then builds all
+intermediate immutable runtimes inside one transaction.
 
 A stable launcher or updater change requires a new full-package baseline. A
 normal V3 delta never replaces the updater that is currently executing.
@@ -96,9 +100,11 @@ The following documents are signed:
 
 The signed channel carries ordered patch download sources, sizes, SHA256
 values, exact source and target versions, and full-package fallback
-information. Each automatic patch has a GitHub primary direct HTTPS URL and an
-Aliyun OSS fallback direct HTTPS URL. SHA256 protects transport integrity; the
-Ed25519 signature authenticates the publisher.
+information. The current distribution policy uses one GitHub Release HTTPS
+source for automatic patches. Full packages are distributed manually through
+Baidu Netdisk and are never uploaded as GitHub automatic-update assets.
+SHA256 protects transport integrity; the Ed25519 signature authenticates the
+publisher. Source policy is machine-readable in release/release_policy.json.
 
 The runtime downloader:
 
@@ -113,25 +119,34 @@ The runtime downloader:
 
 Remote channel states ready, hold, and awaiting-external-distribution are
 explicit. Only ready can advertise an installable patch. A hold or awaiting
-channel cannot start an update, even when its version is newer.
+channel cannot start an update, even when its version is newer. Release
+candidates stay under release/candidates/<version>/ with hold status; the live
+release/stable.json remains unchanged until acceptance is complete.
 
-## 5. Delta format
+## 5. Delta format and patch graph
 
-A delta is source-version specific. It includes:
+A normal business-runtime delta is source-version specific. It includes:
 
 - signed source and target runtime manifests;
 - the signed target install manifest;
 - changed or new runtime payload files;
-- changed stable launcher/updater payload files;
-- hashes and sizes for all target runtime and stable files.
+- hashes and sizes for all target runtime files;
+- zero launcher, updater, public-key, or trust-root payload files.
 
 The target directory is built from the target manifest, not by recursively
 copying the old directory. Files removed in the target release therefore cannot
 survive as stale executable content.
 
-Initially the stable channel publishes direct patches from each supported base
-version to the current version. The client does not chain several patches in a
-single update transaction.
+Updater 1.3.0 treats the signed channel patches as a directed version graph. It
+prefers a direct patch, otherwise chooses the shortest valid chain within the
+signed max-chain policy. It downloads and verifies every patch in the selected
+chain before installation, validates SHA256, size, signature, source version,
+target version, continuity, manifests, payloads, and protected paths, then
+applies the chain in one transaction and switches current.json only once.
+
+Every supported path longer than two edges must receive a direct rollup patch.
+A launcher, updater, public-key, trust-root, or install-layout change is not a
+normal delta; it creates a new full-package baseline.
 
 ## 6. Health and rollback
 

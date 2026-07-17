@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "effective_after_baseline": "2026.7.15.1",
+  "version_sources": {
+    "runtime": "app/version.json",
+    "stable_components": "tools/runtime_v3_versions.py",
+    "full_baselines": "release/baselines.json",
+    "live_update_channel": "release/stable.json"
+  },
+  "distribution": {
+    "full_package": {
+      "provider": "baidu-netdisk",
+      "delivery": "manual-share-page",
+      "publish_to_github_releases": false,
+      "share_url_hosts": [
+        "pan.baidu.com"
+      ],
+      "checksum_required": true
+    },
+    "automatic_patch": {
+      "provider": "github-releases",
+      "manifest_url_hosts": [
+        "github.com"
+      ],
+      "minimum_sources": 1,
+      "require_direct_https": true,
+      "allow_non_github_mirrors": false
+    }
+  },
+  "channel": {
+    "candidate_directory": "release/candidates",
+    "candidate_status": "hold",
+    "live_manifest": "release/stable.json",
+    "published_status": "ready",
+    "publish_last": true,
+    "auto_status_forbidden": true
+  },
+  "baseline": {
+    "registry": "release/baselines.json",
+    "stable_files": [
+      "LiveClipperWeb.exe",
+      "updater/LiveClipperUpdater.exe",
+      "updater/release_update_public_key.pem"
+    ],
+    "stable_change_requires_full_baseline": true,
+    "normal_delta_stable_payload_files": 0
+  },
+  "patch_chain": {
+    "max_chain_depth": 8,
+    "rollup_after_edges": 2,
+    "prefer_direct_patch": true,
+    "download_and_verify_all_before_apply": true
+  },
+  "acceptance_gates": {
+    "always": [
+      "cross_window_sync",
+      "source_tests",
+      "manifest_signatures",
+      "zip_integrity",
+      "security_audit",
+      "extracted_runtime",
+      "clean_install",
+      "user_data_preserved",
+      "baidu_download_hash"
+    ],
+    "business_runtime": [
+      "github_download_hash",
+      "exact_baseline_update",
+      "interruption_resume",
+      "failure_rollback",
+      "post_update_runtime_integrity"
+    ],
+    "full_baseline": [
+      "polluted_appdata",
+      "stable_component_integrity",
+      "synthetic_next_delta",
+      "first_launch_health_rollback"
+    ]
+  }
+}

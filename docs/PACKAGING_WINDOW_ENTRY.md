@@ -1,85 +1,103 @@
 # LiveClipper Packaging Window Entry
 
-Use this document when opening a dedicated Codex window for packaging or update
-release work.
+本文件是打包窗口入口。发布政策以 docs/RELEASE_POLICY.md 和 release/release_policy.json 为准。
 
 ## Working Directory
 
-Use only:
+只能使用：
 
-C:\Users\周美彤\Documents\GitHub\LiveClipper
+    C:\Users\周美彤\Documents\GitHub\LiveClipper
 
-Do not package from C:\Users\周美彤\Documents\live clipper, old dist contents,
-or temporary workspaces.
+禁止从 C:\Users\周美彤\Documents\live clipper、旧 dist、临时目录或用户解压目录打包。
 
-## First Message For The Packaging Window
+## 必读文件
 
-~~~text
-这是 LiveClipper 打包专用窗口。目标：只负责 Runtime V3 全量基线、签名增量包、发布清单和发布验证。
+1. docs/RELEASE_POLICY.md
+2. docs/ARCHITECTURE_V3.md
+3. docs/RELEASE_PROCESS_V3.md
+4. release/release_policy.json
+5. release/baselines.json
+6. .project_docs/docs/SOURCE_OF_TRUTH.md
+7. .project_docs/docs/PACKAGING_WINDOW_RUNBOOK.md
+8. .project_docs/docs/UPGRADE_RELEASE_RUNBOOK.md
 
-先读取：
-1. docs\PACKAGING_WINDOW_ENTRY.md
-2. docs\ARCHITECTURE_V3.md
-3. docs\RELEASE_PROCESS_V3.md
-4. .project_docs\docs\SOURCE_OF_TRUTH.md
-5. .project_docs\docs\PACKAGING_WINDOW_RUNBOOK.md
-6. .project_docs\docs\UPGRADE_RELEASE_RUNBOOK.md
+## Mandatory Cross-Window Sync Gate
 
-不要假设其他窗口的修改已经包含进来。先检查 git status、git diff、未跟踪文件、
-app/version.json、release/stable.json、稳定启动器/更新器版本、现有正式基线和
-release_dist。远程通道必须保持 hold，直到目标设备完成全量包和增量更新验收。
-~~~
-
-## Mandatory Cross-Window Sync Check
-
-Run this before building or publishing:
+任何版本、清单、构建或发布操作前执行：
 
 ~~~powershell
-cd C:\Users\周美彤\Documents\GitHub\LiveClipper
-git status --short
+git status --short --branch
 git diff --stat
-Get-ChildItem release_dist -File |
+git diff
+git ls-files --others --exclude-standard -- app web_client tools vendor assets packaging docs release tests
+
+Get-ChildItem release_dist -File -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending |
-  Select-Object -First 10 Name,Length,LastWriteTime
+  Select-Object -First 20 Name,Length,LastWriteTime
 ~~~
 
-Rules:
+逐项记录：
 
-- Treat modified tracked files as possible release content.
-- Inspect untracked files under app, web_client, tools, vendor, assets,
-  packaging, and docs.
-- Do not ignore untracked files that runtime code references.
-- If a runtime file changes after app/version.json is generated, regenerate
-  the manifest.
-- A launcher, updater, trust-root, or runtime-layout change requires a new
-  full-package baseline.
-- A normal business-runtime release uses a signed direct V3 delta and must
-  contain zero stable-component payload files.
-- Every automatic patch has at least two signed direct HTTPS sources:
-  GitHub primary and Aliyun OSS fallback.
-- Never use an interactive share page as an automatic-download URL.
-- Publish release/stable.json last. Before that, keep channel_status=hold.
-- Do not open the channel until both a clean install and an exact
-  published-source delta pass on a separate Windows device.
+- 文件用途；
+- 完成状态；
+- 验证证据；
+- 是否进入本次版本；
+- 是否与其他窗口修改冲突。
+
+临时脚本、缓存、备份、密钥、本地配置、测试产物和用途不明文件不得纳入。不得使用 git add -A。
+
+## 状态核对
+
+同步门后必须同时核对：
+
+- app/version.json；
+- tools/runtime_v3_versions.py；
+- release/baselines.json；
+- release/stable.json；
+- release/candidates/<目标版本>/；
+- 当前正式全量 ZIP 和 SHA256；
+- GitHub patch Release 规格；
+- launcher、updater 和公钥 hash。
+
+先运行：
+
+~~~powershell
+python tools\release_preflight.py --phase development
+~~~
+
+开发状态允许 app/version.json 领先 stable.json，但必须明确报告。stable.json 绝不能领先 app/version.json。
+
+## 发布类型
+
+- launcher、updater、公钥、信任根、布局或安装状态格式变化：新全量基线，只通过百度网盘分发全量包。
+- 仅业务 runtime 变化：百度网盘全量修复包 + GitHub 签名 delta。
+- 单台电脑的本地配置或权限问题：先单机修复，不立即发布全体版本。
+
+GitHub Release 禁止上传全量 ZIP。自动补丁只使用 GitHub HTTPS Release URL，不再要求 OSS。
+
+## Channel Gate
+
+- 验收候选写入 release/candidates/<版本>/stable.hold.json。
+- 构建和验收期间不得改动 live release/stable.json。
+- 所有必需验收项写入 acceptance.json 且为 pass。
+- ready stable 必须最后单独生成、提交和推送。
+- 发布后核对远端 commit、GitHub 资产和 stable 签名内容。
 
 ## Required Final Report
 
-The packaging window final answer must include:
+最终报告必须包括：
 
-- package and patch paths;
-- version, build ID, launcher version, and updater version;
-- SHA256 and size for every artifact;
-- ZIP integrity and release security audit results;
-- extracted-package /api/runtime result;
-- polluted-AppData smoke result;
-- proof that no loose business .py files exist in the package;
-- direct-download verification for GitHub and OSS;
-- interruption/resume, fallback, activation, health, and rollback results;
-- signed channel status and proof that it was published last;
-- modified/untracked files considered;
-- untested areas.
+- 纳入和排除文件；
+- 版本、build ID、launcher 和 updater 版本；
+- 当前正式基线与线上 stable 版本；
+- 全量包和补丁路径、大小、SHA256；
+- 签名、ZIP 和安全审计；
+- 解压包真实 /api/runtime 和进程归属；
+- 干净/污染 AppData；
+- 精确基线更新、多版本链、中断恢复和回滚；
+- 百度网盘和 GitHub 重新下载验证；
+- acceptance.json 结果；
+- stable 最后发布的 commit；
+- 未测试和人工确认项。
 
-The authoritative architecture and release process are:
-
-- docs\ARCHITECTURE_V3.md
-- docs\RELEASE_PROCESS_V3.md
+没有这些证据时只能报告“候选未发布”，不能说“发布完成”。

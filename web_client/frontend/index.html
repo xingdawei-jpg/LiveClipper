@@ -319,27 +319,24 @@
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
               </div>
             </div>
+            <select id="sc-category" hidden aria-hidden="true" tabindex="-1">
+              <option>自动检测</option>
+              <option>食品/生鲜</option>
+              <option>食品饮料</option>
+              <option>美妆护肤</option>
+              <option>个护家清</option>
+              <option>家居百货</option>
+              <option>3C数码家电</option>
+              <option>母婴宠物</option>
+              <option>图书教育</option>
+              <option>运动户外</option>
+              <option>鲜花园艺</option>
+            </select>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="sc-category">AI主品类</label>
-                <select id="sc-category">
-                  <option>自动检测</option>
-                  <option>上衣</option>
-                  <option>裤子</option>
-                  <option>裙子</option>
-                  <option>外套</option>
-                  <option>套装</option>
-                  <option>鞋子</option>
-                  <option>食品/生鲜</option>
-                  <option>食品饮料</option>
-                  <option>美妆护肤</option>
-                  <option>个护家清</option>
-                  <option>家居百货</option>
-                  <option>3C数码家电</option>
-                  <option>母婴宠物</option>
-                  <option>图书教育</option>
-                  <option>运动户外</option>
-                  <option>鲜花园艺</option>
+                <label for="sc-secondary-category">二级类目</label>
+                <select id="sc-secondary-category">
+                  <option selected>自动识别</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -365,42 +362,14 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="sc-secondary-category">二级类目</label>
-                <select id="sc-secondary-category">
-                  <option selected>自动识别</option>
-                  <option>新鲜水果</option>
-                  <option>精选肉类</option>
-                  <option>冷饮冻食</option>
-                  <option>粮油速食</option>
-                  <option>传统滋补</option>
-                  <option>休闲零食</option>
-                  <option>彩妆香水</option>
-                  <option>化妆工具</option>
-                  <option>美容护肤</option>
-                  <option>个人护理</option>
-                  <option>家庭清洁</option>
-                  <option>女装</option>
-                  <option>男装</option>
-                  <option>女鞋</option>
-                  <option>箱包</option>
-                  <option>家纺好物</option>
-                  <option>家具家装</option>
-                  <option>家电好货</option>
-                  <option>影音智能</option>
-                  <option>手机</option>
-                  <option>大家电</option>
-                  <option>电脑办公</option>
-                  <option>户外旅行</option>
-                </select>
+                <label for="sc-leaf-category">细分类目</label>
+                <input id="sc-leaf-category" type="text" list="sc-leaf-category-list" placeholder="自动识别，可填写具体商品">
+                <datalist id="sc-leaf-category-list"></datalist>
               </div>
               <div class="field-row compact">
-                <label for="sc-leaf-category">细分类目</label>
-                <input id="sc-leaf-category" type="text" placeholder="自动识别，可填芒果/口红">
+                <label for="sc-main-product">主商品锁定</label>
+                <input id="sc-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
               </div>
-            </div>
-            <div class="field-row compact advanced-param">
-              <label for="sc-main-product">主商品锁定</label>
-              <input id="sc-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
@@ -550,50 +519,83 @@
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="mix-video-paths">清空</button>
               </div>
             </div>
-            <div class="video-picker-card video-picker-card-compact">
-              <div class="video-picker-empty">
-                <strong>点击“添加视频”选择素材</strong>
-                <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
+            <div class="mix-material-layout">
+              <div class="mix-material-body">
+                <aside class="mix-group-sidebar" aria-label="素材组">
+                  <div class="mix-group-sidebar-head">
+                    <div class="mix-group-sidebar-title">
+                      <strong>素材组</strong>
+                      <button class="icon-button mix-group-add" type="button" data-action="mix-new-group" title="新建素材组" aria-label="新建素材组">+</button>
+                    </div>
+                  </div>
+                  <div class="mix-group-list" id="mix-group-list"></div>
+                  <div class="mix-group-bulk-actions" id="mix-group-bulk-actions">
+                    <label class="mix-group-select-all">
+                      <input type="checkbox" data-action="mix-toggle-all-group-select" aria-label="全选素材组">
+                      <span>全选</span>
+                    </label>
+                    <span id="mix-group-bulk-summary">0/0</span>
+                    <button class="button button-danger button-small" type="button" data-action="mix-delete-selected-groups">删除</button>
+                  </div>
+                </aside>
+                <div class="mix-video-queue">
+                  <div class="mix-queue-header">
+                    <div class="mix-queue-title">
+                      <strong id="mix-active-group-name">当前素材组</strong>
+                      <span id="mix-active-group-meta">未选择素材组</span>
+                    </div>
+                  </div>
+                  <div class="video-picker-card video-picker-card-compact">
+                    <div class="video-picker-empty">
+                      <strong>点击“添加视频”选择素材</strong>
+                      <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
+                    </div>
+                    <div class="mix-video-list-head" aria-hidden="true">
+                      <span></span>
+                      <span>#</span>
+                      <span></span>
+                      <span>视频素材</span>
+                      <span>操作</span>
+                    </div>
+                    <div class="video-list video-list-compact" data-list-for="mix-video-paths"></div>
+                  </div>
+                </div>              </div>
+              <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
+              <div class="mix-material-footer">
+                <div class="mix-footer-settings">
+                  <div class="mix-footer-field mix-footer-category">
+                    <label for="mix-primary-category">一级类目</label>
+                    <select id="mix-primary-category" data-primary-category="mix">
+                      <option selected>服饰内衣</option>
+                      <option>生鲜</option>
+                      <option>食品饮料</option>
+                      <option>美妆</option>
+                      <option>个护家清</option>
+                      <option>鞋靴箱包</option>
+                      <option>钟表配饰</option>
+                      <option>母婴宠物</option>
+                      <option>图书教育</option>
+                      <option>智能家居</option>
+                      <option>3C数码家电</option>
+                      <option>运动户外</option>
+                      <option>鲜花园艺</option>
+                    </select>
+                  </div>
+                  <div class="mix-footer-field mix-footer-output">
+                    <label for="mix-output-dir">输出目录</label>
+                    <div class="input-with-button">
+                      <input id="mix-output-dir" type="text" placeholder="可留空，默认输出到第一个视频目录">
+                      <button class="button button-secondary" data-action="pick-directory" data-target="mix-output-dir">浏览</button>
+                      <button class="button button-muted" data-action="open-path" data-target="mix-output-dir">打开</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="panel-actions">
+                  <button class="button button-secondary" data-action="start-mix-preview">AI选片预览</button>
+                  <button class="button button-primary" data-action="feature-submit" data-feature="mix">开始混剪</button>
+                  <button class="button button-danger mix-stop-button" data-action="stop-scope" data-scope="mix">停止</button>
+                </div>
               </div>
-              <div class="video-list video-list-compact" data-list-for="mix-video-paths"></div>
-            </div>
-            <div class="mix-group-tools">
-              <button class="button button-secondary button-small" data-action="mix-save-group">保存当前组</button>
-              <button class="button button-secondary button-small" data-action="mix-new-group">新增组</button>
-              <button class="button button-muted button-small" data-action="mix-delete-group">删除组</button>
-            </div>
-            <div class="mix-group-list" id="mix-group-list"></div>
-            <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
-            <div class="field-row">
-              <label for="mix-output-dir">输出目录</label>
-              <div class="input-with-button">
-                <input id="mix-output-dir" type="text" placeholder="可留空，默认输出到第一个视频目录">
-                <button class="button button-secondary" data-action="pick-directory" data-target="mix-output-dir">浏览</button>
-                <button class="button button-muted" data-action="open-path" data-target="mix-output-dir">打开</button>
-              </div>
-            </div>
-            <div class="field-row">
-              <label for="mix-primary-category">一级类目</label>
-                <select id="mix-primary-category" data-primary-category="mix">
-                  <option selected>服饰内衣</option>
-                  <option>生鲜</option>
-                  <option>食品饮料</option>
-                  <option>美妆</option>
-                  <option>个护家清</option>
-                  <option>鞋靴箱包</option>
-                  <option>钟表配饰</option>
-                  <option>母婴宠物</option>
-                  <option>图书教育</option>
-                  <option>智能家居</option>
-                  <option>3C数码家电</option>
-                  <option>运动户外</option>
-                  <option>鲜花园艺</option>
-                </select>
-            </div>
-            <div class="panel-actions">
-              <button class="button button-danger" data-action="stop-scope" data-scope="mix">停止</button>
-              <button class="button button-secondary" data-action="start-mix-preview">AI选片预览</button>
-              <button class="button button-primary" data-action="feature-submit" data-feature="mix">开始混剪</button>
             </div>
           </section>
 
@@ -792,27 +794,24 @@
                 <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
               </div>
             </div>
+            <select id="mix-category" hidden aria-hidden="true" tabindex="-1">
+              <option>自动检测</option>
+              <option>食品/生鲜</option>
+              <option>食品饮料</option>
+              <option>美妆护肤</option>
+              <option>个护家清</option>
+              <option>家居百货</option>
+              <option>3C数码家电</option>
+              <option>母婴宠物</option>
+              <option>图书教育</option>
+              <option>运动户外</option>
+              <option>鲜花园艺</option>
+            </select>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="mix-category">AI主品类</label>
-                <select id="mix-category">
-                  <option>自动检测</option>
-                  <option>上衣</option>
-                  <option>裤子</option>
-                  <option>裙子</option>
-                  <option>外套</option>
-                  <option>套装</option>
-                  <option>鞋子</option>
-                  <option>食品/生鲜</option>
-                  <option>食品饮料</option>
-                  <option>美妆护肤</option>
-                  <option>个护家清</option>
-                  <option>家居百货</option>
-                  <option>3C数码家电</option>
-                  <option>母婴宠物</option>
-                  <option>图书教育</option>
-                  <option>运动户外</option>
-                  <option>鲜花园艺</option>
+                <label for="mix-secondary-category">二级类目</label>
+                <select id="mix-secondary-category">
+                  <option selected>自动识别</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -838,42 +837,14 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="mix-secondary-category">二级类目</label>
-                <select id="mix-secondary-category">
-                  <option selected>自动识别</option>
-                  <option>新鲜水果</option>
-                  <option>精选肉类</option>
-                  <option>冷饮冻食</option>
-                  <option>粮油速食</option>
-                  <option>传统滋补</option>
-                  <option>休闲零食</option>
-                  <option>彩妆香水</option>
-                  <option>化妆工具</option>
-                  <option>美容护肤</option>
-                  <option>个人护理</option>
-                  <option>家庭清洁</option>
-                  <option>女装</option>
-                  <option>男装</option>
-                  <option>女鞋</option>
-                  <option>箱包</option>
-                  <option>家纺好物</option>
-                  <option>家具家装</option>
-                  <option>家电好货</option>
-                  <option>影音智能</option>
-                  <option>手机</option>
-                  <option>大家电</option>
-                  <option>电脑办公</option>
-                  <option>户外旅行</option>
-                </select>
+                <label for="mix-leaf-category">细分类目</label>
+                <input id="mix-leaf-category" type="text" list="mix-leaf-category-list" placeholder="自动识别，可填写具体商品">
+                <datalist id="mix-leaf-category-list"></datalist>
               </div>
               <div class="field-row compact">
-                <label for="mix-leaf-category">细分类目</label>
-                <input id="mix-leaf-category" type="text" placeholder="自动识别，可填芒果/口红">
+                <label for="mix-main-product">主商品锁定</label>
+                <input id="mix-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
               </div>
-            </div>
-            <div class="field-row compact advanced-param">
-              <label for="mix-main-product">主商品锁定</label>
-              <input id="mix-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">

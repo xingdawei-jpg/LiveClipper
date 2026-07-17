@@ -741,6 +741,9 @@ def _get_fingerprints():
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
 _VERIFY_API_URL = "https://liveclinse-auth-cfofyfzuwg.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
+_VERIFY_REQUEST_TIMEOUT_SECONDS = 20
+_ACTIVATE_REQUEST_TIMEOUT_SECONDS = 35
+_ACTIVATION_RECOVERY_DELAY_SECONDS = 1.0
 
 
 # ========== Activation result cache (avoid blocking main thread) ==========
@@ -869,6 +872,20 @@ _OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
 _REVOKED_MARKER = ".revoked"  # 熔断标记文件名
 
 
+def _remote_http_error_result(exc):
+    """Keep a server-side rejection distinct from a transport failure."""
+    try:
+        raw = exc.read()
+        if raw:
+            result = json.loads(raw.decode("utf-8"))
+            _store_license_token_from_response(result)
+            if isinstance(result, dict):
+                return result
+    except Exception:
+        pass
+    return {"ok": False, "valid": False, "msg": f"授权服务返回 HTTP {getattr(exc, 'code', 'error')}"}
+
+
 def _verify_online(code, machine_id):
     """联网验证激活码（防盗2.0：调用阿里云FC API + 7组件指纹匹配）
     返回: {valid, expires, revoked, plan, msg} 或 None（网络失败）
@@ -886,10 +903,12 @@ def _verify_online(code, machine_id):
         })
         url = f"{_VERIFY_API_URL}/api/verify?{params}"
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=_VERIFY_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             _store_license_token_from_response(result)
             return result
+    except urllib.error.HTTPError as exc:
+        return _remote_http_error_result(exc)
     except Exception:
         return None  # 网络失败，走离线宽限
 
@@ -915,16 +934,18 @@ def _fc_activate(code, machine_id, result_info, expires_at):
         url = f"{_VERIFY_API_URL}/api/activate"
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=_ACTIVATE_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             _store_license_token_from_response(result)
             return result
+    except urllib.error.HTTPError as exc:
+        return _remote_http_error_result(exc)
     except Exception:
         return None
 
 
 def _server_result_ok(result):
-    return bool(isinstance(result, dict) and result.get("valid", result.get("ok", False)))
+    return bool(isinstance(result, dict) and result.get("valid", result.get("ok", result.get("success", False))))
 
 
 def _server_expires_at(result):
@@ -1285,6 +1306,7 @@ def activate_with_code(code):
     if server_result is None:
         # The server may finish writing Feishu after the activate request times out.
         # A follow-up verify recovers the signed token and avoids a false activation failure.
+        time.sleep(_ACTIVATION_RECOVERY_DELAY_SECONDS)
         verify_result = _verify_online(code, current_mid)
         if verify_result is not None:
             if verify_result.get("revoked"):
@@ -1301,7 +1323,7 @@ def activate_with_code(code):
             return {"ok": False, "msg": server_result.get("msg", "服务器激活失败")}
         _update_online_verify_time()
     elif not local_signature_verified:
-        return {"ok": False, "msg": "需要联网验证激活码，请联网后重试"}
+        return {"ok": False, "msg": "授权服务响应超时，请保持联网并稍等片刻后再试"}
 
     if _TOKEN_REQUIRED and not _token_activation_result(_load_cache()):
         verify_result = _verify_online(code, current_mid)

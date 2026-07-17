@@ -2344,6 +2344,73 @@ def _probe_video_info(path_value: str) -> dict[str, Any]:
     _VIDEO_INFO_CACHE[key] = dict(info)
     return info
 
+def _mix_video_thumbnail_key(path_value: str) -> str:
+    raw_path = (path_value or "").strip().strip('"')
+    if not raw_path:
+        return ""
+    try:
+        path = Path(raw_path)
+        stat = path.stat()
+        fingerprint = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|mix-thumbnail-v1"
+    except Exception:
+        return ""
+    return hashlib.sha256(fingerprint.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _mix_video_thumbnail_path(thumbnail_id: str) -> Path:
+    return _safe_user_child("cache", "mix_video_thumbnails", f"{thumbnail_id}.jpg")
+
+
+def _mix_video_thumbnail_url(path_value: str) -> str:
+    raw_path = (path_value or "").strip().strip('"')
+    thumbnail_id = _mix_video_thumbnail_key(raw_path)
+    if not thumbnail_id:
+        return ""
+    output = _mix_video_thumbnail_path(thumbnail_id)
+    if output.is_file() and output.stat().st_size > 0:
+        return f"/api/videos/thumbnail/{thumbnail_id}"
+    info = _probe_video_info(raw_path)
+    if not info.get("valid"):
+        return ""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f"{thumbnail_id}.{uuid.uuid4().hex}.tmp.jpg")
+    duration = max(0.2, float(info.get("duration") or 0.2))
+    seek_seconds = min(max(duration * 0.15, 0.2), max(0.2, duration - 0.2))
+    try:
+        proc = subprocess.run(
+            [
+                _ffmpeg_cmd(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{seek_seconds:.3f}",
+                "-i",
+                raw_path,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=160:-2",
+                "-q:v",
+                "4",
+                "-y",
+                str(temporary),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=25,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode == 0 and temporary.is_file() and temporary.stat().st_size > 0:
+            temporary.replace(output)
+            return f"/api/videos/thumbnail/{thumbnail_id}"
+    except Exception:
+        pass
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+    return ""
+
 
 def _probe_av_start_gap(path: Path) -> tuple[float, float, float, bool]:
     try:
@@ -4777,34 +4844,56 @@ def _payload_explicit_category(payload: Any) -> str:
     return "" if _is_auto_category_value(category) else category
 
 
-def _force_category_for_payload(payload: Any) -> str | None:
-    explicit = _payload_explicit_category(payload)
-    if explicit:
-        return explicit
+def _payload_primary_profile(payload: Any):
     primary = _payload_primary_category(payload)
     if _is_auto_category_value(primary):
         return None
-    profile = resolve_vertical_profile(primary)
-    if profile and profile.family == "clothing":
-        return None
+    return resolve_vertical_profile(primary)
+
+
+def _force_category_for_payload(payload: Any) -> str | None:
+    primary = _payload_primary_category(payload)
+    profile = _payload_primary_profile(payload)
+    # A selected first-level category wins over any stale/legacy `category`
+    # field. Otherwise an old apparel setting can force a beauty or fresh-food
+    # task back into the wrong vertical.
     if profile:
+        if profile.family == "clothing":
+            return None
         return profile.key
-    return primary or None
+    if _is_auto_category_value(primary):
+        return _payload_explicit_category(payload) or None
+    return primary or _payload_explicit_category(payload) or None
 
 
 def _preview_category_for_payload(payload: Any) -> str:
-    return _payload_explicit_category(payload) or _force_category_for_payload(payload) or _payload_primary_category(payload)
+    profile = _payload_primary_profile(payload)
+    if profile:
+        return profile.key
+    return _force_category_for_payload(payload) or _payload_explicit_category(payload) or _payload_primary_category(payload)
 
 
 def _preferred_category_for_payload(payload: Any, category_summary: dict[str, Any]) -> str:
-    return _payload_explicit_category(payload) or _force_category_for_payload(payload) or str((category_summary or {}).get("main_category") or "")
+    profile = _payload_primary_profile(payload)
+    if profile and profile.family != "clothing":
+        return profile.key
+    return _force_category_for_payload(payload) or str((category_summary or {}).get("main_category") or "")
 
 
 def _payload_ai_controls(payload: Any) -> dict[str, Any]:
     controls = dict(getattr(payload, "ai_controls", {}) or {})
     primary = _payload_primary_category(payload)
     if primary and not _is_auto_category_value(primary):
-        controls.setdefault("primary_category", primary)
+        controls["primary_category"] = primary
+        profile = _payload_primary_profile(payload)
+        secondary = str(controls.get("secondary_category", "") or "").strip()
+        secondary_profile = resolve_vertical_profile(secondary) if secondary and not _is_auto_category_value(secondary) else None
+        if profile and secondary_profile and secondary_profile.key != profile.key:
+            # Settings can be restored from an older task. Drop the entire
+            # child path when it belongs to another first-level category.
+            controls.pop("secondary_category", None)
+            controls.pop("leaf_category", None)
+            controls.pop("main_product", None)
     return controls
 
 
@@ -10309,7 +10398,17 @@ def save_settings(payload: SettingsPayload) -> dict[str, Any]:
     if _save_settings(data):
         emit_log("success", "设置已保存。", "settings")
         return {"ok": True, "message": "设置已保存"}
-    raise HTTPException(status_code=500, detail="璁剧疆淇濆瓨澶辫触")
+    try:
+        from ai_clipper import get_last_settings_save_error
+
+        reason = get_last_settings_save_error()
+    except Exception:
+        reason = ""
+    detail = "设置保存失败"
+    if reason:
+        detail = f"{detail}：{reason}"
+    emit_log("error", detail, "settings")
+    raise HTTPException(status_code=500, detail=detail)
 
 
 @app.get("/api/preferences")
@@ -10676,6 +10775,26 @@ def inspect_videos(payload: PathsPayload) -> dict[str, Any]:
         norm = str(info.get("path") or "").strip().strip('"').lower().replace("/", "\\")
         info["duplicate"] = bool(norm and seen.get(norm, 0) > 1)
     return {"ok": True, "items": infos}
+
+@app.post("/api/videos/thumbnails")
+def video_thumbnails(payload: PathsPayload) -> dict[str, Any]:
+    paths = [str(item or "").strip() for item in payload.paths if str(item or "").strip()]
+    items = []
+    for path in paths[:80]:
+        url = _mix_video_thumbnail_url(path)
+        if url:
+            items.append({"path": path, "url": url})
+    return {"ok": True, "items": items}
+
+
+@app.get("/api/videos/thumbnail/{thumbnail_id}")
+def get_video_thumbnail(thumbnail_id: str) -> FileResponse:
+    if not re.fullmatch(r"[0-9a-f]{64}", thumbnail_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid thumbnail id")
+    path = _mix_video_thumbnail_path(thumbnail_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 @app.post("/api/pip/inspect")

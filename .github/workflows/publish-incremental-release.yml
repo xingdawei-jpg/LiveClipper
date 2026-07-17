@@ -48,6 +48,16 @@ jobs:
               expected_size = asset.get("size")
               if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
                   raise SystemExit(f"Unsafe asset name: {name!r}")
+              if not (
+                  name.startswith("LiveClipperPatch_")
+                  and (
+                      name.endswith(".zip")
+                      or name.endswith(".zip.sha256.txt")
+                  )
+              ):
+                  raise SystemExit(
+                      f"GitHub automatic-update releases may contain patch assets only: {name}"
+                  )
               if name in names:
                   raise SystemExit(f"Duplicate asset name: {name}")
               names.add(name)
@@ -116,6 +126,7 @@ jobs:
           import hashlib
           import json
           import os
+          import zipfile
           from pathlib import Path
 
           tag = os.environ["RELEASE_TAG"]
@@ -151,4 +162,9 @@ jobs:
                       f"SHA256 mismatch for {path.name}: expected {expected_hash}, "
                       f"got {actual_hash}"
                   )
+              if path.suffix.lower() == ".zip":
+                  with zipfile.ZipFile(path) as archive:
+                      bad = archive.testzip()
+                  if bad:
+                      raise SystemExit(f"Corrupt ZIP entry in {path.name}: {bad}")
           PY

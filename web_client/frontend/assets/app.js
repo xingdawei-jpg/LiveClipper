@@ -14,6 +14,10 @@ const state = {
   legacyBatchProgress: {},
   mixGroups: [],
   activeMixGroupIndex: null,
+  mixGroupSelectionMode: false,
+  selectedMixGroupIndices: new Set(),
+  videoThumbnailByTarget: {},
+  videoThumbnailRequestKey: {},
   previewDrafts: {},
   previewDraftSaveTimers: {},
   previewDetailSelection: { smart: null, mix: null },
@@ -70,7 +74,9 @@ const state = {
 };
 
 
-const primaryCategoryToAiCategory = {
+// The top-level category is the only editable category state. This value is
+// derived for the backend so it cannot drift away from the visible selection.
+const primaryCategoryToBackendCategory = {
   "服饰内衣": "自动检测",
   "生鲜": "食品/生鲜",
   "食品饮料": "食品饮料",
@@ -276,6 +282,187 @@ const categoryAiProfiles = {
   },
 };
 
+Object.assign(categoryAiProfiles, {
+  "鞋靴箱包": {
+    preset_keys: [],
+    focus: ["自动", "上脚效果", "舒适体验", "鞋型修饰", "材质做工", "尺码适配", "容量收纳", "搭配场景", "耐用体验", "对比优势", "性价比"],
+    secondary: ["自动识别", "女鞋", "男鞋", "童鞋", "箱包"],
+    goal: ["自动", "场景种草", "专业讲解", "舒适转化", "快速促单"],
+    hook: ["自动", "上脚效果开头", "容量展示开头", "细节近景开头", "痛点开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "尺码引导", "场景收尾", "信任背书", "自然结束", "不要促单"],
+    selling: ["上脚效果", "舒适体验", "鞋型修饰", "材质做工", "尺码适配", "容量收纳", "搭配场景", "耐用体验", "对比优势", "性价比"],
+    avoid: ["尺码长段", "价格长段", "库存", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "上脚效果",
+    default_goal: "场景种草",
+    default_hook: "上脚效果开头",
+    default_ending: "场景收尾",
+    default_selling: ["上脚效果", "舒适体验", "材质做工", "搭配场景"],
+    default_avoid: ["尺码长段", "闲聊", "重复卖点"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：乐福鞋、软底、通勤、容量",
+  },
+  "钟表配饰": {
+    preset_keys: [],
+    focus: ["自动", "外观设计", "材质工艺", "佩戴效果", "功能参数", "尺寸规格", "品质细节", "适配场景", "送礼场景", "对比优势"],
+    secondary: ["自动识别", "钟表", "珠宝文玩", "流行首饰", "眼镜"],
+    goal: ["自动", "场景种草", "专业讲解", "质感高级", "快速促单"],
+    hook: ["自动", "佩戴效果开头", "细节近景开头", "参数亮点开头", "场景开头", "主播强推荐开头", "不强制Hook"],
+    ending: ["自动", "信任背书", "场景收尾", "使用方法", "自然结束", "不要促单"],
+    selling: ["外观设计", "材质工艺", "佩戴效果", "功能参数", "尺寸规格", "品质细节", "适配场景", "送礼场景", "对比优势"],
+    avoid: ["虚构材质", "绝对保值", "价格长段", "闲聊", "重复卖点", "跨商品混讲"],
+    default_focus: "佩戴效果",
+    default_goal: "质感高级",
+    default_hook: "佩戴效果开头",
+    default_ending: "信任背书",
+    default_selling: ["外观设计", "材质工艺", "佩戴效果", "适配场景"],
+    default_avoid: ["虚构材质", "绝对保值", "闲聊"],
+    custom_placeholder: "输入关键词，用逗号分隔，如：机械表、珍珠、通勤、送礼",
+  },
+});
+
+// The hierarchy follows the product-category structure supplied from the
+// Douyin product selection UI. The leaf values are suggestions, never a hard
+// whitelist, so a merchant can still type a new SKU or product name.
+const primaryCategoryTaxonomy = {
+  "服饰内衣": {
+    profile_key: "服饰内衣",
+    secondary: ["自动识别", "女装", "男装", "内衣"],
+    leaf_categories: {
+      "女装": ["套装", "西装", "大码女装", "女士T恤", "半身裙", "衬衫", "连衣裙", "裤子"],
+      "男装": ["Polo衫", "男士T恤", "牛仔裤", "衬衫", "套装", "卫裤", "短裤", "休闲裤"],
+      "内衣": ["文胸", "内裤", "家居服", "保暖内衣", "塑身衣", "睡衣", "袜子"],
+    },
+  },
+  "生鲜": {
+    profile_key: "食品/生鲜",
+    secondary: ["自动识别", "新鲜水果", "精选肉类", "水产海鲜", "蔬菜蛋品", "冷饮冻食", "预制菜", "农产品"],
+    leaf_categories: {
+      "新鲜水果": ["橙子", "更多水果", "芒果", "猕猴桃", "百香果", "桔/橘", "草莓", "火龙果", "苹果", "榴莲", "蟠桃", "水蜜桃"],
+      "精选肉类": ["牛肉类", "鸡肉类", "羊肉类", "更多肉类", "猪肉类", "鸭肉类"],
+      "水产海鲜": ["虾类", "蟹类", "贝类", "鱼类", "海参", "海味干货"],
+      "蔬菜蛋品": ["叶菜", "根茎", "菌菇", "玉米", "鸡蛋", "蔬菜组合"],
+      "冷饮冻食": ["包点/面点", "冻半成品", "冰淇淋", "冷冻水产"],
+      "预制菜": ["即烹菜", "加热即食", "调理肉", "汤羹"],
+      "农产品": ["杂粮干货", "农家特产", "食用菌", "山货"],
+    },
+  },
+  "食品饮料": {
+    profile_key: "食品饮料",
+    secondary: ["自动识别", "粮油速食", "传统滋补", "休闲零食", "饮料冲调", "方便速食", "酒水饮料"],
+    leaf_categories: {
+      "粮油速食": ["调味烘焙", "粮油米面", "方便速食", "干货其他"],
+      "传统滋补": ["阿胶", "养生原料", "枸杞", "养生茶", "燕窝", "食疗滋补", "蜂蜜", "参茸贵细"],
+      "休闲零食": ["海味零食", "肉类零食", "其他零食", "糕点点心", "坚果炒货", "糖巧果脯"],
+      "饮料冲调": ["咖啡", "茶饮", "冲泡饮品", "果汁", "乳饮", "气泡水"],
+      "方便速食": ["自热食品", "拌面米粉", "速食粥汤", "即食小吃"],
+      "酒水饮料": ["白酒", "葡萄酒", "啤酒", "低度酒", "饮料"],
+    },
+  },
+  "美妆": {
+    profile_key: "美妆护肤",
+    secondary: ["自动识别", "彩妆香水", "化妆工具", "美容护肤", "美发护发"],
+    leaf_categories: {
+      "彩妆香水": ["睫毛膏", "彩妆套装", "修容", "眉笔", "气垫", "口红", "粉底液", "眼影眼线", "香水", "隔离", "散粉", "腮红"],
+      "化妆工具": ["假睫毛", "化妆棉", "面扑/粉扑", "化妆刷", "修眉刀", "美容工具"],
+      "美容护肤": ["防晒", "洁面", "护肤套装", "精华", "面霜", "乳液", "面膜", "爽肤水"],
+      "美发护发": ["洗发水", "护发素", "发膜", "染发", "造型工具"],
+    },
+  },
+  "个护家清": {
+    profile_key: "个护家清",
+    secondary: ["自动识别", "个人护理", "家庭清洁"],
+    leaf_categories: {
+      "个人护理": ["卫生巾", "头发清洁", "口腔护理", "染发烫发", "足部护理", "身体护理", "身体清洁"],
+      "家庭清洁": ["衣物清洁", "家庭清洁", "驱虫用品", "纸品/湿巾"],
+    },
+  },
+  "鞋靴箱包": {
+    profile_key: "鞋靴箱包",
+    secondary: ["自动识别", "女鞋", "男鞋", "童鞋", "箱包"],
+    leaf_categories: {
+      "女鞋": ["低帮鞋", "女鞋配件", "靴子", "高跟鞋", "高帮鞋", "凉鞋", "帆布鞋", "拖鞋"],
+      "男鞋": ["休闲鞋", "皮鞋", "运动鞋", "凉鞋", "靴子"],
+      "童鞋": ["学步鞋", "运动鞋", "凉鞋", "棉鞋"],
+      "箱包": ["功能箱包", "男士包袋", "女士包袋", "旅行箱", "双肩包"],
+    },
+  },
+  "钟表配饰": {
+    profile_key: "钟表配饰",
+    secondary: ["自动识别", "钟表", "珠宝文玩", "流行首饰", "眼镜"],
+    leaf_categories: {
+      "钟表": ["机械表", "石英表", "智能手表", "表带"],
+      "珠宝文玩": ["黄金", "玉石", "珍珠", "文玩手串"],
+      "流行首饰": ["项链", "耳饰", "戒指", "手链"],
+      "眼镜": ["太阳镜", "防蓝光眼镜", "镜框", "隐形眼镜"],
+    },
+  },
+  "母婴宠物": {
+    profile_key: "母婴宠物",
+    secondary: ["自动识别", "母婴用品", "宝宝食品", "儿童用品", "宠物食品", "宠物用品"],
+    leaf_categories: {
+      "母婴用品": ["纸尿裤", "湿巾", "喂养用品", "孕产用品"],
+      "宝宝食品": ["奶粉", "辅食", "零食", "营养品"],
+      "儿童用品": ["童装", "玩具", "学习用品", "出行用品"],
+      "宠物食品": ["猫粮", "狗粮", "零食", "罐头"],
+      "宠物用品": ["猫砂", "清洁护理", "玩具", "牵引出行"],
+    },
+  },
+  "图书教育": {
+    profile_key: "图书教育",
+    secondary: ["自动识别", "图书", "教育音像", "学习用品"],
+    leaf_categories: {
+      "图书": ["知识服务", "童书", "小说", "教辅", "生活", "励志", "传记", "社会科学", "文学"],
+      "教育音像": ["教育音像", "课程资料"],
+      "学习用品": ["画具/画材", "文具", "书包"],
+    },
+  },
+  "智能家居": {
+    profile_key: "家居百货",
+    secondary: ["自动识别", "家纺好物", "家具家装", "家电好货", "家居优选", "餐厨优选"],
+    leaf_categories: {
+      "家纺好物": ["床上用品", "居家布艺"],
+      "家具家装": ["电子电工", "五金工具", "基础建材", "品质家具", "家装主材", "灯饰照明"],
+      "家电好货": ["个护健康", "厨房电器", "生活电器"],
+      "家居优选": ["收纳清洁", "居家日用", "家庭饰品"],
+      "餐厨优选": ["厨房工具", "餐具水具", "烹饪锅具"],
+    },
+  },
+  "3C数码家电": {
+    profile_key: "3C数码家电",
+    secondary: ["自动识别", "影音智能", "3C数码配件", "手机", "大家电", "电脑办公"],
+    leaf_categories: {
+      "影音智能": ["影音设备", "智能设备"],
+      "3C数码配件": ["数码配件", "充电配件", "支架"],
+      "手机": ["手机", "手机壳", "贴膜"],
+      "大家电": ["厨房大电", "空调", "热水器", "冰箱"],
+      "电脑办公": ["鼠标键盘", "显示器", "打印设备", "电脑配件"],
+    },
+  },
+  "运动户外": {
+    profile_key: "运动户外",
+    secondary: ["自动识别", "运动服饰", "健身训练", "户外旅行", "露营装备", "骑行用品", "球类用品"],
+    leaf_categories: {
+      "运动服饰": ["跑步服", "瑜伽服", "运动鞋", "防晒衣"],
+      "健身训练": ["哑铃", "拉力器", "健身器械", "护具"],
+      "户外旅行": ["户外照明", "垂钓装备", "饮水用具"],
+      "露营装备": ["帐篷", "睡袋", "桌椅", "炉具"],
+      "骑行用品": ["头盔", "骑行服", "车灯", "维修工具"],
+      "球类用品": ["篮球", "羽毛球", "乒乓球", "足球"],
+    },
+  },
+  "鲜花园艺": {
+    profile_key: "鲜花园艺",
+    secondary: ["自动识别", "鲜花花束", "绿植盆栽", "多肉花卉", "种子种苗", "园艺资材", "园艺工具"],
+    leaf_categories: {
+      "鲜花花束": ["玫瑰", "百合", "康乃馨", "节日花礼"],
+      "绿植盆栽": ["观叶植物", "开花盆栽", "盆景"],
+      "多肉花卉": ["多肉", "兰花", "球根花卉"],
+      "种子种苗": ["蔬菜种子", "花卉种子", "果树苗"],
+      "园艺资材": ["花盆", "营养土", "肥料", "营养液"],
+      "园艺工具": ["剪刀", "喷壶", "浇水器", "园艺套装"],
+    },
+  },
+};
+
 const autoCategoryValues = new Set(["", "自动", "自动检测", "自动识别", "auto"]);
 
 function isAutoCategoryValue(value) {
@@ -286,35 +473,30 @@ function primaryCategoryValue(prefix) {
   return $(`${prefix}-primary-category`)?.value || "服饰内衣";
 }
 
-function aiCategoryForPrimary(primary) {
-  return primaryCategoryToAiCategory[String(primary || "").trim()] || "自动检测";
+function backendCategoryForPrimary(primary) {
+  return primaryCategoryToBackendCategory[String(primary || "").trim()] || "自动检测";
 }
 
-const clothingAiCategoryValues = new Set(["自动检测", "服饰内衣", "上衣", "裤子", "裙子", "外套", "套装", "鞋子"]);
-
-function categoryAiProfileKey(category, primary) {
-  const categoryText = String(category || "").trim();
-  const primaryText = String(primary || "").trim();
-  const mapped = isAutoCategoryValue(categoryText) ? aiCategoryForPrimary(primaryText) : categoryText;
-  const value = isAutoCategoryValue(mapped) ? primaryText : mapped;
-  if (categoryAiProfiles[value]) return value;
-  if (clothingAiCategoryValues.has(value) || ["服饰内衣", "鞋靴箱包", "钟表配饰"].includes(primaryText)) return "服饰内衣";
-  if (value.includes("生鲜") || value.includes("水果") || value.includes("冷饮冻食") || value.includes("农产品")) return "食品/生鲜";
-  if (value.includes("食品") || value.includes("零食") || value.includes("饮料") || value.includes("粮油") || value.includes("滋补")) return "食品饮料";
-  if (value.includes("美妆") || value.includes("护肤") || value.includes("彩妆") || value.includes("香水")) return "美妆护肤";
-  if (value.includes("个护") || value.includes("家清") || value.includes("清洁") || value.includes("洗护")) return "个护家清";
-  if (value.includes("家居") || value.includes("百货") || value.includes("家具") || value.includes("家纺") || value.includes("餐厨")) return "家居百货";
-  if (value.includes("3C") || value.includes("数码") || value.includes("家电") || value.includes("手机") || value.includes("电脑")) return "3C数码家电";
-  if (value.includes("母婴") || value.includes("宠物")) return "母婴宠物";
-  if (value.includes("图书") || value.includes("教育") || value.includes("学习")) return "图书教育";
-  if (value.includes("运动") || value.includes("户外")) return "运动户外";
-  if (value.includes("鲜花") || value.includes("园艺") || value.includes("绿植")) return "鲜花园艺";
-  return "服饰内衣";
+function categoryAiProfileKey(primary) {
+  const taxonomy = primaryCategoryTaxonomy[String(primary || "").trim()];
+  return taxonomy?.profile_key || "服饰内衣";
 }
 
 function currentCategoryAiProfile(prefix) {
-  const key = categoryAiProfileKey($(`${prefix}-category`)?.value, primaryCategoryValue(prefix));
-  return { key, profile: categoryAiProfiles[key] || categoryAiProfiles["服饰内衣"] };
+  const primary = primaryCategoryValue(prefix);
+  const taxonomy = primaryCategoryTaxonomy[primary] || primaryCategoryTaxonomy["服饰内衣"];
+  const key = categoryAiProfileKey(primary);
+  const baseProfile = categoryAiProfiles[key] || categoryAiProfiles["服饰内衣"];
+  return {
+    key,
+    primary,
+    taxonomy,
+    profile: {
+      ...baseProfile,
+      secondary: taxonomy.secondary || baseProfile.secondary,
+      leaf_categories: taxonomy.leaf_categories || {},
+    },
+  };
 }
 
 function replaceSelectOptions(id, values, preferredValue) {
@@ -365,6 +547,27 @@ function refreshAiPresetVisibility(prefix, profile) {
   if (select.selectedOptions[0]?.disabled) select.value = "custom";
 }
 
+function refreshCategoryLeafSuggestions(prefix, profile, options = {}) {
+  const input = $(`${prefix}-leaf-category`);
+  const list = $(`${prefix}-leaf-category-list`);
+  const secondary = $(`${prefix}-secondary-category`)?.value || "自动识别";
+  const values = profile?.leaf_categories?.[secondary] || [];
+  if (list) {
+    list.textContent = "";
+    values.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      list.appendChild(option);
+    });
+  }
+  if (!input) return;
+  if (options.resetValue) input.value = "";
+  if (options.preferredValue !== undefined) input.value = options.preferredValue || "";
+  input.placeholder = values.length
+    ? `自动识别，可填${values.slice(0, 3).join("/")}`
+    : "自动识别，可填写具体商品";
+}
+
 function refreshCategoryAiControls(prefix, options = {}) {
   const { profile } = currentCategoryAiProfile(prefix);
   if (!profile) return;
@@ -377,7 +580,18 @@ function refreshCategoryAiControls(prefix, options = {}) {
   renderAiChipGroup(prefix, "selling", profile.selling, options.selectedSelling ?? (preferDefaults ? profile.default_selling : undefined));
   renderAiChipGroup(prefix, "avoid", profile.avoid, options.selectedAvoid ?? (preferDefaults ? profile.default_avoid : undefined));
   const customInput = $(`${prefix}-selling-custom`);
-  if (customInput && profile.custom_placeholder) customInput.placeholder = profile.custom_placeholder;
+  if (customInput && profile.custom_placeholder) {
+    customInput.placeholder = profile.custom_placeholder;
+    if (options.resetCustomSelling) customInput.value = "";
+  }
+  refreshCategoryLeafSuggestions(prefix, profile, {
+    preferredValue: options.preferredLeaf,
+    resetValue: Boolean(options.resetLeaf),
+  });
+  if (options.resetMainProduct) {
+    const mainProduct = $(`${prefix}-main-product`);
+    if (mainProduct) mainProduct.value = "";
+  }
   refreshAiPresetVisibility(prefix, profile);
   const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
   if (panel) updatePanelSummary(panel);
@@ -386,33 +600,35 @@ function refreshCategoryAiControls(prefix, options = {}) {
 function syncPrimaryCategory(prefix, options = {}) {
   const primary = primaryCategoryValue(prefix);
   const select = $(`${prefix}-category`);
-  if (!select) return;
-  const mapped = aiCategoryForPrimary(primary);
-  const canAutoUpdate = options.force || select.dataset.autoCategory === "1" || isAutoCategoryValue(select.value);
-  if (canAutoUpdate) {
-    setSelectIfPresent(`${prefix}-category`, mapped);
+  if (select) {
+    setSelectIfPresent(`${prefix}-category`, backendCategoryForPrimary(primary));
     select.dataset.autoCategory = "1";
   }
-  const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
-  if (panel) updatePanelSummary(panel);
+  const reset = Boolean(options.reset);
+  refreshCategoryAiControls(prefix, {
+    preferDefaults: reset,
+    resetLeaf: reset,
+    resetMainProduct: reset,
+    resetCustomSelling: reset,
+  });
 }
 
 function bindCategoryControls() {
   ["sc", "mix"].forEach((prefix) => {
     const primary = $(`${prefix}-primary-category`);
-    const category = $(`${prefix}-category`);
     if (primary) {
       primary.addEventListener("change", () => {
-        syncPrimaryCategory(prefix, { force: true });
+        syncPrimaryCategory(prefix, { reset: true });
       });
     }
-    if (category) {
-      category.dataset.autoCategory = isAutoCategoryValue(category.value) ? "1" : "0";
-      category.addEventListener("change", () => {
-        category.dataset.autoCategory = "0";
-        refreshCategoryAiControls(prefix, { preferDefaults: true });
-      });
-    }
+    $(`${prefix}-secondary-category`)?.addEventListener("change", () => {
+      const { profile } = currentCategoryAiProfile(prefix);
+      refreshCategoryLeafSuggestions(prefix, profile, { resetValue: true });
+      const mainProduct = $(`${prefix}-main-product`);
+      if (mainProduct) mainProduct.value = "";
+      const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
+      if (panel) updatePanelSummary(panel);
+    });
     syncPrimaryCategory(prefix);
   });
 }
@@ -507,7 +723,6 @@ const featurePreferenceGroups = {
       "sc-pip-pos",
       "sc-primary-category",
       "sc-ai-preset",
-      "sc-category",
       "sc-focus",
       "sc-secondary-category",
       "sc-leaf-category",
@@ -556,7 +771,6 @@ const featurePreferenceGroups = {
       "mix-pip-pos",
       "mix-primary-category",
       "mix-ai-preset",
-      "mix-category",
       "mix-focus",
       "mix-secondary-category",
       "mix-leaf-category",
@@ -1073,7 +1287,6 @@ function bindLiveRoomFilters() {
     renderLiveRooms();
   });
 }
-
 function bindActions() {
   document.body.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
@@ -1095,9 +1308,10 @@ function bindActions() {
       if (action === "clear-video-list") clearVideoList(target.dataset.target);
       if (action === "remove-video") removeVideoPath(target.dataset.target, Number(target.dataset.index));
       if (action === "move-video") moveVideoPath(target.dataset.target, Number(target.dataset.index), Number(target.dataset.direction));
-      if (action === "mix-save-group") saveCurrentMixGroup();
       if (action === "mix-new-group") newMixGroup();
-      if (action === "mix-delete-group") deleteActiveMixGroup();
+      if (action === "mix-toggle-group-select") toggleMixGroupSelection(Number(target.dataset.index), Boolean(target.checked));
+      if (action === "mix-toggle-all-group-select") toggleAllMixGroupSelection(Boolean(target.checked));
+      if (action === "mix-delete-selected-groups") deleteSelectedMixGroups();
       if (action === "mix-select-group") selectMixGroup(Number(target.dataset.index));
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-smart-from-preview") await startSmartFromPreview();
@@ -1282,7 +1496,7 @@ function bindAiPresetControls() {
   });
 
   ["sc", "mix"].forEach((prefix) => {
-    [`${prefix}-primary-category`, `${prefix}-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
+    [`${prefix}-primary-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
       $(id)?.addEventListener("change", () => markAiPresetCustom(prefix));
     });
     document.body.addEventListener("change", (event) => {
@@ -1340,15 +1554,11 @@ function applyAiPreset(prefix, presetKey) {
   const preset = allAiPresets()[presetKey];
   if (!preset) return;
   setSelectIfPresent(`${prefix}-primary-category`, preset.primary_category);
-  const categorySelect = $(`${prefix}-category`);
-  if (categorySelect && preset.category !== undefined) {
-    categorySelect.dataset.autoCategory = isAutoCategoryValue(preset.category) ? "1" : "0";
-  }
-  setSelectIfPresent(`${prefix}-category`, preset.category);
   syncPrimaryCategory(prefix);
   refreshCategoryAiControls(prefix, {
     preferredFocus: preset.focus,
     preferredSecondary: preset.secondary_category,
+    preferredLeaf: preset.leaf_category,
     preferredGoal: preset.goal,
     preferredHook: preset.hook,
     preferredEnding: preset.ending,
@@ -1387,7 +1597,7 @@ function collectCurrentAiPreset(prefix, label) {
   return {
     label,
     primary_category: $(`${prefix}-primary-category`)?.value || "服饰内衣",
-    category: $(`${prefix}-category`)?.value || "自动检测",
+    category: backendCategoryForPrimary(primaryCategoryValue(prefix)),
     secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
     leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
@@ -2424,7 +2634,8 @@ function updatePanelSummary(panel) {
   } else if (kind === "ai") {
     const preset = fieldText(`${prefix}-ai-preset`, "自定义");
     const primary = fieldText(`${prefix}-primary-category`, "");
-    const category = fieldText(`${prefix}-category`, "自动");
+    const secondary = fieldText(`${prefix}-secondary-category`, "自动识别");
+    const leaf = fieldText(`${prefix}-leaf-category`, "");
     const focus = fieldText(`${prefix}-focus`, "自动");
     const goal = fieldText(`${prefix}-goal`, "自动");
     const selling = selectedAiValues(`${prefix}-selling`);
@@ -2433,7 +2644,8 @@ function updatePanelSummary(panel) {
       selling.length ? `优先${selling.slice(0, 3).join("、")}` : "",
       avoid.length ? `排除${avoid.slice(0, 2).join("、")}` : "",
     ].filter(Boolean).join(" · ");
-    text = `${preset} · ${primary ? `${primary} · ` : ""}${category} · ${focus} · ${goal}${ruleText ? ` · ${ruleText}` : ""}`;
+    const categoryPath = [primary, secondary, leaf].filter(Boolean).join(" / ");
+    text = `${preset} · ${categoryPath || "自动识别"} · ${focus} · ${goal}${ruleText ? ` · ${ruleText}` : ""}`;
   }
   summary.textContent = text;
   button.textContent = panel.classList.contains("is-collapsed") ? "展开" : "收起";
@@ -3267,21 +3479,42 @@ async function loadLicense() {
   }
 }
 
+let licenseActivationInFlight = false;
+
 async function activateLicense() {
+  if (licenseActivationInFlight) {
+    toast("正在验证激活码，请不要重复点击", "warning");
+    return;
+  }
   const code = $("license-code").value.trim();
   if (!code) {
     toast("请先输入激活码", "warning");
     return;
   }
-  const result = await api("/api/license/activate", {
-    method: "POST",
-    body: JSON.stringify({ code }),
-  });
-  toast(result.message || "激活完成", result.ok ? "success" : "warning");
-  if (result.ok && result.restart_required) {
-    alert(result.message || "激活完成，请重启客户端后再使用。");
+  const button = document.querySelector("[data-action='activate-license']");
+  const label = button?.textContent || "激活";
+  licenseActivationInFlight = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在验证...";
   }
-  await loadLicense();
+  try {
+    const result = await api("/api/license/activate", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+    toast(result.message || "激活完成", result.ok ? "success" : "warning");
+    if (result.ok && result.restart_required) {
+      alert(result.message || "激活完成，请重启客户端后再使用。");
+    }
+    await loadLicense();
+  } finally {
+    licenseActivationInFlight = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
 }
 
 async function unbindDevice() {
@@ -3580,8 +3813,15 @@ function getLines(id) {
 function setLines(id, lines) {
   const textarea = $(id);
   if (!textarea) return;
-  textarea.value = lines.join("\n");
+  const isMixMaterial = id === "mix-video-paths";
+  const nextLines = Array.isArray(lines)
+    ? lines.map((line) => String(line || "").trim()).filter(Boolean)
+    : [];
+  if (isMixMaterial && nextLines.length) ensureActiveMixGroup();
+  textarea.value = nextLines.join("\n");
+  if (isMixMaterial) syncActiveMixGroupFromEditor();
   renderVideoList(id);
+  if (isMixMaterial) renderMixGroups();
 }
 
 function addVideoPaths(targetId, paths) {
@@ -3737,7 +3977,7 @@ function removeVideoPath(targetId, index) {
 function moveVideoPath(targetId, index, direction) {
   const lines = getLines(targetId);
   const to = index + direction;
-  if (!Number.isInteger(index) || !direction || index < 0 || to < 0 || index >= lines.length || to >= lines.length) return;
+  if (!Number.isInteger(index) || index < 0 || index >= lines.length || to < 0 || to >= lines.length) return;
   [lines[index], lines[to]] = [lines[to], lines[index]];
   setLines(targetId, lines);
 }
@@ -3749,7 +3989,7 @@ function clearVideoList(targetId) {
 function mixGroupName(paths = [], fallbackIndex = 0) {
   const first = String(paths[0] || "").split(/[\\/]/).filter(Boolean).pop() || "";
   const stem = first.replace(/\.[^.]+$/, "").trim();
-  return stem ? stem.slice(0, 28) : `第${fallbackIndex + 1}组`;
+  return stem ? stem.slice(0, 28) : `素材组 ${fallbackIndex + 1}`;
 }
 
 function normalizeMixGroup(group, index = 0) {
@@ -3760,64 +4000,97 @@ function normalizeMixGroup(group, index = 0) {
   return { name, video_paths: paths };
 }
 
+function isDefaultMixGroupName(name, index) {
+  return String(name || "").trim() === `素材组 ${index + 1}`;
+}
+
+function ensureActiveMixGroup() {
+  const index = state.activeMixGroupIndex;
+  if (Number.isInteger(index) && index >= 0 && index < state.mixGroups.length) return index;
+  const nextIndex = state.mixGroups.length;
+  state.mixGroups.push(normalizeMixGroup({ name: `素材组 ${nextIndex + 1}`, video_paths: [] }, nextIndex));
+  state.activeMixGroupIndex = nextIndex;
+  return nextIndex;
+}
+
+function selectedMixGroupIndexes() {
+  const existing = state.selectedMixGroupIndices instanceof Set ? state.selectedMixGroupIndices : new Set();
+  const valid = new Set(
+    [...existing].filter((index) => Number.isInteger(index) && index >= 0 && index < state.mixGroups.length),
+  );
+  state.selectedMixGroupIndices = valid;
+  return valid;
+}
+
+function resetMixGroupSelection() {
+  state.mixGroupSelectionMode = false;
+  state.selectedMixGroupIndices = new Set();
+}
+
+function toggleMixGroupSelection(index, checked) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) return;
+  const selected = selectedMixGroupIndexes();
+  const shouldSelect = typeof checked === "boolean" ? checked : !selected.has(index);
+  if (shouldSelect) selected.add(index);
+  else selected.delete(index);
+  state.mixGroupSelectionMode = selected.size > 0;
+  state.selectedMixGroupIndices = selected;
+  renderMixGroups();
+}
+
+function toggleAllMixGroupSelection(checked) {
+  state.mixGroupSelectionMode = Boolean(checked);
+  state.selectedMixGroupIndices = checked
+    ? new Set(state.mixGroups.map((_, index) => index))
+    : new Set();
+  renderMixGroups();
+}
+
 function syncActiveMixGroupFromEditor() {
   const index = state.activeMixGroupIndex;
   if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) return;
   const paths = getLines("mix-video-paths");
-  state.mixGroups[index] = normalizeMixGroup({ ...state.mixGroups[index], video_paths: paths }, index);
-}
-
-function saveCurrentMixGroup() {
-  const paths = getLines("mix-video-paths");
-  if (!paths.length) {
-    toast("当前组没有视频素材", "warning");
-    return;
-  }
-  const currentIndex = state.activeMixGroupIndex;
-  if (Number.isInteger(currentIndex) && currentIndex >= 0 && currentIndex < state.mixGroups.length) {
-    state.mixGroups[currentIndex] = normalizeMixGroup({ ...state.mixGroups[currentIndex], video_paths: paths }, currentIndex);
-    renderMixGroups();
-    toast(`已更新第 ${currentIndex + 1} 组`, "success");
-    return;
-  }
-  const nextIndex = state.mixGroups.length;
-  state.mixGroups.push(normalizeMixGroup({ video_paths: paths }, nextIndex));
-  state.activeMixGroupIndex = nextIndex;
-  renderMixGroups();
-  toast(`已保存第 ${nextIndex + 1} 组`, "success");
+  const current = state.mixGroups[index] || {};
+  const next = { ...current, video_paths: paths };
+  if (paths.length && isDefaultMixGroupName(current.name, index)) next.name = "";
+  state.mixGroups[index] = normalizeMixGroup(next, index);
 }
 
 function newMixGroup() {
-  const paths = getLines("mix-video-paths");
-  if (paths.length) {
-    if (Number.isInteger(state.activeMixGroupIndex) && state.activeMixGroupIndex >= 0 && state.activeMixGroupIndex < state.mixGroups.length) {
-      syncActiveMixGroupFromEditor();
-    } else {
-      state.mixGroups.push(normalizeMixGroup({ video_paths: paths }, state.mixGroups.length));
-    }
-  }
-  state.activeMixGroupIndex = null;
+  syncActiveMixGroupFromEditor();
+  const nextIndex = state.mixGroups.length;
+  state.mixGroups.push(normalizeMixGroup({ name: `素材组 ${nextIndex + 1}`, video_paths: [] }, nextIndex));
+  state.activeMixGroupIndex = nextIndex;
   setLines("mix-video-paths", []);
   renderMixGroups();
-  toast(`准备第 ${state.mixGroups.length + 1} 组`, "success");
+  toast(`已新建第 ${nextIndex + 1} 组`, "success");
 }
 
-function deleteActiveMixGroup() {
-  const index = state.activeMixGroupIndex;
-  if (!Number.isInteger(index) || index < 0 || index >= state.mixGroups.length) {
-    toast("请先选择要删除的组", "warning");
+function deleteSelectedMixGroups() {
+  const selected = [...selectedMixGroupIndexes()].sort((left, right) => left - right);
+  if (!selected.length) {
+    toast("请先勾选要删除的素材组", "warning");
     return;
   }
-  state.mixGroups.splice(index, 1);
+  if (typeof window !== "undefined" && !window.confirm("确认删除已选的 " + selected.length + " 个素材组吗？")) return;
+
+  syncActiveMixGroupFromEditor();
+  const activeGroup = Number.isInteger(state.activeMixGroupIndex) ? state.mixGroups[state.activeMixGroupIndex] : null;
+  const selectedSet = new Set(selected);
+  state.mixGroups = state.mixGroups.filter((_, index) => !selectedSet.has(index));
+
   if (state.mixGroups.length) {
-    state.activeMixGroupIndex = Math.min(index, state.mixGroups.length - 1);
+    const nextIndex = activeGroup ? state.mixGroups.indexOf(activeGroup) : -1;
+    state.activeMixGroupIndex = nextIndex >= 0 ? nextIndex : Math.min(selected[0], state.mixGroups.length - 1);
     setLines("mix-video-paths", state.mixGroups[state.activeMixGroupIndex].video_paths);
   } else {
     state.activeMixGroupIndex = null;
     setLines("mix-video-paths", []);
   }
+
+  resetMixGroupSelection();
   renderMixGroups();
-  toast("已删除当前组", "success");
+  toast("已删除 " + selected.length + " 个素材组", "success");
 }
 
 function selectMixGroup(index) {
@@ -3841,25 +4114,58 @@ function collectMixBatchGroups() {
 function renderMixGroups() {
   const box = $("mix-group-list");
   if (!box) return;
+  syncActiveMixGroupFromEditor();
   const groups = state.mixGroups.map((group, index) => normalizeMixGroup(group, index));
+  const selected = selectedMixGroupIndexes();
+  const activeIndex = state.activeMixGroupIndex;
+  const activeGroup = Number.isInteger(activeIndex) && activeIndex >= 0 && activeIndex < groups.length
+    ? groups[activeIndex]
+    : null;
+
+  const activeName = $("mix-active-group-name");
+  const activeMeta = $("mix-active-group-meta");
+  const bulkSummary = $("mix-group-bulk-summary");
+  const deleteSelected = document.querySelector('[data-action="mix-delete-selected-groups"]');
+  const selectAll = document.querySelector('[data-action="mix-toggle-all-group-select"]');
+  const sidebar = box.closest(".mix-group-sidebar");
+
+  if (activeName) activeName.textContent = activeGroup ? `第${activeIndex + 1}组 ${activeGroup.name}` : "当前素材组";
+  if (activeMeta) activeMeta.textContent = activeGroup ? `${activeGroup.video_paths.length}个素材` : "未选择素材组";
+  if (bulkSummary) bulkSummary.textContent = `${selected.size}/${groups.length}`;
+  if (deleteSelected) deleteSelected.disabled = selected.size === 0;
+  if (selectAll) {
+    selectAll.checked = groups.length > 0 && selected.size === groups.length;
+    selectAll.indeterminate = selected.size > 0 && selected.size < groups.length;
+    selectAll.disabled = groups.length === 0;
+  }
+  if (sidebar) sidebar.classList.toggle("is-selecting", Boolean(state.mixGroupSelectionMode));
+
   if (!groups.length) {
-    box.innerHTML = "";
     box.classList.add("is-empty");
+    box.innerHTML = '<div class="mix-group-empty">暂无素材组</div>';
     return;
   }
+
   box.classList.remove("is-empty");
   box.innerHTML = groups.map((group, index) => {
     const active = index === state.activeMixGroupIndex;
-    const title = `${group.name} · ${group.video_paths.length} 个视频`;
-    return `
-      <button class="mix-group-chip ${active ? "is-active" : ""}" type="button" data-action="mix-select-group" data-index="${index}" title="${escapeHtml(title)}">
-        <strong>${index + 1}</strong>
-        <span>${escapeHtml(group.name)}</span>
-        <em>${group.video_paths.length}个</em>
-      </button>`;
+    const selectedForDelete = selected.has(index);
+    const title = group.name + " · " + group.video_paths.length + " 个素材";
+    const classes = ["mix-group-row", active ? "is-active" : "", selectedForDelete ? "is-selected" : ""].filter(Boolean).join(" ");
+    return [
+      '<div class="' + classes + '">',
+      '<button class="mix-group-row-main" type="button" data-action="mix-select-group" data-index="' + index + '" title="' + escapeHtml(title) + '">',
+      '<strong>' + (index + 1) + '组</strong>',
+      '<span>' + escapeHtml(group.name) + '</span>',
+      '<em>' + group.video_paths.length + '</em>',
+      '</button>',
+      '<label class="mix-group-row-check" title="选择第' + (index + 1) + '组">',
+      '<input type="checkbox" data-action="mix-toggle-group-select" data-index="' + index + '" aria-label="选择第' + (index + 1) + '组" ' + (selectedForDelete ? "checked" : "") + '>',
+      '</label>',
+      '</div>',
+    ].join("");
   }).join("");
 }
-
 function normalizeVideoPath(path) {
   return String(path || "").trim().replace(/\//g, "\\").toLowerCase();
 }
@@ -3867,7 +4173,39 @@ function normalizeVideoPath(path) {
 function videoInfoMap(targetId) {
   return state.videoInfoByTarget[targetId] || {};
 }
+function videoThumbnailMap(targetId) {
+  return state.videoThumbnailByTarget[targetId] || {};
+}
 
+async function inspectVideoThumbnails(targetId, lines) {
+  if (targetId !== "mix-video-paths") return;
+  const key = lines.map(normalizeVideoPath).join("\n");
+  if (!key) {
+    state.videoThumbnailByTarget[targetId] = {};
+    state.videoThumbnailRequestKey[targetId] = "";
+    return;
+  }
+  if (state.videoThumbnailRequestKey[targetId] === key) return;
+  state.videoThumbnailRequestKey[targetId] = key;
+  try {
+    const result = await api("/api/videos/thumbnails", {
+      method: "POST",
+      body: JSON.stringify({ paths: lines }),
+    });
+    const thumbnailMap = {};
+    (result.items || []).forEach((item) => {
+      if (!item?.path || !item?.url) return;
+      thumbnailMap[item.path] = item.url;
+      thumbnailMap[normalizeVideoPath(item.path)] = item.url;
+    });
+    state.videoThumbnailByTarget[targetId] = thumbnailMap;
+    if (state.videoThumbnailRequestKey[targetId] === key && getLines(targetId).map(normalizeVideoPath).join("\n") === key) {
+      renderVideoList(targetId);
+    }
+  } catch (error) {
+    state.videoThumbnailByTarget[targetId] = {};
+  }
+}
 function videoListDuplicateMap(lines) {
   const pathCounts = new Map();
   const nameCounts = new Map();
@@ -3907,6 +4245,7 @@ function renderVideoList(targetId) {
   updateVideoCountBadge(targetId, lines.length);
   box.closest(".video-picker-card")?.classList.toggle("has-videos", lines.length > 0);
   const infoMap = videoInfoMap(targetId);
+  const thumbnailMap = videoThumbnailMap(targetId);
   const duplicateMap = videoListDuplicateMap(lines);
   box.innerHTML = lines.map((path, index) => {
     const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
@@ -3922,7 +4261,23 @@ function renderVideoList(targetId) {
       isInvalid ? `<span class="video-badge is-invalid">无效</span>` : "",
       isDuplicate ? `<span class="video-badge is-duplicate">重复</span>` : "",
     ].join("");
-    if (isCompact) {
+    if (targetId === "mix-video-paths") {
+      const thumbnailUrl = thumbnailMap[path] || thumbnailMap[normalizeVideoPath(path)] || "";
+      const thumbnail = thumbnailUrl
+        ? `<img class="mix-video-thumb" src="${escapeHtml(thumbnailUrl)}" alt="" loading="lazy">`
+        : '<span class="mix-video-thumb mix-video-thumb-loading" aria-label="正在生成缩略图"></span>';
+      return `
+        <div class="${rowClass} mix-video-row" draggable="true" data-video-row="${targetId}" data-index="${index}">
+          <div class="video-drag" title="拖拽排序">&#8801;</div>
+          <span class="mix-video-index">${index + 1}</span>
+          <div class="mix-video-thumb-wrap">${thumbnail}</div>
+          <div class="video-main">
+            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}</div>
+            <span class="video-meta">${escapeHtml(compactVideoMetaText(info))}</span>
+          </div>
+          <button class="video-remove" type="button" aria-label="删除 ${escapeHtml(name)}" data-action="remove-video" data-target="${targetId}" data-index="${index}">&times;</button>
+        </div>`;
+    }    if (isCompact) {
       return `
         <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
           <div class="video-drag" title="拖拽排序">≡</div>
@@ -3950,6 +4305,7 @@ function renderVideoList(targetId) {
   }).join("");
   bindVideoRowDrag(box, targetId);
   inspectVideoList(targetId, lines);
+  inspectVideoThumbnails(targetId, lines);
   syncFlowActionState();
 }
 
@@ -4127,7 +4483,7 @@ function collectAiControls(prefix) {
     selling = selling.concat(customWords);
   }
   return {
-    primary_category: $(`${prefix}-primary-category`)?.value || "服饰内衣",
+    primary_category: primaryCategoryValue(prefix),
     secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
     leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
@@ -4233,12 +4589,13 @@ function collectSmartPayload(options = {}) {
   if (requireVideos && !videoPaths.length) {
     throw new Error("请先填写视频路径");
   }
+  const primaryCategory = primaryCategoryValue("sc");
   return {
     video_paths: videoPaths,
     srt_path: $("srt-path").value.trim(),
     output_dir: $("output-dir").value.trim(),
-    primary_category: $("sc-primary-category").value,
-    category: $("sc-category").value,
+    primary_category: primaryCategory,
+    category: backendCategoryForPrimary(primaryCategory),
     focus_hint: $("sc-focus").value,
     ai_controls: collectAiControls("sc"),
     target_duration: Number($("sc-duration").value || 60),
@@ -6611,11 +6968,12 @@ function formatSeconds(value) {
 
 function collectFeaturePayload(feature) {
   if (feature === "mix") {
+    const primaryCategory = primaryCategoryValue("mix");
     return {
       video_paths: getLines("mix-video-paths"),
       output_dir: $("mix-output-dir").value.trim(),
-      primary_category: $("mix-primary-category").value,
-      category: $("mix-category").value,
+      primary_category: primaryCategory,
+      category: backendCategoryForPrimary(primaryCategory),
       versions: Number($("mix-versions").value || 1),
       duration: Number($("mix-duration").value || 60),
       focus_hint: $("mix-focus").value,

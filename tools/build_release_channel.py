@@ -22,7 +22,62 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "app" / "version.json"
 CHANNEL_FILE = ROOT / "release" / "stable.json"
 PUBLIC_KEY_FILE = ROOT / "app" / "release_update_public_key.pem"
+RELEASE_POLICY_FILE = ROOT / "release" / "release_policy.json"
 GITHUB_REPO = "xingdawei-jpg/LiveClipper"
+
+
+def _release_policy() -> dict:
+    data = json.loads(RELEASE_POLICY_FILE.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("release policy root must be an object")
+    return data
+
+
+def _validate_distribution_policy(
+    package_url: str,
+    patches: list[dict],
+    policy: dict,
+) -> None:
+    distribution = policy.get("distribution") if isinstance(policy.get("distribution"), dict) else {}
+    full_policy = (
+        distribution.get("full_package")
+        if isinstance(distribution.get("full_package"), dict)
+        else {}
+    )
+    patch_policy = (
+        distribution.get("automatic_patch")
+        if isinstance(distribution.get("automatic_patch"), dict)
+        else {}
+    )
+    if package_url:
+        parsed = urllib.parse.urlparse(package_url)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise ValueError("full-package URL must use HTTPS")
+        if (
+            parsed.hostname == "github.com"
+            and full_policy.get("publish_to_github_releases") is False
+        ):
+            raise ValueError("full packages must use Baidu Netdisk, not GitHub Releases")
+        allowed_full_hosts = set(full_policy.get("share_url_hosts") or [])
+        if parsed.hostname not in allowed_full_hosts:
+            raise ValueError(
+                f"full-package host is not allowed by release policy: {parsed.hostname}"
+            )
+
+    allowed_hosts = set(patch_policy.get("manifest_url_hosts") or [])
+    minimum_sources = int(patch_policy.get("minimum_sources") or 0)
+    for patch in patches:
+        sources = patch.get("sources") if isinstance(patch.get("sources"), list) else []
+        if len(sources) != minimum_sources:
+            raise ValueError(
+                f"patch {patch.get('filename')} must have exactly {minimum_sources} source"
+            )
+        for source in sources:
+            parsed = urllib.parse.urlparse(str(source.get("url") or ""))
+            if parsed.hostname not in allowed_hosts:
+                raise ValueError(
+                    f"patch source host is not allowed by release policy: {parsed.hostname}"
+                )
 
 
 def _download_sources(urls: list[str]) -> list[dict[str, str]]:
@@ -79,22 +134,17 @@ def main() -> int:
     parser.add_argument("--url", default="")
     parser.add_argument("--patch", type=Path, action="append", default=[])
     parser.add_argument("--patch-url", action="append", default=[])
-    parser.add_argument(
-        "--patch-mirror",
-        action="append",
-        default=[],
-        metavar="PATCH_FILENAME=HTTPS_URL",
-    )
+
     parser.add_argument(
         "--channel-status",
-        choices=("auto", "ready", "hold", "awaiting-external-distribution"),
-        default="auto",
+        choices=("hold", "awaiting-external-distribution"),
+        default="hold",
     )
     parser.add_argument("--bridge-url", default="")
     parser.add_argument("--max-chain-depth", type=int, default=8)
     parser.add_argument("--rollup-after-versions", type=int, default=2)
     parser.add_argument("--private-key", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=CHANNEL_FILE)
+    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     package = args.package.resolve()
@@ -113,14 +163,6 @@ def main() -> int:
         if package_url.startswith("https://github.com/")
         else ""
     )
-    mirrors: dict[str, list[str]] = {}
-    for value in args.patch_mirror:
-        filename, separator, url = str(value).partition("=")
-        filename = filename.strip()
-        url = url.strip()
-        if not separator or not filename or not url:
-            parser.error("--patch-mirror must be PATCH_FILENAME=HTTPS_URL")
-        mirrors.setdefault(filename, []).append(url)
 
     patches = []
     try:
@@ -129,7 +171,7 @@ def main() -> int:
             patches.append(
                 _patch_record(
                     resolved,
-                    [url, *mirrors.get(resolved.name, [])],
+                    [url],
                 )
             )
     except ValueError as exc:
@@ -140,16 +182,19 @@ def main() -> int:
                 f"patch target {patch['to_version']} does not match channel version {version}"
             )
 
-    if args.channel_status == "auto":
-        channel_status = (
-            "ready"
-            if package_url or patches
-            else "awaiting-external-distribution"
-        )
-    else:
-        channel_status = args.channel_status
-    published_patches = patches if channel_status == "ready" else []
-    incremental_ready = channel_status == "ready" and bool(published_patches)
+    channel_status = args.channel_status
+    output = args.output.resolve()
+    candidate_root = (ROOT / "release" / "candidates").resolve()
+    try:
+        output.relative_to(candidate_root)
+    except ValueError:
+        parser.error("candidate manifests must be written under release/candidates")
+
+    try:
+        _validate_distribution_policy(package_url, patches, _release_policy())
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
+    incremental_ready = False
 
     manifest = {
         "schema_version": 3,
@@ -168,7 +213,7 @@ def main() -> int:
         ),
         "supports_incremental_updates": incremental_ready,
         "requires_full_package": not incremental_ready,
-        "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用完整包。",
+        "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
         "release_notes": runtime.get("release_notes") or "",
         "force_update": bool(runtime.get("force_update", False)),
         "release_page_url": release_page,
@@ -185,11 +230,10 @@ def main() -> int:
             "size": package.stat().st_size,
             "filename": package.name,
         },
-        "patches": published_patches,
+        "patches": patches,
         "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     signed = sign_manifest(manifest, args.private_key.resolve())
-    output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(signed, ensure_ascii=False, indent=2) + "\n",
@@ -198,7 +242,7 @@ def main() -> int:
     print(f"wrote {output}")
     print(
         f"package_sha256={signed['package']['sha256']} "
-        f"size={signed['package']['size']} patches={len(published_patches)} "
+        f"size={signed['package']['size']} patches={len(patches)} "
         f"status={channel_status}"
     )
     return 0
