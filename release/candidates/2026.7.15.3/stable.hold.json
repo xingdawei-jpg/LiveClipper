@@ -1,0 +1,83 @@
+{
+  "schema_version": 3,
+  "channel": "stable",
+  "channel_status": "hold",
+  "version": "2026.7.15.3",
+  "latest_version": "2026.7.15.3",
+  "runtime_layout_version": 3,
+  "minimum_runtime_layout_version": 2,
+  "minimum_launcher_version": "1.1.0",
+  "minimum_updater_version": "1.3.0",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "没有匹配当前版本的签名补丁时，请使用百度网盘完整包。",
+  "release_notes": "新增智能成片与混剪成片时长容差选择；修复仅超出零点几秒即判失败；混剪来源配额补足失败后降级告警并继续成片；批量混剪单组失败后继续处理后续素材组。",
+  "force_update": false,
+  "release_page_url": "",
+  "bridge_url": "",
+  "patch_policy": {
+    "graph_version": 1,
+    "max_chain_depth": 8,
+    "rollup_after_versions": 2
+  },
+  "package": {
+    "format": "zip",
+    "url": "",
+    "sha256": "85E77FB114A639BCBA05486E01948AF344DF18C6A35C519E194EAB877EC5A029",
+    "size": 581664718,
+    "filename": "LiveClipperWeb_2026.7.15.3_full_v3_20260717_wv2_ffmpeg.zip"
+  },
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.2",
+      "to_version": "2026.7.15.3",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+        }
+      ],
+      "sha256": "34E6F8C5041286B3500A020E0855F83F12188872C875FF04A7B1FA7CC20C3A32",
+      "size": 17311596,
+      "filename": "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "runtime_payload_files": 5,
+      "stable_payload_files": 0
+    },
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.1",
+      "to_version": "2026.7.15.3",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+        }
+      ],
+      "sha256": "05C88040DD87A84F850952FEAB6614F63720EF9D6ABDE0587AD3245BC9714E5F",
+      "size": 17377122,
+      "filename": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "runtime_payload_files": 11,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-17 23:19:27",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "e489293f17704e2f",
+    "value": "P/NpcxDruCA85byZRZpDKhntGYEvbx1IONKEBmaE6J9EnwF7wJgL8JqZ2eNfweRJjI0XzBvu9FN30uuHyl6LBQ=="
+  }
+}

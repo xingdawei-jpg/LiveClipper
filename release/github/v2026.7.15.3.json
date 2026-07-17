@@ -1,0 +1,31 @@
+{
+  "tag": "v2026.7.15.3",
+  "title": "LiveClipper 2026.7.15.3",
+  "notes": "Signed Runtime V3 incremental updates from 2026.7.15.2 and 2026.7.15.1 to 2026.7.15.3.\n\n- Add selectable duration tolerance for smart clipping and mix editing.\n- Treat sub-second duration overruns within the acceptance margin as warnings instead of failed output.\n- Continue rendering when mix source-quota repair is exhausted, with a visible warning.\n- Continue later material groups when one batch mix group fails.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
+  "assets": [
+    {
+      "name": "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "sha256": "34E6F8C5041286B3500A020E0855F83F12188872C875FF04A7B1FA7CC20C3A32",
+      "size": 17311596
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip.sha256.txt",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip.sha256.txt",
+      "sha256": "A5AD76C022C0CC57D84842BFCD56AC5BFA3274F0774391AB8197F5450BDA7EF9",
+      "size": 129
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "sha256": "05C88040DD87A84F850952FEAB6614F63720EF9D6ABDE0587AD3245BC9714E5F",
+      "size": 17377122
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip.sha256.txt",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip.sha256.txt",
+      "sha256": "FB47A5A48C5C1500ACD57E9068FC1525F914303FFDA23E99A645D4804F413FF0",
+      "size": 129
+    }
+  ]
+}
