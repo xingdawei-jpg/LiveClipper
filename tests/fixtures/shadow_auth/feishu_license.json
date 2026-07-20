@@ -1,0 +1,28 @@
+[
+  {
+    "locator": "record:rec_active",
+    "payload": {
+      "record_id": "rec_active",
+      "fields": {
+        "激活码": "01AB-0000-0000-0001",
+        "状态": "已激活",
+        "设备ID": "fixture-machine-a",
+        "激活日期": 1760000000000,
+        "到期日期": 1762592000000
+      }
+    }
+  },
+  {
+    "locator": "record:rec_lifetime",
+    "payload": {
+      "record_id": "rec_lifetime",
+      "fields": {
+        "激活码": "04AB-0000-0000-0002",
+        "状态": "已激活",
+        "设备ID": "fixture-machine-b",
+        "激活日期": 1760000000000,
+        "到期日期": 9999999999999
+      }
+    }
+  }
+]

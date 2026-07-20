@@ -1,0 +1,16 @@
+[
+  {
+    "locator": "payments/LCfixture0001.json",
+    "payload": {
+      "order_no": "LCfixture0001",
+      "transaction_id": "420000000000fixture0001",
+      "code": "01ab000000000001",
+      "openid": "fixture-openid",
+      "amount_fen": 9900,
+      "plan": "01",
+      "plan_name": "monthly",
+      "status": "done",
+      "created_at": "2026-07-16T00:00:00+00:00"
+    }
+  }
+]

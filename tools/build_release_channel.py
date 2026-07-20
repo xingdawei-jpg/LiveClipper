@@ -128,6 +128,82 @@ def _patch_record(path: Path, urls: list[str]) -> dict:
     }
 
 
+def _patch_edge(patch: dict) -> tuple[str, str]:
+    return (
+        str(patch.get("from_version") or "").strip(),
+        str(patch.get("to_version") or "").strip(),
+    )
+
+
+def _validate_patch_graph(patches: list[dict], target_version: str) -> None:
+    target = str(target_version or "").strip()
+    if not target:
+        raise ValueError("channel target version is missing")
+    edges: set[tuple[str, str]] = set()
+    graph: dict[str, set[str]] = {}
+    for patch in patches:
+        if not isinstance(patch, dict):
+            raise ValueError("patch record is not an object")
+        source, destination = _patch_edge(patch)
+        if not source or not destination or source == destination:
+            raise ValueError(f"invalid patch edge: {(source, destination)}")
+        if (source, destination) in edges:
+            raise ValueError(f"duplicate patch edge: {(source, destination)}")
+        if int(patch.get("stable_payload_files") or 0) != 0:
+            raise ValueError(f"patch contains stable payload: {(source, destination)}")
+        edges.add((source, destination))
+        graph.setdefault(source, set()).add(destination)
+
+    def reaches_target(start: str) -> bool:
+        pending = [start]
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == target:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(graph.get(current, ()))
+        return False
+
+    stranded = sorted(source for source in graph if not reaches_target(source))
+    if stranded:
+        raise ValueError(
+            "patch graph has no route to channel target "
+            f"{target}: {', '.join(stranded)}"
+        )
+
+
+def _load_retained_patches(channel_path: Path) -> list[dict]:
+    source = channel_path.resolve()
+    previous = json.loads(source.read_text(encoding="utf-8-sig"))
+    if not isinstance(previous, dict):
+        raise ValueError(f"retained channel is not an object: {source}")
+    verify_manifest(previous, PUBLIC_KEY_FILE)
+    if str(previous.get("channel") or "") != "stable":
+        raise ValueError(f"retained channel is not stable: {source}")
+    patches = previous.get("patches")
+    if not isinstance(patches, list):
+        raise ValueError(f"retained channel patches are not a list: {source}")
+    retained: list[dict] = []
+    for patch in patches:
+        if not isinstance(patch, dict):
+            raise ValueError(f"retained channel patch is not an object: {source}")
+        retained.append(dict(patch))
+    return retained
+
+
+def _merge_patch_graph(
+    retained_patches: list[dict],
+    new_patches: list[dict],
+    target_version: str,
+) -> list[dict]:
+    patches = [*(dict(patch) for patch in retained_patches), *new_patches]
+    _validate_patch_graph(patches, target_version)
+    return patches
+
+
 def _resolve_release_type(value: str, patch_count: int) -> str:
     release_type = str(value or "").strip()
     if not release_type:
@@ -166,6 +242,7 @@ def main() -> int:
     parser.add_argument("--url", default="")
     parser.add_argument("--patch", type=Path, action="append", default=[])
     parser.add_argument("--patch-url", action="append", default=[])
+    parser.add_argument("--retain-patches-from", type=Path)
 
     parser.add_argument(
         "--channel-status",
@@ -203,11 +280,11 @@ def main() -> int:
     package_url = args.url
     release_page = ""
 
-    patches = []
+    new_patches = []
     try:
         for path, url in zip(args.patch, args.patch_url, strict=True):
             resolved = path.resolve()
-            patches.append(
+            new_patches.append(
                 _patch_record(
                     resolved,
                     [url],
@@ -215,11 +292,20 @@ def main() -> int:
             )
     except ValueError as exc:
         parser.error(str(exc))
-    for patch in patches:
+    for patch in new_patches:
         if patch["to_version"] != version:
             parser.error(
                 f"patch target {patch['to_version']} does not match channel version {version}"
             )
+    try:
+        retained_patches = (
+            _load_retained_patches(args.retain_patches_from)
+            if args.retain_patches_from
+            else []
+        )
+        patches = _merge_patch_graph(retained_patches, new_patches, version)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
 
     channel_status = args.channel_status
     output = args.output.resolve()

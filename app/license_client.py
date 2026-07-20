@@ -189,6 +189,7 @@ def _load_license_code():
         return None
 
 
+
 def _token_activation_result(cache=None):
     cache = cache or _load_cache() or {}
     token = cache.get("license_token", "")
@@ -199,6 +200,26 @@ def _token_activation_result(cache=None):
 
         verified = verify_license_token(token, machine_id=_license_machine_id(cache))
         if not verified.get("ok"):
+            reason = str(verified.get("reason") or "").strip()
+            reason_lower = reason.lower()
+            if "offline window expired" in reason_lower:
+                return {
+                    "need_activate": True,
+                    "reason": "本地授权已超过离线宽限期，请联网验证",
+                    "token_verified": False,
+                }
+            if "machine mismatch" in reason_lower:
+                return {
+                    "need_activate": True,
+                    "reason": "当前设备与授权设备不匹配，请联网处理",
+                    "token_verified": False,
+                }
+            if "expired" in reason_lower:
+                return {
+                    "need_activate": True,
+                    "reason": "本地授权已过期，请联网验证",
+                    "token_verified": False,
+                }
             return None
         payload = verified.get("payload") or {}
         expires_at = int(payload.get("expires_at") or 0)
@@ -213,6 +234,7 @@ def _token_activation_result(cache=None):
             "plan_name": payload.get("plan_name") or cache.get("plan_name") or plan,
             "days_left": days_left,
             "expires_date": expires_date,
+            "offline_until": int(payload.get("offline_until") or 0),
             "token_verified": True,
         }
     except Exception:
@@ -250,8 +272,52 @@ def _store_license_token_from_response(result):
     return True
 
 
+
+_AUTH_REJECTION_CACHE_KEY = "authoritative_rejection_reason"
+
+
+def _retryable_online_result(result=None, fallback_message="授权服务暂时不可用，将在后台自动重试"):
+    payload = result if isinstance(result, dict) else {}
+    message = str(payload.get("msg") or payload.get("message") or fallback_message).strip()
+    error_code = str(payload.get("error_code") or "AUTH_UPSTREAM_UNAVAILABLE").strip()
+    return {
+        "retryable": True,
+        "online_warning": message or fallback_message,
+        "error_code": error_code or "AUTH_UPSTREAM_UNAVAILABLE",
+    }
+
+
+def _is_retryable_auth_result(result):
+    if not isinstance(result, dict):
+        return False
+    if result.get("retryable"):
+        return True
+    text = " ".join(str(result.get(key) or "") for key in ("error_code", "msg", "message")).lower()
+    return any(marker in text for marker in (
+        "timed out", "timeout", "read operation", "upstream", "server error", "too many requests",
+    ))
+
+
+def _remember_authoritative_rejection(reason):
+    cache = _load_cache() or {}
+    cache[_AUTH_REJECTION_CACHE_KEY] = str(reason or "授权已失效，请联网验证")
+    cache["authoritative_rejection_at"] = int(time.time())
+    _save_cache(cache)
+
+
+def _clear_authoritative_rejection():
+    cache = _load_cache() or {}
+    changed = False
+    for key in (_AUTH_REJECTION_CACHE_KEY, "authoritative_rejection_at"):
+        if key in cache:
+            cache.pop(key, None)
+            changed = True
+    if changed:
+        _save_cache(cache)
+
+
 def _refresh_token_from_saved_code(cache=None):
-    """Refresh a signed license token with the saved code before blocking access."""
+    """Refresh a signed token online without converting transient failures into deactivation."""
     try:
         cache = cache or _load_cache() or {}
         code = str(cache.get("code") or _load_license_code() or "").strip()
@@ -259,11 +325,21 @@ def _refresh_token_from_saved_code(cache=None):
             return None
         result = _verify_online(code, _license_machine_id(cache))
         if result is None:
-            return None
+            return _retryable_online_result()
+        if _is_retryable_auth_result(result):
+            return _retryable_online_result(result)
         if result.get("revoked"):
-            return {"need_activate": True, "reason": result.get("msg") or "授权已被吊销，请联系管理员"}
+            reason = str(result.get("msg") or "授权已被吊销，请联系管理员")
+            _write_revoked_marker()
+            _remember_authoritative_rejection(reason)
+            return {"need_activate": True, "reason": reason}
         if result.get("valid") is False or result.get("ok") is False:
-            return {"need_activate": True, "reason": result.get("msg") or "激活码在线验证失败"}
+            reason = str(result.get("msg") or "激活码在线验证失败")
+            _remember_authoritative_rejection(reason)
+            return {"need_activate": True, "reason": reason}
+        if not result.get("valid", result.get("ok", False)):
+            return _retryable_online_result(result)
+        _clear_authoritative_rejection()
         _update_online_verify_time()
         if _store_license_token_from_response(result):
             refreshed = _token_activation_result(_load_cache())
@@ -271,12 +347,8 @@ def _refresh_token_from_saved_code(cache=None):
                 return refreshed
         return None
     except Exception:
-        return None
+        return _retryable_online_result()
 
-
-# ============================================================
-# 飞书 API 调用
-# ============================================================
 
 def _hex_decode(hex_str):
     """hex 解码"""
@@ -753,6 +825,7 @@ _activation_refreshing = False
 _ACTIVATION_CACHE_TTL = 600.0  # seconds
 
 
+
 def _check_activation_local_fast():
     """Local-only activation/trial check for UI gates; never touches the network."""
     try:
@@ -760,13 +833,14 @@ def _check_activation_local_fast():
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
         cache = _load_cache() or {}
+        rejection_reason = str(cache.get(_AUTH_REJECTION_CACHE_KEY) or "").strip()
+        if rejection_reason:
+            return {"need_activate": True, "reason": rejection_reason}
+
         token_result = _token_activation_result(cache)
         if token_result:
             return token_result
         if _TOKEN_REQUIRED:
-            refreshed = _refresh_token_from_saved_code(cache)
-            if refreshed:
-                return refreshed
             return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
 
         code = cache.get("code") or _load_license_code()
@@ -820,26 +894,32 @@ def _check_activation_local_fast():
         return {"need_activate": True, "reason": "本地授权检查异常：" + str(exc)}
 
 
+
+_activation_refresh_lock = threading.Lock()
+
+
 def refresh_activation_cache_async():
-    """Refresh activation against the server in the background."""
+    """Refresh activation against the server in one background request at a time."""
     global _activation_refreshing
-    if _activation_refreshing:
-        return False
-    _activation_refreshing = True
+    with _activation_refresh_lock:
+        if _activation_refreshing:
+            return False
+        _activation_refreshing = True
 
     def _worker():
         global _activation_refreshing
         try:
             _set_activation_cache(check_activation())
         finally:
-            _activation_refreshing = False
+            with _activation_refresh_lock:
+                _activation_refreshing = False
 
     try:
-        import threading
         threading.Thread(target=_worker, daemon=True).start()
         return True
     except Exception:
-        _activation_refreshing = False
+        with _activation_refresh_lock:
+            _activation_refreshing = False
         return False
 
 
@@ -872,18 +952,43 @@ _OFFLINE_GRACE_HOURS = 72  # 离线宽限时间（小时）
 _REVOKED_MARKER = ".revoked"  # 熔断标记文件名
 
 
+
 def _remote_http_error_result(exc):
-    """Keep a server-side rejection distinct from a transport failure."""
+    """Classify HTTP faults before the access-state code decides whether to block."""
+    status_code = int(getattr(exc, "code", 0) or 0)
+    retryable = status_code == 408 or status_code == 429 or status_code >= 500
     try:
         raw = exc.read()
         if raw:
             result = json.loads(raw.decode("utf-8"))
-            _store_license_token_from_response(result)
             if isinstance(result, dict):
+                result = dict(result)
+                if retryable:
+                    result["retryable"] = True
+                    result.setdefault(
+                        "error_code",
+                        "AUTH_UPSTREAM_TIMEOUT" if status_code == 408 else "AUTH_UPSTREAM_RATE_LIMIT" if status_code == 429 else "AUTH_UPSTREAM_ERROR",
+                    )
+                    result.setdefault("msg", "授权服务暂时繁忙")
+                else:
+                    result.setdefault("retryable", False)
+                    _store_license_token_from_response(result)
                 return result
     except Exception:
         pass
-    return {"ok": False, "valid": False, "msg": f"授权服务返回 HTTP {getattr(exc, 'code', 'error')}"}
+    if retryable:
+        return {
+            "ok": False,
+            "retryable": True,
+            "error_code": "AUTH_UPSTREAM_TIMEOUT" if status_code == 408 else "AUTH_UPSTREAM_RATE_LIMIT" if status_code == 429 else "AUTH_UPSTREAM_ERROR",
+            "msg": "授权服务暂时繁忙",
+        }
+    return {
+        "ok": False,
+        "valid": False,
+        "retryable": False,
+        "msg": f"授权服务返回 HTTP {status_code or 'error'}",
+    }
 
 
 def _verify_online(code, machine_id):
@@ -905,7 +1010,12 @@ def _verify_online(code, machine_id):
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=_VERIFY_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            _store_license_token_from_response(result)
+            if (
+                not _is_retryable_auth_result(result)
+                and result.get("ok") is not False
+                and result.get("valid") is not False
+            ):
+                _store_license_token_from_response(result)
             return result
     except urllib.error.HTTPError as exc:
         return _remote_http_error_result(exc)
@@ -960,7 +1070,13 @@ def _server_expires_at(result):
 def _fc_unbind(code, machine_id):
     """调用FC /unbind 解绑设备"""
     if not _VERIFY_API_URL:
-        return False
+        return {
+            "ok": False,
+            "valid": False,
+            "retryable": False,
+            "error_code": "AUTH_SERVER_NOT_CONFIGURED",
+            "msg": "\u6388\u6743\u670d\u52a1\u672a\u914d\u7f6e\uff0c\u65e0\u6cd5\u5b8c\u6210\u89e3\u7ed1",
+        }
     try:
         fingerprints = _get_fingerprints()
         body = json.dumps({
@@ -973,9 +1089,25 @@ def _fc_unbind(code, machine_id):
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            return result.get("ok", False)
+            if isinstance(result, dict):
+                return result
+            return {
+                "ok": False,
+                "valid": False,
+                "retryable": False,
+                "error_code": "AUTH_UNBIND_INVALID_RESPONSE",
+                "msg": "\u6388\u6743\u670d\u52a1\u8fd4\u56de\u4e86\u65e0\u6548\u7684\u89e3\u7ed1\u7ed3\u679c",
+            }
+    except urllib.error.HTTPError as exc:
+        return _remote_http_error_result(exc)
     except Exception:
-        return False
+        return {
+            "ok": False,
+            "valid": False,
+            "retryable": True,
+            "error_code": "AUTH_UNBIND_REQUEST_FAILED",
+            "msg": "\u89e3\u7ed1\u8bf7\u6c42\u672a\u5b8c\u6210\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5",
+        }
 def _get_last_online_verify():
     """获取上次联网验证成功的时间戳"""
     cache = _load_cache()
@@ -1230,8 +1362,8 @@ def validate_code(code):
         return {"ok": False, "msg": f"激活码解析失败: {str(e)}"}
 
 
-def _cached_code_info(code, cache=None):
-    if _TOKEN_REQUIRED or not _LEGACY_CACHE_ENABLED:
+def _cached_code_info(code, cache=None, force_local=False):
+    if not force_local and (_TOKEN_REQUIRED or not _LEGACY_CACHE_ENABLED):
         return {"ok": False, "msg": "需要联网更新签名授权 token"}
 
     result = validate_code(code)
@@ -1369,6 +1501,7 @@ def activate_with_code(code):
         server_result = _fc_activate(code, current_mid, result, fc_expires_at)
         fc_ok = _server_result_ok(server_result)
     if fc_ok:
+        _clear_authoritative_rejection()
         _update_online_verify_time()
 
     # Step 7: 飞书服务端绑定（兼容旧版，非阻塞）
@@ -1400,21 +1533,25 @@ def deactivate_device(force=False):
     if not code:
         return {"ok": False, "msg": "未找到激活码"}
 
+    cache = _load_cache() or {}
     current_mid = _get_machine_id()
 
     # 普通解绑：校验本地机器是否匹配（防滥用）
     if not force:
-        cache = _load_cache()
+        cache = _load_cache() or {}
         if cache:
             cached_mid = cache.get("machine_id", "")
             if cached_mid and cached_mid != current_mid:
                 return {"ok": False, "msg": "当前设备与绑定设备不匹配，如需强制解绑请联系管理员"}
 
     # 防盗2.0 FC解绑（优先）
-    fc_ok = _fc_unbind(code, current_mid)
+    cached_mid = str((cache or {}).get("machine_id") or "").strip()
+    server_machine_id = cached_mid if force and cached_mid else current_mid
+    server_result = _fc_unbind(code, server_machine_id)
+    fc_ok = _server_result_ok(server_result)
     
     # 飞书服务端解绑（兼容旧版）
-    unbind_ok = _unbind_device(code) if not fc_ok else True
+    unbind_ok = bool(fc_ok)
     _record_license_event(
         "license_unbind",
         metadata={
@@ -1425,6 +1562,16 @@ def deactivate_device(force=False):
         },
     )
 
+    if not fc_ok:
+        message = "\u6388\u6743\u670d\u52a1\u672a\u786e\u8ba4\u89e3\u7ed1\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+        if isinstance(server_result, dict):
+            message = str(server_result.get("msg") or message)
+        return {
+            "ok": False,
+            "msg": f"\u89e3\u7ed1\u672a\u5b8c\u6210\uff1a{message}",
+            "retryable": bool(server_result.get("retryable")) if isinstance(server_result, dict) else True,
+            "error_code": str(server_result.get("error_code") or "AUTH_UNBIND_FAILED") if isinstance(server_result, dict) else "AUTH_UNBIND_FAILED",
+        }
     # 清空本地
     _save_cache({"trial_uses_left": 0, "previously_activated": True})
     _set_activation_cache({"need_activate": True, "reason": "设备已解绑，请重新激活。"})
@@ -1435,10 +1582,7 @@ def deactivate_device(force=False):
     except Exception:
         pass
 
-    if unbind_ok:
-        return {"ok": True, "msg": "设备已解绑，可在新设备上激活"}
-    else:
-        return {"ok": True, "msg": "本地已解绑（服务端同步失败，请联系管理员）"}
+    return {"ok": True, "msg": "设备已解绑，可在新设备上激活"}
 
 
 def check_activation():
@@ -1470,22 +1614,43 @@ def check_activation():
             # 联网失败，熔断标记仍生效（防止断网绕过）
             return {"need_activate": True, "reason": "授权已被吊销，请联网后重试"}
 
-    cache = _load_cache()
+    cache = _load_cache() or {}
+    rejection_reason = str(cache.get(_AUTH_REJECTION_CACHE_KEY) or "").strip()
+    if rejection_reason:
+        return {"need_activate": True, "reason": rejection_reason}
+
+    _fc_unreachable_fallback_to_code = False
     if _TOKEN_REQUIRED:
         token_result = _token_activation_result(cache)
         refreshed = _refresh_token_from_saved_code(cache)
-        if refreshed:
-            return refreshed
-        if token_result:
-            return token_result
-        return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
+        if _is_retryable_auth_result(refreshed):
+            if token_result and token_result.get("activated"):
+                allowed = dict(token_result)
+                allowed["online_warning"] = str(
+                    refreshed.get("online_warning") or "授权服务暂时不可用"
+                )
+                allowed["error_code"] = str(
+                    refreshed.get("error_code") or "AUTH_UPSTREAM_UNAVAILABLE"
+                )
+                return allowed
+            if token_result:
+                return token_result
+            # FC unreachable and no valid signed token — fall through
+            # to cached activation code below instead of blocking.
+            _fc_unreachable_fallback_to_code = True
+        else:
+            if refreshed:
+                return refreshed
+            if token_result:
+                return token_result
+            return {"need_activate": True, "reason": "需要联网更新签名授权 token"}
     token_result = _token_activation_result(cache)
     if token_result:
         return token_result
 
     if cache and cache.get("code"):
         code = cache["code"]
-        result = _cached_code_info(code, cache)
+        result = _cached_code_info(code, cache, force_local=_fc_unreachable_fallback_to_code)
         if result["ok"]:
             # 到期时间：优先用服务端缓存，其次才兼容旧本地签名码的内嵌日期。
             expires_at = int(cache.get("expires_at", 0) or 0)
@@ -1526,6 +1691,8 @@ def check_activation():
             
             # Step: 联网服务器验证（新增）
             online_result = _verify_online(code, _get_machine_id())
+            if _is_retryable_auth_result(online_result):
+                online_result = None
             if online_result is not None:
                 # 联网成功
                 _update_online_verify_time()

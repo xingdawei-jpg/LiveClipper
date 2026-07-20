@@ -181,7 +181,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
                 shortage_grace_seconds=grace,
             )
 
-    def test_weak_prefix_chain_is_trimmed_with_exact_word_boundary(self) -> None:
+    def test_vocal_prefix_is_trimmed_but_semantic_connector_is_preserved(self) -> None:
         words = [
             {"text": "对", "start": 0.0, "end": 0.2},
             {"text": "而且", "start": 0.25, "end": 0.6},
@@ -189,9 +189,9 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             {"text": "很轻", "start": 1.85, "end": 2.3},
         ]
         trimmed, removed = volcengine_asr._semantic_trim_weak_prefix(words)
-        self.assertEqual(removed, ["对", "而且"])
-        self.assertEqual(trimmed[0]["text"], "它没有什么重量")
-        self.assertAlmostEqual(trimmed[0]["start"], 0.65, places=2)
+        self.assertEqual(removed, ["对"])
+        self.assertEqual(trimmed[0]["text"], "而且")
+        self.assertAlmostEqual(trimmed[0]["start"], 0.25, places=2)
 
     def test_invalid_ai_hook_is_restored_without_rebuilding_products(self) -> None:
         entries = [

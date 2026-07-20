@@ -42,23 +42,13 @@ def _record_event(event_type, feature_name, units=1, metadata=None):
         return False
 
 
+
 def get_feature_access(refresh=False):
     """Return normalized access state without showing UI."""
     try:
         import license_client as lc
 
         status = lc.check_activation() if refresh else lc.check_activation_cached()
-        if status.get("activated") and not refresh:
-            online_status = lc.check_activation()
-            if online_status.get("need_activate") or online_status.get("activated"):
-                status = online_status
-        if status.get("need_activate") and "token" in str(status.get("reason") or "").lower():
-            status = lc.check_activation()
-        try:
-            lc._set_activation_cache(status)
-        except Exception:
-            pass
-
         if status.get("activated"):
             return {"ok": True, "activated": True, "trial": False, "raw": status}
 
@@ -99,16 +89,21 @@ def get_feature_access(refresh=False):
         }
 
 
+
 def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=True, refresh=False):
     """Gate a user-facing feature before it starts running."""
     access = get_feature_access(refresh=refresh)
     if access.get("ok"):
+        warning = str((access.get("raw") or {}).get("online_warning") or "").strip()
+        if warning:
+            _log(log_fn, f"授权在线刷新暂时不可用，已使用本地签名授权继续：{warning}", "warn")
         _record_event(
             "feature_start",
             feature_name,
             metadata={
                 "activated": bool(access.get("activated")),
                 "trial": bool(access.get("trial")),
+                "online_warning": bool(warning),
             },
         )
         if access.get("trial"):

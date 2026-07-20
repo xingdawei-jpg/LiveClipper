@@ -94,6 +94,18 @@ def _module_file(module_name, *parts):
     return os.path.join(os.path.dirname(spec.origin), *parts)
 
 
+def _require_modules(*module_names):
+    missing = [name for name in module_names if importlib.util.find_spec(name) is None]
+    if missing:
+        raise RuntimeError(
+            "SenseVoice desktop build requires " + ", ".join(missing)
+            + "; install requirements.txt before running PyInstaller"
+        )
+
+
+_require_modules("funasr", "modelscope", "torch", "torchaudio")
+
+
 def _app_datas():
     datas = []
     skip_suffixes = (
@@ -156,6 +168,7 @@ def _tool_datas():
 cv2_data_dir = _module_file("cv2", "data")
 fw_assets_dir = _module_file("faster_whisper", "assets")
 certifi_pem = _module_file("certifi", "cacert.pem")
+funasr_version = _module_file("funasr", "version.txt")
 
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
@@ -171,6 +184,7 @@ datas += _existing([
     (os.path.join(cv2_data_dir, "haarcascade_fullbody.xml") if cv2_data_dir else "", "."),
     (os.path.join(fw_assets_dir, "silero_vad_v6.onnx") if fw_assets_dir else "", os.path.join("faster_whisper", "assets")),
     (certifi_pem if certifi_pem else "", "certifi"),
+    (funasr_version if funasr_version else "", "funasr"),
 ])
 
 binaries = _require_ffmpeg_binaries()
@@ -211,6 +225,7 @@ a = Analysis(
         "av",
         "av.descriptor",
         "faster_whisper",
+        "local_asr", "local_asr_quality", "funasr", "funasr.auto.auto_model", "funasr.models.sense_voice.model", "modelscope", "torch", "torchaudio", "unittest", "unittest.mock", "pdb", "scipy",
         "ctranslate2",
         "tokenizers",
         "ai_clipper",
@@ -241,8 +256,6 @@ a = Analysis(
     ],
     excludes=[
         "test",
-        "unittest",
-        "pdb",
         "doctest",
         "ensurepip",
         "venv",
@@ -250,10 +263,8 @@ a = Analysis(
         "idlelib",
         "tkinter.test",
         "matplotlib",
-        "scipy",
         "pandas",
         "tensorflow",
-        "torch",
         "keras",
         "jupyter",
         "IPython",

@@ -56,16 +56,32 @@ def _semantic_group_key(segment):
     return marker, source
 
 
+def _semantic_is_decimal_point(words, index):
+    """Keep a timed dot only when it sits between two Arabic digits."""
+    if index <= 0 or index + 1 >= len(words):
+        return False
+    previous = words[index - 1]
+    following = words[index + 1]
+    if not isinstance(previous, dict) or not isinstance(following, dict):
+        return False
+    previous_text = str(previous.get("text") or "").strip()
+    following_text = str(following.get("text") or "").strip()
+    return bool(previous_text[-1:].isdigit() and following_text[:1].isdigit())
+
+
 def _semantic_tokens_for_group(segments):
     tokens = []
     for segment_order, segment in enumerate(segments or []):
         if not isinstance(segment, dict):
             continue
         clean_words = []
-        for word in segment.get("words") or []:
+        source_words = list(segment.get("words") or [])
+        for word_index, word in enumerate(source_words):
             if not isinstance(word, dict):
                 continue
             text = str(word.get("text") or "").strip()
+            if text == "." and not _semantic_is_decimal_point(source_words, word_index):
+                continue
             try:
                 start = float(word.get("start") or 0)
                 end = float(word.get("end") or start)
@@ -129,12 +145,14 @@ def _semantic_trim_weak_prefix(words):
     current = list(words or [])
     removed = []
     prefixes = (
-        "然后", "而且", "但是", "因为", "就是", "没错", "对的", "是的",
-        "嗯", "啊", "对",
+        "没错", "对的", "是的", "嗯", "啊",
+        "\u5bf9",
     )
     while current:
         compact = "".join(_semantic_plain_text(word.get("text") or "") for word in current)
         matched = next((prefix for prefix in prefixes if compact.startswith(prefix)), "")
+        if matched == "\u5bf9" and compact.startswith("\u5bf9\u4e0d\u5bf9"):
+            break
         if not matched or len(compact) - len(matched) < 5:
             break
         consumed = 0
@@ -155,7 +173,7 @@ def _semantic_trim_weak_suffix(words):
     """Remove short dangling tails without estimating a replacement end time."""
     current = list(words or [])
     removed = []
-    suffixes = ("但是我", "所以我", "然后我", "但是", "然后", "而且", "因为", "就是", "所以")
+    suffixes = ()  # Semantic connectors must be merged with context, never deleted.
     while current:
         compact = "".join(_semantic_plain_text(word.get("text") or "") for word in current)
         matched = next((suffix for suffix in suffixes if compact.endswith(suffix)), "")
@@ -346,10 +364,13 @@ def write_word_timing_sidecar(srt_path, segments, provider="volcengine", log_fn=
         if not isinstance(segment, dict):
             continue
         clean_words = []
-        for word in segment.get("words") or []:
+        source_words = list(segment.get("words") or [])
+        for word_index, word in enumerate(source_words):
             if not isinstance(word, dict):
                 continue
             text = str(word.get("text") or "").strip()
+            if text == "." and not _semantic_is_decimal_point(source_words, word_index):
+                continue
             try:
                 start = float(word.get("start") or 0)
                 end = float(word.get("end") or start)
@@ -403,6 +424,10 @@ def load_word_timing_sidecar(srt_path, semantic=False, log_fn=None):
         if payload.get("schema") != _WORD_TIMING_SCHEMA:
             return []
         segments = list(payload.get("segments") or [])
+        if str(payload.get("provider") or "").strip().lower() == "sensevoice":
+            from local_asr_quality import apply_domain_corrections
+
+            segments, _ = apply_domain_corrections(segments, log_fn=log_fn)
         if semantic:
             return build_semantic_segments(segments, log_fn=log_fn) or segments
         return segments

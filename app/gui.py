@@ -289,6 +289,8 @@ class App:
                 self.volc_apikey_var.set(s["volc_api_key"])
             if "whisper_model" in s:
                 self._whisper_model_var.set(s["whisper_model"])
+            if "local_asr_engine" in s:
+                self._local_asr_engine_var.set(s["local_asr_engine"])
 
             # ASR 预设
             asr_matched = s.get("asr_preset", "") or s.get("asr_provider", "")
@@ -725,6 +727,12 @@ class App:
         tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
         tk.Label(asr_hdr, text="Whisper:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
         self._whisper_model_var = tk.StringVar(value="small")
+        self._local_asr_engine_var = tk.StringVar(value="sensevoice")
+        tk.Label(asr_hdr, text="Local:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left", padx=(8, 0))
+        local_combo = ttk.Combobox(asr_hdr, textvariable=self._local_asr_engine_var,
+                                   values=["sensevoice", "whisper"], width=10, font=FNT_S, state="readonly")
+        local_combo.pack(side="left", padx=2)
+        local_combo.bind("<<ComboboxSelected>>", lambda e: self._save_ai())
         wm_combo = ttk.Combobox(asr_hdr, textvariable=self._whisper_model_var,
                                 values=["small", "medium"],
                                 width=7, font=FNT_S, state="readonly")
@@ -2080,6 +2088,7 @@ class App:
             "volc_tos_sk": self.volc_tos_sk_var.get().strip() if hasattr(self, "volc_tos_sk_var") else "",
             "volc_bucket": self.volc_bucket_var.get().strip() if hasattr(self, "volc_bucket_var") else "",
             "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
+            "local_asr_engine": self._local_asr_engine_var.get() if hasattr(self, "_local_asr_engine_var") else "sensevoice",
             "ai_preset": self.ai_preset_var.get() if hasattr(self, "ai_preset_var") else "",
             "asr_preset": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
             "asr_provider": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "version": "2026.7.19.1",
+  "include": [
+    "app/ai_clipper.py",
+    "app/cutter_logic.py",
+    "app/gui.py",
+    "app/license_client.py",
+    "app/license_guard.py",
+    "app/live_cutter.spec",
+    "app/local_asr.py",
+    "app/local_asr_quality.py",
+    "app/candidate_quality.py",
+    "app/content_review.py",
+    "app/stt.py",
+    "app/version.json",
+    "app/volcengine_asr.py",
+    "requirements.txt",
+    "requirements-local-asr.txt",
+    "tests/test_ai_batch_reliability.py",
+    "tests/test_license_device_unbind.py",
+    "tests/test_license_timeout_failopen.py",
+    "tests/test_local_asr_observed_corrections.py",
+    "tests/test_local_asr_punctuation_tokens.py",
+    "tests/test_local_asr_quality.py",
+    "tests/test_local_asr_rich_text_cleanup.py",
+    "tests/test_release_policy.py",
+    "tests/test_sensevoice_fashion_context_edges.py",
+    "tests/test_sensevoice_fashion_vocabulary.py",
+    "tests/test_sensevoice_semantic_alignment.py",
+    "tests/test_sensevoice_sentence_boundary_repair.py",
+    "tools/build_release_channel.py",
+    "tools/release_preflight.py",
+    "web_client/frontend/assets/app.js",
+    "web_client/frontend/index.html",
+    "web_client/liveclipper_web.spec",
+    "web_client/server.py"
+  ],
+  "exclude": [
+    {
+      "path": "tests/fixtures/shadow_auth/feishu_license.json",
+      "reason": "shadow-auth migration fixture; not part of the desktop runtime release"
+    },
+    {
+      "path": "tests/fixtures/shadow_auth/oss_binding.json",
+      "reason": "shadow-auth migration fixture; not part of the desktop runtime release"
+    },
+    {
+      "path": "tests/fixtures/shadow_auth/oss_payment.json",
+      "reason": "shadow-auth migration fixture; not part of the desktop runtime release"
+    },
+    {
+      "path": "tools/shadow_auth_import.py",
+      "reason": "separate shadow-auth migration workstream"
+    },
+    {
+      "path": "tools/shadow_auth_oss_verify.py",
+      "reason": "separate shadow-auth migration workstream"
+    },
+    {
+      "path": "tools/shadow_auth_reconcile.py",
+      "reason": "separate shadow-auth migration workstream"
+    },
+    {
+      "path": "tools/shadow_auth_sync.py",
+      "reason": "separate shadow-auth migration workstream"
+    },
+    {
+      "path": "tools/shadow_auth_sync_v2.py",
+      "reason": "separate shadow-auth migration workstream"
+    }
+  ]
+}

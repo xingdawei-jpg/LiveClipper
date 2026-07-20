@@ -1764,6 +1764,13 @@
                 </label>
                 <input id="s-asr-provider" type="hidden" value="火山引擎">
                 <div class="field-row">
+                  <label for="s-local-asr-engine">Local engine</label>
+                  <select id="s-local-asr-engine">
+                    <option value="sensevoice" selected>SenseVoice (fast, word timed)</option>
+                    <option value="whisper">Whisper (compatibility fallback)</option>
+                  </select>
+                </div>
+                <div class="field-row">
                   <label for="s-whisper-model">本地模型</label>
                   <select id="s-whisper-model">
                     <option>tiny</option>

@@ -1,0 +1,106 @@
+{
+  "schema_version": 3,
+  "channel": "stable",
+  "channel_status": "hold",
+  "release_type": "business_runtime",
+  "version": "2026.7.19.1",
+  "latest_version": "2026.7.19.1",
+  "runtime_layout_version": 3,
+  "minimum_runtime_layout_version": 2,
+  "minimum_launcher_version": "1.1.0",
+  "minimum_updater_version": "1.3.0",
+  "update_strategy": "hold",
+  "supports_incremental_updates": false,
+  "requires_full_package": true,
+  "requires_full_package_note": "当前安装版本没有匹配的签名补丁，请使用最近一次人工分发的完整包后再更新。",
+  "release_notes": "新增本地 SenseVoice 高质量语音识别，支持词级时间轴、服饰直播词纠正与 Whisper 自动回退；修复授权服务短暂超时或限流导致的误提示激活、解绑失败误清本地授权；优化智能成片拼接时间轴和无音频素材处理，减少时长漂移与音画不同步。",
+  "force_update": false,
+  "release_page_url": "",
+  "bridge_url": "",
+  "patch_policy": {
+    "graph_version": 1,
+    "max_chain_depth": 8,
+    "rollup_after_versions": 2
+  },
+  "package": {
+    "format": "zip",
+    "url": "",
+    "sha256": "",
+    "size": 0,
+    "filename": ""
+  },
+  "patches": [
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.2",
+      "to_version": "2026.7.15.3",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+        }
+      ],
+      "sha256": "34E6F8C5041286B3500A020E0855F83F12188872C875FF04A7B1FA7CC20C3A32",
+      "size": 17311596,
+      "filename": "LiveClipperPatch_2026.7.15.2_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "runtime_payload_files": 5,
+      "stable_payload_files": 0
+    },
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.1",
+      "to_version": "2026.7.15.3",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.15.3/LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip"
+        }
+      ],
+      "sha256": "05C88040DD87A84F850952FEAB6614F63720EF9D6ABDE0587AD3245BC9714E5F",
+      "size": 17377122,
+      "filename": "LiveClipperPatch_2026.7.15.1_to_2026.7.15.3_v3_wv2_ffmpeg.zip",
+      "runtime_payload_files": 11,
+      "stable_payload_files": 0
+    },
+    {
+      "format": "liveclipper-version-delta-v1",
+      "from_version": "2026.7.15.3",
+      "to_version": "2026.7.19.1",
+      "source_layout_version": 3,
+      "target_layout_version": 3,
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.1/LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip",
+      "urls": [
+        "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.1/LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip"
+      ],
+      "sources": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.1/LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip"
+        }
+      ],
+      "sha256": "051F62FA9912E98313C2BEE4B5C62A4BA6A90D8ACA8FD631836A386979EF4455",
+      "size": 321088079,
+      "filename": "LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip",
+      "runtime_payload_files": 6677,
+      "stable_payload_files": 0
+    }
+  ],
+  "published_at": "2026-07-19 15:34:08",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "e489293f17704e2f",
+    "value": "kCvtSTxGipDRmwEDcdDevZ/qB4MC7wd3ulkkDAXoyQrpsXy60duNtxpRWcKsRXsUXEkdvU4GpyYWlvCl0PpzAg=="
+  }
+}

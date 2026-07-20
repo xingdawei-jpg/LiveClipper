@@ -1,0 +1,12 @@
+[
+  {
+    "locator": "bindings/01ab000000000001.json",
+    "payload": {
+      "code": "01ab000000000001",
+      "machine_id": "fixture-machine-a",
+      "status": "active",
+      "plan": "01",
+      "expires_at": 1762592000
+    }
+  }
+]

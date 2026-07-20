@@ -151,6 +151,7 @@ def transcribe_to_srt(audio_path, srt_output, log_fn=None, whisper_model="small"
         language="zh",
         beam_size=5,
         vad_filter=True,
+        word_timestamps=True,
     )
 
     _log(f"识别语言: {info.language} (概率: {info.language_probability:.2f})")
@@ -200,11 +201,63 @@ def transcribe_to_srt(audio_path, srt_output, log_fn=None, whisper_model="small"
     with open(srt_output, "w", encoding="utf-8") as f:
         f.write(srt_content)
 
+    # Keep local Whisper compatible with the provider-neutral word-timing sidecar.
+    try:
+        from volcengine_asr import write_word_timing_sidecar
+        timed_segments = []
+        for seg in segments:
+            words = []
+            for word in (getattr(seg, "words", None) or []):
+                text = str(getattr(word, "word", "")).strip()
+                start = float(getattr(word, "start", 0) or 0)
+                end = float(getattr(word, "end", start) or start)
+                if text and end > start:
+                    item = {"text": text, "start": start, "end": end}
+                    confidence = getattr(word, "probability", None)
+                    if confidence is not None:
+                        item["confidence"] = confidence
+                    words.append(item)
+            timed_segments.append({"text": seg.text.strip(), "start": seg.start, "end": seg.end, "words": words})
+        write_word_timing_sidecar(srt_output, timed_segments, provider="whisper", log_fn=_log)
+    except Exception as _timing_error:
+        _log(f"Whisper word timing save failed; using segment timestamps: {_timing_error}")
+
     _log(f"字幕生成完成: {len(segments)} 条 -> {os.path.basename(srt_output)}")
     return True
 
 
-def generate_srt(video_path, log_fn=None, whisper_model="small"):
+def transcribe_local_audio_to_srt(
+    audio_path,
+    srt_output,
+    log_fn=None,
+    whisper_model="small",
+    asr_engine="sensevoice",
+):
+    """Transcribe an existing audio file through the shared local ASR policy."""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    selected_engine = (asr_engine or "sensevoice").strip().lower()
+    recognized = False
+    if selected_engine in ("sensevoice", "auto"):
+        try:
+            from local_asr import sensevoice_to_srt
+
+            recognized = sensevoice_to_srt(audio_path, srt_output, log_fn=log_fn)
+        except Exception as sensevoice_error:
+            _log(f"SenseVoice unavailable; falling back to local Whisper: {sensevoice_error}")
+    if recognized:
+        return True
+    return transcribe_to_srt(
+        audio_path,
+        srt_output,
+        log_fn,
+        whisper_model=whisper_model,
+    )
+
+
+def generate_srt(video_path, log_fn=None, whisper_model="small", asr_engine="sensevoice"):
     """
     从视频自动生成 SRT 字幕文件。
     返回 SRT 文件路径，失败返回 None。
@@ -227,7 +280,13 @@ def generate_srt(video_path, log_fn=None, whisper_model="small"):
         return None
 
     # 语音识别
-    if not transcribe_to_srt(wav_path, srt_path, log_fn, whisper_model=whisper_model):
+    if not transcribe_local_audio_to_srt(
+        wav_path,
+        srt_path,
+        log_fn=log_fn,
+        whisper_model=whisper_model,
+        asr_engine=asr_engine,
+    ):
         return None
 
     # 清理临时音频文件

@@ -171,6 +171,142 @@ class ReleasePolicyTests(unittest.TestCase):
                 patch_count=0,
             )
 
+    def test_channel_builder_retains_verified_patch_graph(self) -> None:
+        builder = load_tool("build_release_channel")
+        previous = {
+            "channel": "stable",
+            "patches": [
+                {
+                    "filename": "old-1.zip",
+                    "from_version": "2026.7.15.1",
+                    "to_version": "2026.7.15.3",
+                    "stable_payload_files": 0,
+                    "sources": [
+                        {
+                            "name": "GitHub",
+                            "url": "https://github.com/example/repo/releases/download/v2026.7.15.3/old-1.zip",
+                        }
+                    ],
+                },
+                {
+                    "filename": "old-2.zip",
+                    "from_version": "2026.7.15.2",
+                    "to_version": "2026.7.15.3",
+                    "stable_payload_files": 0,
+                    "sources": [
+                        {
+                            "name": "GitHub",
+                            "url": "https://github.com/example/repo/releases/download/v2026.7.15.3/old-2.zip",
+                        }
+                    ],
+                },
+            ],
+            "signature": {"algorithm": "ed25519"},
+        }
+        new_patch = {
+            "filename": "new.zip",
+            "from_version": "2026.7.15.3",
+            "to_version": "2026.7.19.1",
+            "stable_payload_files": 0,
+            "sources": [
+                {
+                    "name": "GitHub",
+                    "url": "https://github.com/example/repo/releases/download/v2026.7.19.1/new.zip",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            channel = Path(temp) / "stable.json"
+            channel.write_text(json.dumps(previous), encoding="utf-8")
+            with mock.patch.object(builder, "verify_manifest") as verify:
+                retained = builder._load_retained_patches(channel)
+        verify.assert_called_once_with(previous, builder.PUBLIC_KEY_FILE)
+        merged = builder._merge_patch_graph(retained, [new_patch], "2026.7.19.1")
+        self.assertEqual(
+            [(patch["from_version"], patch["to_version"]) for patch in merged],
+            [
+                ("2026.7.15.1", "2026.7.15.3"),
+                ("2026.7.15.2", "2026.7.15.3"),
+                ("2026.7.15.3", "2026.7.19.1"),
+            ],
+        )
+
+    def test_preflight_accepts_patch_graph_and_rejects_stranded_edge(self) -> None:
+        preflight = load_tool("release_preflight")
+        manifest = {
+            "version": "2026.7.19.1",
+            "patches": [
+                {
+                    "from_version": "2026.7.15.1",
+                    "to_version": "2026.7.15.3",
+                    "stable_payload_files": 0,
+                    "sources": [{"url": "https://github.com/example/old.zip"}],
+                },
+                {
+                    "from_version": "2026.7.15.3",
+                    "to_version": "2026.7.19.1",
+                    "stable_payload_files": 0,
+                    "sources": [{"url": "https://github.com/example/new.zip"}],
+                },
+            ],
+        }
+        report = preflight.Report("candidate")
+        preflight.validate_sources(report, manifest, {"github.com"}, strict=True)
+        self.assertFalse(report.errors)
+        manifest["patches"][0]["to_version"] = "2026.7.15.2"
+        report = preflight.Report("candidate")
+        preflight.validate_sources(report, manifest, {"github.com"}, strict=True)
+        self.assertTrue(any("no route to channel target" in item for item in report.errors))
+
+    def test_candidate_scope_allows_only_declared_worktree_changes(self) -> None:
+        preflight = load_tool("release_preflight")
+        with tempfile.TemporaryDirectory() as temp:
+            scope_path = Path(temp) / "release_scope.json"
+            scope_path.write_text(
+                json.dumps(
+                    {
+                        "version": "2026.7.19.1",
+                        "include": ["app/local_asr.py"],
+                        "exclude": [
+                            {
+                                "path": "tools/shadow_auth_sync.py",
+                                "reason": "separate shadow-auth workstream",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scope = preflight.load_release_scope(scope_path)
+        report = preflight.Report("candidate")
+        status = mock.Mock(
+            stdout=(
+                " M app/local_asr.py\n"
+                "?? tools/shadow_auth_sync.py\n"
+                "?? app/unreviewed.py\n"
+            )
+        )
+        with mock.patch.object(preflight.subprocess, "run", return_value=status):
+            preflight.git_paths(report, scope)
+        self.assertEqual(scope["include"], {"app/local_asr.py"})
+        self.assertEqual(scope["exclude"], {"tools/shadow_auth_sync.py"})
+        self.assertTrue(
+            any("app/unreviewed.py" in item for item in report.errors)
+        )
+
+    def test_frozen_specs_bundle_funasr_version_metadata(self) -> None:
+        for relative in ("app/live_cutter.spec", "web_client/liveclipper_web.spec"):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("funasr_version", source)
+            self.assertIn("version.txt", source)
+            self.assertIn("unittest.mock", source)
+            self.assertIn("pdb", source)
+            self.assertIn("scipy", source)
+            self.assertNotIn("'matplotlib', 'scipy', 'pandas'", source)
+            self.assertNotIn('"scipy",\n        "pandas"', source)
+            self.assertNotIn("'test', 'pdb', 'doctest'", source)
+            self.assertNotIn('"pdb",\n        "doctest"', source)
+
     def test_development_preflight_accepts_registered_split_state(self) -> None:
         preflight = load_tool("release_preflight")
         baseline = json.loads(

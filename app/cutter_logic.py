@@ -2478,9 +2478,10 @@ def process_video(video_path, srt_path=None, output_path=None,
                         with open(_spath, "r", encoding="utf-8-sig") as _sf:
                             _sdata = _json.load(_sf)
                         _wmodel = _sdata.get("whisper_model", "small")
+                        _local_asr_engine = _sdata.get("local_asr_engine", "sensevoice")
                 except Exception:
                     pass
-                temp_srt = generate_srt(video_path, log_fn=_log, whisper_model=_wmodel)
+                temp_srt = generate_srt(video_path, log_fn=_log, whisper_model=_wmodel, asr_engine=locals().get("_local_asr_engine", "sensevoice"))
             except Exception as _whisper_err:
                 _err_str = str(_whisper_err).lower()
                 if "huggingface" in _err_str or "hf_hub" in _err_str:
@@ -2720,7 +2721,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     # 每个任务使用独立临时目录。前面 TS 标准化也写入这个目录，结束时统一清理。
     will_subtitle = subtitle_overlay and SUBTITLE_OVERLAY.get("enabled")
-    _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置Whisper+DeepSeek修复）' if will_subtitle else '关'}")
+    _log(f"去重: {dedup_preset} | 字幕叠加: {'开（后置ASR+DeepSeek修复）' if will_subtitle else '关'}")
     _log(f"镜像翻转: {'开' if _mirror_enabled else '关'}" + (f" (单片段概率 {OUTPUT_CLIP_MIRROR_PROBABILITY:.0%})" if _mirror_enabled else ""))
     if _is_ts_like_video(video_path):
         _log("TS normalize: using original TS fallback; cut stage will still use genpts.")
@@ -3131,28 +3132,97 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     _concat_stage_started = time.time()
     _log(f"拼接 {len(temp_files)} 个片段...")
-    list_file = os.path.join(temp_dir, "file_list.txt")
-    with open(list_file, "w", encoding="utf-8") as f:
-        for tf in temp_files:
-            f.write(f"file '{os.path.abspath(tf).replace(chr(92), '/')}'\n")
-
     raw_file = os.path.join(temp_dir, "raw_concat.mp4")
-    concat_cmd = [
-        ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-        "-c:v", "copy", "-c:a", "copy",
-        raw_file
-    ]
+    # Re-encode and normalize each clip before joining. Stream-copy concat can
+    # carry AAC/video duration rounding across boundaries and cause A/V drift.
+    clip_durations = []
+    clip_has_audio = []
+    for clip_file in temp_files:
+        clip_durations.append(_probe_media_duration(clip_file))
+        try:
+            probe = subprocess.run(
+                [ffmpeg, "-i", clip_file],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_NO_WINDOW,
+                timeout=15,
+            )
+            clip_has_audio.append("Audio:" in (probe.stderr or ""))
+        except Exception as probe_error:
+            clip_has_audio.append(False)
+            _log(f"拼接预检: 无法读取音频流 {os.path.basename(clip_file)}: {probe_error}")
 
+    concat_cmd = [ffmpeg, "-y"]
+    concat_filters = []
+    concat_inputs = []
+    concat_input_idx = 0
+    for concat_idx, clip_file in enumerate(temp_files):
+        clip_input_idx = concat_input_idx
+        concat_cmd += ["-i", clip_file]
+        v_label = f"vnorm{concat_idx}"
+        a_label = f"anorm{concat_idx}"
+        concat_filters.append(
+            f"[{clip_input_idx}:v]{_stable_video_tail_filter(VIDEO_CONFIG['fps'])},setsar=1[{v_label}]"
+        )
+        if clip_has_audio[concat_idx]:
+            audio_input_idx = clip_input_idx
+        else:
+            silent_duration = max(0.1, float(clip_durations[concat_idx] or 1.0))
+            concat_cmd += [
+                "-f", "lavfi", "-t", f"{silent_duration:.3f}",
+                "-i", "anullsrc=r=44100:cl=stereo",
+            ]
+            audio_input_idx = clip_input_idx + 1
+            _log(f"拼接预检: {os.path.basename(clip_file)} 无音频流，补静音轨")
+        concat_filters.append(
+            f"[{audio_input_idx}:a]{_stable_audio_tail_filter()},"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo[{a_label}]"
+        )
+        concat_inputs.append(f"[{v_label}][{a_label}]")
+        concat_input_idx = audio_input_idx + 1
+
+    concat_filters.append(
+        f"{''.join(concat_inputs)}concat=n={len(temp_files)}:v=1:a=1[outv][outa]"
+    )
+    concat_filters.append(
+        f"[outv]{_stable_video_tail_filter(VIDEO_CONFIG['fps'])},setsar=1[vstable]"
+    )
+    concat_filters.append(
+        f"[outa]{_stable_audio_tail_filter()},"
+        "aformat=sample_fmts=fltp:channel_layouts=stereo[astable]"
+    )
+    concat_cmd += [
+        "-filter_complex", ";".join(concat_filters),
+        "-map", "[vstable]", "-map", "[astable]",
+    ]
+    concat_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+    concat_cmd += _intermediate_vcodec_args()
+    concat_cmd += [
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-shortest", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+        raw_file,
+    ]
+    _log("拼接: 使用音视频时间轴规范化模式")
+    stderr_data = ""
     try:
-        proc = _register_process(subprocess.Popen(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW))
-        _, stderr_data = _communicate_process(proc, timeout=120, cancel_event=cancel_event)
+        concat_ok, concat_rc, stderr_data = _run_ffmpeg_with_hw_fallback(
+            concat_cmd,
+            dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"),
+            600,
+            _log,
+            "智能成片拼接",
+            raw_file,
+            software_args=_intermediate_software_vcodec_args(),
+            cancel_event=cancel_event,
+        )
     except subprocess.TimeoutExpired:
-        _terminate_process(proc)
-        stderr_out = proc.communicate()[0]
-        _log("拼接超时！(>120s)")
-        if stderr_out:
-            for line in stderr_out.strip().split("\n")[-5:]:
+        _log("拼接超时(>600s)")
+        if stderr_data:
+            for line in stderr_data.strip().split("\n")[-5:]:
                 if line.strip(): _log(f"  ffmpeg: {line.strip()}")
         shutil.rmtree(temp_dir, ignore_errors=True)
         if auto_srt and temp_srt:
@@ -3170,8 +3240,8 @@ def process_video(video_path, srt_path=None, output_path=None,
         DEDUP_PRESET = old_preset
         return False
 
-    if proc.returncode != 0 or not os.path.exists(raw_file):
-        _log(f"拼接失败！(exit={proc.returncode})")
+    if not concat_ok or not os.path.exists(raw_file):
+        _log(f"拼接失败(exit={concat_rc})")
         if stderr_data:
             for line in stderr_data.strip().split("\n")[-5:]:
                 if line.strip(): _log(f"  ffmpeg: {line.strip()}")
@@ -3413,7 +3483,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         raise RuntimeError(_duration_error)
 
     # ============================================================
-    # 第四步：字幕后置处理（Whisper识别最终视频 + DeepSeek修复错别字）
+    # 第四步：字幕后置处理（统一ASR识别最终视频 + DeepSeek修复错别字）
     # ============================================================
     if _cancelled():
         _log("已取消。"); shutil.rmtree(temp_dir, ignore_errors=True)
@@ -4140,9 +4210,62 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
         return False
 
 
+def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
+    """Use the same SenseVoice-first local ASR policy as smart-cut preview."""
+    selected_engine = str(settings.get("local_asr_engine", "sensevoice") or "sensevoice").strip().lower()
+    whisper_model = str(settings.get("whisper_model", "small") or "small")
+    engine_label = "SenseVoice" if selected_engine in ("sensevoice", "auto") else "Whisper"
+    local_srt = os.path.join(temp_dir, "final_local_asr.srt")
+    log_fn(f"字幕阶段：正在使用本地 {engine_label} 识别最终视频音频...")
+
+    try:
+        from stt import transcribe_local_audio_to_srt
+
+        recognized = transcribe_local_audio_to_srt(
+            wav_path,
+            local_srt,
+            log_fn=log_fn,
+            whisper_model=whisper_model,
+            asr_engine=selected_engine,
+        )
+    except Exception as exc:
+        log_fn(f"本地语音识别失败: {exc}")
+        return []
+    if not recognized or not os.path.exists(local_srt):
+        log_fn("本地语音识别未生成可用字幕")
+        return []
+
+    segments = []
+    try:
+        from volcengine_asr import load_word_timing_sidecar
+
+        segments = list(load_word_timing_sidecar(local_srt, semantic=True, log_fn=log_fn) or [])
+    except Exception as sidecar_error:
+        log_fn(f"本地词级时间不可用，改读 SRT 时间段: {sidecar_error}")
+    if not segments:
+        try:
+            with open(local_srt, "r", encoding="utf-8-sig") as handle:
+                segments = _parse_srt_to_segments(handle.read())
+        except Exception as srt_error:
+            log_fn(f"本地字幕读取失败: {srt_error}")
+            return []
+
+    normalized = []
+    for segment in segments:
+        try:
+            start = float(segment.get("start") or 0)
+            end = float(segment.get("end") or start)
+            segment_text = str(segment.get("text") or "").strip()
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if segment_text and end > start:
+            normalized.append({"start": start, "end": end, "text": segment_text})
+    log_fn(f"本地语音识别完成: {len(normalized)} 条语音段")
+    return normalized
+
 def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
     """
-    字幕后置处理：对去重后的视频做 ASR 识别(云端优先) → DeepSeek修复 → 烧录字幕。
+    字幕后置处理：对去重后的视频做 ASR 识别（云端优先，本地与智能成片一致）→ DeepSeek修复 → 烧录字幕。
     时间戳来自最终视频本身，100% 对齐，不受镜像/拼接/变速影响。
     """
     import json as _json
@@ -4172,7 +4295,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     _log(f"音频提取完成: {wav_mb:.1f}MB")
     _log("[PROGRESS] 0.65")
 
-    # --- 4b: Whisper(时间戳) + 云端ASR(准文字) 并行识别 ---
+    # --- 4b: 云端 ASR 优先；本地路径复用智能成片的 SenseVoice 优先策略 ---
     import os as _os
     _os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
@@ -4248,7 +4371,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             v_bucket = cfg.get("volc_bucket", "livec")
             volc_audio = prepare_volcengine_audio(wav_path, temp_dir, prefix="volc_final_audio", ffmpeg=ffmpeg, log_fn=_log, timeout=120)
             if not volc_audio:
-                _log("火山引擎 ASR 音频准备失败，将降级到 Whisper")
+                _log("火山引擎 ASR 音频准备失败，将切换到本地语音识别")
                 return
             segs = volcengine_asr(volc_audio, v_app_id, v_token, v_tos_ak, v_tos_sk,
                                   bucket=v_bucket, region=cfg.get("volc_region", "cn-beijing"), log_fn=_log, api_key=cfg.get("volc_api_key", "") or None)
@@ -4257,58 +4380,43 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 volcengine_success = True
                 _log(f"火山引擎 ASR 成功: {len(raw_segments)} 条语音段")
             else:
-                _log("火山引擎 ASR 失败，将降级到 Whisper")
+                _log("火山引擎 ASR 失败，将切换到本地语音识别")
         except Exception as e:
             _log(f"火山引擎 ASR 异常: {e}")
 
-    def _run_whisper():
-        """Whisper: 精确时间戳（降级方案）"""
+    def _run_local_asr():
+        """Reuse the selected local engine and fallback policy from smart cut."""
         nonlocal raw_segments
-        _log("正在用 Whisper 识别最终视频音频...")
         try:
-            from faster_whisper import WhisperModel
-            from platform_config import WHISPER_DEVICE, WHISPER_COMPUTE
-            model = WhisperModel("small", device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE)
-            segs_iter, info = model.transcribe(wav_path, language="zh", beam_size=5, vad_filter=True)
-            _log(f"Whisper 识别语言: {info.language} (概率: {info.language_probability:.2f})")
-            raw_segments = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segs_iter]
-            _log(f"Whisper 识别完成: {len(raw_segments)} 条语音段")
-            del model
-        except Exception as e:
-            _log(f"Whisper 识别失败: {e}")
+            from ai_clipper import load_settings as load_local_settings
+
+            local_settings = load_local_settings()
+        except Exception as exc:
+            _log(f"读取本地 ASR 设置失败，使用 SenseVoice 默认值: {exc}")
+            local_settings = {"local_asr_engine": "sensevoice", "whisper_model": "small"}
+        raw_segments = _final_subtitle_local_asr_segments(
+            wav_path,
+            temp_dir,
+            local_settings,
+            _log,
+        )
 
     def _build_fallback_segments(cloud_text, wav_path, _log):
-        """[PATCH] When Whisper fails, use cloud ASR text with estimated timestamps"""
+        """Use cloud text across the final audio duration when local ASR is unavailable."""
         if not cloud_text or len(cloud_text) < 10:
             return None
         try:
-            from faster_whisper import WhisperModel
-            _log("Whisper失败，加载Whisper做时间对齐...")
-            from platform_config import WHISPER_DEVICE, WHISPER_COMPUTE
-            model = WhisperModel("small", device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE)
-            segs_iter, _info = model.transcribe(wav_path, language="zh", beam_size=5, vad_filter=True)
-            w_segs = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segs_iter]
-            del model
-            if not w_segs:
+            import wave
+
+            with wave.open(wav_path, "rb") as wav_file:
+                frame_rate = wav_file.getframerate()
+                duration = wav_file.getnframes() / frame_rate if frame_rate else 0.0
+            if duration <= 0:
                 return None
-            # Distribute cloud text across Whisper timestamps by character ratio
-            total_w_chars = sum(len(s["text"]) for s in w_segs)
-            if total_w_chars == 0:
-                return None
-            chars = list(cloud_text)
-            total_c = len(chars)
-            ci = 0
-            result = []
-            for seg in w_segs:
-                ratio = len(seg["text"]) / total_w_chars
-                seg_len = max(1, int(total_c * ratio))
-                seg_text = "".join(chars[ci:ci + seg_len]).strip()
-                ci += seg_len
-                if seg_text:
-                    result.append({"start": seg["start"], "end": seg["end"], "text": seg_text})
-            return result if result else None
-        except Exception as e:
-            _log(f"备用字幕生成失败: {e}")
+            _log("本地ASR失败，按成片时长生成云端参考字幕...")
+            return [{"start": 0.0, "end": duration, "text": cloud_text.strip()}]
+        except Exception as exc:
+            _log(f"备用字幕生成失败: {exc}")
             return None
 
     def _run_cloud_asr():
@@ -4344,7 +4452,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         except Exception as e:
             _log(f"云端ASR参考获取跳过: {e}")
 
-    # 先尝试火山引擎 ASR，失败则降级到 Whisper + 云端ASR
+    # 先尝试选定云端 ASR，失败则走与智能成片一致的本地 ASR
     import threading
 
     # 字幕阶段：跟随用户ASR选项（阿里云/火山引擎）
@@ -4364,8 +4472,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             t_ali.start()
             t_ali.join(timeout=180)
             if not volcengine_success:
-                _log("阿里云ASR失败，降级到本地Whisper")
-                t1 = threading.Thread(target=_run_whisper)
+                _log("阿里云ASR失败，切换到本地语音识别")
+                t1 = threading.Thread(target=_run_local_asr)
                 t1.start()
                 t1.join(timeout=180)
         else:
@@ -4374,20 +4482,20 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             t_volc.start()
             t_volc.join(timeout=120)
             if not volcengine_success:
-                _log("火山引擎ASR失败，降级到本地Whisper")
-                t1 = threading.Thread(target=_run_whisper)
+                _log("火山引擎ASR失败，切换到本地语音识别")
+                t1 = threading.Thread(target=_run_local_asr)
                 t1.start()
                 t1.join(timeout=180)
     else:
-        _log("字幕阶段：云端ASR未启用，使用本地Whisper")
-        t1 = threading.Thread(target=_run_whisper)
+        _log("字幕阶段：云端ASR未启用，使用本地语音识别（跟随设置）")
+        t1 = threading.Thread(target=_run_local_asr)
         t1.start()
         t1.join(timeout=180)
 
     if not volcengine_success:
         if not raw_segments:
             if cloud_reference:
-                _log("Whisper失败，尝试用云端ASR文本生成字幕...")
+                _log("本地ASR失败，尝试用云端ASR文本生成字幕...")
                 fallback = _build_fallback_segments(cloud_reference, wav_path, _log)
                 if fallback:
                     raw_segments = fallback
@@ -4397,7 +4505,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     import shutil as _shutil; _shutil.copy2(video_path, output_path)
                     return
             else:
-                _log("Whisper失败且无云端参考，跳过字幕")
+                _log("本地语音识别失败且无云端参考，跳过字幕")
                 if pip_path and pip_path != "auto" and os.path.exists(pip_path):
                     _log("尝试只叠加画中画（无字幕）...")
                     _add_pip_only(video_path, output_path, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
@@ -4432,7 +4540,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             api_key = ""; base_url = ""; model = ""
 
         if not api_key:
-            _log("未找到 AI API Key，跳过DeepSeek修复，直接用 Whisper 原始文本")
+            _log("未找到 AI API Key，跳过DeepSeek修复，直接使用 ASR 原始文本")
             fixed_segments = raw_segments
         elif not base_url or not model:
             _log("AI 设置不完整（缺少 Base URL 或模型名），跳过DeepSeek修复")
@@ -4444,7 +4552,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             if cloud_reference:
                 ref_note = f"\n\n参考（另一个更准确的语音识别结果，用于纠错参考）：\n{cloud_reference}"
 
-            fix_prompt = f"""你是抖音直播字幕修复专家。请修复以下 Whisper 语音识别结果：
+            fix_prompt = f"""你是抖音直播字幕修复专家。请修复以下 ASR 语音识别结果：
 1. 修正错别字（女装术语：网纱、晴纶、锦纶、阔腿裤、罩衫、连衣裙、风衣、夹克等）
 2. 繁体字转简体（褲→裤、襯→衬、風→风、夾→夹、羽絨→羽绒等）
 3. 去除废话词(呕嗯然后对对对就是那个这个) + 句内重复词(已经。已经→已经) + 填充音(啊啊啊)
@@ -4499,12 +4607,12 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                         })
 
                 if len(fixed_segments) < len(raw_segments) // 2:
-                    _log(f"DeepSeek返回解析异常（{len(fixed_segments)}条 vs 原始{len(raw_segments)}条），回退到 Whisper 原始文本")
+                    _log(f"DeepSeek返回解析异常（{len(fixed_segments)}条 vs 原始{len(raw_segments)}条），回退到 ASR 原始文本")
                     fixed_segments = raw_segments
                 else:
                     _log(f"DeepSeek修复: {len(fixed_segments)} 条字幕")
             except Exception as e:
-                _log(f"DeepSeek修复失败: {e}，回退到 Whisper 原始文本")
+                _log(f"DeepSeek修复失败: {e}，回退到 ASR 原始文本")
                 fixed_segments = raw_segments
 
     _log("[PROGRESS] 0.85")

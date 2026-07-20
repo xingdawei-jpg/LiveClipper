@@ -799,6 +799,7 @@ def _load_settings() -> dict[str, Any]:
         "volc_bucket": "livec",
         "volc_region": "cn-beijing",
         "whisper_model": "small",
+        "local_asr_engine": "sensevoice",
         "aliyun_api_key": "",
         "aliyun_oss_ak": "",
         "aliyun_oss_sk": "",
@@ -1597,6 +1598,7 @@ class SettingsPayload(BaseModel):
     volc_bucket: str = ""
     volc_region: str = "cn-beijing"
     whisper_model: str = "small"
+    local_asr_engine: str = "sensevoice"
     aliyun_api_key: str = ""
     aliyun_oss_ak: str = ""
     aliyun_oss_sk: str = ""
@@ -6201,7 +6203,12 @@ def _ensure_srt(video: Path, scope: str) -> Path | None:
     try:
         from stt import generate_srt
 
-        generated = generate_srt(str(video), log_fn=lambda msg: emit_log("info", msg, scope))
+        generated = generate_srt(
+            str(video),
+            log_fn=lambda msg: emit_log("info", msg, scope),
+            whisper_model=str(settings.get("whisper_model", "small") or "small"),
+            asr_engine=str(settings.get("local_asr_engine", "sensevoice") or "sensevoice"),
+        )
         if generated and Path(generated).exists():
             emit_log("info", "本地语音识别完成。", scope)
             return Path(generated)

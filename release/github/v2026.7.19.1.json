@@ -1,0 +1,19 @@
+{
+    "tag":  "v2026.7.19.1",
+    "title":  "LiveClipper 2026.7.19.1",
+    "notes":  "Signed Runtime V3 incremental update from 2026.7.15.3 to 2026.7.19.1. Existing 2026.7.15.1 and 2026.7.15.2 users continue through the signed patch graph.\n\n- Add local SenseVoice ASR with word timing, fashion-live vocabulary correction, and Whisper fallback.\n- Harden transient authorization timeout and device-unbind handling.\n- Improve smart clip timeline joins and mixed-media handling.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
+    "assets":  [
+                   {
+                       "name":  "LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.1/LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip",
+                       "sha256":  "051F62FA9912E98313C2BEE4B5C62A4BA6A90D8ACA8FD631836A386979EF4455",
+                       "size":  321088079
+                   },
+                   {
+                       "name":  "LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip.sha256.txt",
+                       "url":  "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.1/LiveClipperPatch_2026.7.15.3_to_2026.7.19.1_v3_asr_release.zip.sha256.txt",
+                       "sha256":  "6524A46ED88D010D7278B320D99EC0534A7ABBC29445DE5367C6C45C07F09021",
+                       "size":  130
+                   }
+               ]
+}

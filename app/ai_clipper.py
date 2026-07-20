@@ -29,6 +29,7 @@ from selection_contracts import (
     SelectionRequest, SelectionResult, SHORTAGE_GRACE_SECONDS,
 )
 from category_profiles import iter_vertical_profiles, resolve_vertical_profile
+from candidate_quality import filter_candidate_clips, leading_fragment_trim
 
 
 _ANALYSIS_METADATA_CONTEXT = ContextVar("liveclipper_analysis_metadata", default=None)
@@ -51,6 +52,7 @@ def _begin_analysis_metadata():
         "selection_request": {},
         "selection_result": {},
         "source_contract": {},
+        "content_review_summary": {},
     }
     _ANALYSIS_METADATA_CONTEXT.set(metadata)
     _LAST_CATEGORY_FILTER_SUMMARY = metadata["category_summary"]
@@ -115,6 +117,7 @@ def get_last_analysis_metadata():
         "selection_request": dict(metadata.get("selection_request") or {}),
         "selection_result": dict(metadata.get("selection_result") or {}),
         "source_contract": dict(metadata.get("source_contract") or {}),
+        "content_review_summary": dict(metadata.get("content_review_summary") or {}),
     }
 
 
@@ -249,8 +252,8 @@ def _format_recent_history_hint(recent_items, limit=10):
         end = float(item.get("end") or 0)
         lines.append(f"- {ctype}/{block} {start:.1f}-{end:.1f}s: {text}")
     return (
-        "★同一素材最近已用片段，必须优先避开同一句、同义表达和相同Hook开场；"
-        "素材不足时再少量复用Close，Hook和前3个Product尽量全换★\n"
+        "★同一素材最近已用片段仅用于质量相近时避让。不得为了换Hook、换前三段或追求差异化，"
+        "改选明显更空泛、不完整或证据更弱的内容；高质量候选不足时允许复用★\n"
         + "\n".join(lines)
     )
 
@@ -2456,8 +2459,11 @@ def _default_settings():
     return {
         "api_key": "", "base_url": DEEPSEEK_DEFAULT_BASE_URL,
         "model": DEEPSEEK_DEFAULT_MODEL, "enabled": False,
+        "local_asr_engine": "sensevoice",
+        "whisper_model": "small",
         "style_profile_enabled": True,
         "style_profile_strength": "auto",
+        "content_review_mode": "off",
     }
 
 
@@ -4789,6 +4795,7 @@ def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
         log_fn,
         word_timings=word_timings,
     )
+    candidate_clips = filter_candidate_clips(candidate_clips, log_fn=log_fn)
     candidate_clips = _trim_dangling_tail_clauses(candidate_clips, word_timings, log_fn)
 
     candidates = []
@@ -5750,6 +5757,126 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             + "；由AI统一编排，不做机械轮播"
         )
     _log(f"AI: 构建SRT条目索引 {len(_indexed_srt_entries)} 条")
+    # 内容审稿只读取冻结后的安全候选。任何异常都退回原导演候选，不能让审稿层阻断任务。
+    _content_review_mode = "off"
+    _content_review_version = "content-review-unavailable"
+    _content_review_allowed_ids = None
+    _content_review_hint = ""
+    _content_review_topic_support = {}
+    _content_review_applied = False
+    _final_sequence_reviewer = None
+    try:
+        from content_review import (
+            CONTENT_REVIEW_VERSION,
+            resolve_review_mode,
+            review_candidates,
+            review_final_sequence,
+        )
+        _content_review_version = CONTENT_REVIEW_VERSION
+        _final_sequence_reviewer = review_final_sequence
+
+        _content_review_mode = resolve_review_mode(settings)
+        _content_review_summary = {
+            "mode": _content_review_mode,
+            "version": _content_review_version,
+            "cache_hit": False,
+            "main_count": 0,
+            "reserve_count": 0,
+            "retained_duration": 0.0,
+            "grounded_card_count": 0,
+            "fallback_reason": "",
+        }
+        _analysis_metadata["content_review_summary"] = _content_review_summary
+        if not _director_mode:
+            _content_review_summary["fallback_reason"] = "not_director_mode"
+        elif _content_review_mode != "off":
+            if _director_safe_candidate_duration + 0.1 < _duration_contract.source_min:
+                _content_review_summary["fallback_reason"] = "safe_candidate_duration_insufficient"
+                _log(
+                    "AI\u5185\u5bb9\u5ba1\u7a3f: \u5b89\u5168\u5019\u9009\u65f6\u957f\u4e0d\u8db3\u4ee5\u6ee1\u8db3\u7247\u5355\u5408\u540c\uff0c\u76f4\u63a5\u6cbf\u7528\u65e7\u94fe\u8def\uff0c"
+                    "\u4e0d\u989d\u5916\u8c03\u7528\u5ba1\u7a3f\u6a21\u578b"
+                )
+            else:
+                _review_controls = _normalize_ai_controls(ai_controls)
+                _candidate_digest = str(
+                    (_analysis_metadata.get("candidate_contract") or {}).get("digest") or ""
+                )
+                if not _candidate_digest:
+                    _candidate_digest = hashlib.sha256(
+                        json.dumps(
+                            _director_safe_inventory,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                _content_review_bundle = review_candidates(
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    inventory=_director_safe_inventory,
+                    candidate_digest=_candidate_digest,
+                    category=_cross_cat_preferred or "",
+                    main_product=_review_controls.get("main_product") or "",
+                    avoid=_review_controls.get("avoid") or [],
+                    required_sources=_director_required_sources,
+                    log_fn=_log,
+                )
+                _analysis_metadata["content_review_summary"] = _content_review_bundle.summary(
+                    _content_review_mode
+                )
+                _log(
+                    f"AI\u5185\u5bb9\u5ba1\u7a3f: {_content_review_mode}\u6a21\u5f0f\uff0c\u4fdd\u7559"
+                    f"{len(_content_review_bundle.cards)}\u5f20\u6709\u539f\u6587\u8bc1\u636e\u7684\u5185\u5bb9\u5361/"
+                    f"{_content_review_bundle.retained_duration:.1f}s"
+                    + ("\uff08\u7f13\u5b58\u547d\u4e2d\uff09" if _content_review_bundle.cache_hit else "")
+                )
+                _review_run_min = min(
+                    _director_safe_candidate_duration,
+                    min(
+                        150.0,
+                        max(_duration_contract.source_min, _AI_TARGET_DURATION * 1.2),
+                    ),
+                )
+                if (
+                    _content_review_mode == "on"
+                    and _content_review_bundle.retained_duration + 0.1 < _review_run_min
+                ):
+                    _analysis_metadata["content_review_summary"]["fallback_reason"] = (
+                        "reviewed_candidate_duration_insufficient"
+                    )
+                    _log(
+                        f"AI\u5185\u5bb9\u5ba1\u7a3f: \u5ba1\u7a3f\u6c60{_content_review_bundle.retained_duration:.1f}s"
+                        f"\u4f4e\u4e8e\u672c\u6b21\u6240\u9700{_review_run_min:.1f}s\uff0c\u672c\u6b21\u9000\u56de\u65e7\u5019\u9009"
+                    )
+                elif _content_review_mode == "on":
+                    _content_review_allowed_ids = _content_review_bundle.allowed_candidate_ids
+                    _content_review_hint = _content_review_bundle.director_hint()
+                    _content_review_topic_support = _content_review_bundle.topic_support(
+                        _director_safe_inventory
+                    )
+                    _content_review_applied = True
+                    _log(
+                        f"AI\u5185\u5bb9\u5ba1\u7a3f: \u5bfc\u6f14\u5019\u9009 {_director_candidate_count} -> "
+                        f"{len(_content_review_allowed_ids)}\uff0c\u539f\u7f16\u53f7\u548c\u65f6\u95f4\u6233\u4fdd\u6301\u4e0d\u53d8"
+                    )
+    except Exception as _review_error:
+        _analysis_metadata["content_review_summary"] = {
+            "mode": _content_review_mode,
+            "version": _content_review_version,
+            "cache_hit": False,
+            "main_count": 0,
+            "reserve_count": 0,
+            "retained_duration": 0.0,
+            "grounded_card_count": 0,
+            "fallback_reason": str(_review_error)[:240],
+        }
+        _content_review_allowed_ids = None
+        _content_review_hint = ""
+        _content_review_topic_support = {}
+        _content_review_applied = False
+        if _content_review_mode != "off":
+            _log(f"AI\u5185\u5bb9\u5ba1\u7a3f: {_review_error}\uff0c\u81ea\u52a8\u9000\u56de\u65e7\u5019\u9009\u94fe\u8def")
     for attempt in range(_max_attempts):
         if _director_mode:
             _log(f"AI: 调用 {model}（{_director_stage}）...")
@@ -5798,6 +5925,9 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 duration_contract=_duration_contract,
                 merge_mode=merge_mode,
                 required_sources=_director_required_sources,
+                allowed_candidate_ids=_content_review_allowed_ids,
+                content_review_hint=_content_review_hint,
+                review_topic_support=_content_review_topic_support,
             )
         if not clips and _director_expand_source_clips is not None:
             clips = list(_director_expand_source_clips)
@@ -6075,6 +6205,166 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 )
             if _director_audit.get("warnings"):
                 _log("AI叙事提示: " + "；".join(_director_audit.get("warnings") or []))
+
+            if (
+                _content_review_applied
+                and _final_sequence_reviewer is not None
+                and _content_review_allowed_ids
+            ):
+                _selected_sequence = []
+                for _order, _clip in enumerate(clips, 1):
+                    _selected_sequence.append({
+                        "order": _order,
+                        "clip_type": str(_clip[0] if len(_clip) > 0 else "product"),
+                        "srt_indices": _director_clip_entry_indices(
+                            _clip, _indexed_srt_entries
+                        ),
+                        "source": _director_clip_source_key(_clip).upper(),
+                        "duration_sec": round(_clip_duration_value(_clip), 1),
+                        "focus": str(_clip[6] if len(_clip) > 6 else "")[:40],
+                        "text": re.sub(
+                            r"\s+", " ", str(_clip[1] if len(_clip) > 1 else "")
+                        ).strip()[:240],
+                    })
+                _review_inventory = [
+                    item for item in _director_safe_inventory
+                    if int(item.get("srt_index") or 0) in _content_review_allowed_ids
+                ]
+                try:
+                    _final_review = _final_sequence_reviewer(
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model,
+                        selected_sequence=_selected_sequence,
+                        inventory=_review_inventory,
+                        allowed_candidate_ids=_content_review_allowed_ids,
+                        category=_cross_cat_preferred or "",
+                        preference=_audit_preferred_focus or "",
+                        duration_low=float(_director_audit.get("duration_low") or 0.0),
+                        duration_high=float(_director_audit.get("duration_high") or 0.0),
+                        required_sources=_director_required_sources,
+                        log_fn=_log,
+                    )
+                    _final_review_summary = _final_review.summary()
+                    _analysis_metadata["content_review_summary"]["final_review"] = (
+                        _final_review_summary
+                    )
+                    if _final_review.status == "pass":
+                        _log(
+                            "AI\u6210\u7247\u7ec8\u5ba1: \u901a\u8fc7\uff0cHook\u3001\u627f\u63a5\u3001\u6b63\u6587\u548c\u7ed3\u5c3e\u65e0\u9700\u6539\u5199"
+                        )
+                    elif _final_review.status == "revise":
+                        _reviewed_clips = _parse_ai_response(
+                            json.dumps(
+                                {"clips": list(_final_review.clips)},
+                                ensure_ascii=False,
+                            ),
+                            _log,
+                            _indexed_srt_entries,
+                            set(),
+                            require_srt_indices=True,
+                            allowed_candidate_indices=_content_review_allowed_ids,
+                        )
+                        if _final_review.expansion_plan:
+                            _reviewed_expanded = _apply_ai_expansion_plan(
+                                _reviewed_clips,
+                                list(_final_review.expansion_plan),
+                                _indexed_srt_entries,
+                                _AI_TARGET_DURATION,
+                                _log,
+                                label="AI\u6210\u7247\u7ec8\u5ba1\u8865\u8db3",
+                                duration_contract=_duration_contract,
+                                required_sources=_director_required_sources,
+                            )
+                            if _reviewed_expanded:
+                                _reviewed_clips = _reviewed_expanded
+                        _reviewed_clips = _stabilize_director_structure(
+                            _reviewed_clips,
+                            _indexed_srt_entries,
+                            _hook_candidate_summary,
+                            _log,
+                        )
+                        _reviewed_clips, _reviewed_audit = _director_hard_audit(
+                            _reviewed_clips,
+                            _AI_TARGET_DURATION,
+                            _hook_cap_sec,
+                            _log,
+                            preferred_focus=_audit_preferred_focus,
+                            require_preference_hook=False,
+                            require_preference_mainline=_require_preference_mainline,
+                            preference_target_duration=_final_target_duration,
+                            duration_contract=_duration_contract,
+                        )
+                        _reviewed_missing_sources = _director_missing_sources(
+                            _reviewed_clips,
+                            _director_required_sources,
+                        )
+                        _reviewed_failures = list(
+                            _director_fatal_issues(_reviewed_audit)
+                        )
+                        if _reviewed_audit.get("duration_short"):
+                            _reviewed_failures.append("\u7ec8\u5ba1\u4fee\u8ba2\u7247\u5355\u65f6\u957f\u4e0d\u8db3")
+                        if _reviewed_audit.get("duration_long"):
+                            _reviewed_failures.append("\u7ec8\u5ba1\u4fee\u8ba2\u7247\u5355\u8d85\u65f6")
+                        if int(_reviewed_audit.get("hard_removed") or 0):
+                            _reviewed_failures.append("\u7ec8\u5ba1\u4fee\u8ba2\u7247\u5355\u89e6\u53d1\u786c\u8fc7\u6ee4")
+                        if _reviewed_missing_sources:
+                            _reviewed_failures.append(
+                                "\u7ec8\u5ba1\u4fee\u8ba2\u7247\u5355\u7f3a\u5c11\u6765\u6e90:"
+                                + ",".join(_reviewed_missing_sources)
+                            )
+                        _old_signature = [
+                            (
+                                str(item.get("clip_type") or ""),
+                                tuple(item.get("srt_indices") or []),
+                            )
+                            for item in _selected_sequence
+                        ]
+                        _new_signature = [
+                            (
+                                str(item.get("clip_type") or ""),
+                                tuple(item.get("srt_indices") or []),
+                            )
+                            for item in _final_review.clips
+                        ]
+                        if _new_signature == _old_signature:
+                            _reviewed_failures.append("\u7ec8\u5ba1\u4fee\u8ba2\u672a\u6539\u53d8\u7247\u5355")
+                        if _reviewed_failures:
+                            _fallback_reason = "\uff1b".join(_reviewed_failures[:4])
+                            _analysis_metadata["content_review_summary"]["final_review"] = (
+                                _final_review.summary(
+                                    applied=False,
+                                    fallback_reason=_fallback_reason,
+                                )
+                            )
+                            _log(
+                                "AI\u6210\u7247\u7ec8\u5ba1: \u4fee\u8ba2\u7ed3\u679c\u672a\u901a\u8fc7\u65f6\u957f/\u6765\u6e90/\u5b89\u5168\u5408\u540c\uff0c"
+                                "\u4fdd\u7559\u5bfc\u6f14\u539f\u7247\u5355\uff08" + _fallback_reason + "\uff09"
+                            )
+                        else:
+                            clips = _reviewed_clips
+                            _director_audit = _reviewed_audit
+                            _director_last_audit = dict(_reviewed_audit or {})
+                            _analysis_metadata["content_review_summary"]["final_review"] = (
+                                _final_review.summary(applied=True)
+                            )
+                            _issue_text = "\uff1b".join(_final_review.issues[:3])
+                            _log(
+                                f"AI\u6210\u7247\u7ec8\u5ba1: \u5df2\u5e94\u7528\u4e00\u6b21\u5b8c\u6574\u7247\u5355\u4fee\u8ba2\uff0c"
+                                f"{len(_selected_sequence)}\u6bb5 -> {len(clips)}\u6bb5"
+                                + (f"\uff08{_issue_text}\uff09" if _issue_text else "")
+                            )
+                except Exception as _final_review_error:
+                    _analysis_metadata["content_review_summary"]["final_review"] = {
+                        "status": "unavailable",
+                        "issue_count": 0,
+                        "applied": False,
+                        "fallback_reason": str(_final_review_error)[:240],
+                    }
+                    _log(
+                        f"AI\u6210\u7247\u7ec8\u5ba1: {_final_review_error}\uff0c"
+                        "\u4fdd\u7559\u5df2\u901a\u8fc7\u786c\u5408\u540c\u7684\u5bfc\u6f14\u539f\u7247\u5355"
+                    )
 
             _remaining_issues = _director_fatal_issues(_director_audit)
             if _remaining_issues:
@@ -7413,10 +7703,14 @@ def _force_short_hook(clips, srt_text, log_fn=None, max_hook_sec=5.0, focus_hint
     return clips
 
 
-def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False, required_sources=None):
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False, required_sources=None, allowed_candidate_ids=None, content_review_hint=None, review_hook_pairs=None, review_topic_support=None):
     def _log(msg):
         if log_fn: log_fn(msg)
     main_category = _normalize_forced_category(main_category) or main_category
+    _review_allowed_candidate_ids = (
+        {int(index) for index in allowed_candidate_ids}
+        if allowed_candidate_ids is not None else None
+    )
 
     def _resolve_focus_used_label(label="", detail=""):
         text = str(label or "").strip()
@@ -7502,6 +7796,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _focus_score_excluded_count = 0
         for i, (es, ee, et) in enumerate(srt_entries, 1):
             _srt_entry_map[i] = (es, ee, et)
+            _is_review_allowed = (
+                _review_allowed_candidate_ids is None or i in _review_allowed_candidate_ids
+            )
             _entry_duration = max(0.0, float(ee) - float(es))
             # 违禁词预扫描：标记含违禁词的条目
             _et_variants = _safety_text_variants(et)
@@ -7527,11 +7824,12 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             )
             if _blocked_for_focus_score:
                 _focus_score_excluded_count += 1
-            else:
+            elif _is_review_allowed:
                 _focus_score_entry_texts.append(et)
             if _matched_fw or _matched_price or _matched_content or _matched_backstage:
-                _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] [不可选：含违禁词、价格/CTA或直播操作]")
-            else:
+                if _is_review_allowed:
+                    _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] [不可选：含违禁词、价格/CTA或直播操作]")
+            elif _is_review_allowed:
                 _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s] {et}")
         if merge_mode:
             _interleaved_lines = _director_interleave_prompt_lines(
@@ -7557,6 +7855,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         (_idx, es, ee, et)
         for _idx, (es, ee, et) in sorted(_srt_entry_map.items())
         if _idx not in _forbidden_indices
+        and (_review_allowed_candidate_ids is None or _idx in _review_allowed_candidate_ids)
     ]
     _manual_focus_label = _normalize_focus_label(focus_hint)
     if str(_manual_focus_label or "").strip().lower() in {"", "自动", "auto", "默认", "无"}:
@@ -7581,7 +7880,88 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     }
     _hook_hint = ""
     _allowed_hook_indices = set()
-    if hook_candidates_hint:
+    if review_hook_pairs:
+        _valid_review_pairs = []
+        for _pair in review_hook_pairs:
+            try:
+                _hook_id = int(_pair.get("hook_id") or 0)
+                _followup_id = int(_pair.get("followup_id") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if (
+                _hook_id in _srt_entry_map
+                and _followup_id in _srt_entry_map
+                and (_review_allowed_candidate_ids is None or (
+                    _hook_id in _review_allowed_candidate_ids
+                    and _followup_id in _review_allowed_candidate_ids
+                ))
+            ):
+                _valid_review_pairs.append((_hook_id, _followup_id, _pair))
+        _preferred_review_pairs = []
+        if _manual_focus_label and not _skip_focus:
+            for _item in _valid_review_pairs:
+                _hook_id, _followup_id, _pair = _item
+                _pair_text = " ".join((
+                    str(_pair.get("topic") or ""),
+                    str(_srt_entry_map[_hook_id][2]),
+                    str(_srt_entry_map[_followup_id][2]),
+                ))
+                if _hook_matches_preference(_pair_text, _manual_focus_label, None):
+                    _preferred_review_pairs.append(_item)
+        if _preferred_review_pairs:
+            _valid_review_pairs = _preferred_review_pairs
+        _allowed_hook_indices = {item[0] for item in _valid_review_pairs}
+        _analysis_metadata_context()["hook_candidate_summary"].update({
+            "preference_hook_required": bool(_preferred_review_pairs),
+            "preference_review_pair_count": len(_preferred_review_pairs),
+            "allowed_hook_indices": sorted(_allowed_hook_indices),
+            "ranked_hook_indices": [item[0] for item in _valid_review_pairs],
+            "review_pair_count": len(_valid_review_pairs),
+        })
+        _pair_lines = [
+            f"#{hook_id:02d}->#{followup_id:02d}"
+            f"[{str(pair.get('topic') or '高质量卖点').strip()}]"
+            for hook_id, followup_id, pair in _valid_review_pairs
+        ]
+        _hook_hint = (
+            "\n★内容审稿Hook合同★ Hook必须从以下组合的左侧编号选择，第二段必须使用该组合右侧编号，"
+            "直接解释、证明或兑现开头；关键词分只负责召回，用户偏好不强迫Hook换成较弱句。"
+            f"组合: {', '.join(_pair_lines)}★"
+        )
+        _log(f"AI: 内容审稿提供 {len(_valid_review_pairs)} 组Hook+承接组合")
+    elif content_review_hint:
+        # Keyword scores are recall hints only. In reviewed mode the director may
+        # choose any grounded reviewed candidate as Hook after reading the full story.
+        _ranked_review_hook_candidates = sorted(
+            _hook_candidates,
+            key=lambda candidate: (-candidate[3], candidate[0]),
+        )[:12]
+        _analysis_metadata_context()["hook_candidate_summary"].update({
+            "preference_hook_required": False,
+            "allowed_hook_indices": [],
+            "ranked_hook_indices": [
+                candidate[0] for candidate in _ranked_review_hook_candidates
+            ],
+            "reviewed_pool_unrestricted": True,
+        })
+        _candidate_lines = [
+            f'#{candidate[0]:02d}"{candidate[1][:24]}"'
+            for candidate in _ranked_review_hook_candidates
+        ]
+        _hook_hint = (
+            "\n\u2605Hook\u5019\u9009\u53ea\u662f\u53ec\u56de\u53c2\u8003\uff0c\u4e0d\u662f\u767d\u540d\u5355\u2605 "
+            "\u4f60\u53ef\u4ece\u4efb\u610f\u5ba1\u7a3f\u901a\u8fc7\u7684\u5019\u9009\u4e2d\u9009Hook\u3002"
+            "\u5fc5\u987b\u5148\u68c0\u67e5Hook\u81ea\u8eab\u662f\u5426\u72ec\u7acb\u8bf4\u5b8c\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c\uff0c"
+            "\u518d\u68c0\u67e5\u7b2c2\u6bb5\u662f\u5426\u7acb\u5373\u89e3\u91ca\u3001\u8bc1\u660e\u6216\u5151\u73b0\u5b83\u3002"
+            "\u201c\u60f3\u770bX\u5c31\u7ed9\u4f60\u770b\u4e00\u773c\u201d\u3001\u201cX\u5c31\u8fd9\u4e48\u642d\u201d\u3001\u7eaf\u5c55\u793a\u8fc7\u6e21\u4e0d\u5f97\u4f5cHook\u3002"
+            "\u5dee\u5f02\u5316\u548c\u7528\u6237\u504f\u597d\u53ea\u5728\u5185\u5bb9\u8d28\u91cf\u76f8\u5f53\u65f6\u4f5c\u4e3a\u9009\u62e9\u4f9d\u636e\u3002"
+            + (f"\u53ec\u56de\u53c2\u8003: {', '.join(_candidate_lines)}" if _candidate_lines else "")
+        )
+        _log(
+            f"AI: \u5ba1\u7a3f\u6a21\u5f0fHook\u53ec\u56de {len(_ranked_review_hook_candidates)} \u4e2a\uff0c"
+            "\u4e0d\u9650\u5236\u5bfc\u6f14\u53ea\u80fd\u4ece\u53ec\u56de\u5217\u8868\u9009\u62e9"
+        )
+    elif hook_candidates_hint:
         # 多版本模式：使用外部传入的分配候选
         _hook_hint = hook_candidates_hint
         _log(f"AI: 使用分配的Hook候选")
@@ -7699,6 +8079,29 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 pass
             _food_focus_labels = {"口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法"}
             _food_mode = _is_food_fresh_category(main_category)
+            _review_focus_scores = {}
+            _review_focus_support_counts = {}
+            for _topic, _support in (review_topic_support or {}).items():
+                _focus_name = _normalize_focus_label(_topic)
+                if _focus_name not in _focus_hints_map:
+                    continue
+                if _food_mode and _focus_name not in _food_focus_labels:
+                    continue
+                if not _food_mode and _focus_name in _food_focus_labels:
+                    continue
+                if not isinstance(_support, dict):
+                    continue
+                _main_support = float(_support.get("main") or 0.0)
+                _reserve_support = float(_support.get("reserve") or 0.0)
+                _evidence_support = float(_support.get("evidence") or 0.0)
+                _support_count = int(_main_support + _reserve_support)
+                if _support_count <= 0:
+                    continue
+                _weight = _weights.get(_focus_name, 1.0)
+                _review_focus_scores[_focus_name] = (
+                    _main_support * 3.0 + _reserve_support + _evidence_support * 0.5
+                ) * _weight
+                _review_focus_support_counts[_focus_name] = _support_count
             for _fname, _fkws in _focus_hints_map.items():
                 _fname = _normalize_focus_label(_fname)
                 if _food_mode and _fname not in _food_focus_labels:
@@ -7718,6 +8121,10 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     _focus_scores[_fname] = _focus_scores.get(_fname, 0) + _score * _weight
                     _focus_support_counts[_fname] = _focus_support_counts.get(_fname, 0) + _support_count
             
+            if _review_focus_scores:
+                _focus_scores = _review_focus_scores
+                _focus_support_counts = _review_focus_support_counts
+                _log("AI: 自动偏好改用内容审稿的高质量主题支持量")
             if _focus_scores:
                 _robust_focus_scores = {
                     key: value
@@ -7906,6 +8313,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         pass
     _recent_history_prompt = f"\n{recent_history_hint}\n" if recent_history_hint else ""
     _extra_instruction_prompt = f"\n{extra_instruction}\n" if extra_instruction else ""
+    _content_review_prompt = f"\n{content_review_hint}\n" if content_review_hint else ""
     _active_preference = _current_focus_used_label()
     _preference_quota_prompt = ""
     if not _skip_focus and _preference_quota_supported(_active_preference):
@@ -7929,7 +8337,18 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             "★直播口癖降级★ 不选以“来准备好”“就是你们会发现”“如果你想要有一点尝试的心态”开头的铺垫，"
             "不选以“呀对不对”“是不是这种感觉”收尾的互动句；除非去掉口癖后仍是一句独立且有新增信息的完整卖点。\n"
         )
-    if _manual_focus_label and _preference_hook_candidates and not _skip_focus:
+    if review_hook_pairs:
+        if _manual_focus_label and not _skip_focus:
+            _hook_focus_rule = (
+                f"★Hook必须从内容审稿组合中选择。用户指定偏好“{_manual_focus_label}”时，"
+                "先比较主题相符的审稿组合；只要匹配组合完整、有具体信息且承接成立，就优先使用。"
+                "仅当没有合格匹配组合时才选择最强的其他主题，不得为了偏好使用弱句★"
+            )
+        else:
+            _hook_focus_rule = (
+                "★Hook优先服从内容审稿的强开头与直接承接组合，不得为了差异化选择较弱开头★"
+            )
+    elif _manual_focus_label and _preference_hook_candidates and not _skip_focus:
         _hook_focus_rule = (
             f"★Hook必须体现用户指定偏好“{_manual_focus_label}”，第二段必须同主题兑现Hook；"
             "强度相近时选择偏好Hook，不得用其他主题的通用强Hook覆盖用户选择★"
@@ -8040,6 +8459,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 {extra_instruction}
 {_category_context_prompt}
 {_merge_source_rule}
+{_content_review_prompt}
 本轮指定偏好：{_active_preference or focus or '全量选片'}
 {_preference_quota_prompt}
 {_hook_focus_rule}
@@ -8069,6 +8489,7 @@ Hook、第2段、Close的trim_priority必须为0；其他Product从1开始填写
         user_msg = f"""这是一次定向片单修复，不是重新自由策划。必须解决检查项，不能原样返回旧骨架。
 
 {extra_instruction}
+{_content_review_prompt}
 
 本轮指定偏好：{_active_preference or focus or '全量选片'}
 {_preference_quota_prompt}
@@ -8113,6 +8534,7 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
 {_ai_rules_prompt}
 {_recent_history_prompt}
 {_extra_instruction_prompt}
+{_content_review_prompt}
 
 ★输出格式★: 只输出一个JSON对象。clips中每个片段用srt_indices指定编号条目，不要填start/end时间戳；每项都填写trim_priority。expansion_plan提供4-8个未被clips使用的完整Product，并用after_srt_indices锚定插入位置。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
 {{
@@ -8205,6 +8627,7 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
                 _forbidden_indices,
                 require_srt_indices=bool(srt_entries) and not _orig_skip,
                 allowed_hook_indices=_allowed_hook_indices or None,
+                allowed_candidate_indices=_review_allowed_candidate_ids,
             )
         return _parse_ai_response(
             content,
@@ -8213,6 +8636,7 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
             _forbidden_indices,
             require_srt_indices=bool(srt_entries) and not _orig_skip,
             allowed_hook_indices=_allowed_hook_indices or None,
+            allowed_candidate_indices=_review_allowed_candidate_ids,
         )
     except urllib.error.HTTPError as e:
         err = ""
@@ -8284,9 +8708,30 @@ def _parse_raw_response(content, log_fn=None):
         return None
 
 
-def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None, require_srt_indices=False, allowed_hook_indices=None):
+def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None, require_srt_indices=False, allowed_hook_indices=None, allowed_candidate_indices=None):
     def _log(msg):
         if log_fn: log_fn(msg)
+    _allowed_review_ids_for_plan = (
+        {int(index) for index in allowed_candidate_indices}
+        if allowed_candidate_indices is not None else None
+    )
+
+    def _review_plan_item_allowed(item):
+        if _allowed_review_ids_for_plan is None:
+            return True
+        if not isinstance(item, dict):
+            return False
+        indices = item.get("srt_indices", item.get("srt_index"))
+        if isinstance(indices, int):
+            indices = [indices]
+        try:
+            normalized = [int(index) for index in (indices or [])]
+        except (TypeError, ValueError):
+            return False
+        return bool(normalized) and all(
+            index in _allowed_review_ids_for_plan for index in normalized
+        )
+
 
     # 去掉 markdown 代码块包裹(```json ... ```)
     # R1 经常返回 ```json\n[...]\n``` 格式，需要多行匹配
@@ -8365,6 +8810,10 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
                 return []
 
     raw_expansion_plan = data.get("expansion_plan", []) if isinstance(data, dict) else []
+    if isinstance(raw_expansion_plan, list):
+        raw_expansion_plan = [
+            item for item in raw_expansion_plan if _review_plan_item_allowed(item)
+        ]
     _analysis_metadata_context()["expansion_plan"] = (
         list(raw_expansion_plan) if isinstance(raw_expansion_plan, list) else []
     )
@@ -8389,11 +8838,16 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
     skipped_no_text = 0
     skipped_bad_time = 0
     skipped_missing_indices = 0
+    skipped_outside_review = 0
     skipped_invalid_hook = 0
     allowed_hook_indices = {
         int(index) for index in (allowed_hook_indices or [])
         if str(index).strip().isdigit()
     }
+    allowed_candidate_indices_set = (
+        {int(index) for index in allowed_candidate_indices}
+        if allowed_candidate_indices is not None else None
+    )
     for idx, item in enumerate(data):
         # 诊断:打印第一个 item 的所有字段名
         if idx == 0:
@@ -8417,6 +8871,16 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
             # 按索引查SRT条目，构建clip
             if isinstance(srt_idx, int):
                 srt_idx = [srt_idx]
+            try:
+                srt_idx = [int(index) for index in srt_idx]
+            except (TypeError, ValueError):
+                skipped_bad_time += 1
+                continue
+            if allowed_candidate_indices_set is not None and any(
+                index not in allowed_candidate_indices_set for index in srt_idx
+            ):
+                skipped_outside_review += 1
+                continue
             if ct == "hook" and allowed_hook_indices:
                 try:
                     hook_indices = [int(index) for index in srt_idx]
@@ -8473,7 +8937,7 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
                 ] = trim_priority
     _log(
         f"AI: JSON片单{len(data)}项，解析到{len(clips)}段"
-        f"（缺编号{skipped_missing_indices}，非法Hook{skipped_invalid_hook}，"
+        f"（缺编号{skipped_missing_indices}，池外编号{skipped_outside_review}，非法Hook{skipped_invalid_hook}，"
         f"无文本{skipped_no_text}，无效时间{skipped_bad_time}）"
     )
     if not clips:
@@ -10960,6 +11424,14 @@ def _trim_word_level_filler_edges(clips, word_timings, log_fn=None):
         marker = marker_match.group(1).upper() if marker_match else ""
         new_start, new_end, new_text = original_start, original_end, text
         clip_tail_noise_trimmed = False
+        tokens = _word_timing_tokens(word_timings, new_start, new_end, marker)
+        fragment_trim = leading_fragment_trim(tokens)
+        if fragment_trim:
+            boundary = float(fragment_trim["boundary"])
+            if new_end - boundary >= 2.0:
+                new_start = max(new_start, boundary)
+                changed.add(index)
+                prefix_count += 1
 
         for _ in range(4):
             tokens = _word_timing_tokens(word_timings, new_start, new_end, marker)
@@ -11189,7 +11661,7 @@ def _trim_filler_start(clips, cleaned_srt, log_fn=None, word_timings=None):
             text_for_prefix = marker_match.group(2)
         norm_text = re.sub(r'[^\u4e00-\u9fff\w]', '', text_for_prefix.strip())
         filler_prefix_len = 0
-        if clip_index not in word_trimmed_indices:
+        if clip_index not in word_trimmed_indices and not word_timings:
             remaining_norm = norm_text
             for _prefix_pass in range(4):
                 matched_prefix = ""
@@ -13048,6 +13520,11 @@ _CONTENT_SAFETY_PATTERNS = (
     ("CTA关注引导", re.compile(r"点(?:好|个|下|一下|一)?关注")),
     ("CTA关注倒序识别", re.compile(r"关注(?:点好|点一下|一下)")),
     ("CTA冲单引导", re.compile(r"冲一冲")),
+    (
+        "CTA拍单变体",
+        re.compile(r"(?:赶紧|马上|直接)?去(?:来|再|就|直接|赶紧|马上|给我|回来)?拍(?!照|摄)"),
+    ),
+    ("CTA整套拍单", re.compile(r"拍(?:这|那)(?:一)?套")),
     ("ASR识别残留", re.compile(r"(?:身高|体重|腰围|胸围)[^，。！？!?]{0,12}(?i:asr)")),
     ("CTA链接引导", re.compile(r"(?:上|挂|放)(?:个|下)?(?:链|连)接")),
     ("效果承诺:包出片", re.compile(r"包出片")),

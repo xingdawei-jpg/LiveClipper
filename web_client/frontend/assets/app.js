@@ -641,6 +641,7 @@ const settingFields = {
   asr_enabled: "s-asr-enabled",
   asr_provider: "s-asr-provider",
   whisper_model: "s-whisper-model",
+  local_asr_engine: "s-local-asr-engine",
   volc_api_key: "s-volc-api-key",
   volc_tos_ak: "s-volc-tos-ak",
   volc_tos_sk: "s-volc-tos-sk",

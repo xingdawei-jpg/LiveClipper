@@ -10,7 +10,7 @@ import subprocess
 import sys
 import urllib.parse
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,8 +181,9 @@ def validate_sources(
     allowed_hosts: set[str],
     strict: bool,
 ) -> None:
-    target = str(manifest.get("version") or manifest.get("latest_version") or "")
+    target = str(manifest.get("version") or manifest.get("latest_version") or "").strip()
     seen: set[tuple[str, str]] = set()
+    graph: dict[str, set[str]] = {}
     patches = manifest.get("patches")
     if not isinstance(patches, list):
         report.error("channel patches must be a list")
@@ -195,11 +196,12 @@ def validate_sources(
             str(patch.get("from_version") or ""),
             str(patch.get("to_version") or ""),
         )
+        if not edge[0] or not edge[1] or edge[0] == edge[1]:
+            report.error(f"invalid patch edge: {edge}")
         if edge in seen:
             report.error(f"duplicate patch edge: {edge}")
         seen.add(edge)
-        if edge[1] != target:
-            report.error(f"patch target differs from channel: {edge}")
+        graph.setdefault(edge[0], set()).add(edge[1])
         if int(patch.get("stable_payload_files") or 0) != 0:
             report.error(f"patch contains stable payload: {edge}")
         values: list[Any] = []
@@ -231,6 +233,23 @@ def validate_sources(
             elif parsed.hostname not in allowed_hosts:
                 message = f"patch uses legacy non-policy host {parsed.hostname}: {edge}"
                 (report.error if strict else report.warning)(message)
+
+    def reaches_target(start: str) -> bool:
+        pending = [start]
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == target:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(graph.get(current, ()))
+        return False
+
+    stranded = sorted(source for source in graph if not reaches_target(source))
+    for source in stranded:
+        report.error(f"patch graph has no route to channel target {target}: {source}")
 
 
 def validate_artifact(
@@ -279,7 +298,52 @@ def validate_patch_zip(
         report.error(f"{path.name}: invalid patch: {exc}")
 
 
-def git_paths(report: Report) -> None:
+def _safe_scope_path(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").strip("/")
+    path = PurePosixPath(text)
+    if (
+        not text
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or ":" in path.parts[0]
+    ):
+        raise ValueError(f"unsafe release scope path: {value!r}")
+    return path.as_posix()
+
+
+def load_release_scope(path: Path) -> dict[str, Any]:
+    data = load_json(path)
+    version = str(data.get("version") or "").strip()
+    include = data.get("include")
+    exclude = data.get("exclude")
+    if not version or not isinstance(include, list) or not isinstance(exclude, list):
+        raise ValueError("release scope requires version, include, and exclude lists")
+
+    included: set[str] = set()
+    excluded: set[str] = set()
+    for item in include:
+        if not isinstance(item, str):
+            raise ValueError("release scope include entries must be paths")
+        included.add(_safe_scope_path(item))
+    for item in exclude:
+        if not isinstance(item, dict):
+            raise ValueError("release scope exclude entries must include a reason")
+        reason = str(item.get("reason") or "").strip()
+        if not reason:
+            raise ValueError("release scope exclude entry is missing a reason")
+        excluded.add(_safe_scope_path(item.get("path")))
+
+    overlap = included & excluded
+    if overlap:
+        raise ValueError(f"release scope path is both included and excluded: {sorted(overlap)}")
+    return {
+        "version": version,
+        "include": included,
+        "exclude": excluded,
+    }
+
+
+def git_paths(report: Report, scope: dict[str, Any] | None = None) -> None:
     try:
         run = subprocess.run(
             ["git", "status", "--porcelain=v1", "-uall"],
@@ -303,14 +367,22 @@ def git_paths(report: Report) -> None:
     if report.phase == "development":
         report.warning(f"worktree has {len(paths)} changed files")
         return
-    allowed = (
+    allowed_prefixes = (
         ("release/candidates/", "release/github/")
         if report.phase == "candidate"
         else ("release/stable.json", "release/candidates/")
     )
+    declared: set[str] = set()
+    if scope:
+        included = set(scope.get("include") or ())
+        excluded = set(scope.get("exclude") or ())
+        declared = included | excluded
+        report.facts["release_scope_include"] = sorted(included)
+        report.facts["release_scope_exclude"] = sorted(excluded)
     bad = [
         path for path in paths
-        if not any(path == item or path.startswith(item) for item in allowed)
+        if path not in declared
+        and not any(path == item or path.startswith(item) for item in allowed_prefixes)
     ]
     if bad:
         report.error(f"{report.phase} has forbidden worktree changes: {bad}")
@@ -322,6 +394,7 @@ def run_preflight(
     package_path: Path | None = None,
     patch_paths: list[Path] | None = None,
     acceptance_path: Path | None = None,
+    scope_path: Path | None = None,
 ) -> Report:
     report = Report(phase)
     try:
@@ -359,6 +432,14 @@ def run_preflight(
         version_key(runtime_version)
     except ValueError as exc:
         report.error(str(exc))
+    scope = None
+    if scope_path is not None:
+        try:
+            scope = load_release_scope(scope_path)
+            if scope["version"] != runtime_version:
+                report.error("release scope version differs from runtime version")
+        except Exception as exc:
+            report.error(f"invalid release scope: {exc}")
     if runtime.get("schema_version") != 3 or runtime.get("runtime_layout_version") != 3:
         report.error("app/version.json must declare Runtime V3")
     if runtime.get("minimum_launcher_version") != LAUNCHER_VERSION:
@@ -604,7 +685,7 @@ def run_preflight(
             except Exception as exc:
                 report.error(f"invalid acceptance evidence: {exc}")
 
-    git_paths(report)
+    git_paths(report, scope)
     return report
 
 
@@ -619,6 +700,7 @@ def main() -> int:
     parser.add_argument("--package", type=Path)
     parser.add_argument("--patch", type=Path, action="append", default=[])
     parser.add_argument("--acceptance", type=Path)
+    parser.add_argument("--scope", type=Path)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     report = run_preflight(
@@ -627,6 +709,7 @@ def main() -> int:
         args.package.resolve() if args.package else None,
         [path.resolve() for path in args.patch],
         args.acceptance.resolve() if args.acceptance else None,
+        args.scope.resolve() if args.scope else None,
     )
     result = report.result()
     if args.json:
