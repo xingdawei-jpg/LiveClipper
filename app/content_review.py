@@ -283,7 +283,7 @@ def _load_cache(cache_key: str) -> dict[str, Any] | None:
         try:
             path.unlink(missing_ok=True)
         except OSError:
-            pass
+                        _LOG.warning("os error", exc_info=True)
         return None
 
 
@@ -311,7 +311,7 @@ def _cleanup_cache() -> None:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
-                pass
+                                _LOG.warning("os error", exc_info=True)
 
 
 def _write_cache(bundle: ContentReviewBundle) -> None:
@@ -335,7 +335,7 @@ def _write_cache(bundle: ContentReviewBundle) -> None:
             try:
                 os.remove(temp_name)
             except OSError:
-                pass
+                                _LOG.warning("os error", exc_info=True)
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:
@@ -825,7 +825,7 @@ def review_candidates(
             try:
                 _cache_path(cache_key).unlink(missing_ok=True)
             except OSError:
-                pass
+                                _LOG.warning("os error", exc_info=True)
 
     last_format_error: Exception | None = None
     for attempt in range(2):

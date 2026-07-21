@@ -11,6 +11,9 @@ import json
 import uuid
 import subprocess
 import re
+import logging
+_LOG = logging.getLogger("liveclipper.volcengine_asr")
+
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _WORD_TIMING_SCHEMA = "liveclipper.word-timings.v1"
@@ -385,7 +388,7 @@ def write_word_timing_sidecar(srt_path, segments, provider="volcengine", log_fn=
                 if confidence is not None:
                     item["confidence"] = round(float(confidence), 4)
             except (TypeError, ValueError):
-                pass
+                                _LOG.warning("parse error", exc_info=True)
             clean_words.append(item)
         if not clean_words:
             continue
@@ -455,6 +458,7 @@ if hasattr(sys, '_MEIPASS'):
         try:
             from ssl_context import create_ssl_context as _volc_create_context
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 # 预导入 tos SDK（避免首次调用时卡顿）
@@ -525,6 +529,7 @@ def prepare_volcengine_audio(source_path, output_dir, prefix=None, ffmpeg="ffmpe
             if os.path.exists(audio_path):
                 os.remove(audio_path)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
         cmd = [ffmpeg, "-y", "-fflags", "+genpts", "-i", source_path, *audio_args, audio_path]
@@ -550,6 +555,7 @@ def prepare_volcengine_audio(source_path, output_dir, prefix=None, ffmpeg="ffmpe
             if os.path.exists(audio_path):
                 os.remove(audio_path)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     _log(f"volcengine_asr: 音频准备失败: {last_error}")
@@ -791,6 +797,7 @@ def diagnose_volcengine(app_id="", access_token="", tos_ak="", tos_sk="",
         try:
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 
@@ -1065,4 +1072,5 @@ def _cleanup_tos(client, bucket, obj_key, _log):
         client.delete_object(bucket, obj_key)
         _log("volcengine_asr: 已清理 TOS 临时文件")
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass

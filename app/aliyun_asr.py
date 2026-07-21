@@ -19,6 +19,9 @@ import subprocess
 import time
 import hashlib
 import tempfile
+import logging
+_LOG = logging.getLogger("liveclipper.aliyun_asr")
+
 
 _NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -72,6 +75,7 @@ def _curl_post_json(url, api_key, body, timeout=30):
         try:
             os.unlink(tmp.name)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 

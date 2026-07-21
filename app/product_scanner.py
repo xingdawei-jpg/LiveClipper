@@ -4,6 +4,9 @@
 不依赖 cutter_logic.py / gui.py 的主流程
 """
 
+import logging
+_LOG = logging.getLogger("liveclipper.product_scanner")
+
 import os
 import re
 import json
@@ -365,6 +368,7 @@ def _get_concat_encoder():
         elif he == "h264_nvenc":
             return ["-c:v", "h264_nvenc", "-preset", "p1", "-qp", "22"]
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
@@ -705,6 +709,7 @@ class ProductScanner:
                         if os.path.exists(tmp) and os.path.getsize(tmp) > 1000:
                             tmp_files.append(tmp)
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
 
                 if len(tmp_files) >= 2:
@@ -729,6 +734,7 @@ class ProductScanner:
                             shutil.rmtree(tmp_dir, ignore_errors=True)
                             return [out]
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
 
                 # Concat failed or only 1 part: fall through to return individual parts
@@ -749,6 +755,7 @@ class ProductScanner:
                     import shutil
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
                 return output_paths if output_paths else [out if os.path.exists(out) else ""]
 
@@ -757,6 +764,7 @@ class ProductScanner:
                     import shutil
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
 
         # Single segment or fallback
@@ -778,6 +786,7 @@ class ProductScanner:
                     if os.path.exists(out) and os.path.getsize(out) > 1000:
                         output_paths.append(out)
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
             else:
                 seg_count = int(duration // MAX_SEG) + (1 if duration % MAX_SEG > 30 else 0)
@@ -796,6 +805,7 @@ class ProductScanner:
                         if os.path.exists(out) and os.path.getsize(out) > 1000:
                             output_paths.append(out)
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
         return output_paths
     def extract_all(self, video_path, products, output_dir):
@@ -848,6 +858,7 @@ class ProductScanner:
                         if _os.path.exists(tmp) and _os.path.getsize(tmp) > 1000:
                             tmp_files.append(tmp)
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
                 if len(tmp_files) >= 2:
                     concat_list = _os.path.join(tmp_dir, "list.txt")

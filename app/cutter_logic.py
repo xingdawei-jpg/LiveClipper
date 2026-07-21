@@ -5,6 +5,9 @@
 - 文案逻辑优化（每类最多2个、模糊匹配、语气词过滤）
 """
 
+import logging
+_LOG = logging.getLogger("liveclipper.cutter_logic")
+
 import os
 import sys
 import re
@@ -83,6 +86,7 @@ def _terminate_process(proc):
         try:
             proc.kill()
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 
@@ -396,6 +400,7 @@ def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, outpu
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     proc = _register_process(subprocess.Popen(cmd, **popen_kw, creationflags=_NO_WINDOW))
     try:
@@ -417,6 +422,7 @@ def _run_ffmpeg_with_hw_fallback(cmd, popen_kw, timeout, _log, stage_name, outpu
             if output_path and os.path.exists(output_path):
                 os.remove(output_path)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         retry_cmd = _with_software_encoder(cmd, sw_args)
         proc2 = _register_process(subprocess.Popen(retry_cmd, **popen_kw, creationflags=_NO_WINDOW))
@@ -497,6 +503,7 @@ def _parse_resolution_pair(resolution, fallback=(1080, 1920)):
             if w > 0 and h > 0:
                 return w, h
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return fallback
 
@@ -564,6 +571,7 @@ def _probe_video_size(ffmpeg, video_path, timeout=30):
         if best_w > 100 and best_h > 100:
             return best_w, best_h
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return 0, 0
 
@@ -655,6 +663,7 @@ def _remux_ts_for_editing(video_path, temp_dir, ffmpeg, log_fn=None):
                 if now - os.path.getmtime(path) > 2 * 24 * 3600:
                     os.remove(path)
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
 
         base = os.path.splitext(os.path.basename(video_path))[0]
@@ -958,6 +967,7 @@ def _planned_output_speed_factor(dedup_preset="medium", video_options=None):
         if speed_cfg.get("enabled"):
             return max(0.5, min(2.0, float(speed_cfg.get("fallback_speed") or 1.15)))
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return 1.0
 
@@ -2172,6 +2182,7 @@ def _log_final_clip_details(clips, log_fn=None, title="最终片段明细"):
         try:
             log_fn(f"{title}: 输出失败 {exc}")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 
@@ -2295,6 +2306,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             with open(os.path.join(_run_log_dir, fname), "w", encoding="utf-8") as f:
                 _json.dump(_run_log, f, ensure_ascii=False, indent=2)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     auto_srt = False
@@ -2335,6 +2347,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             from ai_clipper import load_settings as _ld_asr
             _volc_asr_on = _ld_asr().get("asr_enabled", False)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         # 记录AI模型到运行日志
         try:
@@ -2345,6 +2358,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             _run_log["参数"]["云端ASR"] = _s.get("asr_enabled", False)
             _run_log["参数"]["ASR预设"] = _s.get("asr_preset", "自定义")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         if _volc_asr_on and not srt_path:
             # 使用火山引擎 ASR（断句精准），失败则降级到本地 Whisper
@@ -2481,6 +2495,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                         _wmodel = _sdata.get("whisper_model", "small")
                         _local_asr_engine = _sdata.get("local_asr_engine", "sensevoice")
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
                 temp_srt = generate_srt(video_path, log_fn=_log, whisper_model=_wmodel, asr_engine=locals().get("_local_asr_engine", "sensevoice"))
             except Exception as _whisper_err:
@@ -2514,9 +2529,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                         if os.path.exists(_source_words):
                             _shutil.copy2(_source_words, _word_sidecar_path(_cache_path))
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
                     _log(f"SRT已缓存: {os.path.basename(_cache_path)}")
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
         if auto_srt is not False:
             auto_srt = True
@@ -2539,6 +2556,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     with open(_srt_file, 'r', encoding='utf-8') as _f:
                         _multi_result_cache['srt_text'] = _f.read()
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
         _log("ASR完成，跳过AI选片（_asr_only模式）")
         return {"ok": True, "asr_only": True}
@@ -2654,6 +2672,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 import ai_clipper as _ai_meta
                 analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
             _multi_result_cache['analysis_metadata'] = dict(analysis_metadata or {})
             _multi_result_cache['category_summary'] = dict(analysis_metadata.get('category_summary') or {})
@@ -2668,6 +2687,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 with open(srt_path, "r", encoding="utf-8") as _f:
                     _multi_result_cache['srt_text'] = _f.read()
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     # 选片预览/多版本模式：只做AI选片，跳过切割/去重/字幕（省30-60秒）
@@ -2737,6 +2757,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             _srt_boundaries.append((float(_seg.get("start", 0)), float(_seg.get("end", 0))))
         _srt_boundaries.sort()
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     def _needs_next_sentence(_text):
@@ -2773,6 +2794,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 for _diag in getattr(_pc_diag, "HARDWARE_ENCODER_DIAGNOSTICS", [])[-4:]:
                     _log(f"硬件诊断: {_diag}")
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
         elif _hardware_encoder_requested():
             _log(f"编码器: 硬件加速自检未通过，使用稳定软件编码 ({_software_encoder_name()})")
@@ -2781,6 +2803,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 for _diag in getattr(_pc_diag, "HARDWARE_ENCODER_DIAGNOSTICS", [])[-8:]:
                     _log(f"硬件诊断: {_diag}")
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
         else:
             _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
@@ -2899,6 +2922,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                                 _log(f"结尾承接: 延伸到下一句 {end:.1f}s，避免最后一句截断")
                             break
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
             start = max(0, start - start_buf)
             end = min(video_duration, end + end_buf)
@@ -3008,6 +3032,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                         for _line in err_tail:
                             _log(f"  ffmpeg: {_line}")
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
             except subprocess.TimeoutExpired:
                 _terminate_process(proc)
@@ -3566,6 +3591,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         if _r.returncode == 0 and _r.stdout.strip():
             _actual_dur = float(_r.stdout.strip())
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     if _actual_dur > 0:
@@ -3587,7 +3613,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 os.remove(output_path)
             except OSError:
-                pass
+                _LOG.warning("failed to remove output path", exc_info=True)
             _run_log["结果"] = "失败"
             _run_log["错误"] = _duration_error
             _save_run_log()
@@ -3698,6 +3724,7 @@ def _dedup_speed_factor(dedup):
             if 0.05 <= speed <= 8.0:
                 return speed
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     return 1.0
 
@@ -3828,6 +3855,7 @@ def _apply_srt_cut_alignment(c_type, start, end, srt_segments, clip_idx=0, total
                         end = next_end
                     break
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     return start, end, (abs(start - original[0]) > 0.01 or abs(end - original[1]) > 0.01)
@@ -4088,6 +4116,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
             subtitle_settings = _load_subtitle_settings()
             font_size = max(32, min(96, int(float(subtitle_settings.get("subtitle_font_size", font_size)))))
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         if w and w > 0:
             font_size = max(28, int(font_size * w / 1080))
@@ -4177,6 +4206,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
             if os.path.exists(norm_output):
                 os.remove(norm_output)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         drawtext_filters = []
         for idx, seg in enumerate(fixed_segments):
@@ -4313,6 +4343,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     _log("云端ASR未启用，跳过阿里云")
                     return
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         nonlocal raw_segments, volcengine_success
         try:
@@ -4351,6 +4382,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     _log("云端ASR未启用，跳过火山引擎")
                     return
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         nonlocal raw_segments, volcengine_success
         try:
@@ -4464,8 +4496,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _sub_cfg = _ld_sub()
         _use_cloud_sub = _sub_cfg.get("asr_enabled", False)
         _asr_preset_sub = _sub_cfg.get("asr_preset", "") or _sub_cfg.get("asr_provider", "")
-    except:
-        pass
+    except Exception:
+        _LOG.warning("failed to read asr preset", exc_info=True)
     if _use_cloud_sub:
         if _asr_preset_sub == "阿里云":
             _log("字幕阶段：云端ASR已启用，优先阿里云")
@@ -4783,6 +4815,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _subtitle_settings = _load_subtitle_settings()
         font_size = max(32, min(96, int(float(_subtitle_settings.get("subtitle_font_size", font_size)))))
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     _base_font_size = font_size
     # 根据视频宽度自适应缩放字号（基准1080px）
@@ -5066,6 +5099,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             if os.path.exists(_multi_srt_path):
                 os.remove(_multi_srt_path)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     
     return {"ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results), "版本数": len(results)}
@@ -5116,6 +5150,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
             _d = max(0.0, _e - _s)
             _log(f"最终片段 [{_idx}/{len(_prepared_clips)}] {_ct} {_s:.1f}-{_e:.1f}s ({_d:.1f}s) | {_text[:90]}")
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     
     def _mock_analyze(*args, **kwargs):
@@ -5195,6 +5230,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             for _diag in getattr(_pc_diag, "HARDWARE_ENCODER_DIAGNOSTICS", [])[-4:]:
                 _log(f"硬件诊断: {_diag}")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     elif _hardware_encoder_requested():
         _log(f"编码器: 硬件加速自检未通过，使用稳定软件编码 ({_software_encoder_name()})")
@@ -5203,6 +5239,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             for _diag in getattr(_pc_diag, "HARDWARE_ENCODER_DIAGNOSTICS", [])[-8:]:
                 _log(f"硬件诊断: {_diag}")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     else:
         _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
@@ -5794,6 +5831,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 import ai_clipper as _ai_meta
                 analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
             _multi_result_cache["analysis_metadata"] = dict(analysis_metadata or {})
             _multi_result_cache["category_summary"] = dict(analysis_metadata.get("category_summary") or {})
@@ -5959,6 +5997,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                             _log(f"结尾承接: 延伸到下一句 {end:.1f}s，避免最后一句截断")
                         break
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
         if _next_same_source_start is not None and end > _next_same_source_start:
@@ -6504,6 +6543,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if _r.returncode == 0 and _r.stdout.strip():
             _actual_dur = float(_r.stdout.strip())
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     if _actual_dur > 0:
@@ -6525,7 +6565,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             try:
                 os.remove(final)
             except OSError:
-                pass
+                _LOG.warning("failed to remove temp file", exc_info=True)
             shutil.rmtree(tmp, ignore_errors=True)
             raise RuntimeError(_duration_error)
 
