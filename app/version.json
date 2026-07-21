@@ -98,11 +98,11 @@
     "app/volcengine_asr.py": "b81bc8e12ed7df7495008ff6ae69dccb92d00f16146c3b401421482fc889768e",
     "app/candidate_quality.py": "767fa9cba4879118c3e36a16b43ecd4e1597005c9e12dbec4bdcae5d3d5f64f4",
     "app/content_review.py": "ec5647bd3e4e1263b8ab3f46ad56044d11930a16d04681b49e07bedd92fa7072",
-    "app/version.json": "f1a0b0c489b87e1c5c330b4777a8d5af041351875541f1dacdb572aba9b3abca"
+    "app/version.json": "b0af6e0e1912a8feca503b2d1a4f0ab08b80ad88e4c23217bc0794370f093355"
   },
   "release_notes": "新增本地 SenseVoice 高质量语音识别，支持词级时间轴、服饰直播词纠正与 Whisper 自动回退；修复授权服务短暂超时或限流导致的误提示激活、解绑失败误清本地授权；优化智能成片拼接时间轴和无音频素材处理，减少时长漂移与音画不同步。",
   "update_message": "新增本地 SenseVoice 高质量语音识别，支持词级时间轴、服饰直播词纠正与 Whisper 自动回退；修复授权服务短暂超时或限流导致的误提示激活、解绑失败误清本地授权；优化智能成片拼接时间轴和无音频素材处理，减少时长漂移与音画不同步。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-20 21:30:47"
+  "updated_at": "2026-07-21 15:19:57"
 }

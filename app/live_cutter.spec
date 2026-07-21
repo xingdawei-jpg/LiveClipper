@@ -73,6 +73,8 @@ a = Analysis(
         ('aliyun_asr_v2.py', 'app'),
         ('multi_version.py', 'app'),
         ('mix_page.py', 'app'),
+        ('candidate_quality.py', 'app'),
+        ('content_review.py', 'app'),
         ('dedup_page.py', 'app'),
         ('platform_config.py', 'app'),
         ('run_pipeline.py', 'app'),
