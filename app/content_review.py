@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import ssl
+from ssl_context import create_ssl_context
 import tempfile
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -769,9 +770,7 @@ def _post_review_request(
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    context = create_ssl_context()
     with urllib.request.urlopen(request, timeout=180, context=context) as response:
         result = json.loads(response.read().decode("utf-8"))
     content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()

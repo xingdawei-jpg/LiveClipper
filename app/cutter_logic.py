@@ -9,6 +9,7 @@ import os
 import sys
 import re
 import time
+from ssl_context import create_ssl_context
 import shutil
 
 # 多版本缓存：process_video 写入，process_video_multi 读取
@@ -4567,10 +4568,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             try:
                 import urllib.request
                 import ssl as _ssl
-                ctx = _ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
-
+                ctx = create_ssl_context()
                 req_body = _json.dumps({
                     "model": model,
                     "messages": [{"role": "user", "content": fix_prompt}],

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """
+from ssl_context import create_ssl_context
 阿里云 DashScope ASR 封装 — 使用 paraformer-v2 模型（字级时间戳）
 
 API 流程（异步模式）：
@@ -292,10 +293,7 @@ def _parse_result(status_data, log_fn=None):
         # 下载并解析结果
         try:
             import urllib.request
-            import ssl
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ctx = create_ssl_context()
             req = urllib.request.Request(transcription_url)
             with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
                 trans_data = json.loads(resp.read().decode("utf-8"))

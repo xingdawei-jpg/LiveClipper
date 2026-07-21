@@ -1425,6 +1425,12 @@ def activate_with_code(code):
     # Step 3: 清除旧熔断标记
     _clear_revoked_marker()
 
+    # Step 3b: 如果之前激活过其他码，先解绑旧码（FC 服务端不允许一台设备绑多个码）
+    old_code = str(cache_before_activate.get("code") or _load_license_code() or "").strip()
+    if old_code and not _same_license_code(old_code, code):
+        _log("激活新码前先解绑旧码: %s..." % old_code[:8])
+        _fc_unbind(old_code, current_mid)
+
     # Step 4: 联网服务器激活。新码在 verify 阶段会返回“尚未激活”，
     # 所以这里直接调用 activate，由服务端负责首次写入激活日和到期日。
     plan_days_pre = PLAN_DAYS.get(result.get("plan_hex", "01"), 30)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """阿里云 Qwen3-ASR 封装 — 使用 qwen3-asr-flash-filetrans 异步 API（支持长音频+时间戳）"""
+from ssl_context import create_ssl_context
 import json, os, time, ssl, urllib.request
 
 ASR_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
@@ -55,9 +56,7 @@ def qwen_asr(audio_path, api_key=None, oss_ak=None, oss_sk=None,
         return None
 
     # 3. 轮询
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = create_ssl_context()
     start = time.time()
     poll_interval = 5
     while time.time() - start < timeout:

@@ -19,6 +19,7 @@ import sys
 import time
 from contextvars import ContextVar
 import ssl
+from ssl_context import create_ssl_context
 import urllib.request
 import urllib.error
 import re
@@ -5294,9 +5295,7 @@ def _call_director_trim_selection(api_key, base_url, model, clips, target_durati
         method="POST",
     )
     try:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        context = create_ssl_context()
         with urllib.request.urlopen(request, timeout=180, context=context) as response:
             result = json.loads(response.read().decode("utf-8"))
         content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
@@ -5484,9 +5483,7 @@ def _call_director_expand_selection(
         method="POST",
     )
     try:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        context = create_ssl_context()
         with urllib.request.urlopen(request, timeout=180, context=context) as response:
             result = json.loads(response.read().decode("utf-8"))
         content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
@@ -8599,9 +8596,7 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
 
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = create_ssl_context()
         with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         msg = result.get("choices", [{}])[0].get("message", {})
@@ -9719,9 +9714,7 @@ def _compose_version_ai(api_key, base_url, model, raw_clips, srt_text, angle, an
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
 
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = create_ssl_context()
         with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         content = result.get("choices", [{}])[0].get("message", {}).get("content", "")

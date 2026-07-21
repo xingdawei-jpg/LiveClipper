@@ -3,6 +3,7 @@
 火山引擎 ASR 封装 — 通过 TOS 上传音频后调用大模型语音识别
 """
 
+from ssl_context import create_ssl_context
 import os
 import sys
 import time
@@ -452,8 +453,7 @@ if hasattr(sys, '_MEIPASS'):
     else:
         # 都找不到，干脆跳过 SSL 验证
         try:
-            import ssl as _ssl
-            _ssl._create_default_https_context = _ssl._create_unverified_context
+            from ssl_context import create_ssl_context as _volc_create_context
         except Exception:
             pass
 
@@ -576,10 +576,7 @@ def _ordered_tos_regions(preferred_region=""):
 
 
 def _volc_ssl_context():
-    import ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = create_ssl_context()
     return ctx
 
 
@@ -923,10 +920,7 @@ def volcengine_asr(audio_path, app_id, access_token, tos_ak, tos_sk,
     _log("volcengine_asr: 提交 ASR 任务...")
     try:
         import urllib.request
-        import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = create_ssl_context()
 
         req_data = json.dumps(submit_body).encode("utf-8")
         req = urllib.request.Request(submit_url, data=req_data, headers=headers, method="POST")
