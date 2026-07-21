@@ -78,6 +78,9 @@ from ai_model_config import (
     normalize_ai_model_defaults as _shared_normalize_ai_model_defaults,
 )
 
+import logging
+_LOG = logging.getLogger("liveclipper.server")
+
 
 app = FastAPI(title="LiveClipper Web Client", version="0.1.0")
 
@@ -658,6 +661,7 @@ def _read_json_file(path: Path) -> dict[str, Any]:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return {}
 
@@ -765,6 +769,7 @@ def _clear_ai_keyword_cache() -> None:
             cache["_data"] = None
             cache["_mtime"] = 0
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
 
@@ -994,6 +999,7 @@ def _cache_target_stats(path: Path) -> dict[str, Any]:
                 except Exception:
                     continue
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return {"files": files, "bytes": size}
 
@@ -1103,6 +1109,7 @@ def _cache_clear_targets() -> list[Path]:
         try:
             targets.extend(path for path in temp_root.iterdir() if path.name.startswith(prefix))
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     root = Path("C:/")
@@ -1114,6 +1121,7 @@ def _cache_clear_targets() -> list[Path]:
             if path.is_dir() and (path.name.startswith("lc_temp_") or path.name.startswith("lc_temp_mix_"))
         )
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     unique: list[Path] = []
@@ -2202,6 +2210,7 @@ def _cancel_scope(scope: str) -> int:
                 for event in cancel_events:
                     killed += int(cancel_processes(event) or 0)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     if scope == "live-rec":
         stopped += _stop_live_all()
@@ -2253,6 +2262,7 @@ def _ffmpeg_cmd() -> str:
         if FFMPEG_CMD and os.path.exists(FFMPEG_CMD):
             return FFMPEG_CMD
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return "ffmpeg"
 
@@ -2267,6 +2277,7 @@ def _ffprobe_cmd() -> str:
             if candidate.exists():
                 return str(candidate)
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     if ffmpeg.lower().endswith("ffmpeg.exe"):
         return ffmpeg[:-10] + "ffprobe.exe"
@@ -2409,6 +2420,7 @@ def _mix_video_thumbnail_url(path_value: str) -> str:
             temporary.replace(output)
             return f"/api/videos/thumbnail/{thumbnail_id}"
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     finally:
         if temporary.exists():
@@ -2513,6 +2525,7 @@ def _transcode_live_recording_sync(source: Path, target: Path, scope: str, name:
         if tmp_target.exists():
             tmp_target.unlink()
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return False
 
@@ -2605,6 +2618,7 @@ def _video_split_override_count(video: Path, payload: VideoSplitPayload) -> int:
     try:
         keys.add(str(video.resolve()))
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     normalized = {key.strip().strip('"').lower().replace("/", "\\") for key in keys if key}
     for key, value in (payload.overrides or {}).items():
@@ -2863,6 +2877,7 @@ def _parse_live_start_datetime(value: Any, video_values: list[str] | None = None
         try:
             return datetime.strptime(text, fmt)
         except ValueError:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     match = re.fullmatch(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?", text)
     if not match:
@@ -3038,6 +3053,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             if int(data.get("versions") or 1) > 1:
                 warnings.append("用预览成片会按当前预览结果固定输出 1 个版本；多版本请使用“开始成片”。")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
@@ -3058,6 +3074,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             if int(data.get("versions") or 1) > 1:
                 warnings.append("用预览混剪会按当前预览结果固定输出 1 个版本；多版本请使用“开始混剪”。")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
@@ -3705,6 +3722,7 @@ def _preview_segment_block_reason(text: Any) -> str:
             if word and (word in clean or (word_compact and word_compact in compact)):
                 return f"违禁词：{word}"
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     price_patterns = [
         r"\d{2,4}\s*[元块]",
@@ -3723,6 +3741,7 @@ def _preview_segment_block_reason(text: Any) -> str:
         if ai_mod._is_backstage_instruction(clean):
             return "直播现场调度"
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return ""
 
@@ -5082,6 +5101,7 @@ def _append_preview_selection_feedback(record: dict[str, Any]) -> None:
             lines = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
             path.write_text("\n".join(lines[-600:]) + "\n", encoding="utf-8")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -5374,6 +5394,7 @@ def _preview_feedback_latest_at(records: list[dict[str, Any]]) -> float:
         try:
             latest = max(latest, float(record.get("created_at") or 0))
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     return latest
 
@@ -6046,6 +6067,7 @@ def _render_preview_clip_range(cut_video: Path, start: float, duration: float, t
         try:
             target.unlink(missing_ok=True)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         video_only_cmd = _base_cmd() + [
             "-filter_complex",
@@ -6294,6 +6316,7 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
             if audio_path:
                 audio_path.unlink(missing_ok=True)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 
@@ -6605,6 +6628,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
                 or {}
             )
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         dedup_summary["category_summary"] = category_summary
         dedup_summary["preference_summary"] = preference_summary
@@ -8232,6 +8256,7 @@ def _normalize_live_stream_quality(value: Any, fallback: str = "") -> str:
                 text = repaired.strip()
                 break
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     compact = re.sub(r"\s+", "", text).lower()
     if not compact:
@@ -8353,6 +8378,7 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
         try:
             summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     settings = _live_product_split_settings(payload)
     info = _probe_video_info(str(output))
@@ -8433,6 +8459,7 @@ def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
             )
             return
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
     try:
         proc.terminate()
@@ -8441,6 +8468,7 @@ def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
         try:
             proc.kill()
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
 
@@ -8822,6 +8850,7 @@ def _live_record_error_text(stderr_path: Path) -> str:
         if stderr_path.exists():
             return stderr_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     return ""
 
@@ -9110,6 +9139,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
             try:
                 stderr_file.close()
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
         size = output.stat().st_size if output.exists() else 0
         if _is_task_cancelled(task_id):
@@ -9733,6 +9763,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
                 or {}
             )
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         dedup_summary["category_summary"] = category_summary
         dedup_summary["preference_summary"] = preference_summary
@@ -10342,6 +10373,7 @@ def set_user_data_dir(payload: UserDataDirPayload) -> dict[str, Any]:
             cache["_data"] = None
             cache["_mtime"] = 0
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     message = f"用户数据目录已切换到：{target}"
@@ -10738,11 +10770,13 @@ def clear_cache() -> dict[str, Any]:
         _VIDEO_INFO_CACHE.clear()
         _VIDEO_FP_CACHE.clear()
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     try:
         import cutter_logic as cutter_mod
         cutter_mod._multi_result_cache = {}
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
     freed_bytes = sum(int(item.get("bytes") or 0) for item in removed_items if item.get("removed"))

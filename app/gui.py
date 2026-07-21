@@ -40,6 +40,8 @@ from license_client import check_activation, check_activation_cached, activate_w
 # 样式
 from config import C, FNT_S, FNT_B
 
+_LOG = logging.getLogger("liveclipper.gui")
+
 # ==== 启动时清理 PyInstaller 残留临时目录（_MEI*） ====
 import atexit as _atexit, shutil as _shutil, glob as _glob, time as _time
 _temp_dir = os.environ.get('TEMP', os.environ.get('TMP', ''))
@@ -65,6 +67,7 @@ def _cleanup_temp_dir():
                 except Exception:
                     _time.sleep(0.5)
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
 
 FNT=("Segoe UI",10); FNT_B=("Segoe UI",10,"bold"); FNT_T=("Segoe UI",20,"bold")
@@ -212,11 +215,13 @@ class App:
             import license_client as _lc
             _lc.refresh_activation_cache_async()
         except Exception:
+            _LOG.warning("failed to refresh license cache", exc_info=True)
             pass
         finally:
             try:
                 self.root.after(10 * 60 * 1000, self._periodic_license_refresh)
             except Exception:
+                _LOG.warning("failed to reschedule license refresh", exc_info=True)
                 pass
 
     def _restore_toggle_states(self):
@@ -1190,6 +1195,7 @@ class App:
             self._dv_reverb.set(d.get("audio_reverb", True))
             self._dv_noise.set(d.get("noise_fusion", True))
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     def _reset_dedup_defaults(self):
@@ -1404,6 +1410,7 @@ class App:
             try:
                 self.root.after(0, lambda r=result: _finish(r))
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -1669,11 +1676,13 @@ class App:
                             with open(os.path.join(log_dir, logs[-1]), "r", encoding="utf-8") as f:
                                 log_text = f.read().strip()
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
                 if not log_text:
                     try:
                         log_text = self.log.get("1.0", "end").strip()
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
             msg = f"【LiveClipper 用户反馈】\n{content}"
             if log_text:
@@ -1729,6 +1738,7 @@ class App:
             try:
                 self._page_error.destroy()
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
             self._page_error = None
 
@@ -1740,6 +1750,7 @@ class App:
             self._log(f"{title}页面加载失败: {err}", "err")
             self._log(detail, "err")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
         frame = tk.Frame(self._page_container, bg=C.get("bg", "#1E1E2F"))
@@ -1874,7 +1885,8 @@ class App:
                                      capture_output=True, timeout=120,
                                      creationflags=_sp.CREATE_NO_WINDOW)
                         audio_ok = r.returncode == 0 and os.path.exists(audio_path)
-                    except:
+                    except Exception:
+                        _LOG.warning("failed to extract audio via ffmpeg", exc_info=True)
                         pass
                     if audio_ok:
                         if asr_provider == "火山引擎":
@@ -1916,7 +1928,8 @@ class App:
                                 self._log(f"  云端ASR失败: {e}", "warn")
                         try:
                             os.remove(audio_path)
-                        except:
+                        except Exception:
+                            _LOG.warning("failed to remove temp audio file", exc_info=True)
                             pass
                     if not srt_generated:
                         self._log(f"本地Whisper: {os.path.basename(video_path)}", "info")
@@ -2145,6 +2158,7 @@ class App:
             with open(kw_path, "r", encoding="utf-8") as f:
                 kw_data = json.load(f)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
         # 默认值：从代码中提取当前配置
@@ -2331,6 +2345,7 @@ class App:
                 try:
                     os.remove(kw_path)
                 except Exception:
+                    _LOG.warning("unexpected error", exc_info=True)
                     pass
                 win.destroy()
                 self._open_keyword_manager()  # 重新打开
@@ -2424,15 +2439,19 @@ class App:
                     elif kind == "step":
                         self.step_label.configure(text=msg)
                 except Exception:
+                    _LOG.warning("failed to update single progress message", exc_info=True)
                     pass  # 单条消息更新失败不影响后续
         except queue.Empty:
+            _LOG.warning("queue empty in poll loop", exc_info=True)
             pass
         except Exception:
+            _LOG.warning("unexpected error in poll loop", exc_info=True)
             pass
         # 关键：无论发生什么，必须继续调度
         try:
             self.root.after(50, self._poll_queue)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     # ---- 执行 ----
@@ -2552,6 +2571,7 @@ class App:
                         from license_guard import consume_trial_after_success
                         consume_trial_after_success("智能成片", root=None, log_fn=self._log)
                     except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
                         pass
 
             # 批处理结束，恢复按钮
@@ -2561,7 +2581,9 @@ class App:
             self._log("__BATCH_DONE__")
             try:
                 self.root.after(0, lambda: self._reset_btn(cancelled=was_cancelled))
-            except: pass
+            except Exception: 
+                _LOG.warning("failed to reset button after batch", exc_info=True)
+                pass
 
         self._cancel_event = threading.Event()
         self.worker = threading.Thread(target=batch_run, daemon=True)
@@ -2573,7 +2595,9 @@ class App:
                 pct = float(msg.split(" ")[1])
                 base = idx / total
                 self._set_bar(base + pct / total)
-            except ValueError: pass
+            except ValueError:
+                _LOG.warning("failed to parse progress percentage", exc_info=True)
+                pass
         elif msg.startswith("[STEP]"):
             self._set_step(msg.replace("[STEP] ", ""))
         else:
@@ -2595,6 +2619,7 @@ class App:
         try:
             self.root.after(3000, lambda: self._restore_ready_btn())
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     def _restore_ready_btn(self):
@@ -2622,6 +2647,7 @@ def _show_activation_check(root, app=None):
             try:
                 app.btn.configure(state="normal")
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
 
     def _on_result(status):
@@ -2637,6 +2663,7 @@ def _show_activation_check(root, app=None):
             elif status.get("need_activate"):
                 _show_activate_dialog(root)
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
 
     import threading
@@ -2712,6 +2739,7 @@ def _show_activate_dialog(root):
                 _lc._set_activation_cache(_lc._check_activation_local_fast())
                 _lc.refresh_activation_cache_async()
             except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
                 pass
             dlg.destroy()  # 立即关闭弹窗，无需等待
         else:
@@ -2894,6 +2922,7 @@ def _show_welcome_guide(root):
             with open(guide_done_path, "w") as f:
                 f.write("done")
         except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
             pass
         dlg.destroy()
 
@@ -2916,7 +2945,8 @@ def _cleanup_tempdir():
                 for d in os.listdir(parent):
                     if d.startswith('_MEI'):
                         shutil.rmtree(os.path.join(parent, d), ignore_errors=True)
-    except:
+    except Exception:
+        _LOG.warning("failed to cleanup _MEI temp directories", exc_info=True)
         pass
 atexit.register(_cleanup_tempdir)
 
@@ -2933,7 +2963,8 @@ def main():
         tkfont.nametofont('TkDefaultFont').configure(family='Microsoft YaHei UI', size=11)
         tkfont.nametofont('TkTextFont').configure(family='Microsoft YaHei UI', size=11)
         tkfont.nametofont('TkFixedFont').configure(family='Consolas', size=11)
-    except:
+    except Exception:
+        _LOG.warning("failed to set default tk font", exc_info=True)
         pass
     # 首次启动引导
     _show_welcome_guide(root)
@@ -2945,11 +2976,13 @@ def main():
         from updater import init_installed_version
         init_installed_version()
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     # 启动时后台检查更新（不阻塞主程序）
     try:
         check_and_prompt_update(root)
     except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
         pass
     root.mainloop()
 
