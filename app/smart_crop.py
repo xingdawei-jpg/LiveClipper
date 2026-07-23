@@ -11,6 +11,18 @@ Smart Crop 智能裁切模块 v7
 
 import os
 import random
+import logging
+
+_LOG = logging.getLogger("liveclipper.smart_crop")
+_WARNED_FALLBACKS = set()
+
+
+def _warn_once(message):
+    """Record a degraded Smart Crop path once without flooding frame logs."""
+    if message in _WARNED_FALLBACKS:
+        return
+    _WARNED_FALLBACKS.add(message)
+    _LOG.warning(message, exc_info=True)
 
 _CV2_AVAILABLE = False
 try:
@@ -18,7 +30,7 @@ try:
     import numpy as np
     _CV2_AVAILABLE = True
 except ImportError:
-        _LOG.warning("cv2 import failed", exc_info=True)
+    _LOG.info("OpenCV unavailable; Smart Crop will use standard crop")
 
 # HOG 人体检测器（OpenCV内置，无需额外文件）
 _HOG = None
@@ -99,7 +111,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
                             wt, 'body'
                         ))
         except Exception:
-                        _LOG.warning("detection error", exc_info=True)
+            _warn_once("Smart Crop HOG detection failed; falling back")
 
     if all_detections:
         return all_detections
@@ -113,7 +125,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
             for x, y, bw, bh in bodies:
                 all_detections.append((x, y, bw, bh, 0.8, 'upper'))
         except Exception:
-                        _LOG.warning("detection error", exc_info=True)
+            _warn_once("Smart Crop upper-body detection failed; falling back")
 
     if all_detections:
         return all_detections
@@ -133,7 +145,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
                 new_h = min(fh + expand_h + expand_y, h - new_y)
                 all_detections.append((new_x, new_y, new_w, new_h, 0.6, 'face_expanded'))
         except Exception:
-                        _LOG.warning("detection error", exc_info=True)
+            _warn_once("Smart Crop face detection failed; falling back")
 
     if all_detections:
         return all_detections
@@ -156,7 +168,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
                 x, y, bw, bh = cv2.boundingRect(largest)
                 all_detections.append((x, y, bw, bh, 0.5, 'skin'))
     except Exception:
-                _LOG.warning("detection error", exc_info=True)
+        _warn_once("Smart Crop skin detection failed; falling back")
 
     return all_detections
 def prepare_face_detector(app_dir=None, log_fn=None):
@@ -423,7 +435,7 @@ def _ken_burns_motion(intensity=None, max_zoom_delta=None):
             cap = max(0.02, float(max_zoom_delta))
             target_zoom = min(target_zoom, cap)
         except Exception:
-                        _LOG.warning("smartcrop error", exc_info=True)
+            _warn_once("Smart Crop ignored an invalid Ken Burns zoom limit")
     return direction, target_zoom
 
 
@@ -500,7 +512,7 @@ def apply_ken_burns_ffmpeg(clip_path, output_path, clip_duration, w, h, fps, ffm
             if os.path.exists(output_path):
                 os.remove(output_path)
         except Exception:
-                        _LOG.warning("smartcrop error", exc_info=True)
+            _LOG.warning("Smart Crop could not remove failed FFmpeg output", exc_info=True)
         return False
     return True
 
@@ -638,7 +650,7 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
         try:
             proc.stdin.close()
         except Exception:
-                        _LOG.warning("smartcrop error", exc_info=True)
+            _LOG.warning("Smart Crop could not close FFmpeg input", exc_info=True)
         proc.wait()
 
     if proc.returncode != 0:

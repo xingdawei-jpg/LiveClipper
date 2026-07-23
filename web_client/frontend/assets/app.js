@@ -1,5 +1,12 @@
 const state = {
   page: "smart-cut",
+  previewWorkbenchModes: { smart: "role", mix: "role" },
+  previewWorkbenchFilters: { smart: "all", mix: "all" },
+  previewCandidateCategoryFilters: { smart: "all", mix: "all" },
+  previewCandidateSourceFilters: { smart: "recommended", mix: "recommended" },
+  previewWorkbenchStages: { smart: "triage", mix: "triage" },
+  previewTriageSessions: {},
+  previewAssemblyOrders: {},
   settingsTab: "ai",
   liveRecTab: "rooms",
   smartPreview: null,
@@ -72,6 +79,44 @@ const state = {
     "live-rec": 0,
   },
 };
+
+const previewInlineAudioStorageKey = "lc:preview:inline-audio";
+
+function previewInlineAudioPreference() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(previewInlineAudioStorageKey) || "null");
+    return {
+      muted: raw?.muted === true,
+      volume: Number.isFinite(Number(raw?.volume)) ? Math.min(1, Math.max(0, Number(raw.volume))) : 1,
+    };
+  } catch (error) {
+    return { muted: false, volume: 1 };
+  }
+}
+
+function savePreviewInlineAudioPreference(video) {
+  if (!video) return;
+  try {
+    localStorage.setItem(previewInlineAudioStorageKey, JSON.stringify({
+      muted: Boolean(video.muted),
+      volume: Number.isFinite(Number(video.volume)) ? Number(video.volume) : 1,
+    }));
+  } catch (error) {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function applyPreviewInlineAudioPreference(video) {
+  if (!video) return;
+  const preference = previewInlineAudioPreference();
+  video.muted = preference.muted;
+  if (Number.isFinite(preference.volume)) video.volume = preference.volume;
+}
+
+function previewInlineAudioMutedAttribute() {
+  return previewInlineAudioPreference().muted ? "muted" : "";
+}
+
 
 
 // The top-level category is the only editable category state. This value is
@@ -1316,6 +1361,20 @@ function bindActions() {
       if (action === "mix-toggle-all-group-select") toggleAllMixGroupSelection(Boolean(target.checked));
       if (action === "mix-delete-selected-groups") deleteSelectedMixGroups();
       if (action === "mix-select-group") selectMixGroup(Number(target.dataset.index));
+      if (action === "preview-workbench-stage") setPreviewWorkbenchStage(target.dataset.previewScope || "smart", target.dataset.value);
+      if (action === "preview-triage-role") setPreviewTriageRole(target.dataset.previewScope || "smart", target.dataset.value);
+      if (action === "preview-triage-topic") setPreviewTriageTopic(target.dataset.previewScope || "smart", target.dataset.value);
+      if (action === "preview-triage-filter") setPreviewTriageFilter(target.dataset.previewScope || "smart", target.dataset.value);
+      if (action === "preview-triage-focus") setPreviewTriageActive(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
+      if (action === "preview-triage-prev") movePreviewTriage(target.dataset.previewScope || "smart", -1);
+      if (action === "preview-triage-next") movePreviewTriage(target.dataset.previewScope || "smart", 1);
+      if (action === "preview-triage-keep") keepPreviewTriageCandidate(target.dataset.previewScope || "smart");
+      if (action === "preview-triage-skip") skipPreviewTriageCandidate(target.dataset.previewScope || "smart");
+      if (action === "preview-triage-undo") undoPreviewTriageAction(target.dataset.previewScope || "smart");
+      if (action === "preview-workbench-inspect-clip") inspectPreviewWorkbenchClip(Number(target.dataset.previewIndex), target.dataset.previewScope || "smart");
+      if (action === "preview-assembly-move") movePreviewAssemblyClip(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex), Number(target.dataset.direction));
+      if (action === "preview-assembly-auto-arrange") autoArrangePreviewAssembly(target.dataset.previewScope || "smart");
+      if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-smart-from-preview") await startSmartFromPreview();
       if (action === "start-mix-preview") await startMixPreview();
@@ -1381,6 +1440,11 @@ function bindActions() {
   document.body.addEventListener("change", (event) => {
     const target = event.target.closest("[data-live-naming-mode]");
     if (target) updateLiveRoomNamingMode(Number(target.dataset.index), target.value);
+  });
+
+  document.body.addEventListener("input", (event) => {
+    const target = event.target.closest("[data-preview-triage-search]");
+    if (target) setPreviewTriageSearch(target.dataset.previewTriageSearch || "smart", target.value);
   });
 
   document.querySelectorAll(".path-entry input").forEach((input) => {
@@ -1822,6 +1886,11 @@ function bindPreviewControls() {
       Number(previewRow.dataset.previewIndex)
     );
   });
+
+  document.body.addEventListener("volumechange", (event) => {
+    const video = event.target?.closest?.("[data-preview-inline-player]");
+    if (video) savePreviewInlineAudioPreference(video);
+  }, true);
 
   document.body.addEventListener("change", (event) => {
     const segment = event.target.closest("[data-preview-segment]");
@@ -3839,6 +3908,29 @@ function addVideoPaths(targetId, paths) {
   setLines(targetId, next);
 }
 
+async function addDroppedVideoFiles(targetId, files) {
+  const droppedFiles = Array.from(files || []).filter(Boolean);
+  if (!droppedFiles.length) return;
+
+  const localPaths = droppedFiles
+    .map((file) => file.path || file.webkitRelativePath || "")
+    .filter(Boolean);
+  if (localPaths.length === droppedFiles.length) {
+    addVideoPaths(targetId, localPaths);
+    toast(`已添加 ${localPaths.length} 个视频`, "success");
+    return;
+  }
+
+  const form = new FormData();
+  droppedFiles.forEach((file) => form.append("files", file, file.name || "video.mp4"));
+  toast(`正在缓存 ${droppedFiles.length} 个拖入视频...`, "warning");
+  const result = await upload("/api/uploads/videos", form);
+  const uploadedPaths = (result.paths || []).map((path) => String(path || "").trim()).filter(Boolean);
+  if (!uploadedPaths.length) throw new Error("视频缓存失败，没有可添加的文件。");
+  addVideoPaths(targetId, uploadedPaths);
+  toast(`已缓存并添加 ${uploadedPaths.length} 个视频`, "success");
+}
+
 function setButtonBusy(button, busy, label = "正在打开...") {
   if (!button) return () => {};
   const previousText = button.textContent;
@@ -4417,29 +4509,32 @@ async function inspectVideoList(targetId, lines = getLines(targetId)) {
 function bindVideoDropzones() {
   document.querySelectorAll("[data-drop-target]").forEach((zone) => {
     const targetId = zone.dataset.dropTarget;
-    zone.addEventListener("click", (event) => {
-      if (event.target.closest("[data-action]")) return;
-      if (event.target.closest("input, textarea, select, button")) return;
-      const picker = document.querySelector(`[data-action="pick-videos"][data-target="${targetId}"]`);
-      pickVideos(targetId, picker);
-    });
+    if (zone.dataset.dropClickPicker !== "false") {
+      zone.addEventListener("click", (event) => {
+        if (event.target.closest("[data-action]")) return;
+        if (event.target.closest("input, textarea, select, button")) return;
+        const picker = document.querySelector(`[data-action="pick-videos"][data-target="${targetId}"]`);
+        pickVideos(targetId, picker);
+      });
+    }
     zone.addEventListener("dragover", (event) => {
       event.preventDefault();
       zone.classList.add("is-dragging");
     });
-    zone.addEventListener("dragleave", () => zone.classList.remove("is-dragging"));
+    zone.addEventListener("dragleave", (event) => {
+      if (event.relatedTarget && zone.contains(event.relatedTarget)) return;
+      zone.classList.remove("is-dragging");
+    });
     zone.addEventListener("drop", async (event) => {
       event.preventDefault();
       zone.classList.remove("is-dragging");
       const files = Array.from(event.dataTransfer?.files || []);
-      const pathItems = files.map((file) => file.path || file.webkitRelativePath || "").filter(Boolean);
-      if (pathItems.length === files.length && pathItems.length) {
-        addVideoPaths(targetId, pathItems);
-        toast(`已添加 ${pathItems.length} 个视频`, "success");
-        return;
-      }
       if (!files.length) return;
-      toast("浏览器未提供本地文件路径。请点击“添加视频”选择文件，避免复制缓存和改名。", "warning");
+      try {
+        await addDroppedVideoFiles(targetId, files);
+      } catch (error) {
+        toast(error.message || String(error), "error");
+      }
     });
   });
 }
@@ -4739,7 +4834,6 @@ async function startMixFromPreview() {
 function previewPageId(scope = "smart") {
   return scope === "mix" ? "page-mix" : "page-smart-cut";
 }
-
 function previewPanelPrefix(scope = "smart") {
   return scope === "mix" ? "mix" : "sc";
 }
@@ -4769,27 +4863,31 @@ function setPreviewLayoutState(scope = "smart", preview = null) {
   }
 }
 
-function getPreviewState(scope = "smart") {
-  return scope === "mix" ? state.mixPreview : state.smartPreview;
+function hydratePreviewCandidatePool(preview) {
+  if (!preview || !Array.isArray(preview.candidate_clips) || !preview.candidate_clips.length) return preview;
+  if (preview.clips !== preview.candidate_clips) preview.clips = preview.candidate_clips;
+  return preview;
 }
 
+function getPreviewState(scope = "smart") {
+  const preview = scope === "mix" ? state.mixPreview : state.smartPreview;
+  return hydratePreviewCandidatePool(preview);
+}
 function renderPreviewState(scope = "smart") {
   if (scope === "mix") renderMixPreview(state.mixPreview);
   else renderSmartPreview(state.smartPreview);
 }
-
 function previewBox(scope = "smart") {
   return scope === "mix" ? $("mix-preview") : $("smart-preview");
 }
-
 function previewStoryScrollTop(scope = "smart") {
-  return previewBox(scope)?.querySelector(".clip-story-list")?.scrollTop || 0;
+  return previewBox(scope)?.querySelector(".preview-sequence-scroll")?.scrollTop || 0;
 }
 
 function renderPreviewStateKeepStoryScroll(scope = "smart") {
   const scrollTop = previewStoryScrollTop(scope);
   renderPreviewState(scope);
-  const list = previewBox(scope)?.querySelector(".clip-story-list");
+  const list = previewBox(scope)?.querySelector(".preview-sequence-scroll");
   if (list) list.scrollTop = scrollTop;
 }
 
@@ -4914,6 +5012,38 @@ function normalizedIntegerList(values) {
   return result;
 }
 
+function previewAssemblyOrderKey(scope = "smart", preview = null) {
+  return previewDraftKey(scope, preview?.id || "");
+}
+
+function previewAssemblyOrder(scope = "smart", preview = getPreviewState(scope)) {
+  if (!preview?.id || !Array.isArray(preview.clips)) return [];
+  const key = previewAssemblyOrderKey(scope, preview);
+  const selected = preview.clips.filter(isPreviewWorkbenchSelected);
+  const selectedSet = new Set(selected.map((clip) => Number(clip.index)).filter(Number.isInteger));
+  const stored = normalizedIntegerList(state.previewAssemblyOrders[key]);
+  const ordered = stored.filter((index) => selectedSet.has(index));
+  selected.forEach((clip) => {
+    const index = Number(clip.index);
+    if (Number.isInteger(index) && !ordered.includes(index)) ordered.push(index);
+  });
+  state.previewAssemblyOrders[key] = ordered;
+  return ordered;
+}
+
+function setPreviewAssemblyMembership(scope = "smart", index, selected) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || !Number.isInteger(Number(index))) return;
+  const key = previewAssemblyOrderKey(scope, preview);
+  const clipIndex = Number(index);
+  const current = previewAssemblyOrder(scope, preview);
+  if (selected) {
+    state.previewAssemblyOrders[key] = current.includes(clipIndex) ? current : [...current, clipIndex];
+  } else {
+    state.previewAssemblyOrders[key] = current.filter((item) => item !== clipIndex);
+  }
+}
+
 function buildPreviewDraftFromState(scope = "smart") {
   const preview = getPreviewState(scope);
   const draft = {
@@ -4924,10 +5054,15 @@ function buildPreviewDraftFromState(scope = "smart") {
     selected_segments: {},
     updated_at: Date.now(),
   };
-  (preview?.clips || []).forEach((clip) => {
-    const clipIndex = Number(clip.index);
-    if (!Number.isInteger(clipIndex)) return;
-    draft.order.push(clipIndex);
+  const clipsByIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
+  const selectedOrder = previewAssemblyOrder(scope, preview);
+  const remaining = (preview?.clips || [])
+    .map((clip) => Number(clip.index))
+    .filter((index) => Number.isInteger(index) && !selectedOrder.includes(index));
+  draft.order = [...selectedOrder, ...remaining];
+  selectedOrder.forEach((clipIndex) => {
+    const clip = clipsByIndex.get(clipIndex);
+    if (!clip) return;
     const segments = previewSegments(clip);
     const keptSegments = segments
       .filter((segment) => segment.selected !== false)
@@ -4963,17 +5098,6 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length || !draft) return;
   const order = normalizedIntegerList(draft.order);
-  if (order.length) {
-    const positionByIndex = new Map(order.map((index, position) => [index, position]));
-    preview.clips.sort((a, b) => {
-      const aIndex = Number(a.index);
-      const bIndex = Number(b.index);
-      const aPosition = positionByIndex.has(aIndex) ? positionByIndex.get(aIndex) : Number.MAX_SAFE_INTEGER;
-      const bPosition = positionByIndex.has(bIndex) ? positionByIndex.get(bIndex) : Number.MAX_SAFE_INTEGER;
-      if (aPosition !== bPosition) return aPosition - bPosition;
-      return aIndex - bIndex;
-    });
-  }
   const hasSelectedIndices = Array.isArray(draft.selected_indices);
   const selectedSet = new Set(normalizedIntegerList(draft.selected_indices));
   const segmentMap = draft.selected_segments && typeof draft.selected_segments === "object"
@@ -5006,6 +5130,15 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
     }
     clip.selected = !segments.length || segments.some((segment) => segment.selected !== false);
   });
+  const selectedOrder = normalizedIntegerList(draft.selected_indices);
+  const fallbackOrder = order.filter((index) => selectedSet.has(index));
+  const preferred = (selectedOrder.length ? selectedOrder : fallbackOrder)
+    .filter((index) => selectedSet.has(index));
+  preview.clips.forEach((clip) => {
+    const index = Number(clip.index);
+    if (isPreviewWorkbenchSelected(clip) && Number.isInteger(index) && !preferred.includes(index)) preferred.push(index);
+  });
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = preferred;
 }
 
 function savePreviewDraft(scope = "smart", draft = null, { remote = true } = {}) {
@@ -5109,6 +5242,7 @@ function updatePreviewClipSelection(index, selected, scope = "smart") {
         segment.selected = segment.selection_locked === true ? false : selected;
       });
     }
+    setPreviewAssemblyMembership(scope, index, selected);
     commitPreviewDraft(scope);
     refreshPreviewSelectionUi(scope);
   }
@@ -5122,6 +5256,7 @@ function updatePreviewSegmentSelection(index, segmentIndex, selected, scope = "s
   if (!segment || segment.selection_locked === true) return;
   segment.selected = selected;
   clip.selected = clip.segments.some((item) => item.selected !== false);
+  setPreviewAssemblyMembership(scope, index, clip.selected);
   commitPreviewDraft(scope);
   refreshPreviewSelectionUi(scope);
 }
@@ -5154,12 +5289,13 @@ function reorderPreviewClip(scope, fromIndex, toIndex) {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length) return;
   syncPreviewClipSelections(scope);
-  const clips = preview.clips;
-  const from = clips.findIndex((clip) => Number(clip.index) === fromIndex);
-  const to = clips.findIndex((clip) => Number(clip.index) === toIndex);
+  const order = previewAssemblyOrder(scope, preview);
+  const from = order.indexOf(Number(fromIndex));
+  const to = order.indexOf(Number(toIndex));
   if (from < 0 || from === to) return;
-  const [clip] = clips.splice(from, 1);
-  clips.splice(to, 0, clip);
+  const [clip] = order.splice(from, 1);
+  order.splice(to, 0, clip);
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
 }
@@ -5228,6 +5364,7 @@ function applyInlinePreviewVideoState(scope, index, key) {
   if (!panel) return;
   const video = panel.querySelector("[data-preview-inline-player]");
   const entry = state.previewInlineVideos[key] || {};
+  applyPreviewInlineAudioPreference(video);
   if (entry.url) {
     if (video && video.getAttribute("src") !== entry.url) {
       video.src = entry.url;
@@ -5288,7 +5425,7 @@ async function ensureInlinePreviewVideo(scope = "smart", index = null) {
 }
 
 async function previewClipVideo(index, scope = "smart") {
-  const preview = scope === "mix" ? state.mixPreview : state.smartPreview;
+  const preview = getPreviewState(scope);
   if (!preview?.id || preview.status !== "ready") {
     toast("请先生成 AI 选片预览", "warning");
     return;
@@ -5300,18 +5437,19 @@ async function previewClipVideo(index, scope = "smart") {
     return;
   }
   const segments = previewSegments(clip);
-  if (clip.selected === false || (segments.length && !selectedPreviewSegments(clip).length)) {
+  const inspectOnly = !isPreviewWorkbenchSelected(clip);
+  if (!inspectOnly && segments.length && !selectedPreviewSegments(clip).length) {
     toast("这个片段没有选中的句子，勾选后再预览", "warning");
     return;
   }
-  const draft = commitPreviewDraft(scope, { remote: true });
+  const draft = inspectOnly ? null : commitPreviewDraft(scope, { remote: true });
   const bounds = effectiveClipBounds(clip);
   const modal = ensurePreviewModal();
   const video = modal.querySelector("#preview-modal-video");
   const title = modal.querySelector("#preview-modal-title");
   const status = modal.querySelector("#preview-modal-status");
   if (!video) return;
-  if (title) title.textContent = `片段预览 ${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)} · ${bounds.duration.toFixed(1)}s`;
+  if (title) title.textContent = `${inspectOnly ? "候选试看" : "片段预览"} ${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)} · ${bounds.duration.toFixed(1)}s`;
   if (status) {
     status.textContent = "正在生成片段预览...";
     status.classList.remove("is-hidden", "is-error");
@@ -5325,7 +5463,12 @@ async function previewClipVideo(index, scope = "smart") {
   try {
     const result = await api(endpoint, {
       method: "POST",
-      body: JSON.stringify({
+      body: JSON.stringify(inspectOnly ? {
+        preview_id: preview.id,
+        clip_index: index,
+        scope,
+        inspect_only: true,
+      } : {
         preview_id: preview.id,
         clip_index: index,
         scope,
@@ -5931,9 +6074,11 @@ async function loadLatestSmartPreview() {
     if (!preview?.id) return;
     const isNewPreview = !state.smartPreview || preview.id !== state.smartPreview.id;
     const isNewerPreview = preview.created_at > (state.smartPreview?.created_at || 0);
-    if (isNewPreview || isNewerPreview) {
+    const statusChanged = preview.status !== state.smartPreview?.status;
+    if (isNewPreview || isNewerPreview || statusChanged) {
       state.smartPreview = preview;
       renderSmartPreview(preview);
+      if (preview.status === "running" || preview.status === "queued") pollSmartPreview(preview.id);
     }
   } catch (error) {
     // Preview is optional.
@@ -5946,9 +6091,11 @@ async function loadLatestMixPreview() {
     if (!preview?.id) return;
     const isNewPreview = !state.mixPreview || preview.id !== state.mixPreview.id;
     const isNewerPreview = preview.created_at > (state.mixPreview?.created_at || 0);
-    if (isNewPreview || isNewerPreview) {
+    const statusChanged = preview.status !== state.mixPreview?.status;
+    if (isNewPreview || isNewerPreview || statusChanged) {
       state.mixPreview = preview;
       renderMixPreview(preview);
+      if (preview.status === "running" || preview.status === "queued") pollMixPreview(preview.id);
     }
   } catch (error) {
     // Preview is optional.
@@ -6167,20 +6314,21 @@ function renderPreviewInlineVideo(scope, preview, clip) {
   return `
     <div class="clip-detail-video" data-preview-inline-video="${scope}" data-preview-index="${Number(clip.index)}" data-video-key="${escapeHtml(key)}">
       <div class="clip-detail-video-stage">
-        <video class="${videoClass}" data-preview-inline-player controls playsinline preload="metadata" ${entry.url ? `src="${escapeHtml(entry.url)}"` : ""}></video>
+        <video class="${videoClass}" data-preview-inline-player controls playsinline ${previewInlineAudioMutedAttribute()} autoplay preload="metadata" ${entry.url ? `src="${escapeHtml(entry.url)}"` : ""}></video>
         <div class="clip-detail-video-status ${statusClass} ${entry.error ? "is-error" : ""}" data-preview-inline-status>${escapeHtml(statusText)}</div>
       </div>
     </div>
   `;
 }
 
-function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
+function renderPreviewDetailPanel(scope, preview, analysis, activeIndex, sequenceClips = null) {
   const clips = preview?.clips || [];
-  const clip = clips.find((item) => Number(item.index) === activeIndex) || clips[0];
+  const displayClips = Array.isArray(sequenceClips) && sequenceClips.length ? sequenceClips : clips;
+  const clip = clips.find((item) => Number(item.index) === activeIndex) || displayClips[0] || clips[0];
   if (!clip) {
-    return `<aside class="clip-detail-panel"><p>请选择左侧片段查看句子。</p></aside>`;
+    return `<aside class="clip-detail-panel"><p>请选择成片片段，再逐句精修。</p></aside>`;
   }
-  const position = Math.max(0, clips.findIndex((item) => Number(item.index) === Number(clip.index)));
+  const position = Math.max(0, displayClips.findIndex((item) => Number(item.index) === Number(clip.index)));
   const typeLabel = clipTypeLabel(clip.clip_type);
   const bounds = effectiveClipBounds(clip);
   const time = `${formatSeconds(bounds.start)}-${formatSeconds(bounds.end)}`;
@@ -6188,6 +6336,9 @@ function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
   const { risk, riskLabel, riskClass } = previewClipRisk(clip, analysis);
   const segments = previewSegments(clip);
   const segmentCountText = selectedSegmentCountText(clip) || "整段";
+  const videoAction = isPreviewWorkbenchSelected(clip)
+    ? `<button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">打开大预览</button>`
+    : `<button class="button button-muted button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">试看候选</button>`;
   const segmentRows = segments.length ? segments.map((segment) => {
     const checked = segment.selected === false ? "" : "checked";
     const locked = segment.selection_locked === true;
@@ -6211,7 +6362,7 @@ function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
           <strong>#${position + 1} ${escapeHtml(typeLabel)}</strong>
           <span>${escapeHtml(time)}</span>
         </div>
-        <button class="button button-secondary button-small" data-action="preview-clip-video" data-preview-scope="${scope}" data-preview-index="${clip.index}">打开大预览</button>
+        ${videoAction}
       </div>
       <div class="clip-detail-stats">
         <span>${escapeHtml(duration)}</span>
@@ -6226,25 +6377,409 @@ function renderPreviewDetailPanel(scope, preview, analysis, activeIndex) {
   `;
 }
 
+function previewWorkbenchRoleKey(clip) {
+  const role = previewSalesRole(clip);
+  if (role === "hook" || role === "hook_followup") return "hook";
+  if (role === "proof_detail") return "proof";
+  if (role === "scene_crowd" || role === "objection_resolver") return "scene";
+  if (role === "natural_close") return "close";
+  if (role === "weak_fragment") return "weak";
+  return "product";
+}
+
+function previewWorkbenchRoleLabel(clip) {
+  return ({ hook: "开头钩子", product: "核心卖点", proof: "证据解释", scene: "场景与顾虑", close: "收尾", weak: "补充内容" })[previewWorkbenchRoleKey(clip)] || "核心卖点";
+}
+
+function previewWorkbenchTopicLabel(clip) {
+  const explicit = String(clip?.focus_block || clip?.focus || "").trim();
+  if (explicit && explicit !== "其他") return explicit;
+  return String(classifyFinalClipTopic({ ...clip, segments: [] }) || explicit || "其他").trim();
+}
+
+function previewWorkbenchRoleRank(clip) {
+  return ["hook", "product", "proof", "scene", "close", "weak"].indexOf(previewWorkbenchRoleKey(clip));
+}
+
+function isPreviewWorkbenchSelected(clip) {
+  return clip?.selected !== false && (!previewSegments(clip).length || selectedPreviewSegments(clip).length > 0);
+}
+
+function previewWorkbenchCandidateDuration(clip) {
+  const start = Number(clip?.start || 0);
+  const end = Number(clip?.end || start);
+  return Math.max(0, Number(clip?.duration || end - start));
+}
+
+function previewTriageSession(scope = "smart", preview = getPreviewState(scope)) {
+  const key = previewDraftKey(scope, preview?.id || "");
+  if (!state.previewTriageSessions[key]) {
+    state.previewTriageSessions[key] = {
+      activeIndex: null,
+      role: "all",
+      topic: "all",
+      filter: "pending",
+      search: "",
+      skipped: {},
+      reviewed: {},
+      history: [],
+    };
+  }
+  return state.previewTriageSessions[key];
+}
+
+function previewTriageCandidates(scope = "smart", preview = getPreviewState(scope)) {
+  const session = previewTriageSession(scope, preview);
+  const query = String(session.search || "").trim().toLocaleLowerCase();
+  return (preview?.clips || []).filter((clip) => {
+    const index = Number(clip.index);
+    const skipped = session.skipped[String(index)] === true;
+    const reviewed = session.reviewed[String(index)] === true;
+    const selected = isPreviewWorkbenchSelected(clip);
+    if (session.role !== "all" && previewWorkbenchRoleKey(clip) !== session.role) return false;
+    if (session.topic !== "all" && previewWorkbenchTopicLabel(clip) !== session.topic) return false;
+    if (query) {
+      const searchable = [clip.text, previewWorkbenchTopicLabel(clip), previewWorkbenchRoleLabel(clip), clip.focus, clip.source]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      if (!searchable.includes(query)) return false;
+    }
+    if (session.filter === "pending") return !reviewed && !skipped;
+    if (session.filter === "kept") return selected;
+    if (session.filter === "skipped") return skipped;
+    return true;
+  });
+}
+
+function previewTriageActive(scope = "smart", preview = getPreviewState(scope)) {
+  const session = previewTriageSession(scope, preview);
+  const candidates = previewTriageCandidates(scope, preview);
+  let position = candidates.findIndex((clip) => Number(clip.index) === Number(session.activeIndex));
+  if (position < 0) position = candidates.length ? 0 : -1;
+  const clip = position >= 0 ? candidates[position] : null;
+  session.activeIndex = clip ? Number(clip.index) : null;
+  return { session, candidates, clip, position };
+}
+
+function setPreviewWorkbenchStage(scope = "smart", stage = "triage") {
+  state.previewWorkbenchStages[scope] = stage === "assembly" ? "assembly" : "triage";
+  const preview = getPreviewState(scope);
+  if (state.previewWorkbenchStages[scope] === "assembly") {
+    const selected = previewAssemblyOrder(scope, preview);
+    if (selected.length) state.previewDetailSelection[scope] = selected[0];
+  }
+  renderPreviewState(scope);
+}
+
+function setPreviewTriageRole(scope = "smart", role = "all") {
+  const session = previewTriageSession(scope);
+  session.role = ["all", "hook", "product", "proof", "scene", "close", "weak"].includes(role) ? role : "all";
+  session.activeIndex = null;
+  renderPreviewState(scope);
+}
+
+function setPreviewTriageTopic(scope = "smart", topic = "all") {
+  const session = previewTriageSession(scope);
+  session.topic = String(topic || "all").slice(0, 80) || "all";
+  session.activeIndex = null;
+  renderPreviewState(scope);
+}
+
+function setPreviewTriageFilter(scope = "smart", filter = "pending") {
+  const session = previewTriageSession(scope);
+  session.filter = ["pending", "all", "kept", "skipped"].includes(filter) ? filter : "pending";
+  session.activeIndex = null;
+  renderPreviewState(scope);
+}
+
+function setPreviewTriageSearch(scope = "smart", value = "") {
+  const session = previewTriageSession(scope);
+  session.search = String(value || "").slice(0, 80);
+  session.activeIndex = null;
+  renderPreviewState(scope);
+  window.requestAnimationFrame(() => {
+    const input = previewBox(scope)?.querySelector(`[data-preview-triage-search="${scope}"]`);
+    input?.focus();
+    input?.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
+function setPreviewTriageActive(scope = "smart", index) {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips?.some((clip) => Number(clip.index) === Number(index))) return;
+  previewTriageSession(scope, preview).activeIndex = Number(index);
+  renderPreviewState(scope);
+}
+
+function movePreviewTriage(scope = "smart", direction = 1) {
+  const preview = getPreviewState(scope);
+  const { session, candidates, position } = previewTriageActive(scope, preview);
+  if (!candidates.length) return;
+  const next = (position + direction + candidates.length) % candidates.length;
+  session.activeIndex = Number(candidates[next].index);
+  renderPreviewState(scope);
+}
+
+function advancePreviewTriage(scope, currentIndex, previousCandidates) {
+  const preview = getPreviewState(scope);
+  const session = previewTriageSession(scope, preview);
+  const candidates = previewTriageCandidates(scope, preview);
+  if (!candidates.length) {
+    session.activeIndex = null;
+    return;
+  }
+  const valid = new Set(candidates.map((clip) => Number(clip.index)));
+  const previous = Array.isArray(previousCandidates) && previousCandidates.length ? previousCandidates : candidates;
+  const start = previous.findIndex((clip) => Number(clip.index) === Number(currentIndex));
+  for (let offset = 1; offset <= previous.length; offset += 1) {
+    const candidate = previous[(Math.max(0, start) + offset) % previous.length];
+    if (candidate && valid.has(Number(candidate.index))) {
+      session.activeIndex = Number(candidate.index);
+      return;
+    }
+  }
+  session.activeIndex = Number(candidates[0].index);
+}
+
+function rememberPreviewTriageAction(scope, clip) {
+  const preview = getPreviewState(scope);
+  const session = previewTriageSession(scope, preview);
+  const index = Number(clip.index);
+  session.history.push({
+    activeIndex: session.activeIndex,
+    index,
+    selected: clip.selected !== false,
+    segments: previewSegments(clip).map((segment) => segment.selected !== false),
+    skipped: session.skipped[String(index)] === true,
+    reviewed: session.reviewed[String(index)] === true,
+    assemblyOrder: [...previewAssemblyOrder(scope, preview)],
+  });
+  session.history = session.history.slice(-12);
+}
+
+function keepPreviewTriageCandidate(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const { clip, candidates, session } = previewTriageActive(scope, preview);
+  if (!clip) return;
+  rememberPreviewTriageAction(scope, clip);
+  clip.selected = true;
+  previewSegments(clip).forEach((segment) => { segment.selected = segment.selection_locked !== true; });
+  setPreviewAssemblyMembership(scope, Number(clip.index), true);
+  delete session.skipped[String(clip.index)];
+  session.reviewed[String(clip.index)] = true;
+  advancePreviewTriage(scope, Number(clip.index), candidates);
+  commitPreviewDraft(scope);
+  renderPreviewState(scope);
+}
+
+function skipPreviewTriageCandidate(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const { clip, candidates, session } = previewTriageActive(scope, preview);
+  if (!clip) return;
+  rememberPreviewTriageAction(scope, clip);
+  clip.selected = false;
+  previewSegments(clip).forEach((segment) => { segment.selected = false; });
+  setPreviewAssemblyMembership(scope, Number(clip.index), false);
+  session.skipped[String(clip.index)] = true;
+  session.reviewed[String(clip.index)] = true;
+  advancePreviewTriage(scope, Number(clip.index), candidates);
+  commitPreviewDraft(scope);
+  renderPreviewState(scope);
+}
+
+function undoPreviewTriageAction(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const session = previewTriageSession(scope, preview);
+  const snapshot = session.history.pop();
+  if (!snapshot) {
+    toast("没有可撤销的选片操作", "info");
+    return;
+  }
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(snapshot.index));
+  if (!clip) return;
+  clip.selected = snapshot.selected;
+  previewSegments(clip).forEach((segment, position) => {
+    segment.selected = segment.selection_locked === true ? false : Boolean(snapshot.segments[position]);
+  });
+  if (snapshot.skipped) session.skipped[String(snapshot.index)] = true;
+  else delete session.skipped[String(snapshot.index)];
+  if (snapshot.reviewed) session.reviewed[String(snapshot.index)] = true;
+  else delete session.reviewed[String(snapshot.index)];
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = [...snapshot.assemblyOrder];
+  session.activeIndex = snapshot.activeIndex;
+  commitPreviewDraft(scope);
+  renderPreviewState(scope);
+}
+
+function inspectPreviewWorkbenchClip(index, scope = "smart") {
+  state.previewDetailSelection[scope] = Number(index);
+  if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
+  renderPreviewState(scope);
+}
+
+function movePreviewAssemblyClip(scope = "smart", index, direction) {
+  const preview = getPreviewState(scope);
+  const order = previewAssemblyOrder(scope, preview);
+  const position = order.indexOf(Number(index));
+  const next = position + Number(direction);
+  if (position < 0 || next < 0 || next >= order.length) return;
+  reorderPreviewClip(scope, Number(index), order[next]);
+}
+
+function removePreviewAssemblyCandidate(scope = "smart", index) {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip) return;
+  clip.selected = false;
+  previewSegments(clip).forEach((segment) => { segment.selected = false; });
+  setPreviewAssemblyMembership(scope, Number(index), false);
+  commitPreviewDraft(scope);
+  renderPreviewState(scope);
+}
+
+function autoArrangePreviewAssembly(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const order = previewAssemblyOrder(scope, preview);
+  const positions = new Map(order.map((index, position) => [index, position]));
+  const byIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
+  order.sort((left, right) => {
+    const rank = previewWorkbenchRoleRank(byIndex.get(left)) - previewWorkbenchRoleRank(byIndex.get(right));
+    return rank || positions.get(left) - positions.get(right);
+  });
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
+  commitPreviewDraft(scope);
+  renderPreviewState(scope);
+}
+
+function renderPreviewTriageRoleFilters(scope, preview, session) {
+  const roles = ["all", "hook", "product", "proof", "scene", "close", "weak"];
+  return '<div class="preview-triage-role-strip" role="group" aria-label="按成片作用筛选">' + roles.map((role) => {
+    const items = (preview?.clips || []).filter((clip) => role === "all" || previewWorkbenchRoleKey(clip) === role);
+    const pending = items.filter((clip) => !session.reviewed[String(clip.index)] && !session.skipped[String(clip.index)]).length;
+    const label = role === "all" ? "全部候选" : ({ hook: "开头", product: "卖点", proof: "证据", scene: "场景", close: "收尾", weak: "补充" })[role];
+    return '<button class="' + (session.role === role ? "is-active" : "") + '" data-action="preview-triage-role" data-preview-scope="' + scope + '" data-value="' + role + '" aria-pressed="' + (session.role === role ? "true" : "false") + '"><span>' + label + '</span><em>' + pending + '/' + items.length + '</em></button>';
+  }).join("") + '</div>';
+}
+
+function renderPreviewTriageTopicFilters(scope, preview, session) {
+  const counts = new Map();
+  (preview?.clips || []).forEach((clip) => {
+    if (session.role !== "all" && previewWorkbenchRoleKey(clip) !== session.role) return;
+    const topic = previewWorkbenchTopicLabel(clip);
+    counts.set(topic, Number(counts.get(topic) || 0) + 1);
+  });
+  const topics = Array.from(counts.entries())
+    .sort((left, right) => Number(right[1]) - Number(left[1]) || String(left[0]).localeCompare(String(right[0]), "zh-CN"))
+    .slice(0, 8);
+  if (!topics.length) return "";
+  const buttons = [["all", "全部卖点", (preview?.clips || []).filter((clip) => session.role === "all" || previewWorkbenchRoleKey(clip) === session.role).length], ...topics]
+    .map(([value, label, count]) => '<button class="' + (session.topic === value ? "is-active" : "") + '" data-action="preview-triage-topic" data-preview-scope="' + scope + '" data-value="' + escapeHtml(value) + '" aria-pressed="' + (session.topic === value ? "true" : "false") + '"><span>' + escapeHtml(label) + '</span><em>' + Number(count || 0) + '</em></button>')
+    .join("");
+  return '<div class="preview-triage-topic-strip" role="group" aria-label="按卖点模块筛选">' + buttons + '</div>';
+}
+
+function renderPreviewTriageQueueCard(clip, scope, analysis, isActive = false) {
+  const selected = isPreviewWorkbenchSelected(clip);
+  const topic = previewWorkbenchTopicLabel(clip);
+  const role = previewWorkbenchRoleLabel(clip);
+  const origin = clip?.recommended === false || clip?.candidate_origin === "director" ? "补充候选" : "AI 初选";
+  const reason = previewClipReasonParts({ ...clip, selected: true }, analysis, { includeRisk: false })[0] || "可用候选";
+  return '<button class="preview-triage-queue-card ' + (isActive ? "is-active" : "") + (selected ? " is-kept" : "") + '" data-action="preview-triage-focus" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><span class="preview-triage-queue-meta">' + escapeHtml(origin) + ' · ' + escapeHtml(role) + ' · ' + previewWorkbenchCandidateDuration(clip).toFixed(1) + 's</span><strong>' + escapeHtml(topic) + '</strong><small>' + escapeHtml(String(clip.text || "").trim()) + '</small><em>' + escapeHtml(reason) + '</em></button>';
+}
+
+function renderPreviewTriage(scope, preview, analysis, targetId) {
+  const { session, candidates, clip, position } = previewTriageActive(scope, preview);
+  const selectedOrder = previewAssemblyOrder(scope, preview);
+  const byIndex = new Map((preview?.clips || []).map((item) => [Number(item.index), item]));
+  const selected = selectedOrder.map((index) => byIndex.get(index)).filter(Boolean);
+  const totalDuration = selected.reduce((sum, item) => sum + effectiveClipDuration(item), 0);
+  const targetDuration = Number(preview?.target_duration || $(targetId)?.value || 60);
+  const filterButtons = [
+    ["pending", "待审"],
+    ["all", "全部"],
+    ["kept", "片篮"],
+    ["skipped", "已跳过"],
+  ].map(([value, label]) => '<button class="' + (session.filter === value ? "is-active" : "") + '" data-action="preview-triage-filter" data-preview-scope="' + scope + '" data-value="' + value + '" aria-pressed="' + (session.filter === value ? "true" : "false") + '">' + label + '</button>').join("");
+  const queue = clip ? candidates.slice(position + 1, position + 4).map((item) => renderPreviewTriageQueueCard(item, scope, analysis)).join("") : "";
+  const origin = clip?.recommended === false || clip?.candidate_origin === "director" ? "补充候选" : "AI 初选";
+  const activeReason = clip ? (previewClipReasonParts({ ...clip, selected: true }, analysis, { includeRisk: false })[0] || "可用候选") : "";
+  const activeSelected = clip && isPreviewWorkbenchSelected(clip);
+  const activeCard = clip ? '<article class="preview-triage-active-card"><div class="preview-triage-card-top"><span>第 ' + (position + 1) + ' / ' + candidates.length + ' 条</span><span>' + escapeHtml(origin) + ' · ' + previewWorkbenchCandidateDuration(clip).toFixed(1) + 's</span></div><div class="preview-card-tags"><span>' + escapeHtml(previewWorkbenchRoleLabel(clip)) + '</span><span>' + escapeHtml(previewWorkbenchTopicLabel(clip)) + '</span><em>' + (activeSelected ? "已在片篮" : "待决定") + '</em></div><p>' + escapeHtml(String(clip.text || "").trim()) + '</p><small>' + escapeHtml(activeReason) + '</small><div class="preview-triage-actions"><button class="button button-muted button-small" data-action="preview-triage-prev" data-preview-scope="' + scope + '" title="上一条（左方向键）">← 上一条</button><button class="button button-muted button-small" data-action="preview-clip-video" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="预览视频（P）">预览 P</button><button class="button button-muted button-small" data-action="preview-triage-skip" data-preview-scope="' + scope + '" title="跳过（X）">跳过 X</button><button class="button button-secondary button-small" data-action="preview-triage-keep" data-preview-scope="' + scope + '" title="保留（A）">' + (activeSelected ? "确认保留 A" : "保留 A") + '</button><button class="button button-muted button-small" data-action="preview-triage-next" data-preview-scope="' + scope + '" title="下一条（右方向键）">下一条 →</button></div></article>' : '<div class="preview-triage-empty"><strong>这个筛选下没有待选片段</strong><span>切换成“全部”或清空关键词，再继续挑选。</span></div>';
+  const basket = selected.length ? selected.slice(0, 12).map((item, index) => '<button class="preview-basket-item" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(item.index) + '"><span>' + (index + 1) + '</span><strong>' + escapeHtml(previewWorkbenchRoleLabel(item)) + '</strong><small>' + escapeHtml(selectedPreviewText(item) || item.text || "") + '</small></button>').join("") : '<div class="preview-sequence-empty"><strong>片篮还是空的</strong><span>保留候选后会自动放到这里。</span></div>';
+  return '<div class="preview-triage-toolbar"><div class="preview-workbench-toggle">' + filterButtons + '</div><label class="preview-triage-search"><span>补片搜索</span><input type="search" value="' + escapeHtml(session.search) + '" placeholder="卖点、材质、场景…" data-preview-triage-search="' + scope + '"></label><button class="button button-muted button-small" data-action="preview-triage-undo" data-preview-scope="' + scope + '" ' + (session.history.length ? "" : "disabled") + '>撤销 Ctrl+Z</button></div>' + renderPreviewTriageRoleFilters(scope, preview, session) + renderPreviewTriageTopicFilters(scope, preview, session) + '<div class="preview-triage-layout"><section class="preview-triage-stage"><div class="preview-workbench-column-head"><div><strong>快速选片</strong><span>先预览再决定；A 保留、X 跳过、P 预览</span></div><small>当前筛选 ' + candidates.length + ' 条</small></div><div class="preview-triage-stage-scroll">' + activeCard + (queue ? '<div class="preview-triage-up-next"><strong>接下来</strong><div>' + queue + '</div></div>' : "") + '</div></section><aside class="preview-selection-basket"><div class="preview-workbench-column-head"><div><strong>已保留片篮</strong><span>' + selected.length + ' 段 · ' + totalDuration.toFixed(1) + ' / ' + targetDuration + 's</span></div><button class="button button-secondary button-small" data-action="preview-workbench-stage" data-preview-scope="' + scope + '" data-value="assembly">进入编排</button></div><div class="preview-basket-list">' + basket + '</div><div class="preview-basket-foot"><span>' + (totalDuration > targetDuration * 1.15 ? "已超出目标时长，编排时可逐句精修。" : "保留够了就进入编排，顺序与逐句删减都放在下一步。") + '</span></div></aside></div>';
+}
+
+function renderPreviewWorkbenchSequenceCard(clip, position, activeIndex, scope, total = 0) {
+  const bounds = effectiveClipBounds(clip);
+  const canMoveUp = position > 0;
+  const canMoveDown = position < total - 1;
+  return '<article class="preview-sequence-card ' + (Number(clip.index) === Number(activeIndex) ? "is-active" : "") + '" draggable="true" data-preview-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><div class="clip-drag-handle" title="拖动调整成片顺序">&#9776;</div><button class="preview-sequence-main preview-sequence-select" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><span><strong>' + (position + 1) + '. ' + escapeHtml(previewWorkbenchRoleLabel(clip)) + '</strong><em>' + escapeHtml(previewWorkbenchTopicLabel(clip)) + ' · ' + bounds.duration.toFixed(1) + 's</em></span><small>' + escapeHtml(selectedPreviewText(clip) || clip.text || "") + '</small></button><div class="preview-sequence-actions"><button title="上移" aria-label="上移" data-action="preview-assembly-move" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" data-direction="-1" ' + (canMoveUp ? "" : "disabled") + '>↑</button><button title="下移" aria-label="下移" data-action="preview-assembly-move" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" data-direction="1" ' + (canMoveDown ? "" : "disabled") + '>↓</button><button class="preview-sequence-remove" title="移出成片" aria-label="移出成片" data-action="preview-assembly-remove" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">×</button></div></article>';
+}
+
+function renderPreviewAssembly(scope, preview, analysis, targetId) {
+  const selectedOrder = previewAssemblyOrder(scope, preview);
+  const byIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
+  const selected = selectedOrder.map((index) => byIndex.get(index)).filter(Boolean);
+  const activeIndex = previewDetailIndex(scope, selected);
+  const totalDuration = selected.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+  const targetDuration = Number(preview?.target_duration || $(targetId)?.value || 60);
+  const detail = selected.length ? renderPreviewDetailPanel(scope, preview, analysis, activeIndex, selected) : '<div class="preview-sequence-empty"><strong>还没有保留片段</strong><span>回到快速选片，先把可用内容放进片篮。</span><button class="button button-secondary button-small" data-action="preview-workbench-stage" data-preview-scope="' + scope + '" data-value="triage">去快速选片</button></div>';
+  return '<div class="preview-assembly-layout"><section class="preview-assembly-sequence"><div class="preview-workbench-column-head"><div><strong>成片顺序</strong><span>' + selected.length + ' 段 · ' + totalDuration.toFixed(1) + ' / ' + targetDuration + 's</span></div><div class="preview-assembly-head-actions"><button class="button button-muted button-small" data-action="preview-assembly-auto-arrange" data-preview-scope="' + scope + '" ' + (selected.length > 1 ? "" : "disabled") + '>按作用整理</button><button class="button button-secondary button-small" data-action="preview-workbench-stage" data-preview-scope="' + scope + '" data-value="triage">补片</button></div></div><p class="preview-assembly-hint">拖动或用上下按钮调整结构；只展示已保留内容。</p><div class="preview-assembly-scroll">' + (selected.length ? selected.map((clip, position) => renderPreviewWorkbenchSequenceCard(clip, position, activeIndex, scope, selected.length)).join("") : "") + '</div></section><section class="preview-assembly-editor"><div class="preview-workbench-column-head"><div><strong>逐句精修</strong><span>点击成片片段，删除不需要的句子</span></div><small class="' + (totalDuration > targetDuration * 1.15 ? "is-warn" : "") + '">' + (totalDuration > targetDuration * 1.15 ? "超过目标时长" : "已保留内容") + '</small></div><div class="preview-assembly-detail">' + detail + '</div></section></div>';
+}
+
 function renderPreviewWorkbench(scope, preview, targetId) {
+  preview = hydratePreviewCandidatePool(preview);
   ensurePreviewDraft(scope);
   const clips = preview?.clips || [];
   const analysis = analyzeSmartPreview(preview, targetId);
-  const activeIndex = previewDetailIndex(scope, clips);
-  const rows = clips.map((clip, position) => renderClipStoryCard(clip, position, scope, preview, analysis, activeIndex));
-  return `
-    <div data-preview-summary="${scope}">${renderPreviewSummary(analysis)}</div>
-    <div class="clip-preview-workbench" data-preview-workbench="${scope}" style="--preview-left: ${previewSplitRatio(scope)}%;">
-      <div class="clip-story-list" role="list">
-        ${rows.join("")}
-      </div>
-      <div class="clip-preview-resizer" data-preview-resizer="${scope}" role="separator" aria-orientation="vertical" aria-label="调整片段列表和详情宽度" aria-valuemin="38" aria-valuemax="74" aria-valuenow="${Math.round(previewSplitRatio(scope))}" tabindex="0" title="拖动调整左右分栏"></div>
-      ${renderPreviewDetailPanel(scope, preview, analysis, activeIndex)}
-    </div>
-  `;
+  const stage = state.previewWorkbenchStages[scope] === "assembly" ? "assembly" : "triage";
+  const stageButtons = '<div class="preview-workbench-stage-toggle" role="tablist" aria-label="选片步骤"><button class="' + (stage === "triage" ? "is-active" : "") + '" data-action="preview-workbench-stage" data-preview-scope="' + scope + '" data-value="triage" aria-pressed="' + (stage === "triage" ? "true" : "false") + '"><span>1</span>快速选片</button><button class="' + (stage === "assembly" ? "is-active" : "") + '" data-action="preview-workbench-stage" data-preview-scope="' + scope + '" data-value="assembly" aria-pressed="' + (stage === "assembly" ? "true" : "false") + '"><span>2</span>编排精修</button></div>';
+  return '<div data-preview-summary="' + scope + '">' + renderPreviewSummary(analysis) + '</div><div class="preview-workbench-toolbar preview-workbench-stage-bar">' + stageButtons + '<span class="preview-workbench-stage-note">' + (stage === "triage" ? "先看候选，再决定保留；不把逐句删减混在选片里。" : "只处理已保留内容：调顺序、看视频、逐句精修。") + '</span></div><div class="preview-selection-workbench preview-workbench-shell is-' + stage + '" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0">' + (stage === "triage" ? renderPreviewTriage(scope, preview, analysis, targetId) : renderPreviewAssembly(scope, preview, analysis, targetId)) + '</div>';
 }
 
+function bindPreviewWorkbenchKeyboard(box, scope = "smart") {
+  const workbench = box?.querySelector(`[data-preview-workbench-focus="${scope}"]`);
+  if (!workbench) return;
+  workbench.addEventListener("keydown", (event) => {
+    if (state.previewWorkbenchStages[scope] !== "triage") return;
+    if (event.target?.closest?.("input, textarea, select, video, [contenteditable=\"true\"]")) return;
+    const key = String(event.key || "").toLocaleLowerCase();
+    const active = previewTriageActive(scope).clip;
+    if (!active) return;
+    if ((event.ctrlKey || event.metaKey) && key === "z") {
+      event.preventDefault();
+      undoPreviewTriageAction(scope);
+      return;
+    }
+    if (key === "a" || key === "enter") {
+      event.preventDefault();
+      keepPreviewTriageCandidate(scope);
+      return;
+    }
+    if (key === "x") {
+      event.preventDefault();
+      skipPreviewTriageCandidate(scope);
+      return;
+    }
+    if (key === "p") {
+      event.preventDefault();
+      previewClipVideo(Number(active.index), scope);
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      movePreviewTriage(scope, -1);
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      movePreviewTriage(scope, 1);
+    }
+  });
+}
 function renderSmartPreview(preview) {
+  preview = hydratePreviewCandidatePool(preview);
   const box = $("smart-preview");
   const count = $("smart-preview-count");
   if (!box) return;
@@ -6275,11 +6810,12 @@ function renderSmartPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("smart", preview, "sc-duration");
   updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
-  bindPreviewSplitResizer(box, "smart");
-  ensureInlinePreviewVideo("smart", previewDetailIndex("smart", clips));
+  bindPreviewWorkbenchKeyboard(box, "smart");
+  if (state.previewWorkbenchStages.smart === "assembly") ensureInlinePreviewVideo("smart", state.previewDetailSelection.smart);
 }
 
 function renderMixPreview(preview) {
+  preview = hydratePreviewCandidatePool(preview);
   const box = $("mix-preview");
   const count = $("mix-preview-count");
   if (!box) return;
@@ -6310,8 +6846,8 @@ function renderMixPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("mix", preview, "mix-duration");
   updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
-  bindPreviewSplitResizer(box, "mix");
-  ensureInlinePreviewVideo("mix", previewDetailIndex("mix", clips));
+  bindPreviewWorkbenchKeyboard(box, "mix");
+  if (state.previewWorkbenchStages.mix === "assembly") ensureInlinePreviewVideo("mix", state.previewDetailSelection.mix);
 }
 
 function renderClipMeta(clip, position, riskLabel) {
@@ -8021,6 +8557,1005 @@ function escapeHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// [AI_WORKBENCH_INSERTION_POINT]
+// Direct AI selection workbench: word-level state and export draft.
+if (!state.previewCandidateSelections) state.previewCandidateSelections = { smart: null, mix: null };
+// Keep the one-screen workbench in its compatible assembly state so its
+// currently focused clip loads an inline video automatically.
+state.previewWorkbenchStages.smart = "assembly";
+state.previewWorkbenchStages.mix = "assembly";
+
+function previewSegments(clip) {
+  return Array.isArray(clip?.segments) ? clip.segments : [];
+}
+
+function previewSegmentWords(segment) {
+  return Array.isArray(segment?.words) ? segment.words : [];
+}
+
+function isPreviewWordLocked(word) {
+  return word?.selection_locked === true;
+}
+
+function isPreviewWordSelected(word) {
+  return !isPreviewWordLocked(word) && word?.selected !== false;
+}
+
+function selectedPreviewWords(segment) {
+  return previewSegmentWords(segment).filter(isPreviewWordSelected);
+}
+
+function selectedPreviewSegmentText(segment) {
+  const words = previewSegmentWords(segment);
+  return words.length ? selectedPreviewWords(segment).map((word) => String(word?.text || "")).join("").trim() : String(segment?.text || "").trim();
+}
+
+function isPreviewSegmentSelected(segment) {
+  if (!segment || segment.selection_locked === true || segment.selected === false) return false;
+  const words = previewSegmentWords(segment);
+  return !words.length || selectedPreviewWords(segment).length > 0;
+}
+
+function selectedPreviewSegments(clip) {
+  return previewSegments(clip).filter(isPreviewSegmentSelected);
+}
+
+function selectedPreviewText(clip) {
+  const segments = previewSegments(clip);
+  if (!segments.length) return String(clip?.text || "").trim();
+  const selected = selectedPreviewSegments(clip);
+  return selected.length ? selected.map(selectedPreviewSegmentText).filter(Boolean).join(" ") : "\u672a\u9009\u62e9\u53e5\u5b50";
+}
+
+function selectedSegmentCountText(clip) {
+  const segments = previewSegments(clip);
+  return segments.length ? `${selectedPreviewSegments(clip).length}/${segments.length}\u53e5` : "";
+}
+
+function effectivePreviewSegmentBounds(segment) {
+  const start = Number(segment?.start || 0);
+  const end = Number(segment?.end || start);
+  const words = previewSegmentWords(segment);
+  const selected = selectedPreviewWords(segment);
+  if (segment?.wordSelectionExplicit === true && words.length && selected.length) {
+    return { start: Math.min(...selected.map((word) => Number(word.start || start))), end: Math.max(...selected.map((word) => Number(word.end || Number(word.start || start)))) };
+  }
+  return { start, end };
+}
+
+function effectivePreviewSegmentDuration(segment) {
+  const words = previewSegmentWords(segment);
+  if (segment?.wordSelectionExplicit === true && words.length) return selectedPreviewWords(segment).reduce((sum, word) => {
+    const start = Number(word.start || 0);
+    const end = Number(word.end || start);
+    return sum + Math.max(0, end - start);
+  }, 0);
+  const bounds = effectivePreviewSegmentBounds(segment);
+  return Math.max(0, Number(segment?.duration || bounds.end - bounds.start));
+}
+
+function effectiveClipDuration(clip) {
+  if (clip?.selected === false) return 0;
+  const segments = previewSegments(clip);
+  if (segments.length) return selectedPreviewSegments(clip).reduce((sum, segment) => sum + effectivePreviewSegmentDuration(segment), 0);
+  const start = Number(clip?.start || 0);
+  const end = Number(clip?.end || start);
+  return Math.max(0, Number(clip?.duration || end - start));
+}
+
+function effectiveClipBounds(clip) {
+  const allSegments = previewSegments(clip);
+  const segments = selectedPreviewSegments(clip);
+  if (allSegments.length && segments.length) {
+    const bounds = segments.map(effectivePreviewSegmentBounds);
+    return { start: Math.min(...bounds.map((item) => item.start)), end: Math.max(...bounds.map((item) => item.end)), duration: effectiveClipDuration(clip) };
+  }
+  const start = Number(clip?.start || 0);
+  const end = Number(clip?.end || start);
+  if (allSegments.length || clip?.selected === false) return { start, end, duration: 0 };
+  return { start, end, duration: Math.max(0, Number(clip?.duration || end - start)) };
+}
+
+function buildPreviewDraftFromState(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const draft = { preview_id: preview?.id || "", scope, order: [], selected_indices: [], selected_segments: {}, selected_words: {}, updated_at: Date.now() };
+  const clipsByIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
+  const selectedOrder = previewAssemblyOrder(scope, preview);
+  const remaining = (preview?.clips || []).map((clip) => Number(clip.index)).filter((index) => Number.isInteger(index) && !selectedOrder.includes(index));
+  draft.order = [...selectedOrder, ...remaining];
+  selectedOrder.forEach((clipIndex) => {
+    const clip = clipsByIndex.get(clipIndex);
+    if (!clip) return;
+    const segments = previewSegments(clip);
+    const keptSegments = segments.filter(isPreviewSegmentSelected).map((segment) => Number(segment.index)).filter(Number.isInteger);
+    if (clip.selected === false || (segments.length && !keptSegments.length)) return;
+    draft.selected_indices.push(clipIndex);
+    if (segments.length) draft.selected_segments[String(clipIndex)] = keptSegments;
+    const explicitWords = {};
+    segments.forEach((segment) => {
+      if (!segment.wordSelectionExplicit || !previewSegmentWords(segment).length) return;
+      const segmentIndex = Number(segment.index);
+      if (Number.isInteger(segmentIndex)) explicitWords[String(segmentIndex)] = selectedPreviewWords(segment).map((word) => Number(word.index)).filter(Number.isInteger);
+    });
+    if (Object.keys(explicitWords).length) draft.selected_words[String(clipIndex)] = explicitWords;
+  });
+  return draft;
+}
+
+// [AI_WORKBENCH_WORD_MODEL_END]
+
+function applyPreviewDraftToState(scope = "smart", draft = null) {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips?.length || !draft) return;
+  const order = normalizedIntegerList(draft.order);
+  const hasSelectedIndices = Array.isArray(draft.selected_indices);
+  const selectedSet = new Set(normalizedIntegerList(draft.selected_indices));
+  const segmentMap = draft.selected_segments && typeof draft.selected_segments === "object" ? draft.selected_segments : {};
+  const wordMap = draft.selected_words && typeof draft.selected_words === "object" ? draft.selected_words : {};
+  preview.clips.forEach((clip) => {
+    const clipIndex = Number(clip.index);
+    const segments = previewSegments(clip);
+    const selectedByDraft = hasSelectedIndices ? selectedSet.has(clipIndex) : clip.selected !== false;
+    if (!selectedByDraft) {
+      clip.selected = false;
+      segments.forEach((segment) => { segment.selected = false; previewSegmentWords(segment).forEach((word) => { word.selected = false; }); });
+      return;
+    }
+    const segmentValues = segmentMap[String(clipIndex)];
+    if (segments.length && Array.isArray(segmentValues)) {
+      const segmentSet = new Set(normalizedIntegerList(segmentValues));
+      segments.forEach((segment) => { segment.selected = segment.selection_locked === true ? false : segmentSet.has(Number(segment.index)); });
+    } else if (segments.length) {
+      segments.forEach((segment) => { if (segment.selection_locked === true) segment.selected = false; else if (segment.selected === undefined) segment.selected = true; });
+    }
+    const clipWordMap = wordMap[String(clipIndex)] && typeof wordMap[String(clipIndex)] === "object" ? wordMap[String(clipIndex)] : {};
+    segments.forEach((segment) => {
+      const words = previewSegmentWords(segment);
+      if (!words.length) return;
+      const values = clipWordMap[String(segment.index)];
+      if (Array.isArray(values)) {
+        const selectedWords = new Set(normalizedIntegerList(values));
+        segment.wordSelectionExplicit = true;
+        words.forEach((word) => { word.selected = isPreviewWordLocked(word) ? false : selectedWords.has(Number(word.index)); });
+        segment.selected = segment.selection_locked !== true && selectedPreviewWords(segment).length > 0;
+      } else {
+        segment.wordSelectionExplicit = false;
+        words.forEach((word) => { if (isPreviewWordLocked(word)) word.selected = false; else if (word.selected === undefined) word.selected = true; });
+        if (segment.selected !== false && !selectedPreviewWords(segment).length) segment.selected = false;
+      }
+    });
+    clip.selected = !segments.length || segments.some(isPreviewSegmentSelected);
+  });
+  const selectedOrder = normalizedIntegerList(draft.selected_indices);
+  const fallbackOrder = order.filter((index) => selectedSet.has(index));
+  const preferred = (selectedOrder.length ? selectedOrder : fallbackOrder).filter((index) => selectedSet.has(index));
+  preview.clips.forEach((clip) => {
+    const index = Number(clip.index);
+    if (isPreviewWorkbenchSelected(clip) && Number.isInteger(index) && !preferred.includes(index)) preferred.push(index);
+  });
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = preferred;
+}
+
+function resetPreviewSegmentWords(segment) {
+  previewSegmentWords(segment).forEach((word) => { word.selected = !isPreviewWordLocked(word); });
+  segment.wordSelectionExplicit = false;
+}
+
+function syncPreviewClipSelections(scope = "smart") {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips) return;
+  const checked = new Map(Array.from(document.querySelectorAll(`[data-preview-clip][data-preview-scope="${scope}"]`)).map((node) => [Number(node.dataset.previewClip), node.checked]));
+  const segmentChecked = new Map(Array.from(document.querySelectorAll(`[data-preview-segment][data-preview-scope="${scope}"]`)).map((node) => [`${Number(node.dataset.previewSegmentParent)}:${Number(node.dataset.previewSegmentIndex)}`, node.checked]));
+  preview.clips.forEach((clip) => {
+    const clipIndex = Number(clip.index);
+    const segments = previewSegments(clip);
+    segments.forEach((segment) => {
+      const key = `${clipIndex}:${Number(segment.index)}`;
+      if (segment.selection_locked === true) segment.selected = false;
+      else if (segmentChecked.has(key)) segment.selected = segmentChecked.get(key);
+      else if (segment.selected === undefined) segment.selected = true;
+      previewSegmentWords(segment).forEach((word) => { if (isPreviewWordLocked(word)) word.selected = false; else if (word.selected === undefined) word.selected = true; });
+      if (segment.selected !== false && previewSegmentWords(segment).length && !selectedPreviewWords(segment).length) segment.selected = false;
+    });
+    const anySegmentSelected = segments.length ? segments.some(isPreviewSegmentSelected) : true;
+    if (checked.has(clipIndex)) clip.selected = checked.get(clipIndex) && anySegmentSelected;
+    else if (clip.selected === undefined) clip.selected = true;
+    if (segments.length && !anySegmentSelected) clip.selected = false;
+  });
+}
+
+function updatePreviewClipSelection(index, selected, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip) return;
+  clip.selected = selected;
+  previewSegments(clip).forEach((segment) => {
+    segment.selected = segment.selection_locked === true ? false : selected;
+    if (selected) resetPreviewSegmentWords(segment); else previewSegmentWords(segment).forEach((word) => { word.selected = false; });
+  });
+  setPreviewAssemblyMembership(scope, Number(index), selected);
+  commitPreviewDraft(scope);
+  refreshPreviewSelectionUi(scope);
+}
+
+function updatePreviewSegmentSelection(index, segmentIndex, selected, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  const segment = previewSegments(clip).find((item) => Number(item.index) === Number(segmentIndex));
+  if (!clip || !segment || segment.selection_locked === true) return;
+  segment.selected = selected;
+  if (selected) resetPreviewSegmentWords(segment);
+  else { previewSegmentWords(segment).forEach((word) => { word.selected = false; }); segment.wordSelectionExplicit = false; }
+  clip.selected = previewSegments(clip).some(isPreviewSegmentSelected);
+  setPreviewAssemblyMembership(scope, Number(index), clip.selected);
+  commitPreviewDraft(scope);
+  refreshPreviewSelectionUi(scope);
+}
+
+function togglePreviewWordSelection(clipIndex, segmentIndex, wordIndex, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(clipIndex));
+  const segment = previewSegments(clip).find((item) => Number(item.index) === Number(segmentIndex));
+  const word = previewSegmentWords(segment).find((item) => Number(item.index) === Number(wordIndex));
+  if (!clip || !segment || !word || isPreviewWordLocked(word) || segment.selection_locked === true) return;
+  word.selected = word.selected === false;
+  const selectable = previewSegmentWords(segment).filter((item) => !isPreviewWordLocked(item));
+  segment.wordSelectionExplicit = selectedPreviewWords(segment).length !== selectable.length;
+  segment.selected = selectedPreviewWords(segment).length > 0;
+  clip.selected = previewSegments(clip).some(isPreviewSegmentSelected);
+  setPreviewAssemblyMembership(scope, Number(clipIndex), clip.selected);
+  commitPreviewDraft(scope);
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
+function collectPreviewSelection(scope = "smart") {
+  syncPreviewClipSelections(scope);
+  const draft = commitPreviewDraft(scope, { remote: true });
+  return { selectedIndices: draft.selected_indices || [], order: draft.order || [], selectedSegments: draft.selected_segments || {}, selectedWords: draft.selected_words || {} };
+}
+
+// [AI_WORKBENCH_SELECTION_END]
+
+function previewInlineVideoKey(scope, preview, clip, draft = null, { inspectOnly = false } = {}) {
+  if (!preview?.id || !clip) return "";
+  const clipIndex = Number(clip.index);
+  const selection = draft || buildPreviewDraftFromState(scope);
+  const selectedSegments = selection?.selected_segments && Array.isArray(selection.selected_segments[String(clipIndex)]) ? selection.selected_segments[String(clipIndex)].join(",") : "";
+  const wordsBySegment = selection?.selected_words?.[String(clipIndex)] || {};
+  const selectedWords = Object.keys(wordsBySegment).sort((left, right) => Number(left) - Number(right)).map((segmentIndex) => `${segmentIndex}:${normalizedIntegerList(wordsBySegment[segmentIndex]).join(",")}`).join("|");
+  const selected = Array.isArray(selection?.selected_indices) && selection.selected_indices.includes(clipIndex) ? "1" : "0";
+  return `${scope}:${preview.id}:${clipIndex}:${inspectOnly ? "inspect" : selected}:${selectedSegments}:${selectedWords}`;
+}
+
+function renderPreviewInlineVideo(scope, preview, clip, { inspectOnly = false, idleText = "\u70b9\u51fb\u9884\u89c8\u89c6\u9891\u540e\u663e\u793a\u8fd9\u91cc\u3002" } = {}) {
+  const segments = previewSegments(clip);
+  const hasSelectedText = inspectOnly || (clip.selected !== false && (!segments.length || selectedPreviewSegments(clip).length));
+  const draft = inspectOnly ? null : buildPreviewDraftFromState(scope);
+  const key = previewInlineVideoKey(scope, preview, clip, draft, { inspectOnly });
+  const entry = state.previewInlineVideos[key] || {};
+  const videoClass = entry.url ? "" : "is-hidden";
+  const statusClass = entry.url ? "is-hidden" : "";
+  const statusText = !hasSelectedText ? "\u5148\u4fdd\u7559\u81f3\u5c11\u4e00\u53e5\u5185\u5bb9\u540e\u518d\u9884\u89c8\u3002" : entry.error ? `\u5c0f\u89c6\u9891\u751f\u6210\u5931\u8d25\uff1a${entry.error}` : entry.status === "loading" ? "\u6b63\u5728\u751f\u6210\u7247\u6bb5\u5c0f\u89c6\u9891..." : idleText;
+  return `<div class="clip-detail-video" data-preview-inline-video="${scope}" data-preview-index="${Number(clip.index)}" data-video-key="${escapeHtml(key)}"><div class="clip-detail-video-stage"><video class="${videoClass}" data-preview-inline-player controls playsinline ${previewInlineAudioMutedAttribute()} autoplay preload="metadata" ${entry.url ? `src="${escapeHtml(entry.url)}"` : ""}></video><div class="clip-detail-video-status ${statusClass} ${entry.error ? "is-error" : ""}" data-preview-inline-status>${escapeHtml(statusText)}</div></div></div>`;
+}
+
+async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspectOnly = false } = {}) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || preview.status !== "ready") return;
+  const clipIndex = Number(index);
+  const clip = preview.clips?.find((item) => Number(item.index) === clipIndex);
+  if (!clip) return;
+  syncPreviewClipSelections(scope);
+  const segments = previewSegments(clip);
+  if (!inspectOnly && (clip.selected === false || (segments.length && !selectedPreviewSegments(clip).length))) return;
+  const draft = inspectOnly ? null : commitPreviewDraft(scope, { remote: true });
+  const key = previewInlineVideoKey(scope, preview, clip, draft, { inspectOnly });
+  if (!key) return;
+  const existing = state.previewInlineVideos[key];
+  if (existing?.url || existing?.status === "loading" || existing?.error) {
+    applyInlinePreviewVideoState(scope, clipIndex, key);
+    return;
+  }
+  state.previewInlineVideos[key] = { status: "loading" };
+  applyInlinePreviewVideoState(scope, clipIndex, key);
+  const endpoint = scope === "mix" ? "/api/mix/preview/clip-video" : "/api/smart-cut/preview/clip-video";
+  try {
+    const result = await api(endpoint, {
+      method: "POST",
+      body: JSON.stringify(inspectOnly ? { preview_id: preview.id, clip_index: clipIndex, scope, inspect_only: true } : {
+        preview_id: preview.id,
+        clip_index: clipIndex,
+        scope,
+        selected_indices: draft.selected_indices || [],
+        order: draft.order || [],
+        selected_segments: draft.selected_segments || {},
+        selected_words: draft.selected_words || {},
+        updated_at: draft.updated_at || Date.now(),
+      }),
+    });
+    state.previewInlineVideos[key] = { status: "ready", url: result.url };
+  } catch (error) {
+    state.previewInlineVideos[key] = { status: "failed", error: error.message || String(error || "\u672a\u77e5\u9519\u8bef") };
+  }
+  applyInlinePreviewVideoState(scope, clipIndex, key);
+}
+
+// [AI_WORKBENCH_VIDEO_END]
+
+const directPreviewWorkbenchCandidateCategories = [
+  ["hook", "\u5f00\u573a\u5438\u5f15"], ["pref_fabric", "\u9762\u6599\u8d28\u611f"], ["pref_fit", "\u7248\u578b\u663e\u7626"],
+  ["pref_color", "\u989c\u8272\u6c1b\u56f4"], ["pref_scene", "\u573a\u666f\u642d\u914d"], ["pref_emotion", "\u60c5\u7eea\u611f\u67d3"],
+  ["pref_value", "\u6027\u4ef7\u6bd4"], ["pref_urgency", "\u7d27\u8feb\u7a00\u7f3a"], ["pref_trend", "\u6d41\u884c\u8d8b\u52bf"],
+  ["food_taste", "\u53e3\u611f\u98df\u6b32"], ["food_quality", "\u65b0\u9c9c\u54c1\u8d28"], ["food_origin", "\u4ea7\u5730\u6eaf\u6e90"],
+  ["food_spec", "\u89c4\u683c\u5206\u91cf"], ["food_fresh", "\u53d1\u8d27\u4fdd\u9c9c"], ["food_scene", "\u573a\u666f\u5403\u6cd5"],
+  ["live", "\u76f4\u64ad\u4e92\u52a8"], ["unclear", "\u5f85\u786e\u8ba4"], ["close", "\u6536\u5c3e"],
+];
+
+function previewWorkbenchCandidateCategory(clip) {
+  const role = previewWorkbenchRoleKey(clip);
+  const text = `${clip?.focus || ""} ${clip?.focus_block || ""} ${clip?.text || ""}`.toLowerCase();
+  if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(text)) return "hook";
+  if (role === "close" || /\u6536\u5c3e|\u6700\u540e|\u4e0d\u8981\u9519\u8fc7/.test(text)) return "close";
+  if (/\u5c3a\u7801|\u7801\u6570|\u8eab\u9ad8|\u4f53\u91cd|\u65a4|s\u7801|m\u7801|l\u7801|xl/.test(text)) return "size";
+  if (/\u642d\u914d|\u7a7f\u642d|\u5185\u642d|\u5916\u642d|\u53e0\u7a7f|\u914d\u4e0a|\u914d\u8fd9\u4e2a/.test(text)) return "styling";
+  if (role === "scene" || /\u4e0a\u8eab|\u8bd5\u7a7f|\u65e5\u5e38|\u901a\u52e4|\u7ea6\u4f1a|\u51fa\u95e8|\u573a\u666f|\u62cd\u7167|\u8fd0\u52a8/.test(text)) return "scene";
+  if (/\u9762\u6599|\u6750\u8d28|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb/.test(text)) return "fabric";
+  if (/\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u6536\u8170|\u8170\u7ebf|\u817f\u957f|\u80a9|\u80ef|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab/.test(text)) return "fit";
+  if (role === "proof" || /\u7ec6\u8282|\u505a\u5de5|\u5de5\u827a|\u54c1\u8d28|\u8d70\u7ebf|\u5bf9\u6bd4|\u6b63\u54c1|\u53cd\u9988|\u9500\u91cf|\u4fdd\u8bc1/.test(text)) return "proof";
+  return "core";
+}
+
+function previewWorkbenchCategoryLabel(clip) {
+  const key = previewWorkbenchCandidateCategory(clip);
+  return directPreviewWorkbenchCandidateCategories.find(([item]) => item === key)?.[1] || "\u5546\u54c1\u4eae\u70b9";
+}
+
+function previewWorkbenchSelectedClips(scope, preview) {
+  const byIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
+  return previewAssemblyOrder(scope, preview).map((index) => byIndex.get(index)).filter(Boolean);
+}
+
+function previewWorkbenchCurrentClip(scope, preview, selected = previewWorkbenchSelectedClips(scope, preview)) {
+  const rawIndex = state.previewCandidateSelections?.[scope];
+  const candidateIndex = rawIndex === null || rawIndex === undefined ? NaN : Number(rawIndex);
+  const candidate = (preview?.clips || []).find((clip) => Number(clip.index) === candidateIndex);
+  if (candidate) return { clip: candidate, inspectOnly: !isPreviewWorkbenchSelected(candidate) };
+  const activeIndex = previewDetailIndex(scope, selected);
+  const active = selected.find((clip) => Number(clip.index) === Number(activeIndex));
+  if (active) return { clip: active, inspectOnly: false };
+  const fallback = preview?.clips?.[0] || null;
+  return { clip: fallback, inspectOnly: Boolean(fallback && !isPreviewWorkbenchSelected(fallback)) };
+}
+
+function setPreviewDetailSelection(scope = "smart", index) {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip || !isPreviewWorkbenchSelected(clip)) return;
+  syncPreviewClipSelections(scope);
+  state.previewCandidateSelections[scope] = null;
+  state.previewDetailSelection[scope] = Number(index);
+  renderPreviewStateKeepStoryScroll(scope);
+  ensureInlinePreviewVideo(scope, Number(index));
+}
+
+function inspectPreviewWorkbenchClip(index, scope = "smart") {
+  setPreviewDetailSelection(scope, Number(index));
+}
+
+function selectPreviewWorkbenchCandidate(index, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip) return;
+  if (isPreviewWorkbenchSelected(clip)) return setPreviewDetailSelection(scope, Number(index));
+  state.previewCandidateSelections[scope] = Number(index);
+  renderPreviewStateKeepStoryScroll(scope);
+  ensureInlinePreviewVideo(scope, Number(index), { inspectOnly: true });
+}
+
+function addPreviewWorkbenchCandidate(index, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip) return;
+  if (isPreviewWorkbenchSelected(clip)) return setPreviewDetailSelection(scope, Number(index));
+  clip.selected = true;
+  previewSegments(clip).forEach((segment) => { segment.selected = segment.selection_locked !== true; resetPreviewSegmentWords(segment); });
+  setPreviewAssemblyMembership(scope, Number(index), true);
+  state.previewCandidateSelections[scope] = null;
+  state.previewDetailSelection[scope] = Number(index);
+  commitPreviewDraft(scope);
+  renderPreviewStateKeepStoryScroll(scope);
+  ensureInlinePreviewVideo(scope, Number(index));
+}
+
+function previewCurrentWorkbenchClip(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const current = previewWorkbenchCurrentClip(scope, preview);
+  if (current.clip) ensureInlinePreviewVideo(scope, Number(current.clip.index), { inspectOnly: current.inspectOnly });
+}
+
+function renderPreviewCandidateGroups(scope, preview) {
+  const activeCandidate = state.previewCandidateSelections?.[scope];
+  const hasActiveCandidate = activeCandidate !== null && activeCandidate !== undefined;
+  return directPreviewWorkbenchCandidateCategories.map(([key, label]) => {
+    const clips = (preview?.clips || []).filter((clip) => previewWorkbenchCandidateCategory(clip) === key);
+    if (!clips.length) return "";
+    const rows = clips.map((clip) => {
+      const selected = isPreviewWorkbenchSelected(clip);
+      const active = Number(activeCandidate) === Number(clip.index) || (!hasActiveCandidate && Number(state.previewDetailSelection?.[scope]) === Number(clip.index));
+      const text = String(clip.text || selectedPreviewText(clip) || "\u672a\u8bc6\u522b\u53e3\u64ad").trim();
+      return `<article class="preview-candidate-row ${active ? "is-active" : ""} ${selected ? "is-selected" : ""}"><button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}" title="${escapeHtml(text)}"><span>${escapeHtml(text)}</span></button>${selected ? `<button class="preview-candidate-add is-added" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u5df2\u9009</button>` : `<button class="preview-candidate-add" data-action="preview-workbench-add-candidate" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u52a0\u5165</button>`}</article>`;
+    }).join("");
+    return `<section class="preview-candidate-group" data-preview-candidate-group="${key}"><div class="preview-candidate-group-head"><strong>${label}</strong><span>${clips.length}</span></div>${rows}</section>`;
+  }).join("") || `<div class="preview-sequence-empty"><strong>\u6ca1\u6709\u53ef\u7528\u5019\u9009</strong><span>\u91cd\u65b0\u751f\u6210 AI \u9009\u7247\u9884\u89c8\u540e\u518d\u8bd5\u3002</span></div>`;
+}
+
+function renderPreviewSelectedRows(scope, selected) {
+  if (!selected.length) return `<div class="preview-sequence-empty"><strong>\u8fd8\u6ca1\u6709\u5df2\u9009\u7247\u6bb5</strong><span>\u5728\u5de6\u4fa7\u770b\u89c6\u9891\uff0c\u786e\u8ba4\u540e\u70b9\u51fb\u201c\u52a0\u5165\u201d\u3002</span></div>`;
+  const activeIndex = Number(state.previewDetailSelection?.[scope]);
+  return selected.map((clip, position) => {
+    const text = selectedPreviewText(clip) || String(clip.text || "");
+    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" draggable="true" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" title="\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
+  }).join("");
+}
+
+// [AI_WORKBENCH_LIBRARY_END]
+function renderPreviewWorkbenchVideoStage(scope, preview, current) {
+  const clip = current?.clip;
+  if (!clip) {
+    return '<section class="preview-workbench-video"><div class="preview-sequence-empty"><strong>\u70b9\u51fb\u5de6\u4fa7\u5019\u9009\u7247\u6bb5\u5f00\u59cb\u9009\u7247</strong><span>\u89c6\u9891\u4f1a\u5728\u8fd9\u91cc\u5c55\u793a\u3002</span></div></section>';
+  }
+  const selected = isPreviewWorkbenchSelected(clip);
+  const text = current.inspectOnly ? String(clip.text || '\u672a\u8bc6\u522b\u53e3\u64ad') : selectedPreviewText(clip);
+  const addButton = selected ? '' : '<button class="button button-secondary button-small" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165\u5df2\u9009</button>';
+  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div><p class="preview-current-text">' + escapeHtml(text || '\u672a\u8bc6\u522b\u53e3\u64ad') + '</p>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
+}
+
+function renderPreviewEditorSentence(scope, clip, segment, position) {
+  const locked = segment?.selection_locked === true;
+  const selected = isPreviewSegmentSelected(segment);
+  const words = previewSegmentWords(segment);
+  const reason = String(segment?.blocked_reason || segment?.auto_unselected_reason || '').trim();
+  const wordRows = words.length ? words.map((word) => {
+    const text = escapeHtml(String(word?.text || ''));
+    if (isPreviewWordLocked(word)) {
+      return '<span class="preview-word is-locked" title="' + escapeHtml(String(word?.blocked_reason || '\u8fdd\u7981\u8bcd\u4e0d\u53ef\u6062\u590d')) + '">' + text + '</span>';
+    }
+    const deleted = word?.selected === false;
+    return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word="' + Number(word.index) + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd') + '">' + text + '</button>';
+  }).join('') : '<span class="preview-word is-static">' + escapeHtml(String(segment?.text || '\u672a\u8bc6\u522b\u53e5\u5b50')) + '</span>';
+  return '<article class="preview-editor-sentence ' + (!selected ? 'is-deleted' : '') + ' ' + (locked ? 'is-locked' : '') + '"><div class="preview-editor-sentence-head"><label><input type="checkbox" data-preview-segment data-preview-scope="' + scope + '" data-preview-segment-parent="' + Number(clip.index) + '" data-preview-segment-index="' + Number(segment.index) + '" ' + (selected ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '><strong>\u7b2c ' + (position + 1) + ' \u53e5</strong></label><span>' + (locked ? '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009' : (selected ? '\u5df2\u4fdd\u7559' : '\u5df2\u5220\u9664')) + '</span></div><div class="preview-editor-words">' + wordRows + '</div>' + (reason ? '<small class="preview-editor-lock-reason">' + escapeHtml(reason) + '</small>' : '') + '</article>';
+}
+
+function renderPreviewSentenceEditor(scope, current) {
+  const clip = current?.clip;
+  if (!clip) {
+    return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u70b9\u51fb\u5df2\u9009\u7247\u6bb5\u540e\u7f16\u8f91</span></div></div><div class="preview-sequence-empty"><strong>\u8fd8\u6ca1\u6709\u5f53\u524d\u7247\u6bb5</strong></div></section>';
+  }
+  if (!isPreviewWorkbenchSelected(clip)) {
+    return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52a0\u5165\u5df2\u9009\u540e\u624d\u53ef\u7cbe\u4fee</span></div></div><div class="preview-sequence-empty"><strong>\u5148\u786e\u8ba4\u8fd9\u6bb5\u89c6\u9891\u518d\u70b9\u201c\u52a0\u5165\u5df2\u9009\u201d</strong><span>\u5df2\u9009\u7247\u6bb5\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u5168\u90e8\u53e5\u5b50\u548c\u53ef\u5220\u8bcd\u3002</span></div></section>';
+  }
+  const segments = previewSegments(clip);
+  const body = segments.length ? segments.map((segment, position) => renderPreviewEditorSentence(scope, clip, segment, position)).join('') : '<article class="preview-editor-sentence"><div class="preview-editor-words"><span class="preview-word is-static">' + escapeHtml(String(clip.text || '\u672a\u8bc6\u522b\u53e3\u64ad')) + '</span></div></article>';
+  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52fe\u9009\u4fdd\u7559\u53e5\u5b50\uff0c\u70b9\u8bcd\u5373\u53ef\u5220\u9664\uff1b\u9501\u5b9a\u8bcd\u65e0\u6cd5\u6062\u590d</span></div><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip)) + '</small></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
+}
+
+function renderPreviewWorkbench(scope, preview, targetId) {
+  preview = hydratePreviewCandidatePool(preview);
+  ensurePreviewDraft(scope);
+  const analysis = analyzeSmartPreview(preview, targetId);
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const current = previewWorkbenchCurrentClip(scope, preview, selected);
+  const totalDuration = selected.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+  return '<div data-preview-summary="' + scope + '">' + renderPreviewSummary(analysis) + '</div><div class="preview-workbench-toolbar"><span>\u5de6\u4fa7\u770b\u5019\u9009\u5e76\u52a0\u5165\uff0c\u53f3\u4fa7\u62d6\u62fd\u8c03\u6574\u6700\u7ec8\u987a\u5e8f\uff0c\u4e2d\u95f4\u76f4\u63a5\u9009\u53e5\u3001\u5220\u8bcd\u3002</span></div><div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar"><div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>\u6309\u5185\u5bb9\u5f52\u7c7b\uff0c\u4e0d\u6253\u4e71\u539f\u5019\u9009\u987a\u5e8f</span></div><small>' + (preview?.clips?.length || 0) + ' \u6bb5</small></div><div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar"><div class="preview-workbench-column-head"><div><strong>\u5df2\u9009\u7247\u6bb5</strong><span>\u62d6\u62fd\u6392\u5e8f\uff0c\u70b9\u51fb\u5373\u7f16\u8f91\u5168\u90e8\u5185\u5bb9</span></div><small>' + selected.length + ' \u6bb5 \u00b7 ' + totalDuration.toFixed(1) + 's</small></div><div class="preview-selected-list">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
+}
+
+function bindPreviewWorkbenchKeyboard() {
+  // The direct workbench keeps every operation visible; it has no hidden stage shortcut.
+}
+
+function previewStoryScrollTop(scope = "smart") {
+  return previewBox(scope)?.querySelector('.preview-selected-list, .preview-sequence-scroll')?.scrollTop || 0;
+}
+
+function renderPreviewStateKeepStoryScroll(scope = "smart") {
+  const scrollTop = previewStoryScrollTop(scope);
+  renderPreviewState(scope);
+  const list = previewBox(scope)?.querySelector('.preview-selected-list, .preview-sequence-scroll');
+  if (list) list.scrollTop = scrollTop;
+}
+
+function bindDirectPreviewWorkbenchActions() {
+  document.body.addEventListener('click', (event) => {
+    const target = event.target?.closest?.('[data-action]');
+    if (!target || target.disabled) return;
+    const scope = target.dataset.previewScope || 'smart';
+    const action = target.dataset.action;
+    if (action === 'preview-workbench-select-candidate') {
+      event.preventDefault();
+      selectPreviewWorkbenchCandidate(Number(target.dataset.previewIndex), scope);
+    } else if (action === 'preview-candidate-source-filter') {
+      event.preventDefault();
+      setPreviewCandidateSourceFilter(scope, target.dataset.value || 'recommended');
+    } else if (action === 'preview-candidate-category-filter') {
+      event.preventDefault();
+      setPreviewCandidateCategoryFilter(scope, target.dataset.value || 'all');
+    } else if (action === 'preview-workbench-add-candidate') {
+      event.preventDefault();
+      addPreviewWorkbenchCandidate(Number(target.dataset.previewIndex), scope);
+    } else if (action === 'preview-workbench-preview-current') {
+      event.preventDefault();
+      previewCurrentWorkbenchClip(scope);
+    } else if (action === 'preview-word-toggle') {
+      event.preventDefault();
+      togglePreviewWordSelection(Number(target.dataset.previewClip), Number(target.dataset.previewSegment), Number(target.dataset.previewWord), scope);
+    } else if (action === 'preview-word-group-toggle') {
+      event.preventDefault();
+      togglePreviewWordGroupSelection(Number(target.dataset.previewClip), Number(target.dataset.previewSegment), target.dataset.previewWordGroup || '', scope);
+    }
+  });
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindDirectPreviewWorkbenchActions, { once: true });
+else bindDirectPreviewWorkbenchActions();
+
+async function startSmartFromPreview() {
+  await saveFeaturePreferences();
+  if (!state.smartPreview?.id || state.smartPreview.status !== 'ready') {
+    toast('\u8bf7\u5148\u751f\u6210 AI \u9009\u7247\u9884\u89c8', 'warning');
+    return;
+  }
+  syncPreviewClipSelections();
+  const selection = collectPreviewSelection('smart');
+  if (!selection.selectedIndices.length) {
+    toast('\u8bf7\u81f3\u5c11\u4fdd\u7559\u4e00\u4e2a\u7247\u6bb5', 'warning');
+    return;
+  }
+  const payload = {
+    ...collectSmartPayload({ requireVideos: false }),
+    preview_id: state.smartPreview.id,
+    selected_indices: selection.selectedIndices,
+    order: selection.order,
+    selected_segments: selection.selectedSegments,
+    selected_words: selection.selectedWords,
+  };
+  await runPreflight('smart-from-preview', payload, 'smart-cut');
+  const result = await api('/api/smart-cut/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
+  toast(result.message || '\u9884\u89c8\u6210\u7247\u4efb\u52a1\u5df2\u542f\u52a8', 'success');
+  refreshTasks();
+}
+
+async function startMixFromPreview() {
+  await saveFeaturePreferences();
+  if (!state.mixPreview?.id || state.mixPreview.status !== 'ready') {
+    toast('\u8bf7\u5148\u751f\u6210\u6df7\u526a AI \u9009\u7247\u9884\u89c8', 'warning');
+    return;
+  }
+  syncPreviewClipSelections('mix');
+  const selection = collectPreviewSelection('mix');
+  if (!selection.selectedIndices.length) {
+    toast('\u8bf7\u81f3\u5c11\u4fdd\u7559\u4e00\u4e2a\u7247\u6bb5', 'warning');
+    return;
+  }
+  const payload = {
+    ...collectFeaturePayload('mix'),
+    preview_id: state.mixPreview.id,
+    selected_indices: selection.selectedIndices,
+    order: selection.order,
+    selected_segments: selection.selectedSegments,
+    selected_words: selection.selectedWords,
+  };
+  await runPreflight('mix-from-preview', payload, 'mix');
+  const result = await api('/api/mix/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
+  toast(result.message || '\u9884\u89c8\u6df7\u526a\u4efb\u52a1\u5df2\u542f\u52a8', 'success');
+  refreshTasks();
+}
+
+async function previewClipVideo(index, scope = 'smart') {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || preview.status !== 'ready') {
+    toast('\u8bf7\u5148\u751f\u6210 AI \u9009\u7247\u9884\u89c8', 'warning');
+    return;
+  }
+  syncPreviewClipSelections(scope);
+  const clip = preview.clips?.find((item) => Number(item.index) === Number(index));
+  if (!clip) {
+    toast('\u7247\u6bb5\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u751f\u6210\u9884\u89c8', 'warning');
+    return;
+  }
+  const inspectOnly = !isPreviewWorkbenchSelected(clip);
+  const segments = previewSegments(clip);
+  if (!inspectOnly && segments.length && !selectedPreviewSegments(clip).length) {
+    toast('\u8bf7\u4fdd\u7559\u81f3\u5c11\u4e00\u53e5\u5185\u5bb9\u540e\u518d\u9884\u89c8', 'warning');
+    return;
+  }
+  const draft = inspectOnly ? null : commitPreviewDraft(scope, { remote: true });
+  const bounds = effectiveClipBounds(clip);
+  const modal = ensurePreviewModal();
+  const video = modal.querySelector('#preview-modal-video');
+  const title = modal.querySelector('#preview-modal-title');
+  const status = modal.querySelector('#preview-modal-status');
+  if (!video) return;
+  if (title) title.textContent = (inspectOnly ? '\u5019\u9009\u8bd5\u770b' : '\u7247\u6bb5\u9884\u89c8') + ' ' + formatSeconds(bounds.start) + '-' + formatSeconds(bounds.end);
+  if (status) {
+    status.textContent = '\u6b63\u5728\u751f\u6210\u7247\u6bb5\u9884\u89c8...';
+    status.classList.remove('is-hidden', 'is-error');
+  }
+  modal.classList.remove('is-hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  const endpoint = scope === 'mix' ? '/api/mix/preview/clip-video' : '/api/smart-cut/preview/clip-video';
+  try {
+    const result = await api(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(inspectOnly ? {
+        preview_id: preview.id,
+        clip_index: Number(index),
+        scope,
+        inspect_only: true,
+      } : {
+        preview_id: preview.id,
+        clip_index: Number(index),
+        scope,
+        selected_indices: draft.selected_indices || [],
+        order: draft.order || [],
+        selected_segments: draft.selected_segments || {},
+        selected_words: draft.selected_words || {},
+        updated_at: draft.updated_at || Date.now(),
+      }),
+    });
+    video.src = result.url;
+    video.load();
+    if (status) status.classList.add('is-hidden');
+  } catch (error) {
+    if (status) {
+      status.textContent = error.message || String(error || '\u9884\u89c8\u751f\u6210\u5931\u8d25');
+      status.classList.remove('is-hidden');
+      status.classList.add('is-error');
+    }
+  }
+}
+function renderPreviewEditorSentence(scope, clip, segment, position) {
+  const locked = segment?.selection_locked === true;
+  const selected = isPreviewSegmentSelected(segment);
+  const words = previewSegmentWords(segment);
+  const wordTimed = segment?.word_timed === true && words.length > 0;
+  const reason = String(segment?.blocked_reason || segment?.auto_unselected_reason || '').trim();
+  let wordHint = '';
+  let wordRows = '';
+  if (!wordTimed) {
+    const sentenceText = String(segment?.text || words.map((word) => String(word?.text || '')).join('') || '\u672a\u8bc6\u522b\u53e5\u5b50');
+    wordRows = '<span class="preview-word is-static">' + escapeHtml(sentenceText) + '</span>';
+    if (!locked) wordHint = '<small class="preview-editor-word-hint">\u6682\u65e0\u9010\u8bcd\u65f6\u95f4\uff0c\u53ef\u4ee5\u6574\u53e5\u5220\u9664</small>';
+  } else {
+    wordRows = words.map((word) => {
+      const text = escapeHtml(String(word?.text || ''));
+      const wordLocked = locked || isPreviewWordLocked(word);
+      if (wordLocked) {
+        const blockedReason = locked ? (reason || '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009') : String(word?.blocked_reason || '\u8fdd\u7981\u8bcd\u4e0d\u53ef\u6062\u590d');
+        return '<span class="preview-word is-locked" title="' + escapeHtml(blockedReason) + '">' + text + '</span>';
+      }
+      const deleted = word?.selected === false;
+      return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word="' + Number(word.index) + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd') + '">' + text + '</button>';
+    }).join('');
+  }
+  return '<article class="preview-editor-sentence ' + (!selected ? 'is-deleted' : '') + ' ' + (locked ? 'is-locked' : '') + '"><div class="preview-editor-sentence-head"><label><input type="checkbox" data-preview-segment data-preview-scope="' + scope + '" data-preview-segment-parent="' + Number(clip.index) + '" data-preview-segment-index="' + Number(segment.index) + '" ' + (selected ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '><strong>\u7b2c ' + (position + 1) + ' \u53e5</strong></label><span>' + (locked ? '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009' : (selected ? '\u5df2\u4fdd\u7559' : '\u5df2\u5220\u9664')) + '</span></div><div class="preview-editor-words">' + wordRows + '</div>' + wordHint + (reason ? '<small class="preview-editor-lock-reason">' + escapeHtml(reason) + '</small>' : '') + '</article>';
+}
+
+// [AI_WORKBENCH_DIRECT_REFINEMENT]
+// Keep candidate categories focused on the decision a user needs to make.  In
+// particular, live-chat and low-confidence fragments must not flood the main
+// product-selling category.
+function previewWorkbenchPreferenceCategory(text) {
+  if (/\u9762\u6599|\u6750\u8d28|\u8d28\u611f|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb|\u5de5\u827a|\u505a\u5de5/.test(text)) return "pref_fabric";
+  if (/\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u6536\u8170|\u8170\u7ebf|\u817f\u957f|\u80a9|\u80ef|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab|\u7a7f\u7740\u4f53\u9a8c|\u5305\u5bb9/.test(text)) return "pref_fit";
+  if (/\u989c\u8272|\u6c1b\u56f4|\u663e\u767d|\u663e\u6c14\u8272|\u629ac\u8272|\u56fe\u6848|\u5370\u82b1|\u590d\u53e4|\u98ce\u683c|\u5143\u7d20/.test(text)) return "pref_color";
+  if (/\u573a\u666f|\u642d\u914d|\u7a7f\u642d|\u901a\u52e4|\u7ea6\u4f1a|\u65e5\u5e38|\u51fa\u95e8|\u4e0a\u73ed|\u62cd\u7167|\u53e0\u7a7f|\u5185\u642d|\u5916\u642d/.test(text)) return "pref_scene";
+  if (/\u60c5\u7eea|\u611f\u67d3|\u6c1b\u56f4\u611f|\u9ad8\u7ea7|\u6e29\u67d4|\u8f7b\u719f|\u6c14\u8d28|\u597d\u770b|\u559c\u6b22|\u5c0f\u4f17/.test(text)) return "pref_emotion";
+  if (/\u6027\u4ef7\u6bd4|\u5212\u7b97|\u503c|\u4ef7\u683c|\u798f\u5229|\u4f18\u60e0|\u4fbf\u5b9c|\u7701\u94b1/.test(text)) return "pref_value";
+  if (/\u7d27\u8feb|\u7a00\u7f3a|\u9650\u91cf|\u5e93\u5b58|\u79d2\u6740|\u62a2|\u4e0a\u8f66|\u4e0b\u5355|\u6700\u540e|\u9519\u8fc7/.test(text)) return "pref_urgency";
+  if (/\u6d41\u884c|\u8d8b\u52bf|\u7206\u6b3e|\u4eca\u5e74|\u5f53\u4e0b|\u65b0\u6b3e|\u4e0a\u65b0/.test(text)) return "pref_trend";
+  if (/\u53e3\u611f|\u98df\u6b32|\u597d\u5403|\u9999|\u8106|\u7cef|\u751c|\u6c41|\u5165\u5473|\u89e3\u998b/.test(text)) return "food_taste";
+  if (/\u65b0\u9c9c|\u54c1\u8d28|\u8d28\u91cf|\u9c9c|\u73b0\u6458|\u73b0\u505a|\u5e72\u51c0/.test(text)) return "food_quality";
+  if (/\u4ea7\u5730|\u6eaf\u6e90|\u539f\u4ea7|\u519c\u573a|\u679c\u56ed|\u6d77\u57df|\u6e90\u5934/.test(text)) return "food_origin";
+  if (/\u89c4\u683c|\u5206\u91cf|\u51c0\u542b\u91cf|\u4e00\u7bb1|\u4e00\u888b|\u4e00\u65a4|\u5927\u679c|\u5c0f\u679c|\u4efd\u91cf/.test(text)) return "food_spec";
+  if (/\u53d1\u8d27|\u4fdd\u9c9c|\u51b7\u94fe|\u5305\u88c5|\u987a\u4e30|\u5230\u8d27|\u73b0\u53d1/.test(text)) return "food_fresh";
+  if (/\u5403\u6cd5|\u505a\u6cd5|\u706b\u9505|\u714e|\u716e|\u70e4|\u62cc|\u65e9\u9910|\u591c\u5bb5|\u9001\u793c|\u5bb6\u5ead/.test(text)) return "food_scene";
+  return "";
+}
+
+function previewWorkbenchCandidateCategory(clip) {
+  const role = previewWorkbenchRoleKey(clip);
+  const text = (String(clip?.focus || "") + " " + String(clip?.focus_block || "") + " " + String(clip?.text || "")).toLowerCase();
+  const focus = String(clip?.focus_block || clip?.focus || "").toLowerCase();
+  const explicitRole = String(clip?.sales_role || "").toLowerCase();
+  const denseText = text.replace(/\s+/g, "");
+  if (explicitRole === "weak_fragment") return "unclear";
+  if (explicitRole === "hook" || explicitRole === "hook_followup") return "hook";
+  if (explicitRole === "natural_close") return "close";
+  const focusCategory = previewWorkbenchPreferenceCategory(focus);
+  if (focusCategory) return focusCategory;
+  if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(text)) return "hook";
+  if (role === "close" || /\u6536\u5c3e|\u6700\u540e|\u4e0d\u8981\u9519\u8fc7/.test(text)) return "close";
+  if (/\u4e0b\u4e00\u4f4d|\u7c89\u4e1d|\u4e3e\u62a5|\u6295\u7968|\u76f4\u64ad\u95f4|\u4e0a\u8f66|\u4e0b\u5355|\u5ba2\u670d|\u94fe\u63a5|\u53d1\u8d27|\u552e\u540e|\u5e93\u5b58|\u79d2\u6740|\u8ba2\u5355|\u62a2|\u5f00\u6389|\u542c\u6b4c|\u97f3\u4e50|\u7a0d\u7b49|\d+\s*\u5355/.test(text)) return "live";
+  const textCategory = previewWorkbenchPreferenceCategory(text);
+  if (textCategory) return textCategory;
+  if (role === "product" || /\u8863\u670d|\u88d9\u5b50|\u8fd9\u4e2a\u6b3e|\u8fd9\u4ef6|\u6b3e\u5f0f|\u8bbe\u8ba1|\u590f\u6b3e|\u4e0a\u65b0|\u5355\u54c1|\u7cbe\u81f4/.test(text)) return "pref_fabric";
+  if ((role === "core" || role === "product") && denseText.length >= 18) return "pref_fabric";
+  return "unclear";
+}
+
+function previewWorkbenchCandidateText(clip) {
+  return String(selectedPreviewText(clip) || clip?.text || "").trim();
+}
+
+function isPreviewWorkbenchHardWasteCandidate(clip) {
+  const text = previewWorkbenchCandidateText(clip);
+  const dense = text.replace(/[\s，。！？,.!?、：:；;"'“”‘’（）()【】\[\]-]/g, "");
+  if (!dense) return true;
+  if (/^(嗯+|啊+|哦+|噢+|呃+|额+|哈+|呀+|呢+|嘛+|啦+|好+|对+|是的|没错|可以|行+)$/.test(dense)) return true;
+  if (/^(然后|而且|但是|所以|就是|这个|那个|好了|好吧|来吧|来看|接下来|下一位|稍等|等一下|听歌|音乐|为什么|能理解吗|知道吧|对不对|是不是)$/.test(dense)) return true;
+  if (/\u76f4\u64ad\u95f4|\u5ba2\u670d|\u4e0a\u8f66|\u4e0b\u5355|\u8ba2\u5355|\u94fe\u63a5|\u5e93\u5b58|\u53d1\u8d27|\u552e\u540e|\u4e3e\u62a5|\u6295\u7968|\u542c\u6b4c|\u97f3\u4e50|\u4e0b\u4e00\u4f4d/.test(text)) return true;
+  return false;
+}
+
+function previewWorkbenchCandidateQualityScore(clip) {
+  if (isPreviewWorkbenchHardWasteCandidate(clip)) return -100;
+  const explicitRole = String(clip?.sales_role || "").toLowerCase();
+  const text = previewWorkbenchCandidateText(clip);
+  const dense = text.replace(/[\s，。！？,.!?、：:；;"'“”‘’（）()【】\[\]-]/g, "");
+  const category = previewWorkbenchCandidateCategory(clip);
+  let score = 0;
+  if (previewWorkbenchCandidateOrigin(clip) === "recommended") score += 8;
+  if (clip?.selected !== false) score += 5;
+  if (["hook", "close"].includes(category)) score += 5;
+  if (category !== "live" && category !== "unclear") score += 4;
+  if (explicitRole === "weak_fragment") score -= 8;
+  if (category === "unclear") score -= 5;
+  if (dense.length >= 18) score += 4;
+  else if (dense.length >= 10) score += 2;
+  else score -= 4;
+  return score;
+}
+
+function isPreviewWorkbenchUsefulCandidate(clip) {
+  if (isPreviewWorkbenchHardWasteCandidate(clip)) return false;
+  const explicitRole = String(clip?.sales_role || "").toLowerCase();
+  if (explicitRole === "weak_fragment") return false;
+  const text = previewWorkbenchCandidateText(clip);
+  const dense = text.replace(/[\s，。！？,.!?、：:；;"'“”‘’（）()【】\[\]-]/g, "");
+  const category = previewWorkbenchCandidateCategory(clip);
+  if (category === "live" || category === "unclear") return false;
+  if (dense.length < 10 && !["hook", "close"].includes(category)) return false;
+  return true;
+}
+
+function previewWorkbenchCandidateOrigin(clip) {
+  if (clip?.candidate_origin === "director" || clip?.recommended === false) return "extra";
+  return "recommended";
+}
+
+function previewWorkbenchCandidateSourceFilter(scope) {
+  return state.previewCandidateSourceFilters?.[scope] === "extra" ? "extra" : "recommended";
+}
+
+function previewWorkbenchCategoryFilter(scope) {
+  return state.previewCandidateCategoryFilters?.[scope] || "all";
+}
+
+function previewWorkbenchSourceCandidatesFor(scope, preview, source) {
+  const pool = (preview?.clips || []).filter(function (clip) {
+    return previewWorkbenchCandidateOrigin(clip) === source && !isPreviewWorkbenchHardWasteCandidate(clip);
+  });
+  const useful = pool.filter(isPreviewWorkbenchUsefulCandidate);
+  const selectedCount = previewWorkbenchSelectedClips(scope, preview).length;
+  const targetCount = Math.min(pool.length, Math.max(8, selectedCount + 4, Math.ceil(selectedCount * 1.5)));
+  if (useful.length >= targetCount) return useful;
+  const usefulSet = new Set(useful.map(function (clip) { return Number(clip.index); }));
+  const supplements = pool
+    .filter(function (clip) { return !usefulSet.has(Number(clip.index)); })
+    .sort(function (a, b) {
+      const scoreDiff = previewWorkbenchCandidateQualityScore(b) - previewWorkbenchCandidateQualityScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return Number(a.index) - Number(b.index);
+    })
+    .slice(0, targetCount - useful.length);
+  return [...useful, ...supplements].sort(function (a, b) { return Number(a.index) - Number(b.index); });
+}
+
+function previewWorkbenchSourceCandidates(scope, preview) {
+  return previewWorkbenchSourceCandidatesFor(scope, preview, previewWorkbenchCandidateSourceFilter(scope));
+}
+
+function previewWorkbenchFilteredCandidates(scope, preview) {
+  const category = previewWorkbenchCategoryFilter(scope);
+  return previewWorkbenchSourceCandidates(scope, preview).filter(function (clip) {
+    return category === "all" || previewWorkbenchCandidateCategory(clip) === category;
+  });
+}
+
+function previewWorkbenchCandidateFilterStats(scope, preview) {
+  const recommended = previewWorkbenchSourceCandidatesFor(scope, preview, "recommended").length;
+  const extra = previewWorkbenchSourceCandidatesFor(scope, preview, "extra").length;
+  const sourceCandidates = previewWorkbenchSourceCandidates(scope, preview);
+  return {
+    recommended,
+    extra,
+    source: sourceCandidates.length,
+    filtered: previewWorkbenchFilteredCandidates(scope, preview).length,
+  };
+}
+
+function setPreviewCandidateSourceFilter(scope = "smart", value = "recommended") {
+  if (!state.previewCandidateSourceFilters) state.previewCandidateSourceFilters = { smart: "recommended", mix: "recommended" };
+  state.previewCandidateSourceFilters[scope] = value === "extra" ? "extra" : "recommended";
+  state.previewCandidateSelections[scope] = null;
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
+function setPreviewCandidateCategoryFilter(scope = "smart", value = "all") {
+  if (!state.previewCandidateCategoryFilters) state.previewCandidateCategoryFilters = { smart: "all", mix: "all" };
+  state.previewCandidateCategoryFilters[scope] = value || "all";
+  state.previewCandidateSelections[scope] = null;
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
+function renderPreviewCandidateFilterBar(scope, preview) {
+  const labels = new Map(directPreviewWorkbenchCandidateCategories);
+  const source = previewWorkbenchCandidateSourceFilter(scope);
+  const category = previewWorkbenchCategoryFilter(scope);
+  const stats = previewWorkbenchCandidateFilterStats(scope, preview);
+  const sourceButtons = [
+    ["recommended", "\u0041\u0049\u63a8\u8350", stats.recommended],
+    ["extra", "\u5907\u7528\u5019\u9009", stats.extra],
+  ].map(function ([value, label, count]) {
+    return '<button type="button" class="' + (source === value ? 'is-active' : '') + '" data-action="preview-candidate-source-filter" data-preview-scope="' + scope + '" data-value="' + value + '" ' + (count ? '' : 'disabled') + '><span>' + label + '</span><em>' + count + '</em></button>';
+  }).join("");
+  const present = new Map();
+  previewWorkbenchSourceCandidates(scope, preview).forEach(function (clip) {
+    const key = previewWorkbenchCandidateCategory(clip);
+    present.set(key, (present.get(key) || 0) + 1);
+  });
+  const categoryButtons = ['<button type="button" class="' + (category === 'all' ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="all"><span>\u5168\u90e8\u54c1\u7c7b</span><em>' + stats.source + '</em></button>'];
+  directPreviewWorkbenchCandidateCategories.forEach(function ([key, label]) {
+    const count = present.get(key) || 0;
+    if (!count) return;
+    categoryButtons.push('<button type="button" class="' + (category === key ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="' + key + '"><span>' + escapeHtml(label) + '</span><em>' + count + '</em></button>');
+  });
+  return '<div class="preview-candidate-filterbar"><div class="preview-candidate-source-filter">' + sourceButtons + '</div><div class="preview-candidate-category-filter">' + categoryButtons.join("") + '</div><small>\u5f53\u524d\u663e\u793a ' + stats.filtered + ' / ' + stats.source + ' \u6bb5</small></div>';
+}
+
+function renderPreviewCandidateGroups(scope, preview) {
+  const activeCandidate = state.previewCandidateSelections?.[scope];
+  const hasActiveCandidate = activeCandidate !== null && activeCandidate !== undefined;
+  const labels = new Map(directPreviewWorkbenchCandidateCategories);
+  const candidates = previewWorkbenchFilteredCandidates(scope, preview);
+  const groups = [];
+  candidates.forEach(function (clip) {
+    const key = previewWorkbenchCandidateCategory(clip);
+    const last = groups[groups.length - 1];
+    if (!last || last.key !== key) groups.push({ key: key, label: labels.get(key) || "\u5f85\u786e\u8ba4", clips: [] });
+    groups[groups.length - 1].clips.push(clip);
+  });
+  return groups.map(function (group) {
+    const key = group.key;
+    const label = group.label;
+    const clips = group.clips;
+    const rows = clips.map(function (clip) {
+      const selected = isPreviewWorkbenchSelected(clip);
+      const active = Number(activeCandidate) === Number(clip.index) || (!hasActiveCandidate && Number(state.previewDetailSelection?.[scope]) === Number(clip.index));
+      const clipText = String(clip.text || selectedPreviewText(clip) || "\u672a\u8bc6\u522b\u53e3\u64ad").trim();
+      const inspectButton = '<button class="preview-candidate-add is-added" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u5df2\u9009</button>';
+      const addButton = '<button class="preview-candidate-add" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165</button>';
+      return '<article class="preview-candidate-row ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '"><button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span>' + escapeHtml(clipText) + '</span></button>' + (selected ? inspectButton : addButton) + '</article>';
+    }).join("");
+    const secondary = key === "live" || key === "unclear";
+    return '<details class="preview-candidate-group ' + (secondary ? 'is-secondary' : '') + '" data-preview-candidate-group="' + key + '"' + (secondary ? '' : ' open') + '><summary class="preview-candidate-group-head" title="\u70b9\u51fb\u5c55\u5f00\u6216\u6536\u8d77"><strong>' + label + '</strong><span>' + clips.length + '</span></summary><div class="preview-candidate-group-rows">' + rows + '</div></details>';
+  }).join("") || '<div class="preview-sequence-empty"><strong>\u8fd9\u4e2a\u7b5b\u9009\u4e0b\u6ca1\u6709\u6709\u6548\u5019\u9009</strong><span>\u5df2\u8fc7\u6ee4\u5f31\u65ad\u53e5\u3001\u4e92\u52a8\u5e9f\u8bdd\u548c\u65e0\u5356\u70b9\u7247\u6bb5\uff1b\u53ef\u5207\u6362\u54c1\u7c7b\u6216\u5907\u7528\u5019\u9009\u3002</span></div>';
+}
+
+const previewWordBlockBoundaries = [
+  "\u56e0\u4e3a", "\u6240\u4ee5", "\u4f46\u662f", "\u7136\u540e", "\u5982\u679c", "\u5c31\u662f", "\u8fd9\u4e2a", "\u8fd9\u4ef6", "\u90a3\u4e2a", "\u4f60\u4eec", "\u6211\u4eec", "\u4ed6\u4eec", "\u7279\u522b", "\u771f\u7684", "\u6709\u70b9", "\u4e00\u4e2a", "\u8fd9\u79cd", "\u6b3e\u5f0f", "\u8863\u670d", "\u88d9\u5b50", "\u9762\u6599", "\u7248\u578b", "\u989c\u8272", "\u642d\u914d", "\u7ec6\u8282", "\u5de5\u827a", "\u505a\u5de5", "\u8170\u5e26", "\u7ec7\u5e26", "\u5370\u82b1", "\u8c79\u7eb9", "\u8ff7\u5f69", "\u597d\u770b", "\u663e\u7626", "\u663e\u9ad8", "\u6536\u8170", "\u4e0a\u8eab", "\u5b9a\u5236", "\u590d\u53e4", "\u6c34\u6d17", "\u62d6\u6b20", "\u53ef\u4ee5", "\u90fd\u662f", "\u4e0d\u662f", "\u4e0d\u4f1a", "\u5df2\u7ecf", "\u8fd8\u6709", "\u6ca1\u6709", "\u611f\u89c9", "\u559c\u6b22", "\u9002\u5408", "\u76f4\u63a5", "\u5c0f\u4f17", "\u5143\u7d20", "\u4e00\u6837", "\u8fd9\u4e9b", "\u90a3\u79cd", "\u81ea\u5df1", "\u4e0a\u9762", "\u91cc\u9762", "\u5916\u9762", "\u5168\u90e8", "\u53ea\u6709", "\u51fa\u6765", "\u4e00\u4e0b", "\u975e\u5e38", "\u7a0d\u5fae", "\u53ef\u80fd", "\u4e5f", "\u5427", "\u554a", "\u5462", "\u5440", "\u7684", "\u4e86", "\u5417", "\u54e6", "\u55ef", "\u6211"
+];
+
+function previewEditorWordGroups(segment) {
+  const groups = [];
+  let current = null;
+  const words = previewSegmentWords(segment);
+  words.forEach(function (word, position) {
+    const text = String(word?.text || "");
+    const wordLocked = segment?.selection_locked === true || isPreviewWordLocked(word);
+    const wordSelected = word?.selected !== false;
+    const wordLength = Math.max(1, Array.from(text).length);
+    const endsPhrase = /[\u3002\uff01\uff1f!?\uff1b;\u2026]$/.test(text);
+    const previous = current?.words?.[current.words.length - 1];
+    const previousEnd = Number(previous?.end);
+    const wordStart = Number(word?.start);
+    const hasPause = Number.isFinite(previousEnd) && Number.isFinite(wordStart) && wordStart - previousEnd > 0.32;
+    const followingText = words.slice(position).map(function (item) { return String(item?.text || ""); }).join("");
+    const boundaryAhead = Boolean(current) && previewWordBlockBoundaries.some(function (term) { return followingText.startsWith(term); });
+    const canJoin = current && current.locked === wordLocked && current.selected === wordSelected && !current.endsPhrase && !hasPause && !boundaryAhead && current.length + wordLength <= 4;
+    if (!canJoin) {
+      current = { text: "", words: [], locked: wordLocked, selected: wordSelected, length: 0, endsPhrase: false };
+      groups.push(current);
+    }
+    current.text += text;
+    current.words.push(word);
+    current.length += wordLength;
+    current.endsPhrase = endsPhrase;
+  });
+  return groups;
+}
+
+function togglePreviewWordGroupSelection(clipIndex, segmentIndex, rawIndices, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === Number(clipIndex); });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === Number(segmentIndex); });
+  if (!clip || !segment || segment.selection_locked === true) return;
+  const indices = new Set(String(rawIndices || "").split(",").map(Number).filter(Number.isInteger));
+  const words = previewSegmentWords(segment).filter(function (word) { return indices.has(Number(word.index)) && !isPreviewWordLocked(word); });
+  if (!words.length) return;
+  const restoreWords = words.some(function (word) { return word.selected === false; });
+  words.forEach(function (word) { word.selected = restoreWords; });
+  const selectable = previewSegmentWords(segment).filter(function (word) { return !isPreviewWordLocked(word); });
+  segment.wordSelectionExplicit = selectedPreviewWords(segment).length !== selectable.length;
+  segment.selected = selectedPreviewWords(segment).length > 0;
+  clip.selected = previewSegments(clip).some(isPreviewSegmentSelected);
+  setPreviewAssemblyMembership(scope, Number(clipIndex), clip.selected);
+  commitPreviewDraft(scope);
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
+function renderPreviewEditorSentence(scope, clip, segment, position) {
+  const locked = segment?.selection_locked === true;
+  const selected = isPreviewSegmentSelected(segment);
+  const words = previewSegmentWords(segment);
+  const wordTimed = segment?.word_timed === true && words.length > 0;
+  const reason = String(segment?.blocked_reason || segment?.auto_unselected_reason || "").trim();
+  let wordHint = "";
+  let wordRows = "";
+  if (!wordTimed) {
+    const sentenceText = String(segment?.text || words.map(function (word) { return String(word?.text || ""); }).join("") || "\u672a\u8bc6\u522b\u53e5\u5b50");
+    wordRows = '<span class="preview-word is-static">' + escapeHtml(sentenceText) + '</span>';
+    if (!locked) wordHint = '<small class="preview-editor-word-hint">\u6682\u65e0\u9010\u8bcd\u65f6\u95f4\uff0c\u53ef\u4ee5\u6574\u53e5\u5220\u9664</small>';
+  } else {
+    wordRows = previewEditorWordGroups(segment).map(function (group) {
+      const groupText = escapeHtml(group.text || "");
+      if (group.locked) {
+        const blockedReason = locked ? (reason || "\u98ce\u9669\u53e5\u4e0d\u53ef\u9009") : String(group.words.find(function (word) { return isPreviewWordLocked(word); })?.blocked_reason || "\u8fdd\u7981\u8bcd\u4e0d\u53ef\u6062\u590d");
+        return '<span class="preview-word is-locked" title="' + escapeHtml(blockedReason) + '">' + groupText + '</span>';
+      }
+      const deleted = group.words.length > 0 && group.words.every(function (word) { return word?.selected === false; });
+      const indices = group.words.map(function (word) { return Number(word.index); }).filter(Number.isInteger).join(",");
+      return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-group-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word-group="' + indices + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd\u5757' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd\u5757') + '">' + groupText + '</button>';
+    }).join("");
+    wordHint = '<small class="preview-editor-word-hint">\u70b9\u8bcd\u5757\u5220\u9664\uff0c\u518d\u70b9\u4e00\u6b21\u5373\u53ef\u6062\u590d</small>';
+  }
+  return '<article class="preview-editor-sentence ' + (!selected ? 'is-deleted' : '') + ' ' + (locked ? 'is-locked' : '') + '"><div class="preview-editor-sentence-head"><label><input type="checkbox" data-preview-segment data-preview-scope="' + scope + '" data-preview-segment-parent="' + Number(clip.index) + '" data-preview-segment-index="' + Number(segment.index) + '" ' + (selected ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '><strong>\u7b2c ' + (position + 1) + ' \u53e5</strong></label><span>' + (locked ? '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009' : (selected ? '\u5df2\u4fdd\u7559' : '\u5df2\u5220\u9664')) + '</span></div><div class="preview-editor-words">' + wordRows + '</div>' + wordHint + (reason ? '<small class="preview-editor-lock-reason">' + escapeHtml(reason) + '</small>' : '') + '</article>';
+}
+
+function renderPreviewSentenceEditor(scope, current) {
+  const clip = current?.clip;
+  if (!clip) return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u70b9\u51fb\u5de6\u4fa7\u5019\u9009\u7247\u6bb5\u540e\u7f16\u8f91</span></div></div><div class="preview-sequence-empty"><strong>\u8fd8\u6ca1\u6709\u5f53\u524d\u7247\u6bb5</strong></div></section>';
+  if (!isPreviewWorkbenchSelected(clip)) return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u5148\u770b\u89c6\u9891\uff0c\u52a0\u5165\u5df2\u9009\u540e\u518d\u7cbe\u4fee</span></div></div><div class="preview-sequence-empty"><strong>\u786e\u8ba4\u8fd9\u6bb5\u89c6\u9891\u540e\u70b9\u201c\u52a0\u5165\u5df2\u9009\u201d</strong><span>\u5df2\u9009\u7247\u6bb5\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u5168\u90e8\u53e5\u5b50\u548c\u53ef\u5220\u8bcd\u5757\u3002</span></div></section>';
+  const segments = previewSegments(clip);
+  const body = segments.length ? segments.map(function (segment, position) { return renderPreviewEditorSentence(scope, clip, segment, position); }).join("") : '<article class="preview-editor-sentence"><div class="preview-editor-words"><span class="preview-word is-static">' + escapeHtml(String(clip.text || "\u672a\u8bc6\u522b\u53e3\u64ad")) + '</span></div></article>';
+  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52fe\u9009\u4fdd\u7559\u6574\u53e5\uff1b\u70b9\u8bcd\u5757\u5220\u9664\u6216\u6062\u590d</span></div><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip)) + '</small></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
+}
+
+function renderPreviewWorkbench(scope, preview, targetId) {
+  preview = hydratePreviewCandidatePool(preview);
+  ensurePreviewDraft(scope);
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const current = previewWorkbenchCurrentClip(scope, preview, selected);
+  const totalDuration = selected.reduce(function (sum, clip) { return sum + effectiveClipDuration(clip); }, 0);
+  const candidateStats = previewWorkbenchCandidateFilterStats(scope, preview);
+  const candidateHead = '<div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>\u5148\u770b AI \u7c97\u7b5b\uff0c\u518d\u6309\u54c1\u7c7b\u7b5b\u9009</span></div><small>' + candidateStats.filtered + ' / ' + candidateStats.source + ' \u6bb5</small></div>';
+  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>\u5df2\u9009\u7247\u6bb5</strong><span>\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb</span></div><small>' + selected.length + ' \u6bb5 \u00b7 ' + totalDuration.toFixed(1) + 's</small></div>';
+  return '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
 }
 
 function toast(message, type = "success") {

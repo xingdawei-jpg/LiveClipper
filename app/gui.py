@@ -42,34 +42,6 @@ from config import C, FNT_S, FNT_B
 
 _LOG = logging.getLogger("liveclipper.gui")
 
-# ==== 启动时清理 PyInstaller 残留临时目录（_MEI*） ====
-import atexit as _atexit, shutil as _shutil, glob as _glob, time as _time
-_temp_dir = os.environ.get('TEMP', os.environ.get('TMP', ''))
-if _temp_dir:
-    for _old_mei in _glob.glob(os.path.join(_temp_dir, '_MEI*')):
-        if os.path.isdir(_old_mei) and _old_mei != getattr(sys, '_MEIPASS', ''):
-            for _attempt in range(3):
-                try:
-                    _shutil.rmtree(_old_mei, ignore_errors=True)
-                    break
-                except Exception:
-                    _time.sleep(0.5)
-
-@_atexit.register
-def _cleanup_temp_dir():
-    try:
-        _mp = getattr(sys, '_MEIPASS', '')
-        if _mp and _mp.startswith(_temp_dir or ''):
-            for _attempt in range(3):
-                try:
-                    _shutil.rmtree(_mp, ignore_errors=True)
-                    break
-                except Exception:
-                    _time.sleep(0.5)
-    except Exception:
-        _LOG.warning("unexpected error", exc_info=True)
-        pass
-
 FNT=("Segoe UI",10); FNT_B=("Segoe UI",10,"bold"); FNT_T=("Segoe UI",20,"bold")
 FNT_S=("Segoe UI",9); FNT_L=("Consolas",9)
 DEDUP_CLR={"none":"#63687A","light":"#FFD60A","medium":"#0A84FF","heavy":"#A78BFA","custom":"#FF6B6B"}
@@ -2442,7 +2414,7 @@ class App:
                     _LOG.warning("failed to update single progress message", exc_info=True)
                     pass  # 单条消息更新失败不影响后续
         except queue.Empty:
-            _LOG.warning("queue empty in poll loop", exc_info=True)
+            # An empty queue is the expected idle state for this 50 ms poll.
             pass
         except Exception:
             _LOG.warning("unexpected error in poll loop", exc_info=True)
@@ -2931,24 +2903,6 @@ def _show_welcome_guide(root):
     dlg.protocol("WM_DELETE_WINDOW", _close_guide)
 
 
-
-import atexit
-def _cleanup_tempdir():
-    """退出时清理 PyInstaller 临时目录，避免弹窗"""
-    try:
-        import sys
-        if getattr(sys, '_MEIPASS', '') and '_MEI' in sys._MEIPASS:
-            import shutil
-            parent = os.path.dirname(sys._MEIPASS)
-            temp_root = os.environ.get('TEMP', '') or '/tmp'
-            if parent.startswith(temp_root):
-                for d in os.listdir(parent):
-                    if d.startswith('_MEI'):
-                        shutil.rmtree(os.path.join(parent, d), ignore_errors=True)
-    except Exception:
-        _LOG.warning("failed to cleanup _MEI temp directories", exc_info=True)
-        pass
-atexit.register(_cleanup_tempdir)
 
 def main():
     try:

@@ -146,6 +146,97 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             5.0,
         )
 
+    def test_verified_best_effort_policy_allows_dynamic_duration_grace(self) -> None:
+        metadata = {
+            "duration_relaxation": {
+                "applied": True,
+                "policy": "safe_best_effort_v1",
+                "grace_seconds": 25.0,
+                "standard_final_min": 50.0,
+                "relaxed_final_min": 25.0,
+            },
+        }
+        grace = cutter_logic._selection_shortage_grace_seconds(metadata)
+        clips = [("product", "安全候选用尽后的最佳完整片单", 0.0, 28.75, 50, 28.75)]
+        selected = cutter_logic._validate_selected_duration_contract(
+            clips,
+            60,
+            1.15,
+            shortage_grace_seconds=grace,
+        )
+        actual_ok, _actual_message = cutter_logic._validate_actual_duration_contract(
+            25.0,
+            60,
+            shortage_grace_seconds=grace,
+        )
+
+        self.assertEqual(grace, 25.0)
+        self.assertTrue(selected["used_shortage_grace"])
+        self.assertAlmostEqual(selected["projected_final"], 25.0, places=2)
+        self.assertTrue(actual_ok)
+
+    def test_best_effort_policy_rejects_inconsistent_or_unsafe_metadata(self) -> None:
+        for relaxation in (
+            {
+                "applied": True,
+                "policy": "safe_best_effort_v1",
+                "grace_seconds": 40.0,
+                "standard_final_min": 50.0,
+                "relaxed_final_min": 25.0,
+            },
+            {
+                "applied": True,
+                "policy": "safe_best_effort_v1",
+                "grace_seconds": 50.0,
+                "standard_final_min": 50.0,
+                "relaxed_final_min": 0.0,
+            },
+        ):
+            self.assertEqual(
+                cutter_logic._selection_shortage_grace_seconds({
+                    "duration_relaxation": relaxation,
+                }),
+                0.0,
+            )
+
+    def test_best_effort_success_is_visible_in_batch_summary(self) -> None:
+        result = {
+            "ok": True,
+            "analysis_metadata": {
+                "duration_relaxation": {
+                    "applied": True,
+                    "policy": "safe_best_effort_v1",
+                    "projected_final_duration": 37.5,
+                    "standard_final_min": 50.0,
+                },
+            },
+        }
+        detail = server._batch_best_effort_detail("短素材.mp4", result)
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["code"], "content_shortage_output")
+        summary = server._batch_summary_message(
+            "智能成片完成",
+            3,
+            3,
+            [],
+            "个",
+            [detail],
+        )
+        self.assertIn("成功 3/3", summary)
+        self.assertIn("内容不足但已成片 1", summary)
+
+        self.assertIsNone(server._batch_best_effort_detail("普通素材.mp4", {"ok": True}))
+        self.assertIsNone(server._batch_best_effort_detail("普通素材.mp4", {
+            "ok": True,
+            "analysis_metadata": {
+                "duration_relaxation": {
+                    "applied": True,
+                    "projected_final_duration": 37.5,
+                    "standard_final_min": 50.0,
+                },
+            },
+        }))
+
     def test_duration_grace_survives_ai_metadata_bridge_to_cutter_contract(self) -> None:
         metadata = ai_clipper._begin_analysis_metadata()
         metadata["duration_relaxation"] = {

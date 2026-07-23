@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
@@ -115,6 +116,7 @@ LIVE_PROBE_STOP_NOTE = "__liveclipper_stop__"
 _CLIP_PREVIEWS: dict[str, dict[str, Any]] = {}
 _CLIP_PREVIEW_LOCK = threading.Lock()
 _AI_PREVIEW_CACHE_SCHEMA = "sales_roles_v10_task_metadata"
+_PREVIEW_CANDIDATE_POOL_LIMIT = 120
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -1734,6 +1736,7 @@ class SmartPreviewCutPayload(SmartCutPayload):
     selected_indices: list[int] = Field(default_factory=list)
     order: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    selected_words: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
 
 
 class MixPreviewCutPayload(MixPayload):
@@ -1741,6 +1744,7 @@ class MixPreviewCutPayload(MixPayload):
     selected_indices: list[int] = Field(default_factory=list)
     order: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    selected_words: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
 
 
 class PreviewSelectionPayload(BaseModel):
@@ -1749,6 +1753,7 @@ class PreviewSelectionPayload(BaseModel):
     order: list[int] = Field(default_factory=list)
     selected_indices: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    selected_words: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
     updated_at: float = 0
 
 
@@ -1759,7 +1764,9 @@ class SmartPreviewClipPayload(BaseModel):
     order: list[int] = Field(default_factory=list)
     selected_indices: list[int] = Field(default_factory=list)
     selected_segments: dict[str, list[int]] = Field(default_factory=dict)
+    selected_words: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
     updated_at: float = 0
+    inspect_only: bool = False
 
 
 class AiFeedbackImportPayload(BaseModel):
@@ -2002,11 +2009,43 @@ def _batch_failure_detail(label: str, error: Any) -> dict[str, Any]:
     return detail
 
 
-def _batch_summary_message(prefix: str, succeeded: int, total: int, details: list[dict[str, Any]], unit: str) -> str:
+def _batch_best_effort_detail(label: str, result: Any) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    metadata = dict(result.get("analysis_metadata") or {})
+    relaxation = dict(metadata.get("duration_relaxation") or {})
+    if not relaxation.get("applied") or relaxation.get("policy") != "safe_best_effort_v1":
+        return None
+    try:
+        projected = max(0.0, float(relaxation.get("projected_final_duration") or 0.0))
+        standard_low = max(0.0, float(relaxation.get("standard_final_min") or 0.0))
+    except (TypeError, ValueError):
+        return None
+    if projected <= 0.0 or standard_low <= 0.0 or projected >= standard_low:
+        return None
+    return {
+        "label": str(label or "").strip(),
+        "code": "content_shortage_output",
+        "projected_final_duration": projected,
+        "standard_final_min": standard_low,
+        "message": f"预计成片{projected:.1f}秒，标准下限{standard_low:.0f}秒",
+    }
+
+
+def _batch_summary_message(
+    prefix: str,
+    succeeded: int,
+    total: int,
+    details: list[dict[str, Any]],
+    unit: str,
+    best_effort_details: list[dict[str, Any]] | None = None,
+) -> str:
     insufficient = sum(1 for item in details if item.get("code") == "insufficient_content")
     duration_mismatch = sum(1 for item in details if item.get("code") == "duration_mismatch")
     other_failed = max(0, len(details) - insufficient - duration_mismatch)
     parts = [f"{prefix}：成功 {succeeded}/{total} {unit}"]
+    if best_effort_details:
+        parts.append(f"内容不足但已成片 {len(best_effort_details)}")
     if insufficient:
         parts.append(f"内容不足 {insufficient}")
     if duration_mismatch:
@@ -2877,8 +2916,7 @@ def _parse_live_start_datetime(value: Any, video_values: list[str] | None = None
         try:
             return datetime.strptime(text, fmt)
         except ValueError:
-            _LOG.warning("unexpected error", exc_info=True)
-            pass
+            continue
     match = re.fullmatch(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?", text)
     if not match:
         raise ValueError("请填写 17:08 或 2026-03-13 17:08 这样的时间格式")
@@ -3502,6 +3540,27 @@ def _normalize_preview_final_clips(
         # topic replacement, Hook promotion, or role-based reordering.
         if hasattr(ai_mod, "_filter_price_and_cta"):
             _step("forbidden_price_filter", lambda items: ai_mod._filter_price_and_cta(items, None))
+        if hasattr(ai_mod, "_filter_live_interaction_or_size_responses"):
+            _step(
+                "live_interaction_filter",
+                lambda items: ai_mod._filter_live_interaction_or_size_responses(
+                    items, None, label="预览互动硬排除"
+                ),
+            )
+        if hasattr(ai_mod, "_filter_hook_ineligible_clips"):
+            _step(
+                "hook_contract_filter",
+                lambda items: ai_mod._filter_hook_ineligible_clips(
+                    items, None, label="预览Hook硬排除"
+                ),
+            )
+        if hasattr(ai_mod, "_filter_low_value_hook_clips"):
+            _step(
+                "hook_quality_filter",
+                lambda items: ai_mod._filter_low_value_hook_clips(
+                    items, None, label="预览Hook质量硬排除"
+                ),
+            )
         if srt_text and word_timings and hasattr(ai_mod, "_trim_filler_start"):
             _step(
                 "word_boundary_trim",
@@ -3514,6 +3573,27 @@ def _normalize_preview_final_clips(
             )
         if hasattr(ai_mod, "_filter_price_and_cta"):
             _step("final_forbidden_price_filter", lambda items: ai_mod._filter_price_and_cta(items, None))
+        if hasattr(ai_mod, "_filter_live_interaction_or_size_responses"):
+            _step(
+                "final_live_interaction_filter",
+                lambda items: ai_mod._filter_live_interaction_or_size_responses(
+                    items, None, label="预览最终互动硬排除"
+                ),
+            )
+        if hasattr(ai_mod, "_filter_hook_ineligible_clips"):
+            _step(
+                "final_hook_contract_filter",
+                lambda items: ai_mod._filter_hook_ineligible_clips(
+                    items, None, label="预览最终Hook硬排除"
+                ),
+            )
+        if hasattr(ai_mod, "_filter_low_value_hook_clips"):
+            _step(
+                "final_hook_quality_filter",
+                lambda items: ai_mod._filter_low_value_hook_clips(
+                    items, None, label="预览最终Hook质量硬排除"
+                ),
+            )
     except Exception as exc:
         emit_log("warning", f"preview cleanup failed: {exc}", "system")
 
@@ -3711,6 +3791,76 @@ def _preview_forbidden_words() -> list[str]:
     return result
 
 
+def _preview_lock_forbidden_words(words: list[dict[str, Any]]) -> None:
+    """Lock every word token that contributes to a configured forbidden phrase."""
+    if not words:
+        return
+    compact_parts: list[str] = []
+    character_words: list[int] = []
+    for offset, word in enumerate(words):
+        compact = _preview_compact_text(word.get("text") or "")
+        compact_parts.append(compact)
+        character_words.extend([offset] * len(compact))
+    rendered = "".join(compact_parts)
+    if not rendered:
+        return
+    for phrase in _preview_forbidden_words():
+        needle = _preview_compact_text(phrase)
+        if not needle:
+            continue
+        start = rendered.find(needle)
+        while start >= 0:
+            for offset in set(character_words[start:start + len(needle)]):
+                if 0 <= offset < len(words):
+                    words[offset]["selection_locked"] = True
+                    words[offset]["blocked_reason"] = f"\u8fdd\u7981\u8bcd\uff1a{phrase}"
+            start = rendered.find(needle, start + len(needle))
+
+
+def _preview_word_payloads_for_range(
+    word_values: Any,
+    start: float,
+    end: float,
+) -> list[dict[str, Any]]:
+    """Expose absolute source timings without allowing a token to exceed its clip."""
+    result: list[dict[str, Any]] = []
+    for word in word_values if isinstance(word_values, list) else []:
+        if not isinstance(word, dict):
+            continue
+        try:
+            word_start = float(word.get("start") or 0.0)
+            word_end = float(word.get("end") or word_start)
+        except (TypeError, ValueError):
+            continue
+        midpoint = (word_start + word_end) / 2.0
+        if word_end <= word_start or not (start - 0.02 <= midpoint <= end + 0.02):
+            continue
+        clipped_start = max(start, word_start)
+        clipped_end = min(end, word_end)
+        text = _strip_preview_source_marker(word.get("text") or "")
+        if clipped_end <= clipped_start or not text:
+            continue
+        result.append({
+            "text": text,
+            "start": round(clipped_start, 3),
+            "end": round(clipped_end, 3),
+        })
+    result.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    for index, word in enumerate(result):
+        word["index"] = index
+    _preview_lock_forbidden_words(result)
+    return result
+
+
+def _preview_fallback_word_payload(text: Any, start: float, end: float) -> list[dict[str, Any]]:
+    value = _strip_preview_source_marker(text)
+    if not value or end <= start:
+        return []
+    result = [{"index": 0, "text": value, "start": round(start, 3), "end": round(end, 3)}]
+    _preview_lock_forbidden_words(result)
+    return result
+
+
 def _preview_segment_block_reason(text: Any) -> str:
     clean = _strip_preview_source_marker(text)
     compact = _preview_compact_text(clean)
@@ -3751,13 +3901,26 @@ def _preview_has_forbidden_or_price(text: Any) -> bool:
 
 
 def _preview_lock_unsafe_segments(public_clips: list[dict[str, Any]]) -> int:
-    """Keep hard-blocked subtitle units out of preview drafts and final export."""
+    """Keep unsafe subtitle units out while allowing a precisely removed forbidden token."""
     locked = 0
     for clip in public_clips or []:
         for segment in list(clip.get("segments") or []):
             if not isinstance(segment, dict):
                 continue
+            words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+            safe_words = [word for word in words if not word.get("selection_locked")]
             reason = _preview_segment_block_reason(segment.get("text") or "")
+            # Only a configured forbidden phrase can be excised word-by-word.
+            # Price, CTA, content-risk and backstage language remain whole-sentence locks.
+            if reason.startswith("\u8fdd\u7981\u8bcd\uff1a") and words and safe_words:
+                remaining_text = "".join(str(word.get("text") or "") for word in safe_words)
+                remaining_reason = _preview_segment_block_reason(remaining_text)
+                if not remaining_reason:
+                    segment["selected"] = True
+                    segment.pop("selection_locked", None)
+                    segment.pop("blocked_reason", None)
+                    continue
+                reason = remaining_reason
             if not reason:
                 continue
             if segment.get("selected") is not False or not segment.get("selection_locked"):
@@ -4352,30 +4515,19 @@ def _preview_segments_for_clip(
         for word_segment in word_timings:
             if not isinstance(word_segment, dict):
                 continue
-            segment_marker = str(word_segment.get("source_marker") or "").strip().upper()
+            segment_marker = re.sub(r"[\[\]\s]", "", str(word_segment.get("source_marker") or "")).upper()
             if marker and segment_marker != marker:
                 continue
             if not marker and segment_marker:
                 continue
-            selected_words = []
-            for word in word_segment.get("words") or []:
-                if not isinstance(word, dict):
-                    continue
-                try:
-                    word_start = float(word.get("start") or 0)
-                    word_end = float(word.get("end") or word_start)
-                except (TypeError, ValueError):
-                    continue
-                midpoint = (word_start + word_end) / 2.0
-                if start - 0.02 <= midpoint <= end + 0.02 and word_end > word_start:
-                    selected_words.append((word_start, word_end, str(word.get("text") or "")))
-            if not selected_words:
+            words = _preview_word_payloads_for_range(word_segment.get("words") or [], start, end)
+            if not words:
                 continue
-            text = _clean_preview_filler_prefix("".join(item[2] for item in selected_words).strip())
+            text = _clean_preview_filler_prefix("".join(str(word.get("text") or "") for word in words).strip())
             if not text or _preview_is_pure_filler(text):
                 continue
-            piece_start = max(start, selected_words[0][0])
-            piece_end = min(end, selected_words[-1][1])
+            piece_start = max(start, float(words[0]["start"]))
+            piece_end = min(end, float(words[-1]["end"]))
             pieces.append({
                 "index": len(pieces),
                 "start": round(piece_start, 3),
@@ -4384,6 +4536,7 @@ def _preview_segments_for_clip(
                 "text": text,
                 "selected": not _preview_has_forbidden_or_price(text),
                 "word_timed": True,
+                "words": words,
             })
         if pieces:
             weak_tail_segments = {
@@ -4435,6 +4588,8 @@ def _preview_segments_for_clip(
                 "duration": round(max(0.0, seg_end - seg_start), 3),
                 "text": text,
                 "selected": overlap >= 0.04 and not _preview_has_forbidden_or_price(text),
+                "word_timed": False,
+                "words": _preview_fallback_word_payload(text, seg_start, seg_end),
             })
     if pieces:
         return _sort_and_reindex_preview_segments(pieces)
@@ -4449,6 +4604,8 @@ def _preview_segments_for_clip(
         "duration": round(max(0.0, end - start), 3),
         "text": text,
         "selected": not _preview_is_pure_filler(text) and not _preview_has_forbidden_or_price(text),
+        "word_timed": False,
+        "words": _preview_fallback_word_payload(text, start, end),
     }]
 
 
@@ -4591,11 +4748,267 @@ def _drop_unusable_preview_clips(
     _refresh_preview_clip_sales_metadata(kept_public)
     return kept_raw, kept_public, removed
 
+def _preview_candidate_identity(clip: Any) -> tuple[str, float, float, str]:
+    """Stable identity for removing only exact final-list duplicates from the manual pool."""
+    info = _clip_public(0, clip)
+    marker = _preview_source_marker(info.get("text") or "")
+    source = marker or str(info.get("source") or "").strip().casefold()
+    try:
+        start = round(float(info.get("start") or 0.0), 3)
+        end = round(float(info.get("end") or start), 3)
+    except (TypeError, ValueError):
+        start, end = 0.0, 0.0
+    return source, start, end, _preview_compact_text(info.get("text") or "")
+
+
+def _preview_director_candidate_tuple(
+    candidate: dict[str, Any],
+    *,
+    default_source: str = "",
+    merge_mode: bool = False,
+) -> tuple[Any, ...] | None:
+    if not isinstance(candidate, dict):
+        return None
+    text = str(candidate.get("text") or "").strip()
+    try:
+        start = float(candidate.get("start") or 0.0)
+        end = float(candidate.get("end") or start)
+    except (TypeError, ValueError):
+        return None
+    if not text or end <= start:
+        return None
+
+    source_marker = re.sub(r"[\[\]\s]", "", str(candidate.get("source_id") or candidate.get("source") or "")).upper()
+    if merge_mode and re.fullmatch(r"V\d+", source_marker) and not _preview_source_marker(text):
+        text = f"[{source_marker}] {text}"
+    raw_clip: tuple[Any, ...] = (
+        "product",
+        text,
+        round(start, 3),
+        round(end, 3),
+        0.0,
+        round(max(0.0, end - start), 3),
+        "",
+    )
+    return raw_clip if merge_mode else _preview_clip_with_source(raw_clip, default_source)
+
+
+def _preview_safe_director_candidates(raw_clips: list[Any]) -> list[Any]:
+    """Apply the same whole-clip hard safety filter before a broad candidate is exposed."""
+    if not raw_clips:
+        return []
+    try:
+        import ai_clipper as ai_mod
+
+        safe = list(ai_mod._filter_price_and_cta(list(raw_clips), None) or [])
+        if hasattr(ai_mod, "_filter_live_interaction_or_size_responses"):
+            safe = list(
+                ai_mod._filter_live_interaction_or_size_responses(
+                    safe, None, label="预览候选互动硬排除"
+                ) or []
+            )
+        if hasattr(ai_mod, "_filter_hook_ineligible_clips"):
+            safe = list(
+                ai_mod._filter_hook_ineligible_clips(
+                    safe, None, label="预览候选Hook硬排除"
+                ) or []
+            )
+        return safe
+    except Exception as exc:
+        _LOG.warning("preview candidate safety filter skipped: %s", exc)
+        return list(raw_clips)
+
+
+def _build_preview_candidate_pool(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+    director_candidates: list[dict[str, Any]] | None,
+    srt_text: str,
+    *,
+    default_source: str = "",
+    sources: list[Any] | None = None,
+    merge_mode: bool = False,
+    word_timings: list[dict[str, Any]] | None = None,
+) -> tuple[list[Any], list[dict[str, Any]], dict[str, int]]:
+    """Keep the final shortlist intact and append bounded, safe manual alternatives."""
+    recommended_raw = list(raw_clips or [])
+    candidate_raw = list(recommended_raw)
+    candidate_public = copy.deepcopy(list(public_clips or []))
+    for index, public_clip in enumerate(candidate_public):
+        public_clip["index"] = index
+        public_clip["candidate_origin"] = "recommended"
+        public_clip["recommended"] = True
+
+    capacity = max(0, _PREVIEW_CANDIDATE_POOL_LIMIT - len(candidate_raw))
+    seen = {_preview_candidate_identity(clip) for clip in candidate_raw}
+    extra_pairs: list[tuple[Any, dict[str, Any]]] = []
+    for item in director_candidates or []:
+        if len(extra_pairs) >= capacity:
+            break
+        raw_clip = _preview_director_candidate_tuple(
+            item,
+            default_source=default_source,
+            merge_mode=merge_mode,
+        )
+        if raw_clip is None:
+            continue
+        identity = _preview_candidate_identity(raw_clip)
+        if not identity[3] or identity in seen:
+            continue
+        seen.add(identity)
+        extra_pairs.append((raw_clip, dict(item)))
+
+    if not extra_pairs:
+        return candidate_raw, candidate_public, {
+            "candidate_pool_count": len(candidate_public),
+            "candidate_pool_recommended_count": len(recommended_raw),
+            "candidate_pool_extra_count": 0,
+        }
+
+    metadata_by_identity = {
+        _preview_candidate_identity(raw_clip): metadata
+        for raw_clip, metadata in extra_pairs
+    }
+    extra_raw = _preview_safe_director_candidates([raw_clip for raw_clip, _metadata in extra_pairs])
+    if merge_mode:
+        extra_raw = _attach_mix_sources_to_preview_clips(extra_raw, list(sources or []))
+    extra_public = _preview_public_clips(
+        extra_raw,
+        srt_text,
+        sources=list(sources or []),
+        merge_mode=merge_mode,
+        word_timings=word_timings,
+    )
+    extra_raw, extra_public, unusable_removed = _drop_unusable_preview_clips(extra_raw, extra_public)
+    for raw_clip, public_clip in zip(extra_raw, extra_public):
+        metadata = metadata_by_identity.get(_preview_candidate_identity(raw_clip), {})
+        public_clip["index"] = len(candidate_public)
+        public_clip["candidate_origin"] = "director"
+        public_clip["recommended"] = False
+        public_clip["director_candidate_id"] = metadata.get("candidate_id")
+        public_clip["hook_eligible"] = bool(metadata.get("hook_eligible"))
+        public_clip["selected"] = False
+        for segment in list(public_clip.get("segments") or []):
+            if isinstance(segment, dict):
+                segment["selected"] = False
+        candidate_raw.append(raw_clip)
+        candidate_public.append(public_clip)
+
+    return candidate_raw, candidate_public, {
+        "candidate_pool_count": len(candidate_public),
+        "candidate_pool_recommended_count": len(recommended_raw),
+        "candidate_pool_extra_count": len(extra_public),
+        "candidate_pool_unusable_removed": unusable_removed,
+    }
+
+
+def _preview_selection_raw_clips(preview: dict[str, Any]) -> list[Any]:
+    return list(preview.get("candidate_raw_clips") or preview.get("raw_clips") or [])
+
+
+def _preview_selection_public_clips(preview: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(preview.get("candidate_clips") or preview.get("clips") or [])
+
+
+def _preview_requested_word_indices(
+    selected_words_by_segment: Any,
+    segment_index: int,
+    word_count: int,
+) -> tuple[bool, set[int]]:
+    if not isinstance(selected_words_by_segment, dict):
+        return False, set()
+    values = selected_words_by_segment.get(str(segment_index))
+    if values is None:
+        values = selected_words_by_segment.get(segment_index)
+    if values is None:
+        return False, set()
+    return True, set(_clean_preview_int_list(values, word_count))
+
+
+def _preview_segment_selection_units(
+    segment: dict[str, Any],
+    selected_words_by_segment: Any,
+) -> list[dict[str, Any]]:
+    if segment.get("selection_locked"):
+        return []
+    segment_index = _preview_segment_index(segment)
+    segment_start = _preview_segment_start(segment)
+    segment_end = _preview_segment_end(segment)
+    words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+    words.sort(key=lambda word: (float(word.get("start") or 0), float(word.get("end") or 0)))
+    explicit, wanted = _preview_requested_word_indices(selected_words_by_segment, segment_index, len(words))
+    locked = any(word.get("selection_locked") for word in words)
+    if not words:
+        if explicit:
+            return []
+        text = _strip_preview_source_marker(segment.get("text") or "")
+        return ([{
+            "start": segment_start,
+            "end": segment_end,
+            "text": text,
+            "segment_index": segment_index,
+            "whole_segment": True,
+            "selected_word_indices": [],
+        }] if text and segment_end > segment_start and not _preview_segment_block_reason(text) else [])
+    if not explicit and not locked:
+        text = _strip_preview_source_marker(segment.get("text") or "")
+        return ([{
+            "start": segment_start,
+            "end": segment_end,
+            "text": text,
+            "segment_index": segment_index,
+            "whole_segment": True,
+            "selected_word_indices": [],
+        }] if text and segment_end > segment_start and not _preview_segment_block_reason(text) else [])
+
+    runs: list[list[tuple[int, dict[str, Any]]]] = []
+    current: list[tuple[int, dict[str, Any]]] = []
+    previous_index: int | None = None
+    for position, word in enumerate(words):
+        try:
+            word_index = int(word.get("index", position))
+        except (TypeError, ValueError):
+            word_index = position
+        keep = not word.get("selection_locked") and (not explicit or word_index in wanted)
+        if not keep:
+            if current:
+                runs.append(current)
+                current = []
+            previous_index = None
+            continue
+        if current and previous_index is not None and word_index != previous_index + 1:
+            runs.append(current)
+            current = []
+        current.append((word_index, word))
+        previous_index = word_index
+    if current:
+        runs.append(current)
+
+    units: list[dict[str, Any]] = []
+    for run in runs:
+        text = "".join(str(word.get("text") or "") for _index, word in run).strip()
+        if not text or _preview_segment_block_reason(text):
+            continue
+        start = max(segment_start, min(float(word.get("start") or segment_start) for _index, word in run))
+        end = min(segment_end, max(float(word.get("end") or start) for _index, word in run))
+        if end <= start:
+            continue
+        units.append({
+            "start": start,
+            "end": end,
+            "text": text,
+            "segment_index": segment_index,
+            "whole_segment": False,
+            "selected_word_indices": [index for index, _word in run],
+        })
+    return units
+
 
 def _merge_selected_segments(
     public_clip: dict[str, Any],
     raw_clip: Any,
     segment_indices: list[int] | None,
+    selected_words_by_segment: dict[str, list[int]] | None = None,
 ) -> list[tuple[Any, ...]]:
     segments = list(public_clip.get("segments") or [])
     if segment_indices is None:
@@ -4610,34 +5023,30 @@ def _merge_selected_segments(
         return []
     selected.sort(key=lambda seg: (_preview_segment_index(seg), _preview_segment_start(seg), _preview_segment_end(seg)))
 
+    units: list[dict[str, Any]] = []
+    for segment in selected:
+        units.extend(_preview_segment_selection_units(segment, selected_words_by_segment))
+    if not units:
+        return []
+
     groups: list[list[dict[str, Any]]] = []
-    group_end = 0.0
-    group_last_index = -1
-    for seg in selected:
-        seg_index = _preview_segment_index(seg)
-        seg_start = _preview_segment_start(seg)
-        seg_end = _preview_segment_end(seg)
+    for unit in units:
         if not groups:
-            groups.append([seg])
-            group_end = seg_end
-            group_last_index = seg_index
+            groups.append([unit])
             continue
-        gap = seg_start - group_end
-        consecutive_sentence = (
-            group_last_index >= 0
-            and seg_index >= 0
-            and seg_index == group_last_index + 1
+        previous = groups[-1][-1]
+        gap = float(unit["start"]) - float(previous["end"])
+        can_merge_whole_segments = (
+            bool(previous.get("whole_segment"))
+            and bool(unit.get("whole_segment"))
+            and int(unit.get("segment_index", -1)) == int(previous.get("segment_index", -1)) + 1
             and gap <= 0.65
         )
-        missing_index_fallback = (group_last_index < 0 or seg_index < 0) and gap <= 0.35
-        if consecutive_sentence or missing_index_fallback:
-            groups[-1].append(seg)
-            group_end = max(group_end, seg_end)
-            group_last_index = seg_index
+        if can_merge_whole_segments:
+            groups[-1].append(unit)
         else:
-            groups.append([seg])
-            group_end = seg_end
-            group_last_index = seg_index
+            # A word-level gap represents an explicit user deletion or lock.
+            groups.append([unit])
 
     base = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
     while len(base) < 8:
@@ -4645,9 +5054,11 @@ def _merge_selected_segments(
     result: list[tuple[Any, ...]] = []
     source_marker = _preview_expected_source_marker(public_clip)
     for group_index, group in enumerate(groups):
-        start = min(float(seg.get("start") or 0) for seg in group)
-        end = max(float(seg.get("end") or start) for seg in group)
-        text = "".join(_strip_preview_source_marker(seg.get("text") or "") for seg in group).strip()
+        start = min(float(unit["start"]) for unit in group)
+        end = max(float(unit["end"]) for unit in group)
+        text = "".join(str(unit["text"]) for unit in group).strip()
+        if not text or end <= start:
+            continue
         if source_marker:
             text = f"[{source_marker}] {text}"
         values = list(base)
@@ -4667,7 +5078,12 @@ def _merge_selected_segments(
             "preview_parent_index": int(public_clip.get("index", -1)),
             "preview_group_index": group_index,
             "preview_group_count": len(groups),
-            "selected_segment_indices": [int(seg.get("index", -1)) for seg in group],
+            "selected_segment_indices": sorted({int(unit["segment_index"]) for unit in group}),
+            "selected_word_indices": {
+                str(unit["segment_index"]): list(unit.get("selected_word_indices") or [])
+                for unit in group
+                if unit.get("selected_word_indices")
+            },
         })
         result.append(tuple(values))
     return result
@@ -4677,14 +5093,16 @@ def _clips_from_preview_selection(
     preview: dict[str, Any],
     selected_indices: list[int],
     selected_segments: dict[str, list[int]] | None = None,
+    selected_words: dict[str, dict[str, list[int]]] | None = None,
 ) -> list[tuple[Any, ...]]:
-    raw_clips = list(preview.get("raw_clips") or [])
+    raw_clips = _preview_selection_raw_clips(preview)
     public_clips = {
         int(clip.get("index")): clip
-        for clip in list(preview.get("clips") or [])
+        for clip in _preview_selection_public_clips(preview)
         if str(clip.get("index", "")).lstrip("-").isdigit()
     }
     segment_map = selected_segments or {}
+    word_map = selected_words or {}
     result: list[tuple[Any, ...]] = []
     for raw_index in selected_indices:
         try:
@@ -4698,7 +5116,10 @@ def _clips_from_preview_selection(
         requested_segments = segment_map.get(key)
         if requested_segments is None:
             requested_segments = segment_map.get(idx) if isinstance(segment_map, dict) else None
-        result.extend(_merge_selected_segments(public_clip, raw_clips[idx], requested_segments))
+        requested_words = word_map.get(key)
+        if requested_words is None:
+            requested_words = word_map.get(idx) if isinstance(word_map, dict) else None
+        result.extend(_merge_selected_segments(public_clip, raw_clips[idx], requested_segments, requested_words))
     return result
 
 
@@ -4775,7 +5196,7 @@ def _preview_mix_source_paths(
 
     if not paths:
         marker_sources: dict[int, str] = {}
-        for clip in list(preview.get("raw_clips") or []) + list(preview.get("clips") or []):
+        for clip in _preview_selection_raw_clips(preview) + _preview_selection_public_clips(preview):
             clip_info = _clip_public(0, clip)
             marker = _preview_source_marker(clip_info.get("text") or "")
             source = str(clip_info.get("source") or "").strip()
@@ -5807,6 +6228,51 @@ def _clean_preview_int_list(values: Any, limit: int | None = None) -> list[int]:
     return result
 
 
+def _normalize_preview_selected_words(
+    public_clips: dict[int, dict[str, Any]],
+    selected_indices: list[int],
+    raw_selected_words: Any,
+) -> dict[str, dict[str, list[int]]]:
+    if not isinstance(raw_selected_words, dict):
+        return {}
+    normalized: dict[str, dict[str, list[int]]] = {}
+    for clip_index in selected_indices:
+        raw_by_segment = raw_selected_words.get(str(clip_index))
+        if raw_by_segment is None:
+            raw_by_segment = raw_selected_words.get(clip_index)
+        if not isinstance(raw_by_segment, dict):
+            continue
+        segments = {
+            _preview_segment_index(segment): segment
+            for segment in list((public_clips.get(clip_index) or {}).get("segments") or [])
+            if isinstance(segment, dict) and _preview_segment_index(segment) >= 0
+        }
+        clean_by_segment: dict[str, list[int]] = {}
+        for raw_segment_index, raw_indices in raw_by_segment.items():
+            try:
+                segment_index = int(raw_segment_index)
+            except (TypeError, ValueError):
+                continue
+            segment = segments.get(segment_index)
+            if not segment or not isinstance(raw_indices, list):
+                continue
+            words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+            allowed: set[int] = set()
+            for position, word in enumerate(words):
+                try:
+                    word_index = int(word.get("index", position))
+                except (TypeError, ValueError):
+                    word_index = position
+                if not word.get("selection_locked"):
+                    allowed.add(word_index)
+            requested = _clean_preview_int_list(raw_indices, len(words))
+            # Preserve [] so deleting every word remains an explicit choice.
+            clean_by_segment[str(segment_index)] = [index for index in requested if index in allowed]
+        if clean_by_segment:
+            normalized[str(clip_index)] = clean_by_segment
+    return normalized
+
+
 def _preview_selection_draft(preview: dict[str, Any] | None) -> dict[str, Any]:
     draft = (preview or {}).get("selection_draft")
     return dict(draft) if isinstance(draft, dict) else {}
@@ -5817,17 +6283,18 @@ def _normalize_preview_selection_draft(
     scope: str,
     selected_indices: list[int] | None,
     selected_segments: dict[str, list[int]] | None,
+    selected_words: dict[str, dict[str, list[int]]] | None = None,
     order: list[int] | None = None,
     updated_at: float | None = None,
 ) -> dict[str, Any]:
-    raw_count = max(len(preview.get("raw_clips") or []), len(preview.get("clips") or []))
+    raw_count = max(len(_preview_selection_raw_clips(preview)), len(_preview_selection_public_clips(preview)))
     selected = _clean_preview_int_list(selected_indices or [], raw_count)
     selected_set = set(selected)
     ordered = _clean_preview_int_list(order or [], raw_count)
     ordered.extend(index for index in range(raw_count) if index not in set(ordered))
     public_clips = {
         int(clip.get("index")): clip
-        for clip in list(preview.get("clips") or [])
+        for clip in _preview_selection_public_clips(preview)
         if str(clip.get("index", "")).lstrip("-").isdigit()
     }
     raw_segment_map = selected_segments if isinstance(selected_segments, dict) else {}
@@ -5845,12 +6312,14 @@ def _normalize_preview_selection_draft(
             else:
                 selected_set.discard(index)
     selected = [index for index in selected if index in selected_set]
+    normalized_words = _normalize_preview_selected_words(public_clips, selected, selected_words)
     return {
         "preview_id": str(preview.get("id") or ""),
         "scope": scope,
         "order": ordered,
         "selected_indices": selected,
         "selected_segments": normalized_segments,
+        "selected_words": normalized_words,
         "updated_at": float(updated_at or time.time() * 1000),
     }
 
@@ -5861,6 +6330,7 @@ def _apply_preview_payload_draft(
     scope: str,
     selected_indices: list[int],
     selected_segments: dict[str, list[int]] | None,
+    selected_words: dict[str, dict[str, list[int]]] | None = None,
     order: list[int] | None = None,
 ) -> dict[str, Any]:
     draft = _normalize_preview_selection_draft(
@@ -5868,6 +6338,7 @@ def _apply_preview_payload_draft(
         scope,
         selected_indices,
         selected_segments,
+        selected_words,
         order=order,
     )
     _store_preview(preview_id, selection_draft=draft)
@@ -5892,6 +6363,7 @@ def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
         "target_duration": preview.get("target_duration", 0),
         "created_at": preview.get("created_at", 0),
         "clips": preview.get("clips", []),
+        "candidate_clips": preview.get("candidate_clips", []),
         "selection_draft": preview.get("selection_draft", {}),
         "dedup_summary": preview.get("dedup_summary", {}),
     }
@@ -5938,18 +6410,53 @@ def _preview_clip_source(preview: dict[str, Any], clip_info: dict[str, Any]) -> 
     return cut_video
 
 
+def _preview_candidate_inspection_parts(preview: dict[str, Any], clip_index: int) -> list[Any]:
+    raw_clips = _preview_selection_raw_clips(preview)
+    if clip_index < 0 or clip_index >= len(raw_clips):
+        raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
+    public_clips = {
+        int(clip.get("index")): clip
+        for clip in _preview_selection_public_clips(preview)
+        if str(clip.get("index", "")).lstrip("-").isdigit()
+    }
+    public_clip = public_clips.get(clip_index) or _clip_public(clip_index, raw_clips[clip_index])
+    safe_segment_indices: list[int] = []
+    for segment in list(public_clip.get("segments") or []):
+        if segment.get("selection_locked") is True:
+            continue
+        try:
+            segment_index = int(segment.get("index"))
+        except Exception:
+            continue
+        if segment_index >= 0:
+            safe_segment_indices.append(segment_index)
+    if not safe_segment_indices:
+        raise HTTPException(status_code=400, detail="这个候选没有可安全预览的句子。")
+    parts = _clips_from_preview_selection(
+        preview,
+        [clip_index],
+        {str(clip_index): safe_segment_indices},
+    )
+    if not parts:
+        raise HTTPException(status_code=400, detail="这个候选没有可安全预览的句子。")
+    return parts
+
+
 def _preview_clip_parts_for_video(
     preview: dict[str, Any],
     clip_index: int,
     draft: dict[str, Any] | None,
+    inspect_only: bool = False,
 ) -> list[Any]:
-    raw_clips = list(preview.get("raw_clips") or [])
+    raw_clips = _preview_selection_raw_clips(preview)
     if clip_index < 0 or clip_index >= len(raw_clips):
         raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
+    if inspect_only:
+        return _preview_candidate_inspection_parts(preview, clip_index)
 
     public_clips = {
         int(clip.get("index")): clip
-        for clip in list(preview.get("clips") or [])
+        for clip in _preview_selection_public_clips(preview)
         if str(clip.get("index", "")).lstrip("-").isdigit()
     }
     public_clip = public_clips.get(clip_index) or _clip_public(clip_index, raw_clips[clip_index])
@@ -5965,6 +6472,7 @@ def _preview_clip_parts_for_video(
                 preview,
                 [clip_index],
                 draft.get("selected_segments") if isinstance(draft.get("selected_segments"), dict) else {},
+                draft.get("selected_words") if isinstance(draft.get("selected_words"), dict) else {},
             )
             if not parts:
                 raise HTTPException(status_code=400, detail="这个片段没有选中的句子，勾选后再预览。")
@@ -6135,24 +6643,29 @@ def _preview_clip_video(
     clip_index: int,
     selected_indices: list[int] | None = None,
     selected_segments: dict[str, list[int]] | None = None,
+    selected_words: dict[str, dict[str, list[int]]] | None = None,
     order: list[int] | None = None,
     scope: str = "smart",
     updated_at: float | None = None,
+    inspect_only: bool = False,
 ) -> Path:
     preview = _get_preview(preview_id)
     if not preview or preview.get("status") != "ready":
         raise HTTPException(status_code=404, detail="AI 选片预览不存在或尚未完成。")
-    raw_clips = list(preview.get("raw_clips") or [])
+    raw_clips = _preview_selection_raw_clips(preview)
     if clip_index < 0 or clip_index >= len(raw_clips):
         raise HTTPException(status_code=404, detail="片段不存在，请重新生成预览。")
 
-    has_payload_draft = bool(selected_indices or selected_segments or order)
-    if has_payload_draft:
+    has_payload_draft = not inspect_only and bool(selected_indices or selected_segments or selected_words or order)
+    if inspect_only:
+        draft = None
+    elif has_payload_draft:
         draft = _normalize_preview_selection_draft(
             preview,
             "mix" if scope == "mix" or preview.get("scope") == "mix" else "smart",
             selected_indices or [],
             selected_segments or {},
+            selected_words or {},
             order=order or [],
             updated_at=updated_at,
         )
@@ -6162,7 +6675,7 @@ def _preview_clip_video(
     else:
         draft = _preview_selection_draft(preview)
 
-    preview_parts = _preview_clip_parts_for_video(preview, clip_index, draft)
+    preview_parts = _preview_clip_parts_for_video(preview, clip_index, draft, inspect_only=inspect_only)
     clip_infos = [_clip_public(clip_index, part) for part in preview_parts]
     ranges: list[tuple[Path, float, float]] = []
     total_duration = 0.0
@@ -6380,6 +6893,10 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             return
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("混剪成片", scope=scope)
+        best_effort_detail = _batch_best_effort_detail(paths[0].name, result)
+        completion_message = "混剪成片完成"
+        if best_effort_detail:
+            completion_message += f"：内容不足但已成片，{best_effort_detail['message']}"
         _set_task(
             task_id,
             status="completed",
@@ -6387,8 +6904,13 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             output=str(output_path),
             outputs=[str(output_path)],
             result_count=1,
+            message=completion_message,
+            batch_best_effort=1 if best_effort_detail else 0,
         )
-        emit_log("success", f"混剪成片完成：{output_path}", scope)
+        if best_effort_detail:
+            emit_log("warning", completion_message, scope)
+        else:
+            emit_log("success", f"混剪成片完成：{output_path}", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"混剪成片失败：{exc}", scope)
@@ -6413,6 +6935,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         outputs: list[str] = []
         failures: list[str] = []
         failure_details: list[dict[str, Any]] = []
+        best_effort_details: list[dict[str, Any]] = []
         _set_task(
             task_id,
             batch_total=total_groups,
@@ -6421,6 +6944,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
             batch_current=1,
             batch_failed=0,
             batch_insufficient=0,
+            batch_best_effort=0,
             batch_label="",
             batch_failure_details=[],
         )
@@ -6470,6 +6994,14 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     raise RuntimeError("混剪处理失败。")
                 _archive_used_pip(used_pip_file, scope)
                 outputs.append(str(output_path))
+                best_effort_detail = _batch_best_effort_detail(group_name, result)
+                if best_effort_detail:
+                    best_effort_details.append(best_effort_detail)
+                    emit_log(
+                        "warning",
+                        f"{group_name} 有效内容不足但已完成成片：{best_effort_detail['message']}",
+                        scope,
+                    )
                 _set_task_progress(task_id, min(94, 10 + (index / total_groups) * 84), f"完成 {index}/{total_groups}: {group_name}")
                 _set_task(
                     task_id,
@@ -6478,6 +7010,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     batch_current=index + 1 if index < total_groups else 0,
                     batch_failed=len(failure_details),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_best_effort=len(best_effort_details),
                     batch_failure_details=list(failure_details),
                 )
                 emit_log("success", f"混剪批量 [{index}/{total_groups}] 完成：{group_name}", scope)
@@ -6492,6 +7025,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     batch_current=index + 1 if index < total_groups else 0,
                     batch_failed=len(failure_details),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_best_effort=len(best_effort_details),
                     batch_failure_details=list(failure_details),
                 )
                 emit_log("error", f"混剪批量 [{index}/{total_groups}] 失败：{group_name}，{group_exc}", scope)
@@ -6504,12 +7038,20 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                 batch_current=0,
                 batch_failed=len(failure_details),
                 batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                batch_best_effort=len(best_effort_details),
                 batch_failure_details=list(failure_details),
                 message=_batch_summary_message("批量混剪完成", 0, total_groups, failure_details, "组"),
             )
             raise RuntimeError("批量混剪没有成功输出。")
         _consume_trial("混剪成片", units=len(outputs), scope=scope)
-        summary_message = _batch_summary_message("批量混剪完成", len(outputs), total_groups, failure_details, "组")
+        summary_message = _batch_summary_message(
+            "批量混剪完成",
+            len(outputs),
+            total_groups,
+            failure_details,
+            "组",
+            best_effort_details,
+        )
         _set_task(
             task_id,
             status="completed",
@@ -6524,6 +7066,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
             batch_current=0,
             batch_failed=len(failure_details),
             batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+            batch_best_effort=len(best_effort_details),
             batch_label="",
             batch_failure_details=list(failure_details),
         )
@@ -6636,6 +7179,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         dedup_summary["duration_relaxation"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("duration_relaxation") or {}
         )
+        dedup_summary["content_review_summary"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
+        )
         dedup_summary["source_contract"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("source_contract") or {}
         )
@@ -6685,12 +7231,25 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             ) or effective_topic_summary
             dedup_summary["preference_summary"] = preference_summary
             dedup_summary["topic_coverage_summary"] = effective_topic_summary
+        candidate_raw_clips, candidate_public_clips, candidate_pool_summary = _build_preview_candidate_pool(
+            raw_clips,
+            public_clips,
+            list((cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("director_candidates") or []),
+            srt_text,
+            sources=mix_sources,
+            merge_mode=True,
+            word_timings=word_timings,
+        )
+        dedup_summary.update(candidate_pool_summary)
+        dedup_summary["content_review_summary"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
+        )
         _set_task_progress(task_id, 94, "生成预览列表")
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
             preview_id,
             status="ready",
-            message=f"混剪 AI 选片预览完成，共 {len(public_clips)} 个片段。",
+            message=f"混剪 AI 选片预览完成：{len(public_clips)} 个推荐片段，候选池共 {len(candidate_public_clips)} 段。",
             video=str(paths[0]),
             video_name=paths[0].name,
             sources=mix_sources,
@@ -6701,6 +7260,8 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
+            candidate_raw_clips=candidate_raw_clips,
+            candidate_clips=candidate_public_clips,
             dedup_summary=dedup_summary,
         )
         _set_task(task_id, status="completed", finished_at=time.time())
@@ -9319,6 +9880,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             batch_current=1 if total_videos > 1 else 0,
             batch_failed=0,
             batch_insufficient=0,
+            batch_best_effort=0,
             batch_label="",
             batch_failure_details=[],
         )
@@ -9327,6 +9889,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
         outputs: list[str] = []
         failures: list[str] = []
         failure_details: list[dict[str, Any]] = []
+        best_effort_details: list[dict[str, Any]] = []
         succeeded_videos = 0
 
         for index, video in enumerate(paths, start=1):
@@ -9418,6 +9981,14 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     raise RuntimeError(f"{video.name} 未生成输出文件。")
                 outputs.extend(produced_outputs)
                 succeeded_videos += 1
+                best_effort_detail = _batch_best_effort_detail(video.name, result)
+                if best_effort_detail:
+                    best_effort_details.append(best_effort_detail)
+                    emit_log(
+                        "warning",
+                        f"{video.name} 有效内容不足但已完成成片：{best_effort_detail['message']}",
+                        "smart-cut",
+                    )
                 try:
                     _archive_used_pip(used_pip_file, "smart-cut")
                 except Exception as archive_exc:
@@ -9432,6 +10003,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     batch_current=index + 1 if index < total_videos else 0,
                     batch_failed=len(failures),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_best_effort=len(best_effort_details),
                     batch_failure_details=list(failure_details),
                     batch_label="" if index >= total_videos else f"等待处理 {index + 1}/{total_videos}",
                 )
@@ -9459,6 +10031,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     batch_succeeded=succeeded_videos,
                     batch_failed=len(failures),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+                    batch_best_effort=len(best_effort_details),
                     batch_failure_details=list(failure_details),
                     batch_current=next_current,
                     batch_label="" if next_current == 0 else f"等待处理 {next_current}/{total_videos}",
@@ -9486,7 +10059,14 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             if total_videos > 1:
                 raise RuntimeError(f"批量智能成片没有成功输出：{detail}")
             raise RuntimeError(detail)
-        summary_message = _batch_summary_message("智能成片完成", succeeded_videos, total_videos, failure_details, "个")
+        summary_message = _batch_summary_message(
+            "智能成片完成",
+            succeeded_videos,
+            total_videos,
+            failure_details,
+            "个",
+            best_effort_details,
+        )
         _set_task(
             task_id,
             status="completed",
@@ -9501,6 +10081,7 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             batch_current=0,
             batch_failed=len(failures),
             batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
+            batch_best_effort=len(best_effort_details),
             batch_label="",
             batch_failure_details=list(failure_details),
         )
@@ -9522,15 +10103,16 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         preview = _get_preview(payload.preview_id)
         if not preview or preview.get("status") != "ready":
             raise RuntimeError("混剪选片预览不存在或尚未完成。")
-        raw_clips = list(preview.get("raw_clips") or [])
+        raw_clips = _preview_selection_raw_clips(preview)
         if not raw_clips:
             raise RuntimeError("混剪选片预览里没有可用片段。")
 
         draft = _preview_selection_draft(preview)
         selected = payload.selected_indices or list(draft.get("selected_indices") or [])
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
+        selected_words = payload.selected_words or dict(draft.get("selected_words") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
-        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
+        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再混剪。")
@@ -9811,11 +10393,20 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             ) or effective_topic_summary
             dedup_summary["preference_summary"] = preference_summary
             dedup_summary["topic_coverage_summary"] = effective_topic_summary
+        candidate_raw_clips, candidate_public_clips, candidate_pool_summary = _build_preview_candidate_pool(
+            raw_clips,
+            public_clips,
+            list((cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("director_candidates") or []),
+            srt_text,
+            default_source=str(video),
+            word_timings=word_timings,
+        )
+        dedup_summary.update(candidate_pool_summary)
         dedup_summary.update(_annotate_preview_manual_repeats(public_clips))
         _store_preview(
             preview_id,
             status="ready",
-            message=f"AI 选片预览完成，共 {len(public_clips)} 个片段。",
+            message=f"AI 选片预览完成：{len(public_clips)} 个推荐片段，候选池共 {len(candidate_public_clips)} 段。",
             video=str(video),
             video_name=video.name,
             category=preferred_category,
@@ -9826,6 +10417,8 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             srt_text=srt_text,
             raw_clips=raw_clips,
             clips=public_clips,
+            candidate_raw_clips=candidate_raw_clips,
+            candidate_clips=candidate_public_clips,
             dedup_summary=dedup_summary,
         )
         _set_task(task_id, status="completed", finished_at=time.time())
@@ -9847,14 +10440,15 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         preview = _get_preview(payload.preview_id)
         if not preview or preview.get("status") != "ready":
             raise RuntimeError("选片预览不存在或尚未完成。")
-        raw_clips = list(preview.get("raw_clips") or [])
+        raw_clips = _preview_selection_raw_clips(preview)
         if not raw_clips:
             raise RuntimeError("选片预览里没有可用片段。")
         draft = _preview_selection_draft(preview)
         selected = payload.selected_indices or list(draft.get("selected_indices") or [])
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
+        selected_words = payload.selected_words or dict(draft.get("selected_words") or {})
         selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
-        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments)
+        clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再成片。")
@@ -10979,6 +11573,7 @@ def save_preview_selection(payload: PreviewSelectionPayload) -> dict[str, Any]:
         scope,
         payload.selected_indices,
         payload.selected_segments,
+        payload.selected_words,
         order=payload.order,
         updated_at=payload.updated_at,
     )
@@ -11006,24 +11601,30 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="没有找到这次 AI 选片预览，请重新生成。")
     if preview.get("status") != "ready":
         raise HTTPException(status_code=400, detail="AI 选片预览还没有完成，请稍后再试。")
-    if not preview.get("raw_clips"):
+    if not _preview_selection_raw_clips(preview):
         raise HTTPException(status_code=400, detail="这次预览没有可用片段，请重新生成。")
     draft = _preview_selection_draft(preview)
+    selected_words_supplied = "selected_words" in (
+        getattr(payload, "model_fields_set", None)
+        or getattr(payload, "__fields_set__", set())
+    )
     if not payload.selected_indices and isinstance(draft.get("selected_indices"), list):
         payload.selected_indices = list(draft.get("selected_indices") or [])
     if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
         payload.selected_segments = dict(draft.get("selected_segments") or {})
+    if not selected_words_supplied and not payload.selected_words and isinstance(draft.get("selected_words"), dict):
+        payload.selected_words = dict(draft.get("selected_words") or {})
     if not payload.order and isinstance(draft.get("order"), list):
         payload.order = list(draft.get("order") or [])
     _raise_preflight_errors("smart-from-preview", payload)
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再成片。")
-    clip_count = len(preview.get("raw_clips") or [])
+    clip_count = len(_preview_selection_raw_clips(preview))
     selected = [int(index) for index in payload.selected_indices if 0 <= int(index) < clip_count]
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再成片。")
     payload.selected_indices = selected
-    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments, order=payload.order)
+    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments, payload.selected_words, order=payload.order)
     _record_preview_selection_feedback(preview, "smart", draft, "smart_from_preview")
     task_id = _new_task("smart-cut", "预览成片")
     threading.Thread(target=_run_smart_cut_from_preview, args=(task_id, payload), daemon=True).start()
@@ -11039,19 +11640,22 @@ def smart_preview_clip_video(payload: SmartPreviewClipPayload) -> dict[str, Any]
         payload.clip_index,
         selected_indices=payload.selected_indices,
         selected_segments=payload.selected_segments,
+        selected_words=payload.selected_words,
         order=payload.order,
         scope="smart",
         updated_at=payload.updated_at,
+        inspect_only=payload.inspect_only,
     )
+    query = "inspect_only=1&" if payload.inspect_only else ""
     return {
         "ok": True,
-        "url": f"/api/smart-cut/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?t={int(path.stat().st_mtime)}",
+        "url": f"/api/smart-cut/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?{query}t={int(path.stat().st_mtime)}",
     }
 
 
 @app.get("/api/smart-cut/preview/clip-video/{preview_id}/{clip_index}")
-def get_smart_preview_clip_video(preview_id: str, clip_index: int) -> FileResponse:
-    path = _preview_clip_video(preview_id, clip_index)
+def get_smart_preview_clip_video(preview_id: str, clip_index: int, inspect_only: bool = False) -> FileResponse:
+    path = _preview_clip_video(preview_id, clip_index, inspect_only=inspect_only)
     return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 
@@ -11109,24 +11713,30 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="混剪 AI 选片预览不存在，请重新生成。")
     if preview.get("status") != "ready":
         raise HTTPException(status_code=400, detail="混剪 AI 选片预览尚未完成。")
-    if not preview.get("raw_clips"):
+    if not _preview_selection_raw_clips(preview):
         raise HTTPException(status_code=400, detail="混剪 AI 选片预览里没有可用片段。")
     draft = _preview_selection_draft(preview)
+    selected_words_supplied = "selected_words" in (
+        getattr(payload, "model_fields_set", None)
+        or getattr(payload, "__fields_set__", set())
+    )
     if not payload.selected_indices and isinstance(draft.get("selected_indices"), list):
         payload.selected_indices = list(draft.get("selected_indices") or [])
     if not payload.selected_segments and isinstance(draft.get("selected_segments"), dict):
         payload.selected_segments = dict(draft.get("selected_segments") or {})
+    if not selected_words_supplied and not payload.selected_words and isinstance(draft.get("selected_words"), dict):
+        payload.selected_words = dict(draft.get("selected_words") or {})
     if not payload.order and isinstance(draft.get("order"), list):
         payload.order = list(draft.get("order") or [])
     _raise_preflight_errors("mix-from-preview", payload)
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再混剪。")
-    clip_count = len(preview.get("raw_clips") or [])
+    clip_count = len(_preview_selection_raw_clips(preview))
     selected = [int(index) for index in payload.selected_indices if 0 <= int(index) < clip_count]
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再混剪。")
     payload.selected_indices = selected
-    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments, order=payload.order)
+    draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments, payload.selected_words, order=payload.order)
     _record_preview_selection_feedback(preview, "mix", draft, "mix_from_preview")
     task_id = _new_task("mix", "预览混剪成片")
     threading.Thread(target=_run_mix_from_preview, args=(task_id, payload), daemon=True).start()
@@ -11142,19 +11752,22 @@ def mix_preview_clip_video(payload: SmartPreviewClipPayload) -> dict[str, Any]:
         payload.clip_index,
         selected_indices=payload.selected_indices,
         selected_segments=payload.selected_segments,
+        selected_words=payload.selected_words,
         order=payload.order,
         scope="mix",
         updated_at=payload.updated_at,
+        inspect_only=payload.inspect_only,
     )
+    query = "inspect_only=1&" if payload.inspect_only else ""
     return {
         "ok": True,
-        "url": f"/api/mix/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?t={int(path.stat().st_mtime)}",
+        "url": f"/api/mix/preview/clip-video/{payload.preview_id.strip()}/{payload.clip_index}?{query}t={int(path.stat().st_mtime)}",
     }
 
 
 @app.get("/api/mix/preview/clip-video/{preview_id}/{clip_index}")
-def get_mix_preview_clip_video(preview_id: str, clip_index: int) -> FileResponse:
-    path = _preview_clip_video(preview_id, clip_index, scope="mix")
+def get_mix_preview_clip_video(preview_id: str, clip_index: int, inspect_only: bool = False) -> FileResponse:
+    path = _preview_clip_video(preview_id, clip_index, scope="mix", inspect_only=inspect_only)
     return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 

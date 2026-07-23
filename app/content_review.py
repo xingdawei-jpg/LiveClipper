@@ -18,9 +18,10 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
 
 from ai_model_config import ai_chat_completions_url
+from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
-CONTENT_REVIEW_VERSION = "content-review-v12"
+CONTENT_REVIEW_VERSION = "content-review-v16"
 CONTENT_REVIEW_ENV = "LIVECLIPPER_CONTENT_REVIEW_MODE"
 CONTENT_REVIEW_DEFAULT_MODE = "off"
 CONTENT_REVIEW_MAX_CARDS = 80
@@ -161,6 +162,10 @@ class ContentReviewBundle:
     cards: tuple[ContentCard, ...]
     retained_duration: float
     hook_pairs: tuple[HookPair, ...] = ()
+    # A focused second pass is only needed when the broad review returned no
+    # verified opening pair. Persisting its completed state keeps cache hits
+    # free of another model call, including the valid "no pair exists" result.
+    hook_pair_reviewed: bool = False
     cache_hit: bool = False
     version: str = CONTENT_REVIEW_VERSION
 
@@ -184,6 +189,8 @@ class ContentReviewBundle:
             "model": self.model,
             "retained_duration": round(self.retained_duration, 3),
             "cards": [card.to_dict() for card in self.cards],
+            "hook_pairs": [pair.to_dict() for pair in self.hook_pairs],
+            "hook_pair_reviewed": bool(self.hook_pair_reviewed),
         }
 
     def summary(self, mode: str, fallback_reason: str = "") -> dict[str, Any]:
@@ -196,6 +203,8 @@ class ContentReviewBundle:
             "reserve_count": sum(1 for card in self.cards if card.tier == "reserve"),
             "retained_duration": round(self.retained_duration, 1),
             "grounded_card_count": len(self.cards),
+            "hook_pair_count": len(self.hook_pairs),
+            "hook_pair_reviewed": bool(self.hook_pair_reviewed),
             "fallback_reason": str(fallback_reason or ""),
         }
 
@@ -368,6 +377,8 @@ def _candidate_map(inventory: Sequence[Mapping[str, Any]]) -> dict[int, dict[str
 def _reviewable_candidate_text(text: Any) -> bool:
     cleaned = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.I)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if live_interaction_or_size_response_reason(cleaned):
+        return False
     if len(cleaned) < 6:
         return False
     prefix_match = re.match(r"^[\u4e00-\u9fffA-Za-z][,\uff0c\u3001;\uff1b:\uff1a]", cleaned)
@@ -386,7 +397,22 @@ def _reviewable_candidate_text(text: Any) -> bool:
 def _reviewable_hook_text(text: Any) -> bool:
     if not _reviewable_candidate_text(text):
         return False
+    if hook_ineligible_reason(text):
+        return False
     cleaned = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.I).strip()
+    compact = re.sub(r"\s+", "", cleaned)
+    if re.match(
+        r"^(?:\u554a|\u5440|\u5450|\u90a3|\u5462|\u54ce|\u8bf6|\u55ef|\u54e6)?[\uff0c,\u3001]*(?:\u548c|\u8ddf|\u4e0e|\u800c\u4e14|\u4f46\u662f|\u56e0\u4e3a|\u6240\u4ee5|\u7136\u540e|\u5305\u62ec|\u8fd8\u6709)",
+        compact,
+    ):
+        return False
+    if re.match(
+        r"^(?:(?:\u975e\u5e38)|(?:\u7279\u522b)|\u592a|\u5f88){1,3}(?:\u72e0|\u7edd|\u70b8|\u65e0\u654c|\u597d\u770b|\u597d\u6f02\u4eae|\u725b|\u9876)(?:[\uff0c,\u3002.!\uff01?\uff1f]|$)",
+        compact,
+    ):
+        return False
+    if re.search(r"(?:拖欠|欠你们|等了?(?:很久|好久)|终于(?:来了|到了)|刚到|新品(?:来了|到了)|今天上新)", cleaned):
+        return False
     if re.search(
         r"(?:\u8fd9\u4e2a|\u90a3\u4e2a|\u5b83|\u8fd9\u4ef6)\s*(?:\u548c|\u8ddf|\u4e0e)\s*[\u4e00-\u9fffA-Za-z0-9]{1,8}[\u3002.!\uff01?\uff1f]?$",
         cleaned,
@@ -560,6 +586,57 @@ def _fallback_card(candidate_id: int, candidate_text: Any) -> ContentCard:
         tier="reserve",
     )
 
+def _normalize_hook_pair(
+    raw: Any,
+    *,
+    card_ids: set[int],
+    candidates: Mapping[int, Mapping[str, Any]],
+) -> HookPair | None:
+    """Keep only grounded, self-contained Hook -> immediate-proof options.
+
+    The review model may recommend a pair, but it never owns the final order.
+    The director later chooses one of these verified openings for its own story.
+    """
+    if isinstance(raw, (list, tuple)):
+        if len(raw) < 2:
+            return None
+        raw = {
+            "hook_id": raw[0],
+            "followup_id": raw[1],
+            "topic": raw[2] if len(raw) > 2 else "",
+            "reason": raw[3] if len(raw) > 3 else "",
+        }
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        hook_id = int(raw.get("hook_id") or 0)
+        followup_id = int(raw.get("followup_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if (
+        hook_id <= 0
+        or followup_id <= 0
+        or hook_id == followup_id
+        or hook_id not in card_ids
+        or followup_id not in card_ids
+    ):
+        return None
+    hook_text = str(candidates.get(hook_id, {}).get("text") or "")
+    followup_text = str(candidates.get(followup_id, {}).get("text") or "")
+    if not _reviewable_hook_text(hook_text) or not _reviewable_candidate_text(followup_text):
+        return None
+    topic = _normalize_topic(raw.get("topic"))
+    if not topic or topic == "\u5176\u4ed6":
+        topic = _topic_from_candidate_text(hook_text)
+    reason = _clean_text(raw.get("reason"), 100) or "\u627f\u63a5\u5f00\u5934\u7684\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c"
+    return HookPair(
+        hook_id=hook_id,
+        followup_id=followup_id,
+        topic=topic,
+        reason=reason,
+    )
+
+
 def _rebalance_card_tiers(
     cards: Sequence[ContentCard], candidates: Mapping[int, Mapping[str, Any]]
 ) -> list[ContentCard]:
@@ -671,6 +748,26 @@ def _validate_bundle(
         if missing:
             raise ContentReviewError("\u5ba1\u7a3f\u5019\u9009\u7f3a\u5c11\u6df7\u526a\u6765\u6e90:" + ",".join(missing))
 
+    card_ids = {card.candidate_id for card in cards}
+    hook_pairs: list[HookPair] = []
+    seen_pairs: set[tuple[int, int]] = set()
+    raw_hook_pairs = data.get("hook_pairs") if isinstance(data.get("hook_pairs"), list) else []
+    for raw_pair in raw_hook_pairs:
+        pair = _normalize_hook_pair(
+            raw_pair,
+            card_ids=card_ids,
+            candidates=candidates,
+        )
+        if pair is None:
+            continue
+        signature = (pair.hook_id, pair.followup_id)
+        if signature in seen_pairs:
+            continue
+        seen_pairs.add(signature)
+        hook_pairs.append(pair)
+        if len(hook_pairs) >= 8:
+            break
+
     return ContentReviewBundle(
         cache_key=cache_key,
         candidate_digest=str(candidate_digest or ""),
@@ -678,6 +775,8 @@ def _validate_bundle(
         model=_clean_text(model, 120),
         cards=tuple(cards),
         retained_duration=retained_duration,
+        hook_pairs=tuple(hook_pairs),
+        hook_pair_reviewed=bool(data.get("hook_pair_reviewed")),
     )
 
 
@@ -702,7 +801,8 @@ def _review_prompts(
     system_prompt = (
         "\u4f60\u662f\u5e26\u8d27\u77ed\u89c6\u9891\u7684\u5185\u5bb9\u5ba1\u7a3f\uff0c\u4e0d\u662f\u6700\u7ec8\u526a\u8f91\u5bfc\u6f14\u3002"
         "\u4f60\u53ea\u8d1f\u8d23\u8bc6\u522b\u503c\u5f97\u4f7f\u7528\u7684\u5177\u4f53\u5185\u5bb9\u3001\u4e3b\u9898\u3001\u8d2d\u4e70\u4ef7\u503c\u3001\u4e0a\u4e0b\u6587\u4f9d\u8d56\u548c\u8f6c\u5199\u98ce\u9669\u3002"
-        "\u4e0d\u5f97\u6307\u5b9aHook\u3001\u627f\u63a5\u6bb5\u3001Close\u6216\u6210\u7247\u987a\u5e8f\uff0c\u4e0d\u5f97\u6539\u5199\u5b57\u5e55\u6216\u7f16\u9020\u7f16\u53f7\u3002"
+        "\u4e0d\u5f97\u51b3\u5b9a\u6700\u7ec8\u6210\u7247\u987a\u5e8f\u3001Close\u6216\u6539\u5199\u5b57\u5e55\uff0c\u4e5f\u4e0d\u5f97\u7f16\u9020\u7f16\u53f7\u3002"
+        "\u4f60\u53ef\u4ee5\u63d0\u51fa\u5c11\u91cf\u53ef\u9a8c\u8bc1\u7684Hook+\u627f\u63a5\u5019\u9009\u7ec4\u5408\uff0c\u4f9b\u6700\u7ec8\u5bfc\u6f14\u81ea\u4e3b\u9009\u62e9\uff1b\u8fd9\u4e0d\u662f\u66ff\u5bfc\u6f14\u7f16\u6392\u5168\u7247\u3002"
         "\u6bcf\u5f20\u5361\u53ea\u9700\u9009\u62e9\u771f\u5b9e\u5019\u9009\u7f16\u53f7\u5e76\u5224\u65ad\u5185\u5bb9\u4ef7\u503c\uff1b\u7a0b\u5e8f\u4f1a\u7528\u7f16\u53f7\u7ed1\u5b9a\u539f\u5b57\u5e55\u4f5c\u4e3a\u552f\u4e00\u8bc1\u636e\u3002"
         "\u53ea\u8f93\u51fa\u5355\u884c\u7d27\u51d1JSON\u5bf9\u8c61\uff0c\u4e0d\u8981Markdown\u3001\u89e3\u91ca\u6216\u7f29\u8fdb\u3002"
     )
@@ -734,9 +834,12 @@ def _review_prompts(
 8. tier\u5fc5\u987b\u771f\u5b9e\u5206\u5c42\uff1amain\u53ea\u7ed9\u540c\u7c7b\u4e2d\u6700\u5b8c\u6574\u3001\u6700\u5177\u4f53\u3001\u8bc1\u636e\u6700\u5f3a\u7684\u8868\u8fbe\uff0c\u5176\u4f59\u9ad8\u8d28\u91cf\u8868\u8fbe\u6807reserve\u3002\u5185\u5bb9\u5145\u8db3\u65f6main\u7ea6\u536035%-65%\uff0c\u7981\u6b62\u5168\u90e8\u6807main\uff1b\u540c\u4e00\u5927topic\u6700\u591a4\u5f20main\uff0c\u6df7\u526a\u65f6\u540c\u4e00\u6765\u6e90+\u540c\u4e00\u5927topic\u6700\u591a2\u5f20main\u3002
 9. topic\u4f7f\u7528\u7a33\u5b9a\u5927\u7c7b\uff1a\u670d\u9970\u4f18\u5148\u7528\u7248\u578b\u663e\u7626/\u9762\u6599\u8d28\u611f/\u989c\u8272\u6c1b\u56f4/\u573a\u666f\u642d\u914d/\u5de5\u827a\u7ec6\u8282/\u5c3a\u5bf8\u957f\u5ea6/\u7a7f\u7740\u4f53\u9a8c/\u5bf9\u6bd4\u4f18\u52bf/\u6d41\u884c\u8d8b\u52bf\uff1b\u98df\u54c1\u4f18\u5148\u7528\u53e3\u611f\u98df\u6b32/\u65b0\u9c9c\u54c1\u8d28/\u4ea7\u5730\u6eaf\u6e90/\u89c4\u683c\u5206\u91cf/\u53d1\u8d27\u4fdd\u9c9c/\u573a\u666f\u5403\u6cd5\uff1b\u65b0\u54c1\u7c7b\u7528\u5bf9\u5e94\u7a33\u5b9a\u5927\u7c7b\u3002
 
+10. hook_pairs\u7ed9\u51fa0-8\u7ec4\u53ef\u9009\u5f00\u5934\u7ec4\u5408\uff0c\u53ea\u6709\u771f\u7684\u5b58\u5728\u5f3a\u5f00\u5934\u65f6\u624d\u8f93\u51fa\u3002\u6bcf\u9879\u5fc5\u987b\u662f\u201c\u72ec\u7acb\u8bf4\u6e05\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c\u201d\u7684\u5b8c\u6574Hook\uff0c\u4ee5\u53ca\u4e0b\u4e00\u6bb5\u7acb\u523b\u89e3\u91ca\u3001\u8bc1\u660e\u6216\u5151\u73b0\u5b83\u7684\u5b8c\u6574\u5019\u9009\u3002\u76f4\u64ad\u4e92\u52a8\u3001\u5e93\u5b58\u95ee\u7b54\u3001\u4e2a\u4eba\u8eab\u9ad8\u4f53\u91cd\u5c3a\u7801\u3001\u4ef7\u683c/CTA\u3001\u4e0a\u65b0\u9884\u544a\u3001\u7eaf\u5c55\u793a\u94fa\u57ab\u3001\u6cdb\u6cdb\u5938\u8d5e\u3001\u6b8b\u53e5\u90fd\u7edd\u4e0d\u53ef\u8fdb\u5165hook_pairs\u3002\u82e5\u6ca1\u6709\u8db3\u591f\u5f3a\u7684\u7ec4\u5408\uff0c\u8fd4\u56de\u7a7a\u6570\u7ec4\uff0c\u4e0d\u5f97\u51d1\u6570\u3002
+
 \u8f93\u51faschema\uff08\u5fc5\u987b\u7528\u6570\u7ec4\u77ed\u683c\u5f0f\uff09:
-{{"cards":[[1,"\u7248\u578b\u663e\u7626","\u80a9\u5bbd\u4fee\u9970","\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536","\u539f\u56e0\u89e3\u91ca",["effect","evidence"],"independent",["\u5177\u4f53\u6548\u679c"],"main"]]}}
+{{"cards":[[1,"\u7248\u578b\u663e\u7626","\u80a9\u5bbd\u4fee\u9970","\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536","\u539f\u56e0\u89e3\u91ca",["effect","evidence"],"independent",["\u5177\u4f53\u6548\u679c"],"main"]],"hook_pairs":[[1,2,"\u7248\u578b\u663e\u7626","\u4e0b\u4e00\u6bb5\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0"]]}}
 cards\u5b57\u6bb5\u987a\u5e8f:[\u5019\u9009\u7f16\u53f7,topic,subtopic,buyer_value,evidence_type,roles,dependency,quality_tags,tier]
+hook_pairs\u5b57\u6bb5\u987a\u5e8f:[Hook\u5019\u9009\u7f16\u53f7,\u627f\u63a5\u5019\u9009\u7f16\u53f7,\u4e3b\u9898,\u627f\u63a5\u7406\u7531]
 
 \u5b89\u5168\u5019\u9009\u5b57\u6bb5\u987a\u5e8f:[\u7f16\u53f7,\u6765\u6e90,\u65f6\u957f\u79d2,\u539f\u5b57\u5e55]
 {json.dumps(compact_inventory, ensure_ascii=False, separators=(',', ':'))}"""
@@ -886,6 +989,147 @@ def review_candidates(
         return bundle
     raise ContentReviewError(str(last_format_error or "\u5185\u5bb9\u5ba1\u7a3f\u683c\u5f0f\u5931\u8d25"))
 
+def _hook_pair_repair_prompts(
+    bundle: ContentReviewBundle,
+    inventory: Sequence[Mapping[str, Any]],
+    *,
+    category: str,
+    main_product: str,
+) -> tuple[str, str]:
+    """Build a small semantic review request without giving away story order."""
+    candidate_map = _candidate_map(inventory)
+    approved_cards: list[dict[str, Any]] = []
+    for card in bundle.cards:
+        candidate = candidate_map.get(card.candidate_id)
+        if not candidate:
+            continue
+        approved_cards.append({
+            "srt_index": card.candidate_id,
+            "source": _clean_text(candidate.get("source"), 24),
+            "duration_sec": round(float(candidate.get("duration_sec") or 0.0), 1),
+            "text": _clean_text(candidate.get("text"), 240),
+            "topic": card.topic,
+            "buyer_value": card.buyer_value,
+            "dependency": card.dependency,
+            "tier": card.tier,
+        })
+
+    system_prompt = (
+        "你是带货短视频的开头语义复核员，不是最终剪辑导演。"
+        "只从已经审稿通过的原字幕中找少量真实的Hook+紧接承接组合，绝不重写字幕、编造编号或安排全片顺序。"
+        "只输出一个紧凑JSON对象，不要Markdown或解释。"
+    )
+    user_prompt = (
+        f"品类:{category or '通用'}\n"
+        f"主商品:{main_product or '未指定'}\n"
+        "任务: 广审已经保留内容卡，但没有返回可验证的开头组合。请只做一次严格复核。\n"
+        "Hook必须是一句脱离直播上下文也完整成立的、具体的购买价值陈述，明确说出商品属性、效果、痛点、人群或使用场景中的至少一项。"
+        "下一段必须立即解释、证明或兑现同一项购买价值，不能只是换一个卖点。\n"
+        "绝对排除: 报尺码、个人身高体重试穿、问答互动、库存对话、价格/CTA、上新预告、展示铺垫、连接词开头、泛泛夸赞、"
+        "只说气场/高级/女总裁等空泛身份想象、半句、口头重复或没有商品购买信息的聊天。\n"
+        "若没有真正合格的组合，必须返回空数组，不得凑数。最多返回3组。\n"
+        "输出格式: {\"hook_pairs\":[[Hook编号,承接编号,\"主题\",\"承接如何兑现\"]]}\n"
+        "已审稿内容卡:\n"
+        + json.dumps(approved_cards, ensure_ascii=False, separators=(",", ":"))
+    )
+    return system_prompt, user_prompt
+
+
+def repair_hook_pairs(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    inventory: Sequence[Mapping[str, Any]],
+    bundle: ContentReviewBundle,
+    category: str = "",
+    main_product: str = "",
+    log_fn=None,
+) -> ContentReviewBundle:
+    """Run one focused Hook-pair review when the broad review returned none.
+
+    An empty successful response is meaningful and cached. Transport, JSON, or
+    validation failures leave the original bundle untouched so the caller can
+    use its normal non-blocking fallback behavior.
+    """
+    def log(message: str) -> None:
+        if log_fn:
+            log_fn(message)
+
+    if bundle.hook_pairs or bundle.hook_pair_reviewed:
+        return bundle
+
+    candidates = _candidate_map(inventory)
+    card_ids = {
+        card.candidate_id for card in bundle.cards
+        if card.candidate_id in candidates
+    }
+    if len(card_ids) < 2:
+        resolved = replace(bundle, hook_pair_reviewed=True)
+        _write_cache(resolved)
+        log("AI内容审稿: 内容卡不足两条，确认无可验证Hook组合")
+        return resolved
+
+    system_prompt, user_prompt = _hook_pair_repair_prompts(
+        bundle,
+        inventory,
+        category=category,
+        main_product=main_product,
+    )
+    last_error = ""
+    for attempt in range(2):
+        try:
+            log(
+                "AI内容审稿: 未找到Hook组合，启动Hook语义复核..."
+                if attempt == 0 else "AI内容审稿: Hook语义复核格式重试..."
+            )
+            content = _post_review_request(
+                api_key,
+                base_url,
+                model,
+                system_prompt,
+                user_prompt + (
+                    "\n上次响应格式无效。这次只能返回指定JSON对象。" if attempt else ""
+                ),
+            )
+            data = _extract_json_object(content)
+            raw_pairs = data.get("hook_pairs")
+            if not isinstance(raw_pairs, list):
+                raise ContentReviewError("Hook语义复核缺少hook_pairs数组")
+            pairs: list[HookPair] = []
+            seen: set[tuple[int, int]] = set()
+            for raw_pair in raw_pairs:
+                pair = _normalize_hook_pair(
+                    raw_pair,
+                    card_ids=card_ids,
+                    candidates=candidates,
+                )
+                if pair is None:
+                    continue
+                signature = (pair.hook_id, pair.followup_id)
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                pairs.append(pair)
+                if len(pairs) >= 3:
+                    break
+            resolved = replace(
+                bundle,
+                hook_pairs=tuple(pairs),
+                hook_pair_reviewed=True,
+            )
+            _write_cache(resolved)
+            log(
+                f"AI内容审稿: Hook语义复核完成，验证组合{len(resolved.hook_pairs)}组"
+            )
+            return resolved
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+
+    log(f"AI内容审稿: Hook语义复核未完成，保留原审稿结果（{last_error[:160]}）")
+    return bundle
+
+
 @dataclass(frozen=True)
 class FinalSequenceReview:
     status: str
@@ -1028,6 +1272,76 @@ def _normalize_final_sequence_review(
     )
 
 
+def _final_review_duration_estimate(
+    review: FinalSequenceReview,
+    duration_by_id: Mapping[int, float],
+) -> tuple[float, float]:
+    main_ids = {
+        int(candidate_id)
+        for item in review.clips
+        for candidate_id in item.get("srt_indices", [])
+    }
+    expansion_ids = {
+        int(candidate_id)
+        for item in review.expansion_plan
+        for candidate_id in item.get("srt_indices", [])
+        if int(candidate_id) not in main_ids
+    }
+    main_duration = sum(float(duration_by_id.get(candidate_id, 0.0)) for candidate_id in main_ids)
+    expansion_duration = sum(
+        float(duration_by_id.get(candidate_id, 0.0)) for candidate_id in expansion_ids
+    )
+    return main_duration, expansion_duration
+
+
+def _final_objective_issues(
+    sequence: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    if not sequence:
+        return ["\u7247\u5355\u4e3a\u7a7a"]
+    issues: list[str] = []
+    first_text = _clean_text(sequence[0].get("text"), 360)
+    compact_first = re.sub(r"[\s,\uff0c\u3002.!\uff01?\uff1f]", "", first_text)
+    if re.search(r"(?:\u60f3\u8981|\u9700\u8981|\u60f3\u770b).{0,24}\u7684[\u554a\u5440\u5462\u5427]?$", compact_first):
+        issues.append("\u5f53\u524dHook\u53ea\u53ec\u5524\u4eba\u7fa4\u9700\u6c42\uff0c\u6ca1\u6709\u8bf4\u660e\u5546\u54c1\u7ed3\u679c")
+    if re.search(r"\u60f3\u642d.{0,20}\u7ed9\u4f60\u770b\u4e00\u773c|\u5c31\u8fd9\u4e48\u642d", compact_first):
+        issues.append("\u5f53\u524dHook\u662f\u5c55\u793a\u94fa\u57ab\uff0c\u4e0d\u662f\u72ec\u7acb\u8d2d\u4e70\u4ef7\u503c")
+    if re.match(r"^(?:\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+\u70b9|\u8fd8\u6709(?:\u4e00\u70b9|\u4e00\u4e2a)|\u518d\u8bf4(?:\u4e00\u70b9|\u4e00\u4e2a))", compact_first):
+        issues.append("\u5f53\u524dHook\u4ece\u7f16\u53f7\u6216\u4e0a\u6587\u627f\u63a5\u5f00\u59cb\uff0c\u4e0d\u80fd\u72ec\u7acb\u6210\u7acb")
+    if re.search(
+        r"(?:\u4f1a\u663e\u5f97|\u4f1a\u8ba9|\u53ef\u4ee5\u628a|\u80fd\u591f\u628a).{0,18}"
+        r"(?:\u6240\u6709\u7684\u8089|\u6574\u4e2a|\u8fd9\u79cd|\u8fd9\u4e2a|\u90a3\u4e2a|\u4f60\u7684|\u5b83\u7684)$",
+        compact_first,
+    ):
+        issues.append("\u5f53\u524dHook\u7ed3\u5c3e\u8c13\u8bed\u6216\u7ed3\u679c\u672a\u8bf4\u5b8c")
+    if re.search(r"(?:\u7136\u540e|\u6240\u4ee5|\u56e0\u4e3a|\u4f46\u662f|\u800c\u4e14|\u5982\u679c|\u5c31\u4f1a|\u76f8\u5f53\u4e8e|\u5305\u62ec)$", compact_first):
+        issues.append("\u5f53\u524dHook\u4ee5\u8fde\u63a5\u6210\u5206\u6216\u672a\u5b8c\u6210\u7ed3\u6784\u7ed3\u675f")
+
+    production_pattern = re.compile(
+        r"\u5e2e\u6211\u6295\u56de|\u6295\u56de\u521a\u521a|\u8bbe\u8ba1\u70b9|\u5bfc\u64ad|\u5207\u56de|\u4e0a\u753b\u9762"
+    )
+    purchase_cta_pattern = re.compile(
+        r"(?:\u63a8\u8350|\u5efa\u8bae|\u503c\u5f97)(?:\u4f60\u4eec|\u5927\u5bb6|\u59d0\u59b9\u4eec)?(?:\u76f4\u63a5)?\u62cd(?!\u7167|\u6444)"
+    )
+    for order, item in enumerate(sequence, 1):
+        text = _clean_text(item.get("text"), 360)
+        duration = float(item.get("duration_sec") or 0.0)
+        interaction_reason = live_interaction_or_size_response_reason(text)
+        if interaction_reason:
+            issues.append(f"第{order}段含{interaction_reason}")
+        if order == 1 or str(item.get("clip_type") or "").lower() == "hook":
+            hook_reason = hook_ineligible_reason(text)
+            if hook_reason:
+                issues.append(f"第{order}段不可作Hook:{hook_reason}")
+        if production_pattern.search(text):
+            issues.append(f"\u7b2c{order}\u6bb5\u542b\u5bfc\u64ad/\u6295\u6d41/\u5207\u753b\u9762\u6307\u4ee4")
+        if purchase_cta_pattern.search(text):
+            issues.append(f"\u7b2c{order}\u6bb5\u542b\u63a8\u8350\u62cd\u5355\u7c7bCTA")
+        if str(item.get("clip_type") or "").lower() == "product" and duration > 12.0:
+            issues.append(f"\u7b2c{order}\u6bb5{duration:.1f}\u79d2\u8fc7\u957f\uff0c\u5e94\u6362\u6210\u66f4\u77ed\u7684\u5b8c\u6574\u5356\u70b9")
+    return list(dict.fromkeys(issues))
+
+
 def review_final_sequence(
     *,
     api_key: str,
@@ -1041,19 +1355,50 @@ def review_final_sequence(
     duration_low: float = 0.0,
     duration_high: float = 0.0,
     required_sources: Mapping[str, int] | None = None,
+    hook_pairs: Sequence[Mapping[str, Any]] = (),
+    allowed_hook_ids: Iterable[int] | None = None,
     log_fn=None,
 ) -> FinalSequenceReview:
     allowed_ids = {int(value) for value in allowed_candidate_ids}
-    compact_inventory = [
-        {
+    allowed_hook_set = {
+        int(value) for value in (allowed_hook_ids or [])
+        if str(value).strip().isdigit() and int(value) in allowed_ids
+    }
+    hook_pair_map: dict[int, int] = {}
+    for raw_pair in hook_pairs or ():
+        try:
+            hook_id = int(raw_pair.get("hook_id") or 0)
+            followup_id = int(raw_pair.get("followup_id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if hook_id in allowed_ids and followup_id in allowed_ids and hook_id != followup_id:
+            hook_pair_map[hook_id] = followup_id
+    compact_inventory = []
+    for item in inventory:
+        if int(item.get("srt_index") or 0) not in allowed_ids:
+            continue
+        compact_item = {
             "srt_index": int(item.get("srt_index") or 0),
             "source": _clean_text(item.get("source"), 24),
             "duration_sec": round(max(0.0, float(item.get("duration_sec") or 0.0)), 1),
             "text": _clean_text(item.get("text"), 240),
         }
-        for item in inventory
-        if int(item.get("srt_index") or 0) in allowed_ids
-    ]
+        for field, limit in (
+            ("topic", 40),
+            ("subtopic", 60),
+            ("buyer_value", 100),
+            ("evidence_type", 40),
+            ("dependency", 24),
+            ("tier", 12),
+        ):
+            value = _clean_text(item.get(field), limit)
+            if value:
+                compact_item[field] = value
+        for field in ("roles", "quality_tags"):
+            values = _clean_list(item.get(field), limit=5, item_limit=30)
+            if values:
+                compact_item[field] = list(values)
+        compact_inventory.append(compact_item)
     if not selected_sequence or not compact_inventory:
         raise ContentReviewError("\u6210\u7247\u7ec8\u5ba1\u7f3a\u5c11\u7247\u5355\u6216\u5019\u9009")
     candidate_durations = sorted(
@@ -1061,27 +1406,14 @@ def review_final_sequence(
         if float(item.get("duration_sec") or 0.0) > 0.0
     )
     typical_duration = candidate_durations[len(candidate_durations) // 2] if candidate_durations else 4.0
-    count_divisor = max(4.0, min(8.0, typical_duration))
-    recommended_min_clips = max(6, int(math.ceil(float(duration_low or 0.0) / count_divisor)))
+    recommended_min_clips = max(6, int(math.ceil(float(duration_low or 0.0) / 8.0)))
+    recommended_max_clips = max(
+        recommended_min_clips + 3,
+        int(math.ceil(float(duration_low or 0.0) / 5.0)),
+    )
     selected_duration = sum(float(item.get("duration_sec") or 0.0) for item in selected_sequence)
     inventory_duration = sum(candidate_durations)
-    known_issues: list[str] = []
-    first_text = _clean_text(selected_sequence[0].get("text"), 240)
-    compact_first = re.sub(r"[\s,\uff0c\u3002.!\uff01?\uff1f]", "", first_text)
-    if re.search(r"(?:\u60f3\u8981|\u9700\u8981|\u60f3\u770b).{0,24}\u7684[\u554a\u5440\u5462\u5427]?$", compact_first):
-        known_issues.append("\u5f53\u524dHook\u53ea\u53ec\u5524\u4eba\u7fa4\u9700\u6c42\uff0c\u6ca1\u6709\u8bf4\u660e\u5546\u54c1\u7ed3\u679c")
-    if re.search(r"\u60f3\u642d.{0,20}\u7ed9\u4f60\u770b\u4e00\u773c|\u5c31\u8fd9\u4e48\u642d", compact_first):
-        known_issues.append("\u5f53\u524dHook\u662f\u5c55\u793a\u94fa\u57ab\uff0c\u4e0d\u662f\u72ec\u7acb\u8d2d\u4e70\u4ef7\u503c")
-    production_pattern = re.compile(
-        r"\u5e2e\u6211\u6295\u56de|\u6295\u56de\u521a\u521a|\u8bbe\u8ba1\u70b9|\u5bfc\u64ad|\u5207\u56de|\u4e0a\u753b\u9762"
-    )
-    for order, item in enumerate(selected_sequence, 1):
-        text = _clean_text(item.get("text"), 240)
-        duration = float(item.get("duration_sec") or 0.0)
-        if production_pattern.search(text):
-            known_issues.append(f"\u7b2c{order}\u6bb5\u542b\u5bfc\u64ad/\u6295\u6d41/\u5207\u753b\u9762\u6307\u4ee4")
-        if str(item.get("clip_type") or "").lower() == "product" and duration > 12.0:
-            known_issues.append(f"\u7b2c{order}\u6bb5{duration:.1f}\u79d2\u8fc7\u957f\uff0c\u5e94\u6362\u6210\u66f4\u77ed\u7684\u5b8c\u6574\u5356\u70b9")
+    known_issues = _final_objective_issues(selected_sequence)
     known_issue_text = "\uff1b".join(dict.fromkeys(known_issues)) or "\u65e0\u7a0b\u5e8f\u9884\u6807\u8bb0\uff0c\u4ecd\u9700\u4f60\u901a\u8bfb\u5224\u65ad"
 
     system_prompt = (
@@ -1097,19 +1429,39 @@ def review_final_sequence(
             f"{source}\u81f3\u5c11{max(1, int(count or 1))}\u6bb5"
             for source, count in sorted(required_sources.items())
         )
+    hook_pair_rule = ""
+    if hook_pair_map:
+        pair_text = "\u3001".join(
+            f"#{hook_id}->#{followup_id}"
+            for hook_id, followup_id in sorted(hook_pair_map.items())
+        )
+        hook_pair_rule = (
+            "\u5ba1\u7a3fHook\u5408\u540c:" + pair_text
+            + "\u3002\u82e5\u4fee\u8ba2\u7247\u5355\uff0cHook\u5fc5\u987b\u4ec5\u4f7f\u7528\u5de6\u4fa7\u7f16\u53f7\uff0c"
+            "\u7b2c2\u6bb5\u5fc5\u987b\u7d27\u63a5\u4f7f\u7528\u5bf9\u5e94\u53f3\u4fa7\u7f16\u53f7\u3002\u4e0d\u5f97\u53e6\u9009\u5f00\u5934\u3002\n"
+        )
+    elif allowed_hook_set:
+        hook_pair_rule = (
+            "Strict Hook ID contract: "
+            + ", ".join(f"#{value}" for value in sorted(allowed_hook_set))
+            + ". A revised sequence may use only one of these IDs as its first Hook; do not choose another reviewed line as the opening.\n"
+        )
     user_prompt = (
         f"\u54c1\u7c7b:{category or '\u901a\u7528'}\n"
         f"\u504f\u597d\u4e3b\u7ebf:{preference or '\u81ea\u52a8'}\n"
         f"\u539f\u7247\u65f6\u957f\u5408\u540c:{float(duration_low):.1f}-{float(duration_high):.1f}\u79d2\n"
         f"\u5f53\u524d\u7247\u5355\u539f\u7247\u5408\u8ba1:{selected_duration:.1f}\u79d2\uff1b\u5168\u90e8\u5ba1\u7a3f\u5019\u9009\u5408\u8ba1:{inventory_duration:.1f}\u79d2\uff1b"
-        f"\u82e5revise\u5efa\u8bae\u81f3\u5c11{recommended_min_clips}\u4e2a\u7247\u6bb5\uff0c\u6700\u7ec8\u4ee5\u6309inventory.duration_sec\u9010\u9879\u5b9e\u7b97\u8fbe\u5230\u4e0b\u9650\u4e3a\u51c6\n"
+        f"\u82e5revise\u5efa\u8bae\u7ea6{recommended_min_clips}-{recommended_max_clips}\u4e2a\u7247\u6bb5\uff0c\u4f18\u5148\u75282-3\u4e2a\u8fde\u7eed\u4e14\u8bed\u4e49\u5bc6\u5207\u7684\u5019\u9009\u7ec4\u62106-10\u79d2\u5b8c\u6574\u7247\u6bb5\uff0c"
+        "\u4e0d\u8981\u4e3a\u51d1\u65f6\u957f\u62c6\u6210\u5927\u91cf2-3\u79d2\u788e\u53e5\uff1b\u6700\u7ec8\u4ee5\u6309inventory.duration_sec\u9010\u9879\u5b9e\u7b97\u8fbe\u5230\u4e0b\u9650\u4e3a\u51c6\n"
         f"\u7a0b\u5e8f\u9884\u6807\u8bb0\u95ee\u9898:{known_issue_text}\n"
         f"{source_rule}\n"
+        f"{hook_pair_rule}"
         "\u7ec8\u5ba1\u6807\u51c6:\n"
         "1. Hook\u5fc5\u987b\u8131\u79bb\u4e0a\u4e0b\u6587\u4e5f\u80fd\u72ec\u7acb\u8bf4\u5b8c\u4e00\u4e2a\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c\uff0c\u7b2c2\u6bb5\u5fc5\u987b\u7acb\u5373\u89e3\u91ca\u3001\u8bc1\u660e\u6216\u5151\u73b0\u5b83\u3002\u201c\u60f3\u8981X\u7684\u201d\u3001\u201c\u9700\u8981X\u7684\u201d\u53ea\u662f\u53ec\u5524\u4eba\u7fa4\uff0c\u6ca1\u6709\u8bf4\u660e\u5546\u54c1\u5982\u4f55\u89e3\u51b3\u95ee\u9898\uff0c\u4e0d\u662fHook\u3002"
         "\u201c\u60f3\u770bX\u5c31\u7ed9\u4f60\u770b\u4e00\u773c\u201d\u3001\u201c\u5c31\u8fd9\u4e48\u642d\u201d\u7c7b\u5c55\u793a\u94fa\u57ab\u4e0d\u662fHook\u3002\n"
         "2. \u5220\u6389\u660e\u663eASR\u4e71\u7801\u3001\u534a\u53e5\u3001\u6307\u4ee3\u4e0d\u660e\u3001\u7eaf\u4e92\u52a8\u3001\u5bfc\u64ad/\u6295\u6d41/\u5207\u753b\u9762\u6307\u4ee4\u3001\u4e0e\u8d2d\u4e70\u4ef7\u503c\u65e0\u5173\u7684\u73a9\u7b11\u548c\u7a7a\u6d1e\u5938\u8d5e\u3002\n"
         "3. \u540c\u4e49\u91cd\u590d\u53ea\u7559\u6700\u5b8c\u6574\u3001\u6700\u5177\u4f53\u7684\u8868\u8fbe\uff1b\u504f\u597d\u662f\u4e3b\u7ebf\u800c\u4e0d\u662f\u552f\u4e00\u4e3b\u9898\uff0c\u6b63\u6587\u5e94\u8986\u76d6\u81f3\u5c113\u4e2a\u6709\u8bc1\u636e\u7684\u5356\u70b9\u89d2\u5ea6\u3002\n"
+        "inventory\u5df2\u63d0\u4f9btopic/subtopic/buyer_value/evidence_type/tier\uff1b\u76f8\u540csubtopic\u539f\u5219\u4e0a\u4e0d\u8d85\u8fc72\u4e2a\u7247\u6bb5\uff0c\u8bed\u4e49\u76f8\u8fd1\u65f6\u4f18\u5148main\u7ea7\u3001\u8bc1\u636e\u5177\u4f53\u4e14\u53e5\u5b50\u5b8c\u6574\u7684\u5019\u9009\u3002\n"
         "4. \u76f8\u90bb\u7247\u6bb5\u8981\u80fd\u81ea\u7136\u542c\u61c2\uff0c\u7ed3\u5c3e\u5fc5\u987b\u662f\u81ea\u7136\u603b\u7ed3\u6216\u9009\u62e9\u7406\u7531\uff0c\u4e0d\u5f97\u4ee5\u6b8b\u53e5\u3001\u7eaf\u5c3a\u7801\u6216\u65e0\u5173\u5bf9\u8bdd\u7ed3\u675f\u3002\n"
         "5. revise\u5fc5\u987b\u4fdd\u6301\u65f6\u957f\u5408\u540c\u548c\u6df7\u526a\u6765\u6e90\u6700\u4f4e\u8981\u6c42\uff0c\u53ea\u67091\u4e2aHook\u4e14\u5728\u9996\u6bb5\uff0cClose\u5982\u5b58\u5728\u53ea\u80fd\u5728\u672b\u6bb5\u3002\u4fee\u8ba2\u4e0d\u5f97\u53ea\u5220\u7247\uff1b\u5148\u4fdd\u7559\u5f53\u524d\u7247\u5355\u4e2d\u7684\u4f18\u8d28\u9aa8\u67b6\uff0c\u518d\u4eceinventory\u66ff\u6362\u3001\u8865\u8db3\u4e0d\u540c\u5356\u70b9\u3002\u8f93\u51fa\u524d\u5fc5\u987b\u5728\u5185\u90e8\u9010\u9879\u76f8\u52a0duration_sec\uff0c\u4f4e\u4e8e\u4e0b\u9650\u65f6\u7ee7\u7eed\u8865\u5165\u5b8c\u6574\u9ad8\u8d28\u91cf\u7247\u6bb5\uff0c\u4e0d\u5f97\u63d0\u4ea4\u65f6\u957f\u4e0d\u8db3\u7684revise\u3002\u53ea\u8981\u7a0b\u5e8f\u9884\u6807\u8bb0\u4e86\u95ee\u9898\uff0c\u5c31\u7981\u6b62pass\uff0crevise\u5fc5\u987b\u81f3\u5c11\u66f4\u6362\u3001\u5220\u9664\u6216\u91cd\u63921\u4e2a\u7f16\u53f7\uff0c\u4e0d\u5f97\u539f\u6837\u4ea4\u5377\u3002\n"
         "6. revise\u9664\u5b8c\u6574clips\u5916\uff0c\u8fd8\u5fc5\u987b\u8f93\u51fa4-8\u4e2aexpansion_plan\u5907\u7528Product\u3002\u5907\u7528\u7247\u4e0d\u5f97\u4e0eclips\u91cd\u590d\uff0cpriority\u4ece1\u5f00\u59cb\u4e14\u4e0d\u91cd\u590d\uff1bafter_srt_indices\u5fc5\u987b\u7cbe\u786e\u6307\u5411clips\u4e2d\u7684\u975eClose\u7247\u6bb5\uff0c\u8868\u793a\u5e94\u63d2\u5728\u8be5\u6bb5\u4e4b\u540e\u3002\u5907\u7528\u7247\u4e5f\u5fc5\u987b\u5b8c\u6574\u3001\u5e72\u51c0\u3001\u5177\u4f53\uff0c\u5e76\u6309\u5bf9\u53d9\u4e8b\u7684\u5e2e\u52a9\u6392\u5e8f\u3002\n"
@@ -1126,8 +1478,136 @@ def review_final_sequence(
         + "\n\u5168\u90e8\u53ef\u7528\u5019\u9009:\n"
         + json.dumps(compact_inventory, ensure_ascii=False, separators=(",", ":"))
     )
-    if log_fn:
-        log_fn("AI\u6210\u7247\u7ec8\u5ba1: \u8c03\u7528\u6a21\u578b...")
-    content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
-    data = _extract_json_object(content)
-    return _normalize_final_sequence_review(data, allowed_candidate_ids=allowed_ids)
+    duration_by_id = {
+        int(item["srt_index"]): float(item.get("duration_sec") or 0.0)
+        for item in compact_inventory
+    }
+    correction = ""
+    last_error = ""
+    for attempt in range(2):
+        if log_fn:
+            label = "\u8c03\u7528\u6a21\u578b" if attempt == 0 else "\u5408\u540c\u7ea0\u6b63\u91cd\u8bd5"
+            log_fn(f"AI\u6210\u7247\u7ec8\u5ba1: {label}...")
+        content = _post_review_request(
+            api_key,
+            base_url,
+            model,
+            system_prompt,
+            user_prompt + correction,
+        )
+        try:
+            data = _extract_json_object(content)
+            review = _normalize_final_sequence_review(
+                data,
+                allowed_candidate_ids=allowed_ids,
+            )
+            contract_issues: list[str] = []
+            if review.status == "pass" and known_issues:
+                contract_issues.append(
+                    "\u5df2\u6709\u5ba2\u89c2\u95ee\u9898\u9884\u6807\u8bb0\uff0c\u4e0d\u5141\u8bb8pass"
+                )
+            if review.status == "revise":
+                if hook_pair_map:
+                    first = review.clips[0] if review.clips else {}
+                    second = review.clips[1] if len(review.clips) > 1 else {}
+                    first_indices = list(first.get("srt_indices") or [])
+                    second_indices = list(second.get("srt_indices") or [])
+                    hook_id = first_indices[0] if len(first_indices) == 1 else 0
+                    expected_followup = hook_pair_map.get(int(hook_id or 0))
+                    if (
+                        str(first.get("clip_type") or "").lower() != "hook"
+                        or not expected_followup
+                        or second_indices != [expected_followup]
+                    ):
+                        contract_issues.append(
+                            "\u7ec8\u5ba1Hook\u672a\u9075\u5b88\u5ba1\u7a3f\u7684Hook+\u627f\u63a5\u7f16\u53f7\u5408\u540c"
+                        )
+                if not hook_pair_map and allowed_hook_set:
+                    first = review.clips[0] if review.clips else {}
+                    first_indices = list(first.get("srt_indices") or [])
+                    hook_id = first_indices[0] if len(first_indices) == 1 else 0
+                    if (
+                        str(first.get("clip_type") or "").lower() != "hook"
+                        or hook_id not in allowed_hook_set
+                    ):
+                        contract_issues.append(
+                            "final review selected a Hook outside the strict candidate contract"
+                        )
+                main_duration, expansion_duration = _final_review_duration_estimate(
+                    review,
+                    duration_by_id,
+                )
+                combined_duration = main_duration + expansion_duration
+                if duration_low > 0 and main_duration + 0.05 < float(duration_low):
+                    minimum_skeleton = float(duration_low) * 0.75
+                    if main_duration + 0.05 < minimum_skeleton:
+                        contract_issues.append(
+                            f"clips\u4e3b\u7247\u5355\u4ec5{main_duration:.1f}\u79d2\uff0c"
+                            f"\u4f4e\u4e8e\u7a33\u5b9a\u53d9\u4e8b\u9aa8\u67b6{minimum_skeleton:.1f}\u79d2"
+                        )
+                if duration_high > 0 and main_duration - 0.05 > float(duration_high):
+                    contract_issues.append(
+                        f"clips\u4e3b\u7247\u5355{main_duration:.1f}\u79d2\uff0c"
+                        f"\u8d85\u8fc7\u4e0a\u9650{float(duration_high):.1f}\u79d2"
+                    )
+                if duration_low > 0 and combined_duration + 0.05 < float(duration_low):
+                    contract_issues.append(
+                        f"clips\u4e0e\u5168\u90e8expansion_plan\u5408\u8ba1\u4ec5"
+                        f"{combined_duration:.1f}\u79d2"
+                    )
+                inventory_by_id = {
+                    int(item["srt_index"]): item for item in compact_inventory
+                }
+                revised_sequence = []
+                for item in review.clips:
+                    selected_items = [
+                        inventory_by_id[candidate_id]
+                        for candidate_id in item.get("srt_indices", [])
+                        if candidate_id in inventory_by_id
+                    ]
+                    revised_sequence.append({
+                        "clip_type": item.get("clip_type"),
+                        "duration_sec": sum(
+                            float(candidate.get("duration_sec") or 0.0)
+                            for candidate in selected_items
+                        ),
+                        "text": " ".join(
+                            _clean_text(candidate.get("text"), 240)
+                            for candidate in selected_items
+                        ),
+                    })
+                revised_objective_issues = _final_objective_issues(revised_sequence)
+                if revised_objective_issues:
+                    contract_issues.append(
+                        "\u4fee\u8ba2\u7247\u5355\u4ecd\u6709\u5ba2\u89c2\u95ee\u9898:"
+                        + "\u3001".join(revised_objective_issues[:4])
+                    )
+            if not contract_issues:
+                return review
+            last_error = "\uff1b".join(contract_issues)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+
+        if attempt == 0:
+            safety_margin = min(8.0, max(3.0, float(duration_low or 0.0) * 0.05))
+            target_floor = float(duration_low or 0.0) + safety_margin
+            skeleton_floor = float(duration_low or 0.0) * 0.8
+            previous = _clean_text(content, 12000)
+            correction = (
+                "\n\u4e0a\u4e00\u6b21\u7ec8\u5ba1\u8f93\u51fa\u672a\u901a\u8fc7\u673a\u5668\u53ef\u9a8c\u8bc1\u5408\u540c:"
+                + last_error
+                + "\u3002\n\u8bf7\u91cd\u65b0\u8f93\u51fa\u5b8c\u6574JSON\u3002revise\u65f6clips\u4e3b\u7247\u5355\u4f18\u5148\u8fbe\u5230"
+                + f"{target_floor:.1f}\u79d2\u5de6\u53f3\uff0c\u4e14\u4e0d\u5f97\u8d85\u8fc7{float(duration_high or 0.0):.1f}\u79d2;"
+                f"\u82e5\u4e3a\u4fdd\u8bc1\u8bed\u53e5\u8d28\u91cf\u9700\u8981\u7559\u51fa\u8865\u7247\u7a7a\u95f4\uff0cclips\u4e0d\u5f97\u4f4e\u4e8e{skeleton_floor:.1f}\u79d2\uff0c"
+                f"\u4e14clips\u4e0eexpansion_plan\u5408\u8ba1\u5fc5\u987b\u81f3\u5c11{target_floor:.1f}\u79d2\u3002"
+                "\u5148\u4fdd\u7559\u539f\u7247\u5355\u4e2d\u6ca1\u6709\u95ee\u9898\u7684\u9aa8\u67b6\uff0c\u518d\u66ff\u6362\u88ab\u6807\u8bb0\u7684Hook\u3001\u957f\u6bb5\u6216\u5bfc\u64ad\u8bdd\u672f;"
+                f"\u5efa\u8baeclips\u7ea6{recommended_min_clips}-{recommended_max_clips}\u6bb5\uff0c\u4e0d\u5f97\u7528\u5927\u91cf\u788e\u53e5\u51d1\u65f6\u957f\u3002\n"
+                "\u4e0a\u4e00\u6b21\u65e0\u6548\u8f93\u51fa:\n"
+                + previous
+            )
+            if log_fn:
+                log_fn(f"AI\u6210\u7247\u7ec8\u5ba1: {last_error}\uff0c\u4ea4\u56deAI\u505a\u4e00\u6b21\u5408\u540c\u7ea0\u6b63")
+            continue
+        raise ContentReviewError(f"\u6210\u7247\u7ec8\u5ba1\u5408\u540c\u7ea0\u6b63\u5931\u8d25: {last_error}")
+
+    raise ContentReviewError(f"\u6210\u7247\u7ec8\u5ba1\u5931\u8d25: {last_error}")

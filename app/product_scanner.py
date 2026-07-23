@@ -691,11 +691,13 @@ class ProductScanner:
             ranges = [(max(0, product.get("start", 0) - 0.5), product.get("end", 0) + 0.5)]
 
         # If multi-segment: extract each part to temp, concat into final file
+        output_paths = []
         if len(ranges) > 1:
             import tempfile
             tmp_dir = os.path.join(output_dir, ".concat_tmp_" + short_name)
             os.makedirs(tmp_dir, exist_ok=True)
             tmp_files = []
+            out = ""
             try:
                 for si, (st, ed) in enumerate(ranges):
                     dur = ed - st
@@ -757,7 +759,7 @@ class ProductScanner:
                 except Exception:
                     _LOG.warning("unexpected error", exc_info=True)
                     pass
-                return output_paths if output_paths else [out if os.path.exists(out) else ""]
+                return output_paths or ([out] if out and os.path.exists(out) else [])
 
             except Exception:
                 try:

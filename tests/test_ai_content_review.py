@@ -115,7 +115,8 @@ class ContentReviewValidationTests(unittest.TestCase):
         original = json.loads(json.dumps(inventory, ensure_ascii=False))
         bundle = self._validate(_review_payload(include_unknown=True), inventory)
         self.assertEqual([card.candidate_id for card in bundle.cards], [1, 2, 3, 4])
-        self.assertEqual(len(bundle.hook_pairs), 0)
+        self.assertEqual(len(bundle.hook_pairs), 1)
+        self.assertEqual((bundle.hook_pairs[0].hook_id, bundle.hook_pairs[0].followup_id), (1, 2))
         self.assertEqual(inventory, original)
         self.assertNotIn("public_score", bundle.cards[0].to_dict())
         self.assertEqual(bundle.cards[0].evidence_quote, "肩线会往里收")
@@ -147,8 +148,9 @@ class ContentReviewValidationTests(unittest.TestCase):
         ]
         bundle = self._validate(payload)
         self.assertEqual([card.candidate_id for card in bundle.cards], [1, 2, 3, 4])
-        self.assertEqual(len(bundle.hook_pairs), 0)
-    def test_legacy_hook_pairs_are_ignored(self) -> None:
+        self.assertEqual(len(bundle.hook_pairs), 1)
+
+    def test_invalid_hook_pairs_are_ignored(self) -> None:
         payload = _review_payload()
         payload["hook_pairs"] = [
             {"hook_id": 99, "followup_id": 1},
@@ -156,6 +158,20 @@ class ContentReviewValidationTests(unittest.TestCase):
         bundle = self._validate(payload)
         self.assertEqual(bundle.hook_pairs, ())
         self.assertTrue(all("hook" not in card.roles for card in bundle.cards))
+
+    def test_hook_pairs_must_reference_real_reviewed_cards_and_be_safe(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = "我一米六体重98穿S码"
+        payload = _review_payload()
+        payload["hook_pairs"] = [
+            {"hook_id": 1, "followup_id": 2, "topic": "版型显瘦", "reason": "个人尺码"},
+            {"hook_id": 2, "followup_id": 2, "topic": "版型显瘦", "reason": "同一编号"},
+            {"hook_id": 2, "followup_id": 3, "topic": "版型显瘦", "reason": "有效"},
+            {"hook_id": 2, "followup_id": 3, "topic": "版型显瘦", "reason": "重复"},
+            {"hook_id": 2, "followup_id": 99, "topic": "版型显瘦", "reason": "未知编号"},
+        ]
+        bundle = self._validate(payload, inventory)
+        self.assertEqual([(pair.hook_id, pair.followup_id) for pair in bundle.hook_pairs], [(2, 3)])
     def test_invalid_and_duplicate_ids_never_enter_cards(self) -> None:
         payload = _review_payload()
         payload["cards"].insert(1, dict(payload["cards"][0]))
@@ -327,7 +343,46 @@ class ContentReviewValidationTests(unittest.TestCase):
             source_topic_counts[key] = source_topic_counts.get(key, 0) + 1
         self.assertTrue(all(count <= 4 for count in main_counts.values()))
         self.assertTrue(all(count <= 2 for count in source_topic_counts.values()))
-        self.assertEqual(len(bundle.hook_pairs), 0)
+        self.assertEqual(len(bundle.hook_pairs), 4)
+class ContentReviewDirectorContractTests(unittest.TestCase):
+    def test_review_hook_pair_requires_its_immediate_followup(self) -> None:
+        entries = [
+            (0.0, 2.0, "\u8fd9\u4ef6\u4e0a\u8eab\u80a9\u7ebf\u4f1a\u5411\u5185\u6536\uff0c\u770b\u8d77\u6765\u66f4\u5229\u843d\u3002"),
+            (2.0, 4.0, "\u80a9\u90e8\u7684\u9ed1\u8272\u7f16\u7ec7\u7ebf\u628a\u89c6\u89c9\u91cd\u5fc3\u5411\u5185\u6536\u3002"),
+            (4.0, 6.0, "\u901a\u52e4\u642d\u897f\u88c5\uff0c\u5468\u672b\u642d\u725b\u4ed4\u88e4\u90fd\u80fd\u7a7f\u3002"),
+        ]
+        invalid = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [3]},
+        ])
+        self.assertEqual(
+            ai_clipper._parse_ai_response(
+                invalid,
+                None,
+                entries,
+                require_srt_indices=True,
+                allowed_hook_indices={1},
+                allowed_candidate_indices={1, 2, 3},
+                required_hook_followups={1: 2},
+            ),
+            [],
+        )
+        valid = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [2]},
+        ])
+        clips = ai_clipper._parse_ai_response(
+            valid,
+            None,
+            entries,
+            require_srt_indices=True,
+            allowed_hook_indices={1},
+            allowed_candidate_indices={1, 2, 3},
+            required_hook_followups={1: 2},
+        )
+        self.assertEqual([clip[0] for clip in clips], ["hook", "product"])
+
+
 class ContentReviewCacheTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -382,6 +437,89 @@ class ContentReviewCacheTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertFalse(first.cache_hit)
         self.assertTrue(second.cache_hit)
+
+    def test_empty_broad_review_gets_one_focused_hook_pair_repair_and_caches_it(self) -> None:
+        broad_payload = _review_payload()
+        broad_payload["hook_pairs"] = []
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps(broad_payload, ensure_ascii=False),
+        ):
+            bundle = self._review()
+
+        repair_payload = {"hook_pairs": [[1, 2, "版型显瘦", "下一句解释肩线内收"]]}
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps(repair_payload, ensure_ascii=False),
+        ) as request:
+            repaired = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=_inventory(),
+                bundle=bundle,
+                category="上衣",
+                main_product="T恤",
+            )
+        self.assertEqual(request.call_count, 1)
+        self.assertTrue(repaired.hook_pair_reviewed)
+        self.assertEqual(
+            [(pair.hook_id, pair.followup_id) for pair in repaired.hook_pairs],
+            [(1, 2)],
+        )
+
+        with mock.patch.object(content_review, "_post_review_request") as request:
+            cached = self._review()
+            repeat = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=_inventory(),
+                bundle=cached,
+                category="上衣",
+                main_product="T恤",
+            )
+        request.assert_not_called()
+        self.assertTrue(cached.cache_hit)
+        self.assertTrue(repeat.hook_pair_reviewed)
+        self.assertEqual([(pair.hook_id, pair.followup_id) for pair in repeat.hook_pairs], [(1, 2)])
+
+    def test_empty_focused_repair_is_cached_without_repeating_the_api_call(self) -> None:
+        broad_payload = _review_payload()
+        broad_payload["hook_pairs"] = []
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps(broad_payload, ensure_ascii=False),
+        ):
+            bundle = self._review()
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps({"hook_pairs": []}),
+        ) as request:
+            repaired = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=_inventory(),
+                bundle=bundle,
+            )
+        self.assertEqual(request.call_count, 1)
+        self.assertTrue(repaired.hook_pair_reviewed)
+        self.assertEqual(repaired.hook_pairs, ())
+        with mock.patch.object(content_review, "_post_review_request") as request:
+            repeated = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=_inventory(),
+                bundle=repaired,
+            )
+        request.assert_not_called()
+        self.assertEqual(repeated, repaired)
 
     def test_cache_key_changes_for_contract_category_product_avoid_or_model(self) -> None:
         base = content_review.build_cache_key("d", "上衣", "T恤", ["价格"], "m")
@@ -574,6 +712,207 @@ class FinalSequenceReviewTests(unittest.TestCase):
         self.assertEqual(result.clips, ())
         self.assertEqual(request.call_count, 1)
 
+    def test_final_review_retries_when_revised_main_list_is_too_short(self) -> None:
+        short_response = json.dumps({
+            "status": "revise",
+            "issues": ["replace weak hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+            "expansion_plan": [
+                {
+                    "priority": 1,
+                    "after_srt_indices": [2],
+                    "srt_indices": [3],
+                }
+            ],
+        }, ensure_ascii=False)
+        corrected_response = json.dumps({
+            "status": "revise",
+            "issues": ["replace weak hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+                {"clip_type": "close", "srt_indices": [3]},
+            ],
+            "expansion_plan": [
+                {
+                    "priority": 1,
+                    "after_srt_indices": [2],
+                    "srt_indices": [4],
+                }
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            side_effect=[short_response, corrected_response],
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=30.0,
+                duration_high=50.0,
+            )
+        self.assertEqual(result.status, "revise")
+        self.assertEqual(len(result.clips), 3)
+        self.assertEqual(request.call_count, 2)
+        self.assertIn("clips\u4e3b\u7247\u5355\u4ec5", request.call_args_list[1].args[4])
+
+    def test_final_review_cannot_replace_the_reviewed_hook_pair(self) -> None:
+        invalid = json.dumps({
+            "status": "revise",
+            "issues": ["replace hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [3]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+        }, ensure_ascii=False)
+        corrected = json.dumps({
+            "status": "revise",
+            "issues": ["keep reviewed opening"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            side_effect=[invalid, corrected],
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=20.0,
+                duration_high=50.0,
+                hook_pairs=[{"hook_id": 1, "followup_id": 2}],
+            )
+        self.assertEqual(result.clips[0]["srt_indices"], [1])
+        self.assertEqual(result.clips[1]["srt_indices"], [2])
+        self.assertEqual(request.call_count, 2)
+
+    def test_final_review_cannot_escape_strict_fallback_hook_ids(self) -> None:
+        invalid = json.dumps({
+            "status": "revise",
+            "issues": ["replace hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [3]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+        }, ensure_ascii=False)
+        corrected = json.dumps({
+            "status": "revise",
+            "issues": ["keep safe fallback"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            side_effect=[invalid, corrected],
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=20.0,
+                duration_high=50.0,
+                allowed_hook_ids={1},
+            )
+        self.assertEqual(result.clips[0]["srt_indices"], [1])
+        self.assertEqual(request.call_count, 2)
+
+    def test_final_review_accepts_ai_anchored_expansion_for_small_deficit(self) -> None:
+        response = json.dumps({
+            "status": "revise",
+            "issues": ["replace weak hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+                {"clip_type": "close", "srt_indices": [3]},
+            ],
+            "expansion_plan": [
+                {
+                    "priority": 1,
+                    "after_srt_indices": [2],
+                    "srt_indices": [4],
+                }
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=response,
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=35.0,
+                duration_high=50.0,
+            )
+        self.assertEqual(result.status, "revise")
+        self.assertEqual(len(result.expansion_plan), 1)
+        self.assertEqual(request.call_count, 1)
+
+    def test_final_review_retries_pass_when_objective_issue_is_preflagged(self) -> None:
+        selected = self._selected()
+        selected[0]["text"] = "\u60f3\u8981\u663e\u7626\u7684"
+        pass_response = json.dumps(
+            {"status": "pass", "issues": [], "clips": []},
+            ensure_ascii=False,
+        )
+        corrected_response = json.dumps({
+            "status": "revise",
+            "issues": ["\u66ff\u6362\u5f31Hook"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [2]},
+            ],
+            "expansion_plan": [
+                {
+                    "priority": 1,
+                    "after_srt_indices": [2],
+                    "srt_indices": [3],
+                }
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            side_effect=[pass_response, corrected_response],
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=selected,
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=20.0,
+                duration_high=50.0,
+            )
+        self.assertEqual(result.status, "revise")
+        self.assertEqual(request.call_count, 2)
+
     def test_final_review_revision_is_full_grounded_list(self) -> None:
         response = json.dumps({
             "status": "revise",
@@ -703,7 +1042,9 @@ class FinalSequenceReviewTests(unittest.TestCase):
     def test_cta_asr_variants_are_hard_blocked_without_blocking_photography(self) -> None:
         self.assertTrue(ai_clipper._is_safety_blocked_text("姐妹们赶紧去来拍"))
         self.assertTrue(ai_clipper._is_safety_blocked_text("喜欢就拍这一套"))
+        self.assertTrue(ai_clipper._is_safety_blocked_text("这套我推荐你们拍的点是它很藏肉"))
         self.assertNotIn("CTA拍单变体", ai_clipper._content_safety_pattern_matches("这套很适合去拍照"))
+        self.assertFalse(ai_clipper._is_safety_blocked_text("这套我很推荐拍照穿"))
 
 if __name__ == "__main__":
     unittest.main()

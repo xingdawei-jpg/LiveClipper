@@ -817,6 +817,19 @@ def get_ffmpeg_cmd():
     return "ffmpeg"
 
 
+def _create_processing_temp_dir(prefix="lc_temp_"):
+    """Create per-job scratch space under the user-selected data directory."""
+    try:
+        import config as _config
+
+        cache_root = os.path.join(str(_config.USER_DATA_DIR), "cache", "processing")
+        os.makedirs(cache_root, exist_ok=True)
+        return tempfile.mkdtemp(prefix=prefix, dir=cache_root)
+    except Exception:
+        _LOG.warning("failed to create managed processing cache; using system temp", exc_info=True)
+        return tempfile.mkdtemp(prefix=prefix)
+
+
 # ============================================================
 # 去重逻辑（保持不变）
 # ============================================================
@@ -1025,9 +1038,19 @@ def _selection_shortage_grace_seconds(analysis_metadata):
     if not relaxation.get("applied"):
         return 0.0
     try:
+        reported_grace = max(0.0, float(relaxation.get("grace_seconds") or 0.0))
+        if relaxation.get("policy") == "safe_best_effort_v1":
+            standard_low = float(relaxation.get("standard_final_min") or 0.0)
+            relaxed_low = float(relaxation.get("relaxed_final_min") or 0.0)
+            if standard_low <= 1.0 or relaxed_low < 1.0 or relaxed_low > standard_low:
+                return 0.0
+            derived_grace = standard_low - relaxed_low
+            if abs(reported_grace - derived_grace) > 1.0:
+                return 0.0
+            return min(max(reported_grace, derived_grace), standard_low - 1.0)
         return min(
             float(SHORTAGE_GRACE_SECONDS),
-            max(0.0, float(relaxation.get("grace_seconds") or 0.0)),
+            reported_grace,
         )
     except (TypeError, ValueError):
         return 0.0
@@ -2698,7 +2721,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     # 4. 切割 + 去重 + 字幕叠加
     ffmpeg = get_ffmpeg_cmd()
     cfg = VIDEO_CONFIG
-    temp_dir = tempfile.mkdtemp(prefix="lc_temp_", dir="C:\\")
+    temp_dir = _create_processing_temp_dir()
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     video_path = _remux_ts_for_editing(video_path, temp_dir, ffmpeg, _log)
     # 动态检测源视频分辨率，短边=宽，长边=宽*16/9，偶数对齐
@@ -3644,7 +3667,11 @@ def process_video(video_path, srt_path=None, output_path=None,
     _run_log["选片"] = report
     _run_log["输出"] = output_path
     _save_run_log()
-    return {"ok": True, "report": report}
+    return {
+        "ok": True,
+        "report": report,
+        "analysis_metadata": dict(analysis_metadata or {}),
+    }
 
 
 # 兼容旧接口
@@ -5102,7 +5129,11 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             _LOG.warning("unexpected error", exc_info=True)
             pass
     
-    return {"ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results), "版本数": len(results)}
+    return {
+        "ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results),
+        "版本数": len(results),
+        "analysis_metadata": dict(_multi_result_cache.get("analysis_metadata") or {}),
+    }
 
 
 def _process_version_with_clips(video_path, srt_path, output_path,
@@ -5245,8 +5276,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
 
     # Temp dir
-    tmp = os.path.join("C:\\", "lc_temp_mix_" + os.urandom(4).hex())
-    os.makedirs(tmp, exist_ok=True)
+    tmp = _create_processing_temp_dir(prefix="lc_temp_mix_")
 
     out_dir = os.path.dirname(output_path) if output_path else os.path.join(os.path.dirname(original_video_list[0]), "mix_output")
     os.makedirs(out_dir, exist_ok=True)
@@ -6602,4 +6632,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _log(f"  Size: {final_mb:.1f}MB")
     _log(f"  混剪总用时: {_elapsed_text}")
 
-    return {"ok": True, "output_path": final, "clips": len(sorted_clips), "sources": len(video_list), "size_mb": final_mb}
+    return {
+        "ok": True,
+        "output_path": final,
+        "clips": len(sorted_clips),
+        "sources": len(video_list),
+        "size_mb": final_mb,
+        "analysis_metadata": dict(analysis_metadata or {}),
+    }

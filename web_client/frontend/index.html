@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260713-video-list-readable">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260723-ai-workbench-v11">
 </head>
 <body>
   <div class="app-shell">
@@ -79,7 +79,7 @@
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="video-paths">清空</button>
               </div>
             </div>
-            <div class="video-picker-card video-picker-card-compact">
+            <div class="video-picker-card video-picker-card-compact" data-drop-target="video-paths" data-drop-click-picker="false">
               <div class="video-picker-empty">
                 <strong>点击“添加视频”选择素材</strong>
                 <span>自动检测同名 SRT 字幕。</span>
@@ -481,11 +481,12 @@
 
           <section class="panel panel-wide">
             <div class="panel-header">
-              <h2>AI选片预览</h2>
+              <h2>AI 选片工作台</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="smart-preview-count">0</span>
                 <button class="button button-muted button-small" data-action="clear-cache" title="清理 AI 选片预览缓存">清选片缓存</button>
-                <button class="button button-primary button-small" data-action="start-smart-from-preview">用预览成片</button>
+                <button class="button button-muted button-small" data-action="clear-preview-workbench" data-preview-scope="smart">清空编排</button>
+                <button class="button button-primary button-small" data-action="start-smart-from-preview">按当前编排成片</button>
               </div>
             </div>
             <div class="clip-preview-player is-hidden" id="smart-preview-player">
@@ -556,7 +557,7 @@
                       <span id="mix-active-group-meta">未选择素材组</span>
                     </div>
                   </div>
-                  <div class="video-picker-card video-picker-card-compact">
+                  <div class="video-picker-card video-picker-card-compact" data-drop-target="mix-video-paths" data-drop-click-picker="false">
                     <div class="video-picker-empty">
                       <strong>点击“添加视频”选择素材</strong>
                       <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
@@ -967,11 +968,12 @@
 
           <section class="panel panel-wide">
             <div class="panel-header">
-              <h2>AI选片预览</h2>
+              <h2>AI 选片工作台</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="mix-preview-count">0</span>
                 <button class="button button-muted button-small" data-action="clear-cache" title="清理混剪 AI 选片预览缓存">清选片缓存</button>
-                <button class="button button-primary button-small" data-action="start-mix-from-preview">用预览混剪</button>
+                <button class="button button-muted button-small" data-action="clear-preview-workbench" data-preview-scope="mix">清空编排</button>
+                <button class="button button-primary button-small" data-action="start-mix-from-preview">按当前编排混剪</button>
               </div>
             </div>
             <div class="clip-preview-player is-hidden" id="mix-preview-player">
@@ -1976,6 +1978,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260717-duration-batch-reliability" defer></script>
+  <script src="/assets/app.js?v=20260723-ai-workbench-v11" defer></script>
 </body>
 </html>
