@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "version": "2026.7.19.2",
+  "release_type": "business_runtime",
+  "candidate_sha256": "8B71CCF2CB25D33EA8926698C22B0030FF60D168F34D06B837513E2447D6298F",
+  "gates": {
+    "cross_window_sync": "pass",
+    "source_tests": "pass",
+    "manifest_signatures": "pass",
+    "zip_integrity": "pass",
+    "security_audit": "pass",
+    "github_download_hash": "pass",
+    "exact_baseline_update": "pass",
+    "failure_rollback": "pass",
+    "post_update_runtime_integrity": "pass",
+    "user_data_preserved": "pass"
+  },
+  "evidence": {
+    "cross_window_sync": "2026-07-23 Cross-Window Sync Gate reviewed all tracked and untracked source changes; only the approved 20 source/test files were committed. Candidate preflight subsequently reported a clean worktree.",
+    "source_tests": "python -m unittest discover -s tests -p test_*.py completed 259 tests successfully; release policy tests completed 17 tests successfully; Python compilation, node --check, development preflight, and browser desktop/mobile runtime checks passed.",
+    "manifest_signatures": "The 2026.7.19.2 staging runtime_manifest.json and install_manifest.json verified with the release public key. Each of the three patch manifests and their nested source/target/install manifests verified successfully.",
+    "zip_integrity": "All three patch ZIP files passed zipfile.testzip(), outer SHA256 verification, and per-payload size/SHA256 verification before upload.",
+    "security_audit": "tools/audit_release_security.py --strict passed for the signed staging runtime and all three patch ZIPs.",
+    "github_download_hash": "GitHub draft asset API downloaded all six assets and verified full SHA256 against the candidate asset spec. After publishing the GitHub release, all three public ZIP URLs returned HTTP 206 Range responses whose bytes matched local artifacts, and all three public .sha256.txt files matched their declared hashes.",
+    "exact_baseline_update": "Actual update-agent transactions from 2026.7.15.1, 2026.7.15.2, and 2026.7.15.3 each reached 2026.7.19.2 through their dedicated direct signed patch, retained the source runtime, and left launcher/updater/public-key hashes unchanged.",
+    "failure_rollback": "A deliberately corrupted 2026.7.15.3 patch was rejected by the update agent with a nonzero exit; current.json stayed on 2026.7.15.3, no target runtime was created, and stable files were unchanged. Chain atomic rollback coverage also passed in the 259-test suite.",
+    "post_update_runtime_integrity": "A real root-launcher start from the updated 2026.7.15.3 test install returned /api/runtime version 2026.7.19.2, code_source=bundled, active runtime under versions/2026.7.19.2, runtime_integrity.ok=true with 9 files checked, then cleared the pending health state.",
+    "user_data_preserved": "User-data sentinel files were preserved for all three direct upgrade transactions and for the corrupt-patch rejection case."
+  }
+}
