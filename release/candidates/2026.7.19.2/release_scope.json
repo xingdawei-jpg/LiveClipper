@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "version": "2026.7.19.2",
+  "include": [
+    "app/ai_clipper.py",
+    "app/config.py",
+    "app/content_review.py",
+    "app/cutter_logic.py",
+    "app/gui.py",
+    "app/license_client.py",
+    "app/product_scanner.py",
+    "app/selection_safety.py",
+    "app/smart_crop.py",
+    "app/version.json",
+    "tests/test_ai_batch_reliability.py",
+    "tests/test_ai_content_review.py",
+    "tests/test_preview_word_editing.py",
+    "tests/test_safety_regressions.py",
+    "tests/test_selection_safety.py",
+    "tests/test_selection_safety_content_review.py",
+    "web_client/frontend/assets/app.js",
+    "web_client/frontend/assets/styles.css",
+    "web_client/frontend/index.html",
+    "web_client/server.py",
+    "app/local_asr.py",
+    "app/local_asr_quality.py",
+    "app/candidate_quality.py",
+    "app/stt.py",
+    "app/volcengine_asr.py",
+    "app/ssl_context.py",
+    "app/live_cutter.spec",
+    "web_client/liveclipper_web.spec",
+    "requirements.txt",
+    "requirements-local-asr.txt"
+  ],
+  "exclude": [
+    {
+      "path": "deploy",
+      "reason": "FC server-side deployment workstream is separately deployed and is not a desktop runtime artifact."
+    },
+    {
+      "path": "tests/fixtures/shadow_auth",
+      "reason": "Shadow-auth migration fixtures are not part of the desktop runtime release."
+    },
+    {
+      "path": "tools/shadow_auth_import.py",
+      "reason": "Separate shadow-auth migration workstream."
+    },
+    {
+      "path": "tools/shadow_auth_oss_verify.py",
+      "reason": "Separate shadow-auth migration workstream."
+    },
+    {
+      "path": "tools/shadow_auth_reconcile.py",
+      "reason": "Separate shadow-auth migration workstream."
+    },
+    {
+      "path": "tools/shadow_auth_sync.py",
+      "reason": "Separate shadow-auth migration workstream."
+    },
+    {
+      "path": "tools/shadow_auth_sync_v2.py",
+      "reason": "Separate shadow-auth migration workstream."
+    }
+  ]
+}

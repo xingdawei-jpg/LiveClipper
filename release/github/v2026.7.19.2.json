@@ -1,0 +1,43 @@
+{
+  "tag": "v2026.7.19.2",
+  "title": "LiveClipper 2026.7.19.2",
+  "notes": "Signed Runtime V3 direct incremental updates from 2026.7.15.1, 2026.7.15.2, and 2026.7.15.3 to 2026.7.19.2. This release uploads signed patches and checksum files only; it does not upload a full package to GitHub.\n\n- Add local SenseVoice ASR with word timing, fashion-live vocabulary correction, and Whisper fallback.\n- Add AI preview candidate selection, sentence selection, and word-level refinement with hard safety filtering.\n- Improve batch duration fallback, mixed-media joins, and no-audio handling.\n- Prevent premature old-license unbind during activation and accept the deployed structured authorization response.\n- Keep launcher 1.1.0 and updater 1.3.0 unchanged.",
+  "assets": [
+    {
+      "name": "LiveClipperPatch_2026.7.15.1_to_2026.7.19.2_v3_release.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.1_to_2026.7.19.2_v3_release.zip",
+      "sha256": "0457781C3F59A5E9D5B562A8A6183D6858DD4C1F4035494067828137CEB9B8D0",
+      "size": 321161826
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.1_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.1_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "sha256": "31CC3C331BCBE031B51D154CF174301F1819CA1C8CBDBBB73ABF8D4F45E3FC99",
+      "size": 126
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.2_to_2026.7.19.2_v3_release.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.2_to_2026.7.19.2_v3_release.zip",
+      "sha256": "2C0659D7E03B8AC10DFA12812F9D6CA20D291FAE77B0D87502D5568B2B5728C4",
+      "size": 689743798
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.2_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.2_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "sha256": "0A0BB600461BAFFDDBD80E8D834A06CDA356EEE304C732C61A80050D3D23B81E",
+      "size": 126
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.3_to_2026.7.19.2_v3_release.zip",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.3_to_2026.7.19.2_v3_release.zip",
+      "sha256": "6932F2A9D61B77570B84C76FB73CA16E983DC3D44A0A526AE46514D49AE1E268",
+      "size": 321212062
+    },
+    {
+      "name": "LiveClipperPatch_2026.7.15.3_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "url": "https://github.com/xingdawei-jpg/LiveClipper/releases/download/v2026.7.19.2/LiveClipperPatch_2026.7.15.3_to_2026.7.19.2_v3_release.zip.sha256.txt",
+      "sha256": "C3CB83B1B27EE666A0F8CC7375C4B85F43369FCA808A8C17F3A21552AFE25290",
+      "size": 126
+    }
+  ]
+}
