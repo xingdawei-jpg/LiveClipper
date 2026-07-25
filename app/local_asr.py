@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
+import traceback
+from datetime import datetime
 import threading
 from typing import Any, Callable
 
@@ -142,12 +145,34 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
             if log_fn:
                 log_fn("SenseVoice 标点恢复已启用")
         except Exception as punctuation_error:
+            # Write full traceback to file for frozen-build debugging
+            try:
+                debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
+                os.makedirs(os.path.dirname(debug_log), exist_ok=True)
+                with open(debug_log, "a", encoding="utf-8") as _df:
+                    _df.write(f"\n--- {datetime.now()} ---\n")
+                    _df.write("Error: {}\n".format(punctuation_error))
+                    _df.write("cwd: {}\n".format(os.getcwd()))
+                    _df.write("sys.path: {}\n".format(sys.path))
+                    traceback.print_exc(file=_df)
+            except Exception:
+                pass
             if log_fn:
                 log_fn(f"标点恢复模型不可用，继续使用停顿断句: {punctuation_error}")
             try:
                 _SENSEVOICE_MODEL = AutoModel(**model_kwargs)
                 _SENSEVOICE_PUNCTUATION = False
             except Exception as exc:
+                # Write traceback for fallback failure
+                try:
+                    debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
+                    os.makedirs(os.path.dirname(debug_log), exist_ok=True)
+                    with open(debug_log, "a", encoding="utf-8") as _df:
+                        _df.write(f"--- fallback AutoModel FAILED at {datetime.now()} ---\n")
+                        _df.write("Error: {}\n".format(exc))
+                        traceback.print_exc(file=_df)
+                except Exception:
+                    pass
                 raise LocalASRUnavailable(f"SenseVoice model unavailable: {exc}") from exc
     return _SENSEVOICE_MODEL
 
