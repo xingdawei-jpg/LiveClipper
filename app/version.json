@@ -58,7 +58,7 @@
     "tools/liveclipper_launcher.spec": "fdf5e304c8f888c0eb3e1b09457f8080b5f8e12e4a5de4740e8f044bb3c59050",
     "tools/liveclipper_update_agent.py": "0504e5d1def9fda70de4f65d4a0cd62e1c6804067571cfa444aa9e656a391a34",
     "tools/liveclipper_update_agent.spec": "e3bd5c1ba52c803e6224bc6d73c337c2b6fe51f5c227c104d75898cf22b7b07b",
-    "app/ai_clipper.py": "0d2d47e65f52e6ea747e237590df4b90b19e6530fd0001af7238c44c9b33eb52",
+    "app/ai_clipper.py": "6825a51557cc9a421775d64fc8c28d8903a9607e64f353f08113dff8c963e9a9",
     "app/ai_model_config.py": "74ada692c7f82d910d5d155f821330db3691aa3c87e46adf960e9d1db71328b8",
     "app/aliyun_asr.py": "2e03a925e96b0d454d0b90c62a074fc2d46343d1b6641e2b7b3853c59004450c",
     "app/aliyun_asr_v2.py": "eba14c2496d5a21e2f13f113f91cd224b25992e623fba4579825e61b90651691",
@@ -104,9 +104,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "修复桌面版已选片段手动拖拽排序，避免与零拷贝文件拖入冲突。",
-  "update_message": "修复桌面版已选片段手动拖拽排序，避免与零拷贝文件拖入冲突。",
+  "release_notes": "修复桌面版已选片段拖拽排序，并修复 AI 片单超时时自动精简导致预览失败的问题。",
+  "update_message": "修复桌面版已选片段拖拽排序，并修复 AI 片单超时时自动精简导致预览失败的问题。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-27 23:38:14"
+  "updated_at": "2026-07-28 01:25:06"
 }
