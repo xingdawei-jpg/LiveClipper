@@ -292,12 +292,15 @@ class ReleaseArchitectureTests(unittest.TestCase):
 
     def test_manifest_hash_normalizes_csharp_line_endings(self) -> None:
         builder = _load_tool("build_update_manifest")
+        preflight = _load_tool("release_preflight")
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "native_bridge.cs"
             source.write_bytes(b"first\nsecond\n")
             lf_hash = builder._sha256(source)
+            preflight_lf_hash = preflight.manifest_sha256(source)
             source.write_bytes(b"first\r\nsecond\r\n")
             self.assertEqual(builder._sha256(source), lf_hash)
+            self.assertEqual(preflight.manifest_sha256(source), preflight_lf_hash)
 
     def test_release_sources_require_https_and_keep_order(self) -> None:
         builder = _load_tool("build_release_channel")

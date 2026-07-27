@@ -76,7 +76,7 @@ def sha256_file(path: Path) -> str:
 def manifest_sha256(path: Path) -> str:
     data = path.read_bytes()
     if path.suffix.lower() in {
-        ".py", ".json", ".txt", ".html", ".css", ".js", ".spec", ".pem"
+        ".py", ".json", ".txt", ".html", ".css", ".js", ".cs", ".spec", ".pem"
     }:
         data = data.replace(b"\r\n", b"\n")
     return hashlib.sha256(data).hexdigest()

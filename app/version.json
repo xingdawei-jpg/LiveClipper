@@ -48,7 +48,7 @@
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
     "tools/build_update_manifest.py": "7c2126b99a824c23bf4a72fa8bad00f07db93ddfff73f448bf4d340dabe9a955",
     "tools/build_release_channel.py": "dcfd4ac7ceb6d682442f4f2991d67056183fbac8e1082be857141bfdbe259b84",
-    "tools/release_preflight.py": "08269c844d892d3eddaf9e1cdf5ed7a889305d59b458ada23165b417e6135329",
+    "tools/release_preflight.py": "5bf0d70357652cc9acb34149e5d339e84760550416706ddda76ee926b6818e5e",
     "tools/promote_release_channel.py": "4244ad4255685edc4998fa327698a16dcc650f15a50eb8efe4d31f87d21c4a9b",
     "tools/build_v3_package.py": "1cbf2e0d9ed5003a88059f76f734bf65fff5894e2a195cdc09c139273de208ab",
     "tools/build_delta_package.py": "d1aa9d8f95b8db38febaa6e3fdda7c0d6bcd7d2d455412c8fb554dfcb6e27e37",
@@ -108,5 +108,5 @@
   "update_message": "修复桌面版已选片段拖拽排序，并修复 AI 片单超时时自动精简导致预览失败的问题。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-28 01:27:25"
+  "updated_at": "2026-07-28 01:28:36"
 }
