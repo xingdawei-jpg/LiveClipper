@@ -290,6 +290,15 @@ class ReleaseArchitectureTests(unittest.TestCase):
         self.assertEqual(built["minimum_launcher_version"], versions.LAUNCHER_VERSION)
         self.assertEqual(built["minimum_updater_version"], versions.UPDATER_VERSION)
 
+    def test_manifest_hash_normalizes_csharp_line_endings(self) -> None:
+        builder = _load_tool("build_update_manifest")
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "native_bridge.cs"
+            source.write_bytes(b"first\nsecond\n")
+            lf_hash = builder._sha256(source)
+            source.write_bytes(b"first\r\nsecond\r\n")
+            self.assertEqual(builder._sha256(source), lf_hash)
+
     def test_release_sources_require_https_and_keep_order(self) -> None:
         builder = _load_tool("build_release_channel")
         sources = builder._download_sources(

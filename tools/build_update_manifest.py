@@ -69,7 +69,7 @@ SOURCE_FILES = [
     ROOT / "tools" / "liveclipper_update_agent.spec",
 ]
 
-TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js", ".spec", ".pem"}
+TEXT_SUFFIXES = {".py", ".json", ".txt", ".html", ".css", ".js", ".cs", ".spec", ".pem"}
 
 
 def _manifest_bytes(path: Path) -> bytes:
