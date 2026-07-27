@@ -6639,7 +6639,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     log_fn,
                     duration_contract=_duration_contract,
                     required_sources=_director_required_sources,
-                    allowed_candidate_ids=_content_review_allowed_ids,
                 )
                 if _priority_trimmed:
                     clips, _director_audit = _director_hard_audit(

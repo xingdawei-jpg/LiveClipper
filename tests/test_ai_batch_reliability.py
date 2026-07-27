@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import json
 import sys
 import tempfile
@@ -535,6 +537,21 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         trimmed = ai_clipper._apply_declared_trim_priorities(clips, 10)
         self.assertEqual([clip[1] for clip in trimmed], [entries[0][2], entries[1][2], entries[4][2]])
+
+    def test_declared_trim_call_keywords_match_helper_signature(self) -> None:
+        tree = ast.parse(inspect.getsource(ai_clipper.ai_analyze_clips))
+        supported = set(inspect.signature(ai_clipper._apply_declared_trim_priorities).parameters)
+        call_keywords = {
+            keyword.arg
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_apply_declared_trim_priorities"
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+
+        self.assertTrue(call_keywords <= supported, call_keywords - supported)
 
     def test_preference_hook_and_followup_are_audited_as_a_pair(self) -> None:
         clips = [
