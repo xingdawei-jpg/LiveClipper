@@ -95,12 +95,12 @@ class ReleasePolicyTests(unittest.TestCase):
         ]
         self.assertEqual(len(current), 1)
         self.assertEqual(current[0]["version"], registry["current_baseline_version"])
-        self.assertEqual(current[0]["version"], "2026.7.15.1")
+        self.assertEqual(current[0]["version"], "2026.7.27.3")
         self.assertEqual(current[0]["launcher_version"], "1.1.0")
         self.assertEqual(current[0]["updater_version"], "1.3.0")
         self.assertEqual(
             current[0]["package"]["sha256"],
-            "3F8BB2DB275D73E2192B3F84C03717FBFE2485BD6DFA70439A1CF957898D77C4",
+            "2821E15B223C325BE3516F55E8FD4F5451713CB7E7D5C683CF269D611D3AA5AD",
         )
 
     def test_channel_builder_enforces_baidu_full_and_github_patch_policy(self) -> None:
