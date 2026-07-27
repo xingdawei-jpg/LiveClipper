@@ -6881,6 +6881,8 @@ textarea,
   cursor: grab;
   font-size: 15px;
   user-select: none;
+  touch-action: none;
+  -webkit-user-drag: none;
 }
 
 .preview-workbench-unified .clip-drag-handle:active {

@@ -5547,42 +5547,92 @@ function reorderPreviewClip(scope, fromIndex, toIndex, placeAfter = false) {
 }
 
 function bindPreviewRowDrag(box, scope = "smart") {
-  box.querySelectorAll(`[data-preview-row][data-preview-scope="${scope}"]`).forEach((row) => {
-    row.addEventListener("dragstart", (event) => {
-      if (event.target?.closest?.("input, button, [data-preview-segment-row]")) {
-        event.preventDefault();
-        return;
-      }
-      row.classList.add("is-dragging");
-      event.dataTransfer?.setData("text/plain", JSON.stringify({
-        scope,
-        index: Number(row.dataset.previewIndex),
-      }));
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  // The desktop shell reserves native HTML drag-and-drop for Explorer
+  // CF_HDROP input. Pointer events keep in-page ordering independent from
+  // that native file-drop bridge and work the same in Edge WebView2.
+  const rowSelector = `[data-preview-row][data-preview-scope="${scope}"]`;
+  let active = null;
+
+  const clearDragState = () => {
+    box.querySelectorAll(`${rowSelector}.is-dragging, ${rowSelector}.is-drop-target`).forEach((row) => {
+      row.classList.remove("is-dragging", "is-drop-target", "is-drop-after");
     });
-    row.addEventListener("dragend", () => row.classList.remove("is-dragging"));
-    row.addEventListener("dragover", (event) => {
+  };
+
+  const targetAt = (clientX, clientY) => {
+    const element = document.elementFromPoint(clientX, clientY);
+    const row = element?.closest?.(rowSelector);
+    return row && box.contains(row) ? row : null;
+  };
+
+  const updateTarget = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const moved = Math.hypot(event.clientX - active.startX, event.clientY - active.startY) >= 5;
+    if (!active.started && !moved) return;
+    active.started = true;
+    active.sourceRow.classList.add("is-dragging");
+
+    const targetRow = targetAt(event.clientX, event.clientY);
+    if (active.targetRow && active.targetRow !== targetRow) {
+      active.targetRow.classList.remove("is-drop-target", "is-drop-after");
+    }
+    active.targetRow = targetRow && targetRow !== active.sourceRow ? targetRow : null;
+    if (!active.targetRow) return;
+
+    const bounds = active.targetRow.getBoundingClientRect();
+    active.placeAfter = event.clientY >= bounds.top + (bounds.height / 2);
+    active.targetRow.classList.add("is-drop-target");
+    active.targetRow.classList.toggle("is-drop-after", active.placeAfter);
+  };
+
+  const finish = (event, cancelled = false) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    if (!cancelled) updateTarget(event);
+    const drag = active;
+    active = null;
+    try {
+      if (drag.handle.hasPointerCapture?.(event.pointerId)) drag.handle.releasePointerCapture(event.pointerId);
+    } catch (_error) {
+      // Pointer capture can already be released by the WebView while closing.
+    }
+    clearDragState();
+    if (cancelled || !drag.started || !drag.targetRow) return;
+    reorderPreviewClip(
+      scope,
+      Number(drag.sourceRow.dataset.previewIndex),
+      Number(drag.targetRow.dataset.previewIndex),
+      drag.placeAfter,
+    );
+  };
+
+  box.querySelectorAll(`[data-preview-drag-handle][data-preview-scope="${scope}"]`).forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || active) return;
+      const sourceRow = handle.closest(rowSelector);
+      if (!sourceRow) return;
       event.preventDefault();
-      row.classList.add("is-drop-target");
-      const bounds = row.getBoundingClientRect();
-      row.classList.toggle("is-drop-after", event.clientY >= bounds.top + (bounds.height / 2));
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("is-drop-target", "is-drop-after"));
-    row.addEventListener("drop", (event) => {
-      event.preventDefault();
-      const bounds = row.getBoundingClientRect();
-      const placeAfter = event.clientY >= bounds.top + (bounds.height / 2);
-      row.classList.remove("is-drop-target");
-      row.classList.remove("is-drop-after");
-      let payload = null;
+      active = {
+        handle,
+        pointerId: event.pointerId,
+        sourceRow,
+        targetRow: null,
+        startX: event.clientX,
+        startY: event.clientY,
+        started: false,
+        placeAfter: false,
+      };
       try {
-        payload = JSON.parse(event.dataTransfer?.getData("text/plain") || "{}");
-      } catch (error) {
-        return;
+        handle.setPointerCapture(event.pointerId);
+      } catch (_error) {
+        // Pointer events still bubble on older WebView2 runtimes without capture.
       }
-      if (payload?.scope !== scope) return;
-      reorderPreviewClip(scope, Number(payload.index), Number(row.dataset.previewIndex), placeAfter);
     });
+    handle.addEventListener("pointermove", (event) => {
+      updateTarget(event);
+      if (active?.started) event.preventDefault();
+    });
+    handle.addEventListener("pointerup", (event) => finish(event));
+    handle.addEventListener("pointercancel", (event) => finish(event, true));
   });
 }
 
@@ -9247,7 +9297,7 @@ function renderPreviewSelectedRows(scope, selected) {
   const activeIndex = Number(state.previewDetailSelection?.[scope]);
   return selected.map((clip, position) => {
     const text = selectedPreviewText(clip) || String(clip.text || "");
-    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" draggable="true" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
+    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" data-preview-drag-handle data-preview-scope="${scope}" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
   }).join("");
 }
 

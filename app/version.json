@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.7.27.4",
-  "version": "2026.7.27.4",
-  "latest_version": "2026.7.27.4",
+  "build_id": "2026.7.27.5",
+  "version": "2026.7.27.5",
+  "latest_version": "2026.7.27.5",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -21,8 +21,8 @@
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/release_update_public_key.pem": "d245c8e44144344895379497368d7b74e889298648ced0e0a21f5f0255c76917",
     "web_client/frontend/index.html": "3757150322a280296b7b2b3b4ba530aebec811c01e5043d87e16c26ed138719e",
-    "web_client/frontend/assets/app.js": "da3936a36156ff0567933dec4ab85a9dfa58a5d91849340b9d3e719c715cb560",
-    "web_client/frontend/assets/styles.css": "f391afe0d3976bc555de648c2d78495475a6810bc45065f741ffab07d77f776c",
+    "web_client/frontend/assets/app.js": "b4a813ff63f604ed8b578007fa022cbf6efb8ebce3ed2ac6723219dcede05b63",
+    "web_client/frontend/assets/styles.css": "b02d800f6407ceeb7bce94e48671e83572035ad8222b76eaf1fc9f7203475814",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/native_file_drop_bridge.dll": "c28e38886e9006d471719a01882ccc0717b086f7f248b6cfb2b6604b5b283a35",
     "web_client/tools/douyin_active_product_probe_poc.py": "5144d0a325f1ba7326f44a4c07362cbba5c60dd37d653da490e534473108ac34",
@@ -104,9 +104,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "修复智能成片最终字幕：成片后重新识别最终音频，严格跟随云端/本地语音识别设置，AI仅修正文本并保留最终时间轴；修复混剪新视频词级时间侧车文件；已选片段支持手动拖拽排序，并按中文分词和服装词库显示可删词。",
-  "update_message": "修复智能成片最终字幕：成片后重新识别最终音频，严格跟随云端/本地语音识别设置，AI仅修正文本并保留最终时间轴；修复混剪新视频词级时间侧车文件；已选片段支持手动拖拽排序，并按中文分词和服装词库显示可删词。",
+  "release_notes": "修复桌面版已选片段手动拖拽排序，避免与零拷贝文件拖入冲突。",
+  "update_message": "修复桌面版已选片段手动拖拽排序，避免与零拷贝文件拖入冲突。",
   "update_url": "",
   "force_update": false,
-  "updated_at": "2026-07-27 21:00:36"
+  "updated_at": "2026-07-27 23:38:14"
 }

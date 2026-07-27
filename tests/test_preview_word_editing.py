@@ -16,16 +16,27 @@ server = importlib.import_module("server")
 class PreviewWordEditingTests(unittest.TestCase):
     forbidden = "\u8fdd\u7981\u8bcd"
 
-    def test_selected_preview_rows_expose_drag_only_order_controls(self):
+    def test_selected_preview_rows_expose_pointer_drag_only_order_controls(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
         start = script.rfind("function renderPreviewSelectedRows")
         end = script.find("// [AI_WORKBENCH_LIBRARY_END]", start)
         rendered_rows = script[start:end]
 
-        self.assertIn('class="clip-drag-handle" draggable="true"', rendered_rows)
+        self.assertIn('class="clip-drag-handle" data-preview-drag-handle', rendered_rows)
         self.assertIn('data-preview-row', rendered_rows)
+        self.assertNotIn('draggable="true"', rendered_rows)
         self.assertNotIn('data-action="preview-assembly-move"', rendered_rows)
         self.assertNotIn('data-direction=', rendered_rows)
+
+        drag_start = script.index("function bindPreviewRowDrag")
+        drag_end = script.index("function previewInlineVideoKey", drag_start)
+        drag_binding = script[drag_start:drag_end]
+        self.assertIn("data-preview-drag-handle", drag_binding)
+        self.assertIn('addEventListener("pointerdown"', drag_binding)
+        self.assertIn("setPointerCapture", drag_binding)
+        self.assertIn("document.elementFromPoint", drag_binding)
+        self.assertIn("reorderPreviewClip(", drag_binding)
+        self.assertNotIn("event.dataTransfer", drag_binding)
 
     def test_word_editor_uses_lexical_groups_without_changing_ctc_word_indices(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
