@@ -44,6 +44,7 @@ RUNTIME_FILES = [
     WEB_DIR / "frontend" / "assets" / "app.js",
     WEB_DIR / "frontend" / "assets" / "styles.css",
     WEB_DIR / "frontend" / "assets" / "liveclipper.ico",
+    WEB_DIR / "native_file_drop_bridge.dll",
     WEB_DIR / "tools" / "douyin_active_product_probe_poc.py",
     WEB_DIR / "tools" / "douyin_chrome_live_poc.py",
 ]
@@ -51,6 +52,7 @@ RUNTIME_FILES = [
 SOURCE_FILES = [
     WEB_DIR / "desktop.py",
     WEB_DIR / "server.py",
+    WEB_DIR / "native_file_drop_bridge.cs",
     WEB_DIR / "liveclipper_web.spec",
     APP_DIR / "release_signing.py",
     ROOT / "tools" / "build_update_manifest.py",

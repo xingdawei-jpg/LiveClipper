@@ -18,15 +18,15 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
 
 from ai_model_config import ai_chat_completions_url
+from candidate_quality import candidate_quality_flags
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
-CONTENT_REVIEW_VERSION = "content-review-v16"
+CONTENT_REVIEW_VERSION = "content-review-v24"
 CONTENT_REVIEW_ENV = "LIVECLIPPER_CONTENT_REVIEW_MODE"
 CONTENT_REVIEW_DEFAULT_MODE = "off"
 CONTENT_REVIEW_MAX_CARDS = 80
 CONTENT_REVIEW_TARGET_DURATION = 180.0
-CONTENT_REVIEW_MIN_DURATION = 60.0
 CONTENT_REVIEW_CACHE_DAYS = 60
 CONTENT_REVIEW_CACHE_MAX_FILES = 128
 CONTENT_REVIEW_CACHE_MAX_BYTES = 50 * 1024 * 1024
@@ -379,6 +379,11 @@ def _reviewable_candidate_text(text: Any) -> bool:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if live_interaction_or_size_response_reason(cleaned):
         return False
+    if candidate_quality_flags(cleaned):
+        return False
+    hook_reason = hook_ineligible_reason(cleaned)
+    if hook_reason in {"展示铺垫不可作Hook", "空泛口头语不可作Hook"}:
+        return False
     if len(cleaned) < 6:
         return False
     prefix_match = re.match(r"^[\u4e00-\u9fffA-Za-z][,\uff0c\u3001;\uff1b:\uff1a]", cleaned)
@@ -401,6 +406,12 @@ def _reviewable_hook_text(text: Any) -> bool:
         return False
     cleaned = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.I).strip()
     compact = re.sub(r"\s+", "", cleaned)
+    if re.match(r"^(?:喂|哎|诶|欸)[，,。！？!?\s]*(?:我|你|这|那)", compact):
+        return False
+    if re.match(r"^我(?:其实|也|还)?[^。！？!?]{0,14}(?:质疑|跟你们讲|想说|想问|觉得)", compact):
+        return False
+    if re.match(r"^(?:你们|大家)[^。！？!?]{0,10}(?:细品|看一下|看一眼|听我说)", compact):
+        return False
     if re.match(
         r"^(?:\u554a|\u5440|\u5450|\u90a3|\u5462|\u54ce|\u8bf6|\u55ef|\u54e6)?[\uff0c,\u3001]*(?:\u548c|\u8ddf|\u4e0e|\u800c\u4e14|\u4f46\u662f|\u56e0\u4e3a|\u6240\u4ee5|\u7136\u540e|\u5305\u62ec|\u8fd8\u6709)",
         compact,
@@ -410,6 +421,8 @@ def _reviewable_hook_text(text: Any) -> bool:
         r"^(?:(?:\u975e\u5e38)|(?:\u7279\u522b)|\u592a|\u5f88){1,3}(?:\u72e0|\u7edd|\u70b8|\u65e0\u654c|\u597d\u770b|\u597d\u6f02\u4eae|\u725b|\u9876)(?:[\uff0c,\u3002.!\uff01?\uff1f]|$)",
         compact,
     ):
+        return False
+    if re.match(r"^(?:很|非常|特别|太)\s*[A-Za-z]{2,16}\s*的?(?:这个|这件|这条|它)", compact, re.I):
         return False
     if re.search(r"(?:拖欠|欠你们|等了?(?:很久|好久)|终于(?:来了|到了)|刚到|新品(?:来了|到了)|今天上新)", cleaned):
         return False
@@ -570,22 +583,6 @@ def _normalize_card(
         tier=tier,
     )
 
-def _fallback_card(candidate_id: int, candidate_text: Any) -> ContentCard:
-    evidence_quote = re.sub(r"^\s*\[V\d+\]\s*", "", str(candidate_text or ""), flags=re.I)
-    evidence_quote = _clean_text(evidence_quote, 120)
-    return ContentCard(
-        candidate_id=candidate_id,
-        topic="\u5176\u4ed6",
-        subtopic="\u672a\u5206\u7ea7\u5b89\u5168\u5019\u9009",
-        buyer_value="\u5b89\u5168\u5e93\u5b58\u4fdd\u7559",
-        evidence_type="",
-        evidence_quote=evidence_quote,
-        roles=("product",),
-        dependency="independent",
-        quality_tags=("\u7d20\u6750\u4e0d\u8db3\u4fdd\u7559",),
-        tier="reserve",
-    )
-
 def _normalize_hook_pair(
     raw: Any,
     *,
@@ -707,14 +704,6 @@ def _validate_bundle(
         if len(cards) >= CONTENT_REVIEW_MAX_CARDS:
             break
 
-    safe_duration = sum(candidates[candidate_id]["duration_sec"] for candidate_id in allowed_ids)
-    if safe_duration <= CONTENT_REVIEW_TARGET_DURATION:
-        for candidate_id in sorted(allowed_ids - seen_ids):
-            if len(cards) >= CONTENT_REVIEW_MAX_CARDS:
-                break
-            cards.append(_fallback_card(candidate_id, candidates[candidate_id].get("text")))
-            seen_ids.add(candidate_id)
-
     if not cards:
         rejection_text = ",".join(
             f"{reason}={count}" for reason, count in sorted(rejection_counts.items())
@@ -726,12 +715,10 @@ def _validate_bundle(
         )
     cards = _rebalance_card_tiers(cards, candidates)
     retained_duration = sum(candidates[card.candidate_id]["duration_sec"] for card in cards)
-    required_duration = min(safe_duration, CONTENT_REVIEW_MIN_DURATION)
-    if retained_duration + 0.1 < required_duration:
-        raise ContentReviewError(
-            f"\u5ba1\u7a3f\u4fdd\u7559\u65f6\u957f\u4e0d\u8db3 {retained_duration:.1f}s/{required_duration:.1f}s"
-            f"\uff08\u901a\u8fc7{len(cards)}/\u539f\u59cb{len(raw_cards)}\u5f20\uff09"
-        )
+    # A non-empty, grounded reviewed pool is valid even when it is short.
+    # Duration is handled by the director's existing best-effort policy. A
+    # duration rejection here would fall back to the raw pool and reintroduce
+    # exactly the transcript residue the review rejected.
 
     requirements = {
         str(source or "").strip().upper(): max(1, int(count or 1))
@@ -804,6 +791,9 @@ def _review_prompts(
         "\u4e0d\u5f97\u51b3\u5b9a\u6700\u7ec8\u6210\u7247\u987a\u5e8f\u3001Close\u6216\u6539\u5199\u5b57\u5e55\uff0c\u4e5f\u4e0d\u5f97\u7f16\u9020\u7f16\u53f7\u3002"
         "\u4f60\u53ef\u4ee5\u63d0\u51fa\u5c11\u91cf\u53ef\u9a8c\u8bc1\u7684Hook+\u627f\u63a5\u5019\u9009\u7ec4\u5408\uff0c\u4f9b\u6700\u7ec8\u5bfc\u6f14\u81ea\u4e3b\u9009\u62e9\uff1b\u8fd9\u4e0d\u662f\u66ff\u5bfc\u6f14\u7f16\u6392\u5168\u7247\u3002"
         "\u6bcf\u5f20\u5361\u53ea\u9700\u9009\u62e9\u771f\u5b9e\u5019\u9009\u7f16\u53f7\u5e76\u5224\u65ad\u5185\u5bb9\u4ef7\u503c\uff1b\u7a0b\u5e8f\u4f1a\u7528\u7f16\u53f7\u7ed1\u5b9a\u539f\u5b57\u5e55\u4f5c\u4e3a\u552f\u4e00\u8bc1\u636e\u3002"
+        "\u5185\u5bb9\u5361\u7684\u524d\u63d0\u662f\uff1a\u539f\u5b57\u5e55\u5fc5\u987b\u53ef\u4ee5\u9010\u5b57\u76f4\u63a5\u64ad\u51fa\uff0c\u8131\u79bb\u524d\u540e\u6587\u4ecd\u5b8c\u6574\u3001\u8bed\u4e49\u81ea\u7136\u3002"
+        "\u7edd\u4e0d\u80fd\u6839\u636e\u4e0a\u4e0b\u6587\u66ff\u539f\u5b57\u5e55\u8111\u8865\u6216\u7ea0\u6b63\u9519\u8bcd\u3002\u51e1\u662f\u660e\u663eASR\u4e71\u7801\u3001\u4e3b\u8c13\u6216\u6307\u4ee3\u65ad\u88c2\u3001\u534a\u53e5\u3001\u76f4\u64ad\u95ee\u7b54\u3001"
+        "\u4e2a\u4eba\u8eab\u9ad8\u4f53\u91cd\u6216\u62a5\u5c3a\u7801\u3001\u4ef7\u683c\u6216\u6210\u672c\u6216\u6bcf\u7c73\u62a5\u4ef7\u3001\u5e93\u5b58\u6216CTA\uff0c\u5373\u4f7f\u4f60\u80fd\u731c\u51fa\u60f3\u8868\u8fbe\u4ec0\u4e48\uff0c\u4e5f\u4e0d\u5f97\u8f93\u51fa\u5185\u5bb9\u5361\u3002"
         "\u53ea\u8f93\u51fa\u5355\u884c\u7d27\u51d1JSON\u5bf9\u8c61\uff0c\u4e0d\u8981Markdown\u3001\u89e3\u91ca\u6216\u7f29\u8fdb\u3002"
     )
     source_rule = ""
@@ -1147,6 +1137,24 @@ class FinalSequenceReview:
         }
 
 
+@dataclass(frozen=True)
+class FinalSequenceAudit:
+    """A read-only verdict over a director-owned final sequence."""
+
+    status: str
+    issues: tuple[str, ...]
+    opening_issue: bool = False
+
+    def summary(self, *, opening_repair_applied: bool = False, fallback_reason: str = "") -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "issue_count": len(self.issues),
+            "opening_issue": bool(self.opening_issue),
+            "opening_repair_applied": bool(opening_repair_applied),
+            "fallback_reason": str(fallback_reason or ""),
+        }
+
+
 def _normalize_final_sequence_review(
     data: Mapping[str, Any],
     *,
@@ -1340,6 +1348,93 @@ def _final_objective_issues(
         if str(item.get("clip_type") or "").lower() == "product" and duration > 12.0:
             issues.append(f"\u7b2c{order}\u6bb5{duration:.1f}\u79d2\u8fc7\u957f\uff0c\u5e94\u6362\u6210\u66f4\u77ed\u7684\u5b8c\u6574\u5356\u70b9")
     return list(dict.fromkeys(issues))
+
+
+def audit_final_sequence(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    selected_sequence: Sequence[Mapping[str, Any]],
+    hook_pairs: Sequence[Mapping[str, Any]] = (),
+    log_fn=None,
+) -> FinalSequenceAudit:
+    """Audit quality without giving the reviewer authority to re-edit.
+
+    The final reviewer may identify a weak opening or continuity problem, but
+    it cannot return candidate IDs, replacement clips, or an expansion plan.
+    A flagged opening is repaired only by the bounded director operation.
+    """
+    normalized_sequence = []
+    for order, item in enumerate(selected_sequence or (), 1):
+        if not isinstance(item, Mapping):
+            continue
+        normalized_sequence.append({
+            "order": order,
+            "clip_type": _clean_text(item.get("clip_type"), 16).lower(),
+            "srt_indices": [
+                int(value) for value in (item.get("srt_indices") or [])
+                if str(value).strip().isdigit()
+            ][:3],
+            "duration_sec": round(max(0.0, float(item.get("duration_sec") or 0.0)), 1),
+            "text": _clean_text(item.get("text"), 360),
+            "focus": _clean_text(item.get("focus"), 40),
+        })
+    if not normalized_sequence:
+        raise ContentReviewError("成片终审缺少可审阅片单")
+
+    objective_issues = _final_objective_issues(normalized_sequence)
+    pair_lines = []
+    for pair in hook_pairs or ():
+        try:
+            hook_id = int(pair.get("hook_id") or 0)
+            followup_id = int(pair.get("followup_id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if hook_id > 0 and followup_id > 0:
+            pair_lines.append(f"#{hook_id}->#{followup_id}")
+
+    system_prompt = (
+        "你是带货短视频的成片审稿人，只做审计，不做导演。"
+        "你不能选择候选、不能输出编号、不能要求重排，也不能给出替换片单。"
+        "检查第一句是否有独立且具体的购买价值、第二句是否立即兑现、正文是否重复或断裂、结尾是否自然。"
+        "直播互动、报尺码、个人身高体重、价格CTA、上新预告、展示铺垫和泛泛夸赞一律判为问题。"
+        "只输出JSON对象：{\"status\":\"pass|flag\",\"issues\":[\"...\"],\"opening_issue\":true|false}。"
+        "只有不存在实质问题才可pass；flag最多列出6条可验证问题。"
+    )
+    user_prompt = (
+        "当前导演片单：\n"
+        + json.dumps(normalized_sequence, ensure_ascii=False, separators=(",", ":"))
+        + ("\n已知开头组合：" + ", ".join(pair_lines) if pair_lines else "")
+        + ("\n程序已发现的客观问题：" + "；".join(objective_issues[:6]) if objective_issues else "")
+    )
+    if log_fn:
+        log_fn("AI成片终审: 只审计，不重排片单...")
+    content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
+    data = _extract_json_object(content)
+    status = _clean_text(data.get("status"), 16).lower()
+    if status not in {"pass", "flag"}:
+        raise ContentReviewError("成片终审缺少pass/flag状态")
+    issues = _clean_list(data.get("issues"), limit=6, item_limit=120)
+    if objective_issues and status == "pass":
+        status = "flag"
+        issues = tuple(dict.fromkeys([*objective_issues, *issues]))[:6]
+    elif objective_issues:
+        issues = tuple(dict.fromkeys([*objective_issues, *issues]))[:6]
+    try:
+        opening_issue = bool(data.get("opening_issue"))
+    except Exception:
+        opening_issue = False
+    opening_markers = ("Hook", "开头", "首段", "承接", "第一句", "第二句")
+    if any(any(marker in issue for marker in opening_markers) for issue in issues):
+        opening_issue = True
+    if status == "pass":
+        opening_issue = False
+    return FinalSequenceAudit(
+        status=status,
+        issues=tuple(issues),
+        opening_issue=opening_issue,
+    )
 
 
 def review_final_sequence(

@@ -189,15 +189,3 @@ else:
 
 LICENSE_CACHE_DIR = os.path.join(APP_DATA_DIR, "LiveClipper")
 LICENSE_CACHE_FILE = os.path.join(LICENSE_CACHE_DIR, "license_cache.json")
-
-# ============================================================
-# Whisper 加速配置
-# ============================================================
-if IS_MAC and platform.machine() == "arm64":
-    # Apple Silicon: 使用 Metal GPU 加速
-    WHISPER_DEVICE = "mps"
-    WHISPER_COMPUTE = "float32"  # Metal 支持 float32
-else:
-    # Windows/Intel Mac: CPU int8
-    WHISPER_DEVICE = "cpu"
-    WHISPER_COMPUTE = "int8"

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ from pydantic import BaseModel, Field
 
 
 RUNTIME_LAYOUT_VERSION = 3
+ZERO_COPY_TEST_ENV = "LIVECLIPPER_ZERO_COPY_TEST"
 USER_DATA_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 IS_FROZEN_RUNTIME = bool(getattr(sys, "frozen", False))
@@ -84,6 +86,10 @@ _LOG = logging.getLogger("liveclipper.server")
 
 
 app = FastAPI(title="LiveClipper Web Client", version="0.1.0")
+
+
+def _zero_copy_test_mode() -> bool:
+    return os.environ.get(ZERO_COPY_TEST_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @app.middleware("http")
@@ -670,7 +676,27 @@ def _read_json_file(path: Path) -> dict[str, Any]:
 
 def _write_json_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path = ""
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = ""
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _keyword_config_path() -> Path:
@@ -683,6 +709,15 @@ def _load_keyword_config() -> dict[str, Any]:
     user_file = _safe_user_child("keywords.json")
     user_data = _read_json_file(user_file)
     if not user_data:
+        return default_data
+    try:
+        from ai_clipper import is_keyword_config_usable
+
+        if not is_keyword_config_usable(user_data):
+            _LOG.warning("Ignoring corrupted user keyword vocabulary: %s", user_file)
+            return default_data
+    except Exception:
+        _LOG.warning("Unable to validate user keyword vocabulary", exc_info=True)
         return default_data
     return user_data
 
@@ -742,22 +777,38 @@ def _clean_keyword_map(value: Any) -> dict[str, list[str]]:
     return result
 
 
+_KEYWORD_MAP_KEYS = {"clip_keywords", "preference_keywords"}
+_KEYWORD_LIST_KEYS = {"forbidden_phrases", "filler_words", "negative_signals", "detail_keywords"}
+_KEYWORD_EDITABLE_KEYS = _KEYWORD_MAP_KEYS | _KEYWORD_LIST_KEYS
+
+
+def _keyword_payload_changes(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return an explicit editor patch, with legacy full payload support."""
+    changes = payload.get("changes")
+    if changes is not None:
+        return changes if isinstance(changes, dict) else {}
+    return payload
+
+
+def _keyword_payload_fields(payload: dict[str, Any]) -> list[str]:
+    changes = _keyword_payload_changes(payload)
+    return sorted(key for key in _KEYWORD_EDITABLE_KEYS if key in changes)
+
+
 def _normalize_keyword_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    data = dict(_load_effective_keyword_config())
-    map_keys = {"clip_keywords", "preference_keywords"}
-    list_keys = {"forbidden_phrases", "filler_words", "negative_signals", "detail_keywords"}
-    handled = map_keys | list_keys
-    derived_keys = {"hook_keywords", "_source"}
+    # Never persist the runtime-effective vocabulary: it contains built-in
+    # defaults and safety floors that the user did not edit.
+    data = copy.deepcopy(_load_keyword_config())
+    changes = _keyword_payload_changes(payload)
+    map_keys = _KEYWORD_MAP_KEYS
+    list_keys = _KEYWORD_LIST_KEYS
 
     for key in map_keys:
-        if key in payload:
-            data[key] = _clean_keyword_map(payload.get(key))
+        if key in changes:
+            data[key] = _clean_keyword_map(changes.get(key))
     for key in list_keys:
-        if key in payload:
-            data[key] = _clean_string_list(payload.get(key))
-    for key, value in payload.items():
-        if key not in handled and key not in derived_keys and not str(key).startswith("_"):
-            data[key] = value
+        if key in changes:
+            data[key] = _clean_string_list(changes.get(key))
     data["_web_vocab_full_override"] = True
     return data
 
@@ -779,7 +830,7 @@ def _update_keyword_config(updates: dict[str, Any]) -> Path:
     user_file = _safe_user_child("keywords.json")
     data = _read_json_file(user_file) or _read_json_file(APP_DIR / "keywords.json")
     data.update(updates)
-    user_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_file(user_file, data)
     return user_file
 
 
@@ -805,8 +856,6 @@ def _load_settings() -> dict[str, Any]:
         "volc_tos_sk": "",
         "volc_bucket": "livec",
         "volc_region": "cn-beijing",
-        "whisper_model": "small",
-        "local_asr_engine": "sensevoice",
         "aliyun_api_key": "",
         "aliyun_oss_ak": "",
         "aliyun_oss_sk": "",
@@ -1479,7 +1528,7 @@ def _save_preview_cache(key: str, item: dict[str, Any]) -> None:
 def _file_dialog_types(kind: str) -> list[tuple[str, str]]:
     if kind == "video":
         return [
-            ("视频文件", "*.mp4 *.mov *.mkv *.avi *.flv *.ts *.m4v *.webm"),
+            ("视频文件", "*.mp4 *.mov *.mkv *.avi *.flv *.ts *.m4v *.webm *.mts *.m2ts"),
             ("所有文件", "*.*"),
         ]
     if kind == "excel":
@@ -1583,6 +1632,121 @@ def _choose_directory_dialog(title: str = "选择文件夹") -> str:
     return paths[0] if paths else ""
 
 
+_VIDEO_IMPORT_EXTENSIONS = frozenset({
+    ".mp4", ".mov", ".mkv", ".avi", ".flv", ".ts", ".m4v", ".webm", ".mts", ".m2ts",
+})
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+
+
+def _video_import_path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _video_import_is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = int(path.stat(follow_symlinks=False).st_file_attributes)
+    except (AttributeError, OSError):
+        return path.is_symlink()
+    return bool(attributes & _WINDOWS_REPARSE_POINT)
+
+
+def _video_import_sort_key(path: Path) -> tuple[str, str]:
+    return (str(path).casefold(), str(path))
+
+
+def _video_import_summary() -> dict[str, int]:
+    return {
+        "input_count": 0,
+        "added": 0,
+        "duplicates": 0,
+        "missing": 0,
+        "unreadable": 0,
+        "unsupported": 0,
+        "no_extension": 0,
+        "reparse_points": 0,
+    }
+
+
+def _video_import_add_file(path: Path, paths: list[str], seen: set[str], summary: dict[str, int]) -> None:
+    if _video_import_is_reparse_point(path):
+        summary["reparse_points"] += 1
+        return
+    if not path.suffix:
+        summary["no_extension"] += 1
+        return
+    if path.suffix.lower() not in _VIDEO_IMPORT_EXTENSIONS:
+        summary["unsupported"] += 1
+        return
+    try:
+        with path.open("rb"):
+            pass
+    except OSError:
+        summary["unreadable"] += 1
+        return
+    key = _video_import_path_key(path)
+    if key in seen:
+        summary["duplicates"] += 1
+        return
+    seen.add(key)
+    paths.append(str(path))
+    summary["added"] += 1
+
+
+def _video_import_walk_folder(folder: Path, paths: list[str], seen: set[str], summary: dict[str, int]) -> None:
+    pending = [folder]
+    while pending:
+        current = pending.pop()
+        if _video_import_is_reparse_point(current):
+            summary["reparse_points"] += 1
+            continue
+        try:
+            entries = sorted(Path(current).iterdir(), key=_video_import_sort_key)
+        except OSError:
+            summary["unreadable"] += 1
+            continue
+        child_folders: list[Path] = []
+        for entry in entries:
+            try:
+                if _video_import_is_reparse_point(entry):
+                    summary["reparse_points"] += 1
+                elif entry.is_dir():
+                    child_folders.append(entry)
+                elif entry.is_file():
+                    _video_import_add_file(entry, paths, seen, summary)
+                else:
+                    summary["unsupported"] += 1
+            except OSError:
+                summary["unreadable"] += 1
+        pending.extend(reversed(child_folders))
+
+
+def _resolve_video_import_paths(values: list[str]) -> dict[str, Any]:
+    """Resolve user-selected local files/folders without copying media data."""
+    summary = _video_import_summary()
+    resolved_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = str(raw_value or "").strip().strip('"')
+        if not value:
+            continue
+        summary["input_count"] += 1
+        candidate = Path(value).expanduser().absolute()
+        try:
+            if not candidate.exists():
+                summary["missing"] += 1
+            elif _video_import_is_reparse_point(candidate):
+                summary["reparse_points"] += 1
+            elif candidate.is_dir():
+                _video_import_walk_folder(candidate, resolved_paths, seen, summary)
+            elif candidate.is_file():
+                _video_import_add_file(candidate, resolved_paths, seen, summary)
+            else:
+                summary["unsupported"] += 1
+        except OSError:
+            summary["unreadable"] += 1
+    return {"ok": True, "paths": resolved_paths, "summary": summary, "storage": "original_local_paths"}
+
+
 def _upload_dir() -> Path:
     target = _safe_user_child("web_uploads", time.strftime("%Y%m%d"))
     target.mkdir(parents=True, exist_ok=True)
@@ -1607,8 +1771,6 @@ class SettingsPayload(BaseModel):
     volc_tos_sk: str = ""
     volc_bucket: str = ""
     volc_region: str = "cn-beijing"
-    whisper_model: str = "small"
-    local_asr_engine: str = "sensevoice"
     aliyun_api_key: str = ""
     aliyun_oss_ak: str = ""
     aliyun_oss_sk: str = ""
@@ -1644,6 +1806,13 @@ class UserDataDirPayload(BaseModel):
 
 class PathsPayload(BaseModel):
     paths: list[str] = Field(default_factory=list)
+
+
+class DesktopDropDiagnosticPayload(BaseModel):
+    stage: str = ""
+    target: str = ""
+    path_count: int = Field(default=0, ge=0, le=10000)
+    detail: str = ""
 
 
 class StopScopePayload(BaseModel):
@@ -1966,7 +2135,7 @@ def _task_batch_updates_from_message(message: str) -> dict[str, Any]:
 
 def _batch_failure_detail(label: str, error: Any) -> dict[str, Any]:
     message = re.sub(r"\s+", " ", str(error or "未知错误")).strip()
-    insufficient = "有效内容不足" in message or (
+    insufficient = "有效内容不足" in message or "可用安全内容仅" in message or (
         "低于目标下限" in message and "片单" in message
     )
     duration_mismatch = not insufficient and any(token in message for token in (
@@ -1978,6 +2147,9 @@ def _batch_failure_detail(label: str, error: Any) -> dict[str, Any]:
     detail: dict[str, Any] = {
         "label": str(label or "").strip(),
         "code": (
+            "insufficient_safe_material"
+            if "可用安全内容仅" in message
+            else
             "insufficient_content"
             if insufficient
             else "duration_mismatch"
@@ -2014,6 +2186,8 @@ def _batch_best_effort_detail(label: str, result: Any) -> dict[str, Any] | None:
         return None
     metadata = dict(result.get("analysis_metadata") or {})
     relaxation = dict(metadata.get("duration_relaxation") or {})
+    if relaxation.get("policy") == "safe_best_effort_v1":
+        return None
     if not relaxation.get("applied") or relaxation.get("policy") != "safe_best_effort_v1":
         return None
     try:
@@ -2040,7 +2214,10 @@ def _batch_summary_message(
     unit: str,
     best_effort_details: list[dict[str, Any]] | None = None,
 ) -> str:
-    insufficient = sum(1 for item in details if item.get("code") == "insufficient_content")
+    insufficient = sum(
+        1 for item in details
+        if item.get("code") in {"insufficient_content", "insufficient_safe_material"}
+    )
     duration_mismatch = sum(1 for item in details if item.get("code") == "duration_mismatch")
     other_failed = max(0, len(details) - insufficient - duration_mismatch)
     parts = [f"{prefix}：成功 {succeeded}/{total} {unit}"]
@@ -3859,6 +4036,85 @@ def _preview_fallback_word_payload(text: Any, start: float, end: float) -> list[
     result = [{"index": 0, "text": value, "start": round(start, 3), "end": round(end, 3)}]
     _preview_lock_forbidden_words(result)
     return result
+
+
+def _preview_word_timing_summary(
+    word_timings: list[dict[str, Any]] | None,
+    *,
+    source: str,
+    attempted_sidecars: int = 0,
+) -> dict[str, Any]:
+    segments = [item for item in (word_timings or []) if isinstance(item, dict)]
+    word_count = sum(
+        len(item.get("words") or [])
+        for item in segments
+        if isinstance(item.get("words"), list)
+    )
+    return {
+        "source": source,
+        "semantic_segment_count": len(segments),
+        "word_count": word_count,
+        "attempted_sidecars": max(0, int(attempted_sidecars or 0)),
+    }
+
+
+def _preview_word_timings_with_recovery(
+    cached_word_timings: list[dict[str, Any]] | None,
+    sidecar_sources: list[tuple[str, str]] | None,
+    *,
+    scope: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep preview word editing available when a shared analysis cache is empty.
+
+    The sidecar is the timing source of truth. This only reloads it for preview
+    rendering; it never changes the selected clips, subtitle text, or timings.
+    """
+    cached = [item for item in (cached_word_timings or []) if isinstance(item, dict)]
+    cached_summary = _preview_word_timing_summary(cached, source="analysis_cache")
+    if cached_summary["word_count"]:
+        return cached, cached_summary
+
+    recovered: list[dict[str, Any]] = []
+    attempted = 0
+    for marker, raw_srt_path in sidecar_sources or []:
+        srt_path = str(raw_srt_path or "").strip()
+        if not srt_path:
+            continue
+        attempted += 1
+        try:
+            from volcengine_asr import load_word_timing_sidecar
+
+            loaded = list(load_word_timing_sidecar(srt_path, semantic=True) or [])
+        except Exception:
+            loaded = []
+        for segment in loaded:
+            if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
+                continue
+            restored = dict(segment)
+            restored["words"] = [dict(word) for word in segment["words"] if isinstance(word, dict)]
+            if marker:
+                restored["source_marker"] = str(marker).strip().upper()
+            recovered.append(restored)
+
+    summary = _preview_word_timing_summary(
+        recovered,
+        source="sidecar_recovery" if recovered else "unavailable",
+        attempted_sidecars=attempted,
+    )
+    if summary["word_count"]:
+        emit_log(
+            "info",
+            "预览词级时间恢复: 分析缓存缺失，已从本地词级文件恢复 "
+            f"{summary['semantic_segment_count']} 段/{summary['word_count']} 词。",
+            scope,
+        )
+    else:
+        emit_log(
+            "warning",
+            "预览词级时间不可用：本次只能整句删除，未改动原字幕或时间戳。",
+            scope,
+        )
+    return recovered, summary
 
 
 def _preview_segment_block_reason(text: Any) -> str:
@@ -6228,6 +6484,29 @@ def _clean_preview_int_list(values: Any, limit: int | None = None) -> list[int]:
     return result
 
 
+def _ordered_preview_selection_indices(
+    selected_indices: Any,
+    order: Any,
+    raw_count: int,
+) -> list[int]:
+    """Return selected preview clips in the explicit user assembly order.
+
+    Selection and assembly order are separate pieces of state.  A selected
+    clip absent from an older/incomplete order payload is retained after the
+    ordered items, so saving a draft can never silently discard it.
+    """
+    selected = _clean_preview_int_list(selected_indices, raw_count)
+    selected_set = set(selected)
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for index in _clean_preview_int_list(order, raw_count):
+        if index in selected_set and index not in seen:
+            ordered.append(index)
+            seen.add(index)
+    ordered.extend(index for index in selected if index not in seen)
+    return ordered
+
+
 def _normalize_preview_selected_words(
     public_clips: dict[int, dict[str, Any]],
     selected_indices: list[int],
@@ -6741,8 +7020,6 @@ def _ensure_srt(video: Path, scope: str) -> Path | None:
         generated = generate_srt(
             str(video),
             log_fn=lambda msg: emit_log("info", msg, scope),
-            whisper_model=str(settings.get("whisper_model", "small") or "small"),
-            asr_engine=str(settings.get("local_asr_engine", "sensevoice") or "sensevoice"),
         )
         if generated and Path(generated).exists():
             emit_log("info", "本地语音识别完成。", scope)
@@ -7147,7 +7424,14 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             cutter_mod._multi_result_cache,
             payload.focus_hint,
         )
-        word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
+        word_timings, word_timing_summary = _preview_word_timings_with_recovery(
+            list(cutter_mod._multi_result_cache.get("word_timings") or []),
+            [
+                (f"V{index + 1}", str(Path(source).with_suffix(".srt")))
+                for index, source in enumerate(mix_sources)
+            ],
+            scope=scope,
+        )
         preferred_category = _preferred_category_for_payload(payload, category_summary)
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -7182,9 +7466,19 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         dedup_summary["content_review_summary"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
         )
+        dedup_summary["candidate_safety_summary"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("candidate_safety_summary") or {}
+        )
+        dedup_summary["selection_manifest"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("selection_manifest") or {}
+        )
+        dedup_summary["selection_result"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("selection_result") or {}
+        )
         dedup_summary["source_contract"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("source_contract") or {}
         )
+        dedup_summary["word_timing_summary"] = dict(word_timing_summary)
         srt_text = str(cutter_mod._multi_result_cache.get("srt_text") or "")
         public_clips = _preview_public_clips(
             raw_clips,
@@ -10111,7 +10405,11 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
         selected = payload.selected_indices or list(draft.get("selected_indices") or [])
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_words = payload.selected_words or dict(draft.get("selected_words") or {})
-        selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
+        selected_indices = _ordered_preview_selection_indices(
+            selected,
+            payload.order or draft.get("order"),
+            len(raw_clips),
+        )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
@@ -10322,7 +10620,11 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
             cutter_mod._multi_result_cache,
             payload.focus_hint,
         )
-        word_timings = list(cutter_mod._multi_result_cache.get("word_timings") or [])
+        word_timings, word_timing_summary = _preview_word_timings_with_recovery(
+            list(cutter_mod._multi_result_cache.get("word_timings") or []),
+            [("", resolved_srt)],
+            scope=scope,
+        )
         preferred_category = _preferred_category_for_payload(payload, category_summary)
         raw_clips, dedup_summary = _normalize_preview_final_clips(
             raw_clips,
@@ -10353,6 +10655,22 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         dedup_summary["duration_relaxation"] = dict(
             (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("duration_relaxation") or {}
         )
+        dedup_summary["content_review_summary"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
+        )
+        dedup_summary["candidate_safety_summary"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("candidate_safety_summary") or {}
+        )
+        dedup_summary["selection_manifest"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("selection_manifest") or {}
+        )
+        dedup_summary["selection_result"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("selection_result") or {}
+        )
+        dedup_summary["source_contract"] = dict(
+            (cutter_mod._multi_result_cache.get("analysis_metadata") or {}).get("source_contract") or {}
+        )
+        dedup_summary["word_timing_summary"] = dict(word_timing_summary)
         _set_task_progress(task_id, 94, "生成预览列表")
         public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
@@ -10447,7 +10765,11 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         selected = payload.selected_indices or list(draft.get("selected_indices") or [])
         selected_segments = payload.selected_segments or dict(draft.get("selected_segments") or {})
         selected_words = payload.selected_words or dict(draft.get("selected_words") or {})
-        selected_indices = [int(i) for i in selected if 0 <= int(i) < len(raw_clips)]
+        selected_indices = _ordered_preview_selection_indices(
+            selected,
+            payload.order or draft.get("order"),
+            len(raw_clips),
+        )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         clips = _hard_filter_preview_selection(clips, scope)
         if not clips:
@@ -10594,6 +10916,8 @@ def runtime() -> dict[str, Any]:
         "runtime_integrity": _runtime_integrity_summary(),
         "server_module_file": str(Path(__file__).resolve()),
         "batch_resilience_version": 2,
+        "zero_copy_test_mode": _zero_copy_test_mode(),
+        "zero_copy_test_label": "零拷贝测试" if _zero_copy_test_mode() else "",
         "mode": "local-web-client",
     }
 
@@ -10913,6 +11237,28 @@ async def dialog_videos() -> dict[str, Any]:
         return {"ok": True, "paths": paths}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"打开视频选择窗口失败：{exc}") from exc
+
+
+@app.post("/api/media/video-inputs")
+async def resolve_video_inputs(payload: PathsPayload) -> dict[str, Any]:
+    return await asyncio.to_thread(_resolve_video_import_paths, payload.paths)
+
+
+@app.post("/api/desktop-drop/diagnostic")
+def desktop_drop_diagnostic(payload: DesktopDropDiagnosticPayload) -> dict[str, Any]:
+    if not _zero_copy_test_mode():
+        raise HTTPException(status_code=404, detail="Not found")
+    target = str(payload.target or "").strip()
+    scope = "mix" if target == "mix-video-paths" else "smart-cut" if target == "video-paths" else "settings"
+    stage = re.sub(r"[^a-z0-9._-]", "", str(payload.stage or "").lower())[:80] or "unknown"
+    detail = re.sub(r"\s+", " ", str(payload.detail or "")).strip()[:240]
+    suffix = f"，{detail}" if detail else ""
+    emit_log(
+        "info",
+        f"零拷贝测试 | 前端 {stage}：target={target or '-'}，绝对路径={int(payload.path_count)}{suffix}。",
+        scope,
+    )
+    return {"ok": True}
 
 
 @app.post("/api/dialog/file")
@@ -11308,18 +11654,22 @@ def get_keywords() -> dict[str, Any]:
 @app.post("/api/keywords")
 def save_keywords(payload: dict[str, Any]) -> dict[str, Any]:
     target = _safe_user_child("keywords.json")
-    saved = _normalize_keyword_payload(payload)
-    _write_json_file(target, saved)
-    _clear_ai_keyword_cache()
+    saved_fields = _keyword_payload_fields(payload)
+    if saved_fields:
+        saved = _normalize_keyword_payload(payload)
+        _write_json_file(target, saved)
+        _clear_ai_keyword_cache()
     data = _load_effective_keyword_config()
-    emit_log("success", "关键词配置已保存。", "settings")
+    message = "词库已保存，会影响下一次 AI 选片" if saved_fields else "词库没有改动"
+    emit_log("success", "关键词配置已保存。" if saved_fields else "关键词配置没有改动。", "settings")
     return {
         "ok": True,
-        "message": "词库已保存，会影响下一次 AI 选片",
-        "path": str(target),
-        "source": str(target),
+        "message": message,
+        "path": str(target if target.exists() else _keyword_config_path()),
+        "source": str(target if target.exists() else _keyword_config_path()),
         "count": _keyword_count(data),
         "keywords": data,
+        "saved_fields": saved_fields,
     }
 
 
@@ -11620,11 +11970,12 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再成片。")
     clip_count = len(_preview_selection_raw_clips(preview))
-    selected = [int(index) for index in payload.selected_indices if 0 <= int(index) < clip_count]
+    selected = _ordered_preview_selection_indices(payload.selected_indices, payload.order, clip_count)
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再成片。")
-    payload.selected_indices = selected
     draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "smart", selected, payload.selected_segments, payload.selected_words, order=payload.order)
+    payload.order = list(draft.get("order") or [])
+    payload.selected_indices = _ordered_preview_selection_indices(selected, payload.order, clip_count)
     _record_preview_selection_feedback(preview, "smart", draft, "smart_from_preview")
     task_id = _new_task("smart-cut", "预览成片")
     threading.Thread(target=_run_smart_cut_from_preview, args=(task_id, payload), daemon=True).start()
@@ -11732,11 +12083,12 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
     if not payload.selected_indices:
         raise HTTPException(status_code=400, detail="请至少保留一个片段再混剪。")
     clip_count = len(_preview_selection_raw_clips(preview))
-    selected = [int(index) for index in payload.selected_indices if 0 <= int(index) < clip_count]
+    selected = _ordered_preview_selection_indices(payload.selected_indices, payload.order, clip_count)
     if not selected:
         raise HTTPException(status_code=400, detail="请至少保留一个有效片段再混剪。")
-    payload.selected_indices = selected
     draft = _apply_preview_payload_draft(payload.preview_id.strip(), preview, "mix", selected, payload.selected_segments, payload.selected_words, order=payload.order)
+    payload.order = list(draft.get("order") or [])
+    payload.selected_indices = _ordered_preview_selection_indices(selected, payload.order, clip_count)
     _record_preview_selection_feedback(preview, "mix", draft, "mix_from_preview")
     task_id = _new_task("mix", "预览混剪成片")
     threading.Thread(target=_run_mix_from_preview, args=(task_id, payload), daemon=True).start()

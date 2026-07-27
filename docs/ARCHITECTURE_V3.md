@@ -83,7 +83,10 @@ entire selected patch chain before the business runtime exits, then builds all
 intermediate immutable runtimes inside one transaction.
 
 A stable launcher or updater change requires a new full-package baseline. A
-normal V3 delta never replaces the updater that is currently executing.
+normal V3 delta never replaces the updater that is currently executing. A new
+or broadly replaced native/ML runtime dependency, or a patch that exceeds the
+published automatic-update size/file budget, also requires a full-package
+baseline even when the stable components themselves are unchanged.
 
 ## 4. Release trust
 
@@ -145,8 +148,10 @@ target version, continuity, manifests, payloads, and protected paths, then
 applies the chain in one transaction and switches current.json only once.
 
 Every supported path longer than two edges must receive a direct rollup patch.
-A launcher, updater, public-key, trust-root, or install-layout change is not a
-normal delta; it creates a new full-package baseline.
+A launcher, updater, public-key, trust-root, install-layout, or oversized
+native/ML dependency change is not a normal delta; it creates a new
+full-package baseline. The precise automatic-update budget is in
+docs/PACKAGING_V3_HANDOFF.md.
 
 ## 6. Health and rollback
 

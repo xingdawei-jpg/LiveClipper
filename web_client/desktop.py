@@ -9,12 +9,15 @@ import sys
 import json
 import urllib.request
 from pathlib import Path
+from typing import Any
 import winreg
 
 import uvicorn
 
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
+ZERO_COPY_TEST_ENV = "LIVECLIPPER_ZERO_COPY_TEST"
+ZERO_COPY_TEST_PORT_ENV = "LIVECLIPPER_PORT"
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 RUNTIME_LAYOUT_VERSION = 3
 LAUNCHER_HEALTH_REPORT_TIMEOUT = 30.0
@@ -103,6 +106,19 @@ def _icon_path() -> str | None:
         if path.exists():
             return str(path)
     return None
+
+
+def _zero_copy_test_mode() -> bool:
+    return os.environ.get(ZERO_COPY_TEST_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configured_port() -> int:
+    raw = os.environ.get(ZERO_COPY_TEST_PORT_ENV, "").strip()
+    try:
+        port = int(raw) if raw else 8765
+    except ValueError:
+        return 8765
+    return port if 1024 <= port <= 65535 else 8765
 
 
 def _pick_port(preferred: int = 8765) -> int:
@@ -450,13 +466,166 @@ def _protect_running_tasks_on_close(window, port: int, emit_log) -> None:
         pass
 
 
+def _dedupe_native_drop_paths(values: Any) -> list[str]:
+    """Keep the absolute CF_HDROP paths in Explorer's original order."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for item in values or []:
+        path = str(item or "").strip()
+        if not path or not os.path.isabs(path):
+            continue
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def _native_file_drop_paths(data: Any, file_drop_format: Any) -> list[str]:
+    """Read Explorer's native CF_HDROP array from a WinForms DragDrop event."""
+    try:
+        values = data.GetData(file_drop_format)
+    except Exception:
+        return []
+    return _dedupe_native_drop_paths(values)
+
+
+def _emit_zero_copy_test_log(emit_log, message: str) -> None:
+    if _zero_copy_test_mode():
+        emit_log("info", f"零拷贝测试 | {message}", "settings")
+
+
+def _dispatch_native_video_drop(window: Any, detail: dict[str, Any]) -> None:
+    serialized_detail = json.dumps(detail, ensure_ascii=False)
+    window.evaluate_js(
+        "window.dispatchEvent(new CustomEvent("
+        + json.dumps("liveclipper:native-video-drop")
+        + ", {detail: "
+        + serialized_detail
+        + "}));"
+    )
+
+
+def _dispatch_native_video_drop_after_callback(window: Any, detail: dict[str, Any], emit_log) -> None:
+    """Notify the page after the WinForms DragDrop callback has returned."""
+    def _notify() -> None:
+        # Calling EvaluateScript while WinForms is dispatching DragDrop can block
+        # the OLE callback. Yield it first, then notify the page from a worker.
+        time.sleep(0.05)
+        paths = detail.get("paths") if isinstance(detail, dict) else []
+        _emit_zero_copy_test_log(emit_log, f"CustomEvent 开始派发：绝对路径={len(paths or [])}。")
+        try:
+            _dispatch_native_video_drop(window, detail)
+            _emit_zero_copy_test_log(emit_log, f"CustomEvent 已派发：绝对路径={len(paths or [])}。")
+        except Exception as exc:
+            _emit_zero_copy_test_log(emit_log, f"CustomEvent 派发失败：{type(exc).__name__}。")
+            emit_log("warning", f"桌面端拖入路径通知失败：{exc}", "system")
+
+    threading.Thread(target=_notify, daemon=True, name="liveclipper-drop-notify").start()
+
+
+def _native_file_drop_bridge_path() -> Path:
+    candidates = [
+        MODULE_WEB_DIR / "native_file_drop_bridge.dll",
+        BUNDLE_DIR / "web_client" / "native_file_drop_bridge.dll",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError("native_file_drop_bridge.dll is missing")
+
+
+def _load_native_file_drop_bridge():
+    import clr
+
+    clr.AddReference(str(_native_file_drop_bridge_path()))
+    from LiveClipper.NativeDrop import NativeFileDropBridge
+
+    return NativeFileDropBridge
+
+
+def _enable_desktop_native_file_drop_support(window: Any, emit_log) -> None:
+    """Receive Explorer CF_HDROP on WebView2's render HWND without file copies."""
+    try:
+        if not window.events.loaded.wait(30):
+            raise RuntimeError("桌面页面加载超时")
+
+        from System import Action, Array, Int32, String
+        from System.Drawing import Point
+
+        host_form = getattr(window, "native", None)
+        control = getattr(host_form, "webview", None)
+        if control is None:
+            raise RuntimeError("pywebview EdgeChromium WebView2 控件不可用")
+        native_bridge = _load_native_file_drop_bridge()
+
+        def _on_diagnostic(message: Any) -> None:
+            _emit_zero_copy_test_log(emit_log, str(message or "native OLE diagnostic"))
+
+        def _on_drop(paths: Any, screen_x: Any, screen_y: Any) -> None:
+            normalized_paths = _dedupe_native_drop_paths(paths)
+            try:
+                point = control.PointToClient(Point(int(screen_x), int(screen_y)))
+                client_x, client_y = int(point.X), int(point.Y)
+            except Exception:
+                client_x, client_y = int(screen_x or 0), int(screen_y or 0)
+            try:
+                dpi = int(getattr(control, "DeviceDpi", 96) or 96)
+            except Exception:
+                dpi = 96
+            _emit_zero_copy_test_log(
+                emit_log,
+                f"native OLE callback：CF_HDROP 条目={len(normalized_paths)}，绝对路径={len(normalized_paths)}，坐标={client_x},{client_y}，DPI={dpi}。",
+            )
+            if not normalized_paths:
+                return
+            detail = {
+                "paths": normalized_paths,
+                "x": client_x,
+                "y": client_y,
+                "dpi": dpi,
+                "source": "native-ole-cf-hdrop",
+            }
+            _dispatch_native_video_drop_after_callback(window, detail, emit_log)
+
+        def _configure_on_ui_thread() -> None:
+            render_handle = native_bridge.FindRenderWidgetHost(control.Handle)
+            if int(render_handle.ToInt64()) == 0:
+                raise RuntimeError("未找到 WebView2 渲染窗口")
+            drop_callback = Action[Array[String], Int32, Int32](_on_drop)
+            diagnostic_callback = Action[String](_on_diagnostic)
+            registration = native_bridge.Attach(render_handle, drop_callback, diagnostic_callback)
+            # Keep the COM target and delegates alive for the desktop window lifetime.
+            window._liveclipper_native_file_drop_handlers = (
+                registration,
+                drop_callback,
+                diagnostic_callback,
+            )
+            _emit_zero_copy_test_log(
+                emit_log,
+                f"native OLE hook ready：已接管 WebView2 渲染窗口 HWND={int(render_handle.ToInt64())} 的 CF_HDROP。",
+            )
+
+        if bool(getattr(control, "InvokeRequired", False)):
+            control.Invoke(Action(_configure_on_ui_thread))
+        else:
+            _configure_on_ui_thread()
+    except Exception as exc:
+        _emit_zero_copy_test_log(emit_log, f"桌面 OLE 拖放桥注册失败：{type(exc).__name__}。")
+        emit_log("warning", f"桌面端零拷贝拖入桥不可用：{exc}", "system")
+
+
 def main() -> None:
-    port = _pick_port()
+    port = _pick_port(_configured_port())
     server = _start_server(port)
     from server import emit_log
 
     url = f"http://127.0.0.1:{port}"
     emit_log("info", f"桌面客户端已启动: {url}", "system")
+    if _zero_copy_test_mode():
+        data_dir = os.environ.get("LIVECLIPPER_USER_DATA_DIR", "").strip() or "未设置"
+        _emit_zero_copy_test_log(emit_log, f"测试窗口启动：端口={port}，用户数据目录={data_dir}。")
 
     if not _wait_for_port(port):
         server.should_exit = True
@@ -482,7 +651,7 @@ def main() -> None:
             webview.settings["WEBVIEW2_RUNTIME_PATH"] = str(bundled_runtime)
 
         window = webview.create_window(
-            "LiveClipper",
+            "LiveClipper - 零拷贝测试" if _zero_copy_test_mode() else "LiveClipper",
             url,
             width=1280,
             height=820,
@@ -492,12 +661,20 @@ def main() -> None:
         _protect_running_tasks_on_close(window, port, emit_log)
         icon_path = _icon_path()
         try:
-            kwargs = {"gui": "edgechromium"}
+            kwargs = {
+                "gui": "edgechromium",
+                "func": _enable_desktop_native_file_drop_support,
+                "args": (window, emit_log),
+            }
             if icon_path:
                 kwargs["icon"] = icon_path
             webview.start(**kwargs)
         except TypeError:
-            webview.start(gui="edgechromium")
+            webview.start(
+                _enable_desktop_native_file_drop_support,
+                args=(window, emit_log),
+                gui="edgechromium",
+            )
         server.should_exit = True
         return
     except Exception as exc:

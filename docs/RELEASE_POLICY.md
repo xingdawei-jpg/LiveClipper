@@ -1,6 +1,6 @@
 # LiveClipper 稳定发布策略
 
-本文件是 LiveClipper 打包、版本、全量包和自动更新的唯一发布政策。实现细节见 docs/ARCHITECTURE_V3.md，执行步骤见 docs/RELEASE_PROCESS_V3.md。发生冲突时，以本文件和 release/release_policy.json 为准。
+本文件是 LiveClipper 打包、版本、全量包和自动更新的唯一发布政策。实现细节见 docs/ARCHITECTURE_V3.md，执行步骤见 docs/RELEASE_PROCESS_V3.md，交接和依赖预算见 docs/PACKAGING_V3_HANDOFF.md。发生冲突时，以本文件和 release/release_policy.json 为准。
 
 ## 1. 不可违反的规则
 
@@ -9,7 +9,7 @@
 3. 开发完成不等于已经发布。普通业务更新没有签名补丁、远端下载验证和 stable 通道发布，用户就没有收到更新；新全量基线还必须完成百度网盘验证。
 4. app/version.json、稳定组件版本、正式基线和线上通道是四种不同状态，禁止互相代替。
 5. 稳定 launcher、updater、公钥、信任根或安装布局变化时，必须建立新全量基线，禁止放进普通增量包。
-6. 普通业务版本的增量包必须包含零个稳定组件 payload。
+6. 普通业务版本的增量包必须包含零个稳定组件 payload，且必须通过自动更新体积、文件数和依赖膨胀预算。
 7. 全量包通过百度网盘人工分发；GitHub Release 只存放自动更新使用的签名补丁及校验文件。
 8. 候选通道必须是 hold，并放在 release/candidates/<版本>/；验收期间不得覆盖线上 release/stable.json。
 9. release/stable.json 必须最后单独发布。没有完整验收记录时禁止改为 ready。
@@ -55,7 +55,7 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 ### 普通业务运行时版本
 
-适用于 app、web_client 前端和服务端、AI、ASR、剪辑逻辑等变化，且稳定组件和信任根未变化。
+适用于 app、web_client 前端和服务端、AI、ASR、剪辑逻辑等变化，且稳定组件和信任根未变化，并且对每个受支持基线生成的直接 patch 同时满足 docs/PACKAGING_V3_HANDOFF.md 的全部自动更新预算。
 
 必须产出：
 
@@ -65,7 +65,7 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 - GitHub 补丁 Release；
 - 候选 hold 清单和最终 ready stable 清单。
 
-普通 delta 的 stable_payload_files 必须为 0。新用户继续使用最近一次人工分发并验证过的完整包，启动后再通过 signed delta 升到最新业务版本。普通业务更新不得因为没有新的百度网盘全量包而被阻止。
+普通 delta 的 stable_payload_files 必须为 0。新用户继续使用最近一次人工分发并验证过的完整包，启动后再通过 signed delta 升到最新业务版本。普通业务更新不得因为没有新的百度网盘全量包而被阻止，前提是它确实是小型、可用的自动补丁；不能用巨型 runtime patch 规避新全量基线。
 
 ### 新全量基线
 
@@ -76,6 +76,9 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 - release_update_public_key.pem 或信任根；
 - Runtime V3 目录布局、current.json、install_manifest 格式；
 - 普通补丁无法安全迁移的稳定安装状态。
+- 新增或整体替换 ML/原生运行时依赖，例如 Torch、FunASR、ModelScope、WebView2、ffmpeg、ffprobe，且对应 patch 未通过自动更新预算；
+- 任一受支持基线到目标版本的直接 patch 超过 50 MiB 或 500 个 runtime payload 文件；
+- payload 中出现未验证的测试、示例、训练、文档或诊断目录。
 
 新基线通过百度网盘分发，不在 GitHub Release 上传全量 ZIP。旧稳定层用户必须安装全量包。基线被登记后，必须用该精确包构造一个合成的下一版本 delta，证明后续普通更新可用。
 
@@ -87,20 +90,19 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 1. 执行 Cross-Window Sync Gate，建立明确的纳入和排除清单。
 2. 运行语法、前端、单元测试和安全检查。
-3. 冻结源码，决定普通业务版本或新全量基线。
-4. 升级业务版本；仅在稳定层变化时升级 launcher/updater。
-5. 重新生成 app/version.json，确认所有 runtime hash 与最终源码一致。
-6. 提交发布源码，但不修改 release/stable.json。
-7. 从该干净 commit 构建 frozen runtime 和 V3 staging；只有 full_baseline 才生成全量 ZIP。
-8. business_runtime 直接从精确旧包和目标 staging 生成签名 delta；full_baseline 生成完整包和基线登记材料。
-9. 生成校验文件和 release/candidates/<版本>/stable.hold.json，运行 candidate preflight。
-10. business_runtime 只上传补丁到 GitHub Release；full_baseline 只把全量 ZIP 上传百度网盘。
-11. business_runtime 从 GitHub 重新下载补丁；full_baseline 另外从百度网盘重新下载全量包，核对大小、SHA256 和 ZIP。
-12. business_runtime 完成一次精确旧版本升级、失败回滚、用户数据保持和更新后 runtime 完整性；full_baseline 另外完成干净/污染 AppData、首次启动和健康回滚。
-13. 填写 release/candidates/<版本>/acceptance.json，所有必需 gate 都必须是 pass。
-14. 把 hold 候选 SHA256 写入 acceptance.json，使用 tools/promote_release_channel.py 从该候选生成 ready stable。
-15. 运行 tools/release_preflight.py --phase publish；通过后只提交并推送 release/stable.json。
-16. 远端核对 commit、GitHub Release 资产和 stable.json；保留全部验收证据。
+3. 选择未使用的候选业务版本；仅在稳定层代码真实变化时升级 launcher/updater。
+4. 冻结源码并重新生成 app/version.json，确认所有 runtime hash 与最终源码一致。
+5. 提交发布源码，但不修改 release/stable.json。
+6. 从该干净 commit 构建 frozen runtime 和 V3 staging；审计 runtime manifest 差异和每个 patch 预算，再确认 business_runtime 或 full_baseline。
+7. 只有通过预算的 business_runtime 才从精确旧包和目标 staging 生成签名 delta；否则按 full_baseline 生成完整包和基线登记材料。
+8. 生成校验文件和 release/candidates/<版本>/stable.hold.json，运行 candidate preflight。
+9. business_runtime 只上传补丁到 GitHub Release；full_baseline 只把全量 ZIP 上传百度网盘。
+10. business_runtime 从 GitHub 重新下载补丁；full_baseline 另外从百度网盘重新下载全量包，核对大小、SHA256 和 ZIP。
+11. business_runtime 完成一次精确旧版本升级、失败回滚、用户数据保持和更新后 runtime 完整性；full_baseline 另外完成干净/污染 AppData、首次启动和健康回滚。
+12. 填写 release/candidates/<版本>/acceptance.json，所有必需 gate 都必须是 pass。
+13. 把 hold 候选 SHA256 写入 acceptance.json，使用 tools/promote_release_channel.py 从该候选生成 ready stable。
+14. 运行 tools/release_preflight.py --phase publish；通过后只提交并推送 release/stable.json。
+15. 远端核对 commit、GitHub Release 资产和 stable.json；保留全部验收证据。
 
 任何一步失败都停在当前步骤。修复源码后回到第 1 步，不得沿用旧 hash、旧 ZIP 或旧验收记录。
 
@@ -118,7 +120,7 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 
 ### 百度网盘全量包
 
-以下规则只适用于 full_baseline。普通 business_runtime 不生成或上传新的全量包。
+以下规则适用于 full_baseline，包括因自动更新预算失败而升级为 full_baseline 的业务版本。只有通过预算的普通 business_runtime 不生成或上传新的全量包。
 
 - 上传原始全量 ZIP 和 .sha256.txt。
 - 分享页可以用于人工下载，但不能作为自动补丁 URL。
@@ -148,6 +150,7 @@ release/github/v<版本>.json 只描述 GitHub 补丁 Release 的资产，不是
 - 错误补丁拒绝、失败回滚和用户数据保持结果；
 - 更新后 runtime 文件完整性；
 - GitHub 重新下载后的 hash；
+- 每个候选 patch 的压缩大小、runtime payload 文件数和目录级依赖审计；
 - 用户设置、授权、AI/ASR 配置和输出目录保持结果；
 - stable 最后发布的 commit 和远端内容。
 
@@ -165,6 +168,7 @@ full_baseline 另外保留：全量包路径和 SHA256、百度网盘回下载 h
 - 用源码启动结果代替解压包验收；
 - 在 8765 上未核对进程归属就相信 /api/runtime；
 - 给普通 delta 加 launcher、updater、公钥或信任根；
+- 在未做依赖/预算审计时，仅因“改的是业务代码”就将 ML 或原生运行时大改动标记为普通 delta；
 - 验收前把 live stable 改为 hold 或 ready；
 - 把 GitHub tag、GitHub commit、百度网盘文件或本地 release_dist 单独当作“发布完成”；
 - 删除整个 %APPDATA%\LiveClipper 解决配置问题；

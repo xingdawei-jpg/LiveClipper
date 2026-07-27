@@ -83,12 +83,20 @@ class LocalAsrQualityTests(unittest.TestCase):
             calls.append(kwargs)
             return sentinel
 
-        fake_funasr = types.SimpleNamespace(AutoModel=fake_auto_model)
-        with mock.patch.dict(sys.modules, {"funasr": fake_funasr}):
-            with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
-                local_asr._SENSEVOICE_MODEL = None
-                local_asr._SENSEVOICE_PUNCTUATION = False
-                loaded = local_asr._load_sensevoice()
+        fake_auto_module = types.ModuleType("funasr.auto.auto_model")
+        fake_auto_module.AutoModel = fake_auto_model
+        fake_auto_package = types.ModuleType("funasr.auto")
+        fake_funasr = types.ModuleType("funasr")
+        with mock.patch.dict(sys.modules, {
+            "funasr": fake_funasr,
+            "funasr.auto": fake_auto_package,
+            "funasr.auto.auto_model": fake_auto_module,
+        }):
+            with mock.patch.object(local_asr, "_register_sensevoice_components"):
+                with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
+                    local_asr._SENSEVOICE_MODEL = None
+                    local_asr._SENSEVOICE_PUNCTUATION = False
+                    loaded = local_asr._load_sensevoice()
 
         self.assertIs(loaded, sentinel)
         self.assertTrue(local_asr._SENSEVOICE_PUNCTUATION)
@@ -106,18 +114,77 @@ class LocalAsrQualityTests(unittest.TestCase):
                 raise RuntimeError("punc unavailable")
             return sentinel
 
-        fake_funasr = types.SimpleNamespace(AutoModel=fake_auto_model)
-        with mock.patch.dict(sys.modules, {"funasr": fake_funasr}):
-            with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
-                local_asr._SENSEVOICE_MODEL = None
-                local_asr._SENSEVOICE_PUNCTUATION = False
-                loaded = local_asr._load_sensevoice()
+        fake_auto_module = types.ModuleType("funasr.auto.auto_model")
+        fake_auto_module.AutoModel = fake_auto_model
+        fake_auto_package = types.ModuleType("funasr.auto")
+        fake_funasr = types.ModuleType("funasr")
+        with mock.patch.dict(sys.modules, {
+            "funasr": fake_funasr,
+            "funasr.auto": fake_auto_package,
+            "funasr.auto.auto_model": fake_auto_module,
+        }):
+            with mock.patch.object(local_asr, "_register_sensevoice_components"):
+                with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
+                    local_asr._SENSEVOICE_MODEL = None
+                    local_asr._SENSEVOICE_PUNCTUATION = False
+                    loaded = local_asr._load_sensevoice()
 
         self.assertIs(loaded, sentinel)
         self.assertFalse(local_asr._SENSEVOICE_PUNCTUATION)
         self.assertEqual(len(calls), 2)
         self.assertNotIn("punc_model", calls[1])
         local_asr._SENSEVOICE_MODEL = None
+
+    def test_model_dir_reuses_modelscope_snapshot_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot = Path(temp_dir) / "models" / "iic--SenseVoiceSmall" / "snapshots" / "master"
+            snapshot.mkdir(parents=True)
+            (snapshot / "model.pt").write_bytes(b"model")
+            with mock.patch.dict(os.environ, {"MODELSCOPE_CACHE": temp_dir}, clear=False):
+                model_dir = local_asr._cached_sensevoice_model_dir()
+
+        self.assertEqual(Path(model_dir), snapshot)
+
+    def test_modelscope_work_redirects_windowed_progress_streams(self) -> None:
+        observed = {}
+
+        def fake_modelscope_operation():
+            observed["stdout"] = sys.stdout
+            observed["stderr"] = sys.stderr
+            return "done"
+
+        result = local_asr._run_modelscope_quietly(fake_modelscope_operation)
+
+        self.assertEqual(result, "done")
+        self.assertIsNot(observed["stdout"], sys.stdout)
+        self.assertIsNot(observed["stderr"], sys.stderr)
+
+    def test_registry_load_tolerates_frozen_modules_without_source_text(self) -> None:
+        tables = types.SimpleNamespace(
+            tokenizer_classes={"SentencepiecesTokenizer": object, "CharTokenizer": object},
+            frontend_classes={"WavFrontend": object, "WavFrontendOnline": object},
+            encoder_classes={"SenseVoiceEncoderSmall": object, "FSMN": object, "SANMEncoder": object},
+            model_classes={"SenseVoiceSmall": object, "FsmnVADStreaming": object, "CTTransformer": object},
+            specaug_classes={"SpecAugLFR": object},
+        )
+        fake_funasr = types.ModuleType("funasr")
+        fake_register = types.ModuleType("funasr.register")
+        fake_register.tables = tables
+        imported = []
+
+        def fake_import(module_name):
+            imported.append(module_name)
+            # Simulate FunASR's class decorator consulting source locations
+            # while importing a module from a PyInstaller bytecode archive.
+            self.assertEqual(local_asr.inspect.getsourcelines(object)[1], 0)
+            return types.ModuleType(module_name)
+
+        with mock.patch.dict(sys.modules, {"funasr": fake_funasr, "funasr.register": fake_register}):
+            with mock.patch.object(local_asr.inspect, "getsourcelines", side_effect=OSError("no source")):
+                with mock.patch.object(local_asr.importlib, "import_module", side_effect=fake_import):
+                    local_asr._register_sensevoice_components()
+
+        self.assertEqual(imported, list(local_asr._SENSEVOICE_REGISTRATION_MODULES))
 
     def test_srt_is_resegmented_but_sidecar_keeps_corrected_ctc_tokens(self) -> None:
         spoken = "这个板型很好小个字也可以穿"
@@ -147,6 +214,7 @@ class LocalAsrQualityTests(unittest.TestCase):
 
         self.assertFalse(model.kwargs["merge_vad"])
         self.assertNotIn("merge_length_s", model.kwargs)
+        self.assertTrue(model.kwargs["output_timestamp"])
         self.assertIn("这个版型很好。", srt)
         self.assertIn("小个子也可以穿。", srt)
         self.assertIn("\n2\n", srt)
@@ -158,25 +226,83 @@ class LocalAsrQualityTests(unittest.TestCase):
         self.assertEqual(sidecar["segments"][0]["words"][0]["start"], 0.0)
         self.assertEqual(sidecar["segments"][0]["words"][-1]["end"], len(spoken) * 0.4)
 
-    def test_shared_audio_transcriber_prefers_sensevoice_without_whisper(self) -> None:
+    def test_mix_cache_copies_srt_and_its_word_timing_sidecar_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_srt = root / "generated.srt"
+            destination_srt = root / "video.srt"
+            source_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\n测试\n", encoding="utf-8")
+            source_sidecar = root / "generated.words.json"
+            source_sidecar.write_text(
+                json.dumps({"provider": "sensevoice", "segments": [{"words": _timed_characters("测试")}]}),
+                encoding="utf-8",
+            )
+
+            copied_timing = cutter_logic._copy_srt_with_word_timing_sidecar(source_srt, destination_srt)
+
+            self.assertTrue(copied_timing)
+            self.assertEqual(destination_srt.read_text(encoding="utf-8"), source_srt.read_text(encoding="utf-8"))
+            self.assertEqual(
+                json.loads((root / "video.words.json").read_text(encoding="utf-8")),
+                json.loads(source_sidecar.read_text(encoding="utf-8")),
+            )
+
+    def test_mix_cache_removes_stale_word_timing_when_source_has_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_srt = root / "generated.srt"
+            destination_srt = root / "video.srt"
+            source_srt.write_text("1\n00:00:00,000 --> 00:00:01,000\n新字幕\n", encoding="utf-8")
+            stale_sidecar = root / "video.words.json"
+            stale_sidecar.write_text("{}", encoding="utf-8")
+
+            copied_timing = cutter_logic._copy_srt_with_word_timing_sidecar(source_srt, destination_srt)
+
+            self.assertFalse(copied_timing)
+            self.assertFalse(stale_sidecar.exists())
+
+    def test_mix_sensevoice_fallback_keeps_srt_and_word_timing_together(self) -> None:
+        source = inspect.getsource(cutter_logic.process_video_mix)
+
+        self.assertIn("_copy_srt_with_word_timing_sidecar(_temp, _sc)", source)
+        self.assertNotIn("shutil.copy2(_temp, _sc)", source)
+
+    def test_shared_audio_transcriber_uses_sensevoice_only(self) -> None:
         calls = []
 
         def fake_sensevoice(audio_path, srt_output, log_fn=None):
             calls.append((audio_path, srt_output))
             return True
 
-        fake_local_asr = types.SimpleNamespace(sensevoice_to_srt=fake_sensevoice)
+        fake_local_asr = types.SimpleNamespace(
+            LocalASRUnavailable=local_asr.LocalASRUnavailable,
+            sensevoice_to_srt=fake_sensevoice,
+        )
         with mock.patch.dict(sys.modules, {"local_asr": fake_local_asr}):
-            with mock.patch.object(stt, "transcribe_to_srt") as whisper_transcribe:
-                recognized = stt.transcribe_local_audio_to_srt(
-                    "final.wav",
-                    "final.srt",
-                    asr_engine="sensevoice",
-                )
+            recognized = stt.transcribe_local_audio_to_srt(
+                "final.wav",
+                "final.srt",
+                asr_engine="sensevoice",
+            )
 
         self.assertTrue(recognized)
         self.assertEqual(calls, [("final.wav", "final.srt")])
-        whisper_transcribe.assert_not_called()
+
+    def test_shared_audio_transcriber_returns_failure_without_an_engine_fallback(self) -> None:
+        logs = []
+
+        def fail_sensevoice(*_args, **_kwargs):
+            raise local_asr.LocalASRUnavailable("runtime missing")
+
+        fake_local_asr = types.SimpleNamespace(
+            LocalASRUnavailable=local_asr.LocalASRUnavailable,
+            sensevoice_to_srt=fail_sensevoice,
+        )
+        with mock.patch.dict(sys.modules, {"local_asr": fake_local_asr}):
+            recognized = stt.transcribe_local_audio_to_srt("final.wav", "final.srt", logs.append)
+
+        self.assertFalse(recognized)
+        self.assertTrue(any("SenseVoice 本地识别不可用" in message for message in logs))
 
     def test_final_subtitle_stage_uses_shared_local_asr_and_word_timing(self) -> None:
         semantic = [{"start": 1.2, "end": 2.8, "text": "亚麻肤感很舒服", "words": []}]
@@ -193,21 +319,63 @@ class LocalAsrQualityTests(unittest.TestCase):
                     segments = cutter_logic._final_subtitle_local_asr_segments(
                         "final.wav",
                         temp_dir,
-                        {"local_asr_engine": "sensevoice", "whisper_model": "small"},
+                        {},
                         logs.append,
                     )
 
         self.assertEqual(segments, [{"start": 1.2, "end": 2.8, "text": "亚麻肤感很舒服"}])
-        self.assertEqual(transcribe.call_args.kwargs["asr_engine"], "sensevoice")
-        self.assertEqual(transcribe.call_args.kwargs["whisper_model"], "small")
+        self.assertEqual(transcribe.call_args.kwargs, {"log_fn": logs.append})
         self.assertTrue(any("本地 SenseVoice" in message for message in logs))
 
-    def test_final_subtitle_stage_no_longer_constructs_whisper_directly(self) -> None:
+    def test_final_subtitle_stage_uses_shared_sensevoice_entrypoint(self) -> None:
         source = inspect.getsource(cutter_logic._add_subtitles_final)
 
         self.assertNotIn("from faster_whisper", source)
-        self.assertNotIn("_run_whisper", source)
         self.assertIn("_run_local_asr", source)
+
+    def test_final_subtitle_ai_repair_preserves_final_asr_timestamps(self) -> None:
+        raw_segments = [
+            {"start": 1.25, "end": 2.5, "text": "板型很显受"},
+            {"start": 3.0, "end": 4.25, "text": "小个字也能穿"},
+        ]
+        repaired = cutter_logic._apply_final_subtitle_text_repairs(
+            raw_segments,
+            "[90.00-91.00] 版型很显瘦\n[92.00-93.00] 小个子也能穿",
+        )
+
+        self.assertEqual(
+            repaired,
+            [
+                {"start": 1.25, "end": 2.5, "text": "版型很显瘦"},
+                {"start": 3.0, "end": 4.25, "text": "小个子也能穿"},
+            ],
+        )
+
+    def test_final_subtitle_ai_repair_rejects_missing_lines(self) -> None:
+        raw_segments = [
+            {"start": 1.0, "end": 2.0, "text": "第一句"},
+            {"start": 2.0, "end": 3.0, "text": "第二句"},
+        ]
+
+        repaired = cutter_logic._apply_final_subtitle_text_repairs(
+            raw_segments,
+            "[1.00-2.00] 只返回了一句",
+        )
+
+        self.assertIsNone(repaired)
+
+    def test_smart_cut_final_subtitles_always_re_recognize_assembled_audio(self) -> None:
+        source = inspect.getsource(cutter_logic.process_video)
+
+        self.assertIn("重新识别最终成片音频", source)
+        self.assertIn("_add_subtitles_final(", source)
+        self.assertNotIn("_burn_mapped_subtitles_final(", source)
+
+    def test_local_asr_entrypoint_has_no_whisper_fallback(self) -> None:
+        source = inspect.getsource(stt.transcribe_local_audio_to_srt)
+
+        self.assertNotIn("transcribe_to_srt", source)
+        self.assertNotIn("faster_whisper", inspect.getsource(stt))
 
 
 if __name__ == "__main__":

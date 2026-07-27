@@ -61,6 +61,21 @@ _IMPLICIT_PERSONAL_SIZE_PATTERNS = (
     re.compile(_HEIGHT_VALUE + r"(?:\s*" + _MEASUREMENT_WEIGHT + r")?\s*" + _SIZE_TOKEN, re.I),
     re.compile(r"(?<!\d)(?:[4-9]\d|1\d{2})\s*(?:斤)?\s*" + _SIZE_TOKEN, re.I),
 )
+# ASR can drop both the person marker and the unit, for example
+# "你子身高170，体重105". A paired height/weight label is still a personal
+# try-on reply, while an objective garment measurement never has both labels.
+_BARE_PERSONAL_MEASUREMENT_PAIR_PATTERNS = (
+    re.compile(
+        r"身高\s*(?:1[4-9]\d(?:\s*(?:cm|厘米))?|1\s*[.。．点]\s*[4-9四五六七八九](?:\s*(?:米|m))?|一米[四五六七八九])"
+        r".{0,16}体重\s*(?:\d{2,3}(?:\s*(?:斤|kg|公斤))?|[一二三四五六七八九十]{2,4}(?:斤)?)",
+        re.I,
+    ),
+    re.compile(
+        r"体重\s*(?:\d{2,3}(?:\s*(?:斤|kg|公斤))?|[一二三四五六七八九十]{2,4}(?:斤)?)"
+        r".{0,16}身高\s*(?:1[4-9]\d(?:\s*(?:cm|厘米))?|1\s*[.。．点]\s*[4-9四五六七八九](?:\s*(?:米|m))?|一米[四五六七八九])",
+        re.I,
+    ),
+)
 _HOOK_SIZE_SIGNAL_PATTERN = re.compile(
     r"(?:尺码|码数|码型|" + _SIZE_TOKEN + r")",
     re.I,
@@ -68,6 +83,29 @@ _HOOK_SIZE_SIGNAL_PATTERN = re.compile(
 _HOOK_BODY_DATA_PATTERN = re.compile(
     _HEIGHT_VALUE + r"|(?:\d{2,3}|[一二三四五六七八九十]{2,4})\s*斤",
     re.I,
+)
+# These are not unsafe as body content, but they are a live demonstration
+# lead-in rather than a standalone buyer promise.  Keeping the classifier here
+# makes every Hook entry point reject the same wording.
+_HOOK_PRESENTATION_PREAMBLE_PATTERNS = (
+    re.compile(r"^(?:很|非常|特别|太)[A-Za-z]{2,16}(?:的)?$", re.I),
+    re.compile(
+        r"^我(?:自己|个人)?(?:啊|呀|呢)?我?(?:可能|会|觉得|一般|平时|通常)"
+        r".{0,18}(?:这样|这么)?(?:穿|搭).{0,18}"
+        r"(?:看一眼|看一下|背面看|侧面看|正面看)"
+    ),
+    re.compile(
+        r"^(?:背面|侧面|正面|上身).{0,12}(?:看一眼|看一下|你看)"
+        r".{0,24}(?:不挑人|舒服|好看|显瘦|百搭)"
+    ),
+    re.compile(
+        r"^你(?:这|那)?(?:一套|件|条).{0,14}(?:穿|搭).{0,24}"
+        r"(?:很松|很舒服|也可以|可以的|不挑人|好看)"
+    ),
+    re.compile(
+        r"^(?:想(?:搭|看).{0,18}|(?:给你|我给你).{0,10}看一眼|"
+        r"(?:这个|这样的).{0,12}就这么搭)"
+    ),
 )
 _LIVE_REPLY_PATTERNS = (
     re.compile(r"(?:谢谢|感谢).{0,8}(?:姐|姐妹|宝宝|家人)"),
@@ -101,6 +139,8 @@ def live_interaction_or_size_response_reason(text: Any) -> str:
         return "个人尺码答复"
     if any(pattern.search(value) for pattern in _PERSONAL_MEASUREMENT_PATTERNS):
         return "个人身高体重互动"
+    if any(pattern.search(value) for pattern in _BARE_PERSONAL_MEASUREMENT_PAIR_PATTERNS):
+        return "个人身高体重组合"
     if any(pattern.search(value) for pattern in _IMPLICIT_PERSONAL_SIZE_PATTERNS):
         return "个人身高体重尺码组合"
     if any(pattern.search(value) for pattern in _LIVE_REPLY_PATTERNS):
@@ -130,4 +170,8 @@ def hook_ineligible_reason(text: Any) -> str:
         return "尺码信息不可作Hook"
     if _HOOK_BODY_DATA_PATTERN.search(value):
         return "身高体重信息不可作Hook"
+    if re.fullmatch(r"(?:很|非常|特别|太)[A-Za-z]{2,16}(?:的)?", value, re.I):
+        return "空泛口头语不可作Hook"
+    if any(pattern.search(value) for pattern in _HOOK_PRESENTATION_PREAMBLE_PATTERNS):
+        return "展示铺垫不可作Hook"
     return ""

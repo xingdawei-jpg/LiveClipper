@@ -402,13 +402,13 @@ class ProductScanPage(tk.Frame):
                 vname = os.path.basename(vpath)
                 self._log(f"[{idx+1}/{len(self._video_list)}] {vname}", "info")
 
-                # 1. 生成 SRT（优先云端ASR，失败再用Whisper）
+                # 1. 生成 SRT（优先云端 ASR，失败再用本地 SenseVoice）
                 srt_path = vpath.rsplit(".", 1)[0] + ".srt"
                 if not os.path.exists(srt_path):
                     self._log(f"  生成字幕...", "info")
                     _srt = self._try_cloud_asr(vpath)
                     if not _srt:
-                        self._log(f"  使用本地Whisper...", "info")
+                        self._log("  使用本地 SenseVoice...", "info")
                         from stt import generate_srt
                         _srt = generate_srt(vpath, log_fn=lambda m: self._log(f"  {m}", "info"))
                     srt_path = _srt

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 ai_clipper = importlib.import_module("ai_clipper")
 selection_safety = importlib.import_module("selection_safety")
+content_review = importlib.import_module("content_review")
 
 
 class LiveInteractionSafetyTests(unittest.TestCase):
@@ -20,6 +21,7 @@ class LiveInteractionSafetyTests(unittest.TestCase):
             "158的女孩子是S。但是我跟你说，那个小女人这个女生。",
             "我一。7米，我是大女。我是我1.7哦。",
             "105斤的你直接M码。",
+            "你子身高170，体重105，上身的东西看一下吧。",
             "姐妹有尺码问题抓紧问。",
             "1.6米98S码。好看吧。",
             "一米六九十八S码。",
@@ -81,6 +83,24 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         self.assertTrue(selection_safety.hook_ineligible_reason("尺码表从S到XL都齐全。"))
         self.assertFalse(selection_safety.hook_ineligible_reason("豹纹晕染上身显白，气色更亮。"))
 
+    def test_live_demonstration_preamble_cannot_be_advertised_as_hook(self) -> None:
+        text = "我自己啊我可能会这样穿，背面看一下，不挑人很舒服。"
+
+        self.assertEqual(
+            selection_safety.hook_ineligible_reason(text),
+            "展示铺垫不可作Hook",
+        )
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text(text))
+        self.assertFalse(content_review._reviewable_hook_text(text))
+
+        viewer_preamble = "你这一套去穿呢也很松，你上班通勤穿这一套也可以的。"
+        self.assertEqual(
+            selection_safety.hook_ineligible_reason(viewer_preamble),
+            "展示铺垫不可作Hook",
+        )
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text(viewer_preamble))
+        self.assertFalse(content_review._reviewable_hook_text(viewer_preamble))
+
     def test_generic_live_preamble_cannot_be_hook(self) -> None:
         candidates, _total = ai_clipper._collect_hook_candidates_from_entries(
             [
@@ -93,6 +113,16 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         self.assertEqual([candidate[0] for candidate in candidates], [2])
         self.assertTrue(ai_clipper._is_bad_hook_candidate_text("直接炸了吧，因为这个款式也拖欠你们特别久了。"))
         self.assertFalse(ai_clipper._is_bad_hook_candidate_text("这个豹纹晕染上身显白，整个人气色更亮。"))
+        self.assertEqual(
+            selection_safety.hook_ineligible_reason("很 duang 的"),
+            "空泛口头语不可作Hook",
+        )
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text("很 duang 的"))
+        self.assertTrue(
+            ai_clipper._is_bad_hook_candidate_text(
+                "很 duang 的这个裤子它不是纯亚麻，它是天丝亚麻。"
+            )
+        )
 
         self.assertTrue(
             ai_clipper._is_bad_hook_candidate_text(
@@ -115,7 +145,7 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         self.assertFalse(any(clip[0] == "hook" for clip in safe))
         self.assertGreaterEqual(audit["hard_removed"], 1)
 
-    def test_structure_replaces_a_size_hook_with_a_real_opening(self) -> None:
+    def test_structure_does_not_replace_a_size_hook_by_itself(self) -> None:
         clips = [
             ("hook", "[V1] 1.6米98S码。好看吧。", 0.0, 3.0, 50, 3.0),
             ("product", "[V1] 豹纹晕染上身显白，整个人气色更亮。", 3.0, 7.0, 50, 4.0),
@@ -134,8 +164,75 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         )
 
         self.assertEqual(stable[0][0], "hook")
-        self.assertIn("豹纹晕染", stable[0][1])
-        self.assertFalse(any("1.6米98S码" in str(clip[1]) and clip[0] == "hook" for clip in stable))
+        self.assertIn("1.6", stable[0][1])
+        self.assertEqual([clip[1] for clip in stable], [clip[1] for clip in clips])
+        safe, audit = ai_clipper._director_hard_audit(stable, 10, 8)
+        self.assertFalse(any(clip[0] == "hook" for clip in safe))
+        self.assertFalse(any("Hook" in issue for issue in audit["issues"]))
+        self.assertTrue(any("Product自然开场" in warning for warning in audit["warnings"]))
+
+    def test_ai_opening_pair_replaces_only_the_opening_and_preserves_body_order(self) -> None:
+        entries = [
+            (0.0, 2.0, "[V1] 1.6米 98S码。好看吧。"),
+            (2.2, 5.2, "[V1] 肩部黑色编织线把视觉重心向内收。"),
+            (5.2, 8.8, "[V1] 穿上以后肩线会往里收，看起来更利落。"),
+            (8.8, 12.0, "[V1] 通勤和周末都很耐看。"),
+        ]
+        body = [
+            ("product", entries[1][2], 2.2, 5.2, 50, 3.0),
+            ("close", entries[3][2], 8.8, 12.0, 50, 3.2),
+        ]
+
+        repaired = ai_clipper._apply_ai_opening_pair(
+            body,
+            {"hook_id": 3, "followup_id": 2},
+            entries,
+            allowed_candidate_ids={2, 3, 4},
+        )
+
+        self.assertIsNotNone(repaired)
+        self.assertEqual([clip[0] for clip in repaired], ["hook", "product", "close"])
+        self.assertEqual([clip[1] for clip in repaired], [entries[2][2], entries[1][2], entries[3][2]])
+
+    def test_ai_opening_pair_rejects_size_or_interaction_even_when_model_declares_it(self) -> None:
+        entries = [
+            (0.0, 2.0, "[V1] 1.6米 98S码。好看吧。"),
+            (2.2, 5.2, "[V1] 肩部黑色编织线把视觉重心向内收。"),
+            (5.2, 8.8, "[V1] 穿上以后肩线会往里收，看起来更利落。"),
+        ]
+        body = [("product", entries[2][2], 5.2, 8.8, 50, 3.6)]
+
+        repaired = ai_clipper._apply_ai_opening_pair(
+            body,
+            {"hook_id": 1, "followup_id": 2},
+            entries,
+            allowed_candidate_ids={1, 2, 3},
+        )
+
+        self.assertIsNone(repaired)
+
+    def test_display_preamble_cannot_be_used_as_close(self) -> None:
+        clips = [
+            ("hook", "[V1] 全松紧腰穿上不勒，腿部活动很轻松。", 0.0, 3.0, 50, 3.0),
+            ("product", "[V1] 腰头回弹好，久坐也不会卡肚子。", 3.0, 6.0, 50, 3.0),
+            ("close", "[V1] 我自己可能会这样穿，背面看一下，不挑人很舒服。", 6.0, 10.0, 50, 4.0),
+        ]
+
+        safe, audit = ai_clipper._director_hard_audit(clips, 8, 8)
+
+        self.assertEqual([clip[0] for clip in safe], ["hook", "product"])
+        self.assertGreaterEqual(audit["hard_removed"], 1)
+
+    def test_display_preamble_cannot_be_kept_as_product_filler(self) -> None:
+        clips = [
+            ("product", "[V1] 全松紧腰穿上不勒，腿部活动很轻松。", 0.0, 3.0, 50, 3.0),
+            ("product", "[V1] 我自己可能会这样穿，背面看一下，不挑人很舒服。", 3.0, 7.0, 50, 4.0),
+        ]
+
+        safe, audit = ai_clipper._director_hard_audit(clips, 6, 8)
+
+        self.assertEqual([clip[1] for clip in safe], [clips[0][1]])
+        self.assertGreaterEqual(audit["hard_removed"], 1)
 
 
 if __name__ == "__main__":

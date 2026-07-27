@@ -163,7 +163,7 @@ class SafetyRegressionTests(unittest.TestCase):
         self.assertIn('data-drop-target="video-paths"', markup)
         self.assertIn('data-drop-target="mix-video-paths"', markup)
         self.assertIn('zone.dataset.dropClickPicker !== "false"', script)
-        self.assertIn('await addDroppedVideoFiles(targetId, files)', script)
+        self.assertIn('await addDroppedVideoFiles(targetId, event)', script)
         self.assertIn('upload("/api/uploads/videos", form)', script)
         self.assertIn(".video-picker-card.is-dragging", styles)
 

@@ -41,6 +41,7 @@ const state = {
   liveRoomFilter: "all",
   liveRoomSearch: "",
   liveRoomPlatform: "all",
+  desktopVideoDropTarget: "",
   update: {
     checked: false,
     checking: false,
@@ -81,6 +82,18 @@ const state = {
 };
 
 const previewInlineAudioStorageKey = "lc:preview:inline-audio";
+const desktopVideoDropTargetIds = new Set([
+  "video-paths",
+  "mix-video-paths",
+  "scan-video-paths",
+  "ps-video-paths",
+  "vs-video-paths",
+  "dedup-video-paths",
+]);
+
+function isDesktopVideoDropTarget(targetId) {
+  return desktopVideoDropTargetIds.has(String(targetId || ""));
+}
 
 function previewInlineAudioPreference() {
   try {
@@ -685,8 +698,6 @@ const settingFields = {
   enabled: "s-enabled",
   asr_enabled: "s-asr-enabled",
   asr_provider: "s-asr-provider",
-  whisper_model: "s-whisper-model",
-  local_asr_engine: "s-local-asr-engine",
   volc_api_key: "s-volc-api-key",
   volc_tos_ak: "s-volc-tos-ak",
   volc_tos_sk: "s-volc-tos-sk",
@@ -1287,6 +1298,7 @@ function switchPage(page) {
   document.querySelectorAll(".page").forEach((section) => {
     section.classList.toggle("is-active", section.id === `page-${page}`);
   });
+  rememberDesktopVideoDropTarget(activePageDesktopVideoDropTarget());
   if (page === "settings") {
     loadSettings();
     loadKeywords();
@@ -1348,6 +1360,7 @@ function bindActions() {
     try {
       if (action === "add-path") addPath(target.dataset.input, target.dataset.target);
       if (action === "pick-videos") await pickVideos(target.dataset.target, target);
+      if (action === "pick-video-folder") await pickVideoFolder(target.dataset.target, target);
       if (action === "pick-file") await pickFile(target.dataset.target, target.dataset.kind || "file");
       if (action === "pick-directory") await pickDirectory(target.dataset.target);
       if (action === "open-path") await openPath(target.dataset.target);
@@ -1468,7 +1481,9 @@ function bindActions() {
   $("vs-split-mode")?.addEventListener("change", syncVideoSplitMode);
 
   bindVideoDropzones();
+  bindDesktopNativeVideoDropBridge();
   bindFileDropTargets();
+  injectVideoFolderPickers();
   injectDiagnosticButtons();
   ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "vs-video-paths", "dedup-video-paths"].forEach(renderVideoList);
   renderMixGroups();
@@ -2755,6 +2770,7 @@ async function loadRuntime() {
     const data = await api("/api/runtime");
     state.runtime = data;
     $("app-version").textContent = `v${data.version}`;
+    renderZeroCopyTestMarker(data);
     $("runtime-user-data").value = data.user_data_dir || "";
     if ($("user-data-dir")) $("user-data-dir").value = data.user_data_dir || "";
     $("runtime-repo-root").value = data.repo_root || "";
@@ -3395,12 +3411,23 @@ function applyKeywordConfig(config = {}) {
 
 function collectKeywordConfig() {
   return {
-    ...state.keywordConfig,
     clip_keywords: parseKeywordMap($(keywordFields.clip_keywords)?.value || ""),
     forbidden_phrases: parseKeywordList($(keywordFields.forbidden_phrases)?.value || ""),
     filler_words: parseKeywordList($(keywordFields.filler_words)?.value || ""),
     preference_keywords: parseKeywordMap($(keywordFields.preference_keywords)?.value || ""),
   };
+}
+
+function keywordValueChanged(current, baseline) {
+  return JSON.stringify(current) !== JSON.stringify(baseline);
+}
+
+function collectKeywordChanges() {
+  const current = collectKeywordConfig();
+  const baseline = state.keywordConfig && typeof state.keywordConfig === "object" ? state.keywordConfig : {};
+  return Object.fromEntries(
+    Object.entries(current).filter(([key, value]) => keywordValueChanged(value, baseline[key]))
+  );
 }
 
 function updateKeywordSummary(data) {
@@ -3436,12 +3463,13 @@ async function loadKeywords(showToast = false) {
 }
 
 async function saveKeywords() {
+  const changes = collectKeywordChanges();
   const result = await api("/api/keywords", {
     method: "POST",
-    body: JSON.stringify(collectKeywordConfig()),
+    body: JSON.stringify({ changes }),
   });
   updateKeywordSummary(result);
-  applyKeywordConfig(result.keywords || collectKeywordConfig());
+  applyKeywordConfig(result.keywords || state.keywordConfig || {});
   toast(result.message || "词库已保存", "success");
 }
 
@@ -3899,36 +3927,157 @@ function setLines(id, lines) {
 
 function addVideoPaths(targetId, paths) {
   const next = getLines(targetId);
+  const seen = new Set(next.map(normalizeVideoPath));
   paths
     .map((path) => String(path || "").trim())
     .filter(Boolean)
     .forEach((path) => {
-      if (!next.includes(path)) next.push(path);
+      const key = normalizeVideoPath(path);
+      if (!seen.has(key)) {
+        seen.add(key);
+        next.push(path);
+      }
     });
   setLines(targetId, next);
 }
 
-async function addDroppedVideoFiles(targetId, files) {
-  const droppedFiles = Array.from(files || []).filter(Boolean);
-  if (!droppedFiles.length) return;
+function isDesktopWebViewHost() {
+  return Boolean(window.pywebview?.platform === "edgechromium");
+}
 
-  const localPaths = droppedFiles
-    .map((file) => file.path || file.webkitRelativePath || "")
-    .filter(Boolean);
-  if (localPaths.length === droppedFiles.length) {
-    addVideoPaths(targetId, localPaths);
-    toast(`已添加 ${localPaths.length} 个视频`, "success");
+function zeroCopyDropScope(targetId) {
+  return targetId === "mix-video-paths" ? "mix" : targetId === "video-paths" ? "smart-cut" : "settings";
+}
+
+function reportZeroCopyDropDiagnostic(stage, targetId = "", pathCount = 0, detail = "") {
+  if (!isZeroCopyTestMode()) return;
+  const scope = zeroCopyDropScope(targetId);
+  const message = `零拷贝测试 | 前端 ${stage}：target=${targetId || "-"}，绝对路径=${Number(pathCount) || 0}${detail ? `，${detail}` : ""}。`;
+  appendLog(scope, { time: new Date().toLocaleTimeString(), level: "info", message });
+  api("/api/desktop-drop/diagnostic", {
+    method: "POST",
+    body: JSON.stringify({ stage, target: targetId, path_count: Math.max(0, Number(pathCount) || 0), detail }),
+  }).catch((error) => {
+    appendLog(scope, {
+      time: new Date().toLocaleTimeString(),
+      level: "warning",
+      message: `零拷贝测试 | 前端诊断上报失败：${error.message || error}`,
+    });
+  });
+}
+
+function rememberDesktopVideoDropTarget(targetId) {
+  if (isDesktopVideoDropTarget(targetId)) {
+    state.desktopVideoDropTarget = targetId;
+  }
+}
+
+function isZeroCopyTestMode() {
+  return Boolean(state.runtime?.zero_copy_test_mode);
+}
+
+function renderZeroCopyTestMarker(runtime = state.runtime) {
+  const enabled = Boolean(runtime?.zero_copy_test_mode);
+  document.body.dataset.zeroCopyTest = enabled ? "true" : "false";
+  const version = $("app-version");
+  const markerId = "zero-copy-test-marker";
+  let marker = $(markerId);
+  if (!enabled) {
+    document.title = "LiveClipper";
+    marker?.remove();
+    return;
+  }
+  document.title = "LiveClipper - 零拷贝测试";
+  if (version) version.textContent = `v${runtime?.version || "dev"} · 零拷贝测试`;
+  if (!marker) {
+    marker = document.createElement("div");
+    marker.id = markerId;
+    marker.className = "brand-version";
+    marker.style.color = "#b42318";
+    marker.style.fontWeight = "700";
+    $("app-version")?.insertAdjacentElement("afterend", marker);
+  }
+  marker.textContent = "开发环境：零拷贝测试";
+  if (!window.__liveClipperZeroCopyFrontendReady) {
+    window.__liveClipperZeroCopyFrontendReady = true;
+    reportZeroCopyDropDiagnostic("frontend-bridge-ready", "", 0, `desktopHost=${isDesktopWebViewHost()}`);
+  }
+}
+
+async function consumeDesktopVideoDrop(paths, targetId, targetSource = "") {
+  if (!targetId) {
+    toast("未识别到拖入区域，请将视频拖到当前功能页的视频列表。", "warning");
+    return;
+  }
+  rememberDesktopVideoDropTarget(targetId);
+  reportZeroCopyDropDiagnostic("custom-event-consumed", targetId, paths.length, targetSource);
+  const result = await addResolvedVideoPaths(targetId, paths);
+  reportZeroCopyDropDiagnostic("paths-resolved", targetId, result.paths?.length || 0);
+}
+
+function importSummaryText(summary = {}) {
+  const parts = [];
+  const labels = [
+    ["duplicates", "重复"],
+    ["missing", "不存在"],
+    ["unreadable", "不可读"],
+    ["unsupported", "不支持"],
+    ["no_extension", "无后缀"],
+    ["reparse_points", "链接/重解析点"],
+  ];
+  labels.forEach(([key, label]) => {
+    const count = Number(summary[key] || 0);
+    if (count > 0) parts.push(`${label} ${count}`);
+  });
+  return parts.length ? `，跳过 ${parts.join("、")}` : "";
+}
+
+async function resolveVideoInputPaths(paths) {
+  const values = (paths || []).map((path) => String(path || "").trim()).filter(Boolean);
+  if (!values.length) return { paths: [], summary: {} };
+  const result = await api("/api/media/video-inputs", {
+    method: "POST",
+    body: JSON.stringify({ paths: values }),
+  });
+  return {
+    paths: (result.paths || []).map((path) => String(path || "").trim()).filter(Boolean),
+    summary: result.summary || {},
+  };
+}
+
+async function addResolvedVideoPaths(targetId, rawPaths) {
+  const result = await resolveVideoInputPaths(rawPaths);
+  const before = new Set(getLines(targetId).map(normalizeVideoPath));
+  addVideoPaths(targetId, result.paths);
+  const added = result.paths.filter((path) => !before.has(normalizeVideoPath(path))).length;
+  const detail = importSummaryText(result.summary);
+  if (added) toast(`已添加 ${added} 个视频${detail}`, "success");
+  else toast(`没有可添加的视频${detail || "，请检查文件类型和读取权限"}`, "warning");
+  return result;
+}
+
+async function addDroppedVideoFiles(targetId, event) {
+  if (isDesktopWebViewHost()) {
+    // Explorer paths come only from the WinForms CF_HDROP bridge. A DOM drop
+    // here must never fall through to the browser upload cache.
+    reportZeroCopyDropDiagnostic("web-drop-ignored", targetId, 0, "等待 native CF_HDROP bridge");
     return;
   }
 
+  if (isZeroCopyTestMode()) {
+    reportZeroCopyDropDiagnostic("desktop-host-missing", targetId, 0, "window.pywebview.platform 不是 edgechromium");
+    throw new Error("零拷贝测试窗口未识别为 pywebview EdgeWebView2；已阻止浏览器上传缓存。");
+  }
+
+  const droppedFiles = Array.from(event?.dataTransfer?.files || []).filter(Boolean);
+  if (!droppedFiles.length) return;
   const form = new FormData();
   droppedFiles.forEach((file) => form.append("files", file, file.name || "video.mp4"));
-  toast(`正在缓存 ${droppedFiles.length} 个拖入视频...`, "warning");
+  toast(`浏览器模式正在缓存 ${droppedFiles.length} 个拖入视频...`, "warning");
   const result = await upload("/api/uploads/videos", form);
   const uploadedPaths = (result.paths || []).map((path) => String(path || "").trim()).filter(Boolean);
   if (!uploadedPaths.length) throw new Error("视频缓存失败，没有可添加的文件。");
-  addVideoPaths(targetId, uploadedPaths);
-  toast(`已缓存并添加 ${uploadedPaths.length} 个视频`, "success");
+  await addResolvedVideoPaths(targetId, uploadedPaths);
 }
 
 function setButtonBusy(button, busy, label = "正在打开...") {
@@ -3963,9 +4112,19 @@ async function pickVideos(targetId = "video-paths", trigger = null) {
   }
   const paths = result.paths || [];
   if (paths.length) {
-    addVideoPaths(targetId, paths);
-    toast(`已添加 ${paths.length} 个视频`, "success");
+    await addResolvedVideoPaths(targetId, paths);
   }
+}
+
+async function pickVideoFolder(targetId = "video-paths", trigger = null) {
+  const restoreButton = setButtonBusy(trigger, true, "正在打开...");
+  let result;
+  try {
+    result = await api("/api/dialog/directory", { method: "POST", body: "{}" });
+  } finally {
+    restoreButton();
+  }
+  if (result.path) await addResolvedVideoPaths(targetId, [result.path]);
 }
 
 async function pickFile(targetId, kind = "file") {
@@ -4509,14 +4668,24 @@ async function inspectVideoList(targetId, lines = getLines(targetId)) {
 function bindVideoDropzones() {
   document.querySelectorAll("[data-drop-target]").forEach((zone) => {
     const targetId = zone.dataset.dropTarget;
+    const activateTarget = () => rememberDesktopVideoDropTarget(targetId);
+    zone.addEventListener("pointerdown", activateTarget);
+    zone.addEventListener("focusin", activateTarget);
     if (zone.dataset.dropClickPicker !== "false") {
       zone.addEventListener("click", (event) => {
+        activateTarget();
         if (event.target.closest("[data-action]")) return;
         if (event.target.closest("input, textarea, select, button")) return;
         const picker = document.querySelector(`[data-action="pick-videos"][data-target="${targetId}"]`);
         pickVideos(targetId, picker);
       });
     }
+    zone.addEventListener("dragenter", (event) => {
+      const desktopHost = isDesktopWebViewHost();
+      event.preventDefault();
+      zone.classList.add("is-dragging");
+      if (desktopHost) reportZeroCopyDropDiagnostic("web-dragenter-observed", targetId, 0, "native bridge remains path source");
+    });
     zone.addEventListener("dragover", (event) => {
       event.preventDefault();
       zone.classList.add("is-dragging");
@@ -4528,14 +4697,85 @@ function bindVideoDropzones() {
     zone.addEventListener("drop", async (event) => {
       event.preventDefault();
       zone.classList.remove("is-dragging");
-      const files = Array.from(event.dataTransfer?.files || []);
-      if (!files.length) return;
       try {
-        await addDroppedVideoFiles(targetId, files);
+        await addDroppedVideoFiles(targetId, event);
       } catch (error) {
         toast(error.message || String(error), "error");
       }
     });
+  });
+}
+
+function nativeVideoDropTargetFromCoordinates(detail = {}) {
+  const nativeX = Number(detail.x);
+  const nativeY = Number(detail.y);
+  if (!Number.isFinite(nativeX) || !Number.isFinite(nativeY)) return { targetId: "", detail: "missing-coordinates" };
+  const dpiScale = Number(detail.dpi) > 0 ? Number(detail.dpi) / 96 : Number(window.devicePixelRatio || 1);
+  const candidates = [];
+  if (dpiScale && dpiScale !== 1) candidates.push({ x: nativeX / dpiScale, y: nativeY / dpiScale, label: `dpi=${dpiScale}` });
+  candidates.push({ x: nativeX, y: nativeY, label: "direct" });
+  for (const candidate of candidates) {
+    const element = document.elementFromPoint(candidate.x, candidate.y);
+    const targetId = element?.closest?.("[data-drop-target]")?.dataset?.dropTarget || "";
+    if (isDesktopVideoDropTarget(targetId)) {
+      return { targetId, detail: `coordinate=${Math.round(candidate.x)},${Math.round(candidate.y)} ${candidate.label}` };
+    }
+  }
+  return { targetId: "", detail: `coordinate-miss=${Math.round(nativeX)},${Math.round(nativeY)}` };
+}
+
+function activePageDesktopVideoDropTarget() {
+  const page = document.querySelector(".page.is-active");
+  if (!page) return "";
+  for (const zone of page.querySelectorAll("[data-drop-target]")) {
+    const targetId = zone.dataset?.dropTarget || "";
+    if (isDesktopVideoDropTarget(targetId)) return targetId;
+  }
+  return "";
+}
+
+function bindDesktopNativeVideoDropBridge() {
+  if (window.__liveClipperDesktopVideoDropBound) return;
+  window.__liveClipperDesktopVideoDropBound = true;
+  window.addEventListener("liveclipper:native-video-drop", (event) => {
+    const paths = Array.isArray(event.detail?.paths)
+      ? event.detail.paths.map((path) => String(path || "").trim()).filter(Boolean)
+      : [];
+    if (!paths.length) {
+      reportZeroCopyDropDiagnostic("native-event-empty", state.desktopVideoDropTarget, 0);
+      return;
+    }
+    const resolved = nativeVideoDropTargetFromCoordinates(event.detail || {});
+    const activePageTarget = activePageDesktopVideoDropTarget();
+    const targetId = resolved.targetId || activePageTarget || state.desktopVideoDropTarget;
+    const targetSource = resolved.targetId
+      ? resolved.detail
+      : activePageTarget
+        ? `active-page=${state.page}; ${resolved.detail}`
+        : state.desktopVideoDropTarget
+          ? `last-active; ${resolved.detail}`
+          : resolved.detail;
+    if (!targetId) {
+      reportZeroCopyDropDiagnostic("native-event-no-target", "", paths.length, targetSource);
+      toast("未识别到拖入区域，请将视频拖到当前功能页的视频列表。", "warning");
+      return;
+    }
+    reportZeroCopyDropDiagnostic("native-event-received", targetId, paths.length, targetSource);
+    consumeDesktopVideoDrop(paths, targetId, targetSource).catch((error) => toast(error.message || String(error), "error"));
+  });
+}
+
+function injectVideoFolderPickers() {
+  Array.from(desktopVideoDropTargetIds).forEach((targetId) => {
+    const picker = document.querySelector(`[data-action="pick-videos"][data-target="${targetId}"]`);
+    if (!picker || picker.parentElement?.querySelector(`[data-action="pick-video-folder"][data-target="${targetId}"]`)) return;
+    const folderPicker = document.createElement("button");
+    folderPicker.type = "button";
+    folderPicker.className = "button button-secondary button-small";
+    folderPicker.dataset.action = "pick-video-folder";
+    folderPicker.dataset.target = targetId;
+    folderPicker.textContent = "选择文件夹";
+    picker.insertAdjacentElement("afterend", folderPicker);
   });
 }
 
@@ -4885,10 +5125,15 @@ function previewStoryScrollTop(scope = "smart") {
 }
 
 function renderPreviewStateKeepStoryScroll(scope = "smart") {
-  const scrollTop = previewStoryScrollTop(scope);
+  const box = previewBox(scope);
+  const candidateScrollTop = box?.querySelector(".preview-candidate-list")?.scrollTop || 0;
+  const storyScrollTop = previewStoryScrollTop(scope);
   renderPreviewState(scope);
-  const list = previewBox(scope)?.querySelector(".preview-sequence-scroll");
-  if (list) list.scrollTop = scrollTop;
+  const refreshed = previewBox(scope);
+  const candidateList = refreshed?.querySelector(".preview-candidate-list");
+  const storyList = refreshed?.querySelector(".preview-sequence-scroll");
+  if (candidateList) candidateList.scrollTop = candidateScrollTop;
+  if (storyList) storyList.scrollTop = storyScrollTop;
 }
 
 function previewSplitStorageKey(scope = "smart") {
@@ -5285,16 +5530,17 @@ function collectPreviewSelection(scope = "smart") {
   };
 }
 
-function reorderPreviewClip(scope, fromIndex, toIndex) {
+function reorderPreviewClip(scope, fromIndex, toIndex, placeAfter = false) {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length) return;
   syncPreviewClipSelections(scope);
   const order = previewAssemblyOrder(scope, preview);
   const from = order.indexOf(Number(fromIndex));
-  const to = order.indexOf(Number(toIndex));
-  if (from < 0 || from === to) return;
+  const target = Number(toIndex);
+  if (from < 0 || !order.includes(target) || Number(fromIndex) === target) return;
   const [clip] = order.splice(from, 1);
-  order.splice(to, 0, clip);
+  const to = order.indexOf(target);
+  order.splice(placeAfter ? to + 1 : to, 0, clip);
   state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
@@ -5318,11 +5564,16 @@ function bindPreviewRowDrag(box, scope = "smart") {
     row.addEventListener("dragover", (event) => {
       event.preventDefault();
       row.classList.add("is-drop-target");
+      const bounds = row.getBoundingClientRect();
+      row.classList.toggle("is-drop-after", event.clientY >= bounds.top + (bounds.height / 2));
     });
-    row.addEventListener("dragleave", () => row.classList.remove("is-drop-target"));
+    row.addEventListener("dragleave", () => row.classList.remove("is-drop-target", "is-drop-after"));
     row.addEventListener("drop", (event) => {
       event.preventDefault();
+      const bounds = row.getBoundingClientRect();
+      const placeAfter = event.clientY >= bounds.top + (bounds.height / 2);
       row.classList.remove("is-drop-target");
+      row.classList.remove("is-drop-after");
       let payload = null;
       try {
         payload = JSON.parse(event.dataTransfer?.getData("text/plain") || "{}");
@@ -5330,7 +5581,7 @@ function bindPreviewRowDrag(box, scope = "smart") {
         return;
       }
       if (payload?.scope !== scope) return;
-      reorderPreviewClip(scope, Number(payload.index), Number(row.dataset.previewIndex));
+      reorderPreviewClip(scope, Number(payload.index), Number(row.dataset.previewIndex), placeAfter);
     });
   });
 }
@@ -8996,7 +9247,7 @@ function renderPreviewSelectedRows(scope, selected) {
   const activeIndex = Number(state.previewDetailSelection?.[scope]);
   return selected.map((clip, position) => {
     const text = selectedPreviewText(clip) || String(clip.text || "");
-    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" draggable="true" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" title="\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
+    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" draggable="true" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
   }).join("");
 }
 
@@ -9060,10 +9311,15 @@ function previewStoryScrollTop(scope = "smart") {
 }
 
 function renderPreviewStateKeepStoryScroll(scope = "smart") {
-  const scrollTop = previewStoryScrollTop(scope);
+  const box = previewBox(scope);
+  const candidateScrollTop = box?.querySelector('.preview-candidate-list')?.scrollTop || 0;
+  const storyScrollTop = previewStoryScrollTop(scope);
   renderPreviewState(scope);
-  const list = previewBox(scope)?.querySelector('.preview-selected-list, .preview-sequence-scroll');
-  if (list) list.scrollTop = scrollTop;
+  const refreshed = previewBox(scope);
+  const candidateList = refreshed?.querySelector('.preview-candidate-list');
+  const storyList = refreshed?.querySelector('.preview-selected-list, .preview-sequence-scroll');
+  if (candidateList) candidateList.scrollTop = candidateScrollTop;
+  if (storyList) storyList.scrollTop = storyScrollTop;
 }
 
 function bindDirectPreviewWorkbenchActions() {
@@ -9457,37 +9713,116 @@ function renderPreviewCandidateGroups(scope, preview) {
   }).join("") || '<div class="preview-sequence-empty"><strong>\u8fd9\u4e2a\u7b5b\u9009\u4e0b\u6ca1\u6709\u6709\u6548\u5019\u9009</strong><span>\u5df2\u8fc7\u6ee4\u5f31\u65ad\u53e5\u3001\u4e92\u52a8\u5e9f\u8bdd\u548c\u65e0\u5356\u70b9\u7247\u6bb5\uff1b\u53ef\u5207\u6362\u54c1\u7c7b\u6216\u5907\u7528\u5019\u9009\u3002</span></div>';
 }
 
-const previewWordBlockBoundaries = [
-  "\u56e0\u4e3a", "\u6240\u4ee5", "\u4f46\u662f", "\u7136\u540e", "\u5982\u679c", "\u5c31\u662f", "\u8fd9\u4e2a", "\u8fd9\u4ef6", "\u90a3\u4e2a", "\u4f60\u4eec", "\u6211\u4eec", "\u4ed6\u4eec", "\u7279\u522b", "\u771f\u7684", "\u6709\u70b9", "\u4e00\u4e2a", "\u8fd9\u79cd", "\u6b3e\u5f0f", "\u8863\u670d", "\u88d9\u5b50", "\u9762\u6599", "\u7248\u578b", "\u989c\u8272", "\u642d\u914d", "\u7ec6\u8282", "\u5de5\u827a", "\u505a\u5de5", "\u8170\u5e26", "\u7ec7\u5e26", "\u5370\u82b1", "\u8c79\u7eb9", "\u8ff7\u5f69", "\u597d\u770b", "\u663e\u7626", "\u663e\u9ad8", "\u6536\u8170", "\u4e0a\u8eab", "\u5b9a\u5236", "\u590d\u53e4", "\u6c34\u6d17", "\u62d6\u6b20", "\u53ef\u4ee5", "\u90fd\u662f", "\u4e0d\u662f", "\u4e0d\u4f1a", "\u5df2\u7ecf", "\u8fd8\u6709", "\u6ca1\u6709", "\u611f\u89c9", "\u559c\u6b22", "\u9002\u5408", "\u76f4\u63a5", "\u5c0f\u4f17", "\u5143\u7d20", "\u4e00\u6837", "\u8fd9\u4e9b", "\u90a3\u79cd", "\u81ea\u5df1", "\u4e0a\u9762", "\u91cc\u9762", "\u5916\u9762", "\u5168\u90e8", "\u53ea\u6709", "\u51fa\u6765", "\u4e00\u4e0b", "\u975e\u5e38", "\u7a0d\u5fae", "\u53ef\u80fd", "\u4e5f", "\u5427", "\u554a", "\u5462", "\u5440", "\u7684", "\u4e86", "\u5417", "\u54e6", "\u55ef", "\u6211"
-];
+// SenseVoice supplies CTC-aligned Chinese characters, not trustworthy lexical
+// word boundaries. These phrases improve the editor's display and click target
+// only; cuts still use the original character indices and timestamps.
+const previewEditorWordLexicon = Object.freeze([
+  "\u5bf9\u649e\u886b", "\u70c2\u5927\u8857", "\u6027\u4ef7\u6bd4", "\u9ad8\u7ea7\u611f", "\u677e\u5f1b\u611f", "\u6c1b\u56f4\u611f", "\u8d28\u611f", "\u663e\u7626", "\u663e\u9ad8", "\u663e\u767d", "\u906e\u8089", "\u906e\u80ef", "\u906e\u809a\u5b50", "\u906e\u62dc\u62dc\u8089", "\u4e0d\u663e\u80d6", "\u4e0d\u81c3\u80bf", "\u4e0d\u900f\u8089", "\u4e0d\u95f7\u70ed", "\u4e0d\u7c98\u8eab", "\u4e0d\u6613\u76b1", "\u4e0d\u892a\u8272", "\u4e0d\u53d8\u5f62", "\u4e0d\u624e\u4eba", "\u4e0d\u6311\u4eba", "\u4e0d\u6311\u8eab\u6750", "\u4e0d\u6311\u80a4\u8272", "\u4e0d\u6311\u5e74\u9f84", "\u68a8\u5f62\u8eab\u6750", "\u82f9\u679c\u578b\u8eab\u6750", "\u5c0f\u4e2a\u5b50", "\u5fae\u80d6", "\u57fa\u7840\u6b3e", "\u8fde\u8863\u88d9", "\u534a\u8eab\u88d9", "\u9632\u6652\u8863", "\u9632\u6652\u886b", "\u9614\u817f\u88e4", "\u725b\u4ed4\u88e4", "\u884c\u653f\u88e4", "\u9488\u7ec7\u886b", "\u8857\u5934", "\u8857\u5934", "\u886c\u886b", "\u5957\u88c5", "\u5916\u5957", "\u5185\u642d", "\u9886\u53e3", "\u8896\u53e3", "\u80a9\u7ebf", "\u8170\u7ebf", "\u7248\u578b", "\u9762\u6599", "\u5782\u611f", "\u900f\u6c14", "\u4eb2\u80a4", "\u67d4\u8f6f", "\u5f39\u6027", "\u901a\u52e4", "\u65e5\u5e38", "\u5c0f\u4f17", "\u590d\u53e4", "\u7b80\u7ea6", "\u65b0\u4e2d\u5f0f", "\u6cd5\u5f0f", "\u7f8e\u5f0f", "\u97e9\u7cfb", "\u7a7f\u642d", "\u642d\u914d", "\u4e0a\u8eab", "\u4e00\u4ef6", "\u8fd9\u4ef6", "\u8fd9\u4e2a", "\u90a3\u4ef6", "\u90a3\u4e2a", "\u5b9d\u5b50\u4eec", "\u59d0\u59b9\u4eec", "\u5bb6\u4eba\u4eec"
+].sort(function (left, right) { return right.length - left.length; }));
+
+function previewEditorNativeWordRanges(text) {
+  const source = String(text || "");
+  if (!source) return [];
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    try {
+      const ranges = [];
+      const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+      for (const item of segmenter.segment(source)) {
+        const piece = String(item?.segment || "");
+        const start = Number(item?.index);
+        if (piece && Number.isFinite(start)) ranges.push({ start, end: start + piece.length });
+      }
+      if (ranges.length) return ranges;
+    } catch (_error) {
+      // Old WebView2 runtimes use the deterministic character fallback below.
+    }
+  }
+  const ranges = [];
+  for (let start = 0; start < source.length;) {
+    const piece = String.fromCodePoint(source.codePointAt(start));
+    ranges.push({ start, end: start + piece.length });
+    start += piece.length;
+  }
+  return ranges;
+}
+
+function previewEditorLexicalRanges(text) {
+  const source = String(text || "");
+  const nativeRanges = previewEditorNativeWordRanges(source);
+  const nativeByStart = new Map(nativeRanges.map(function (range) { return [range.start, range]; }));
+  const ranges = [];
+  for (let start = 0; start < source.length;) {
+    const lexiconMatch = previewEditorWordLexicon.find(function (term) { return source.startsWith(term, start); });
+    if (lexiconMatch) {
+      ranges.push({ start, end: start + lexiconMatch.length });
+      start += lexiconMatch.length;
+      continue;
+    }
+    const nativeRange = nativeByStart.get(start);
+    if (nativeRange && nativeRange.end > start) {
+      ranges.push(nativeRange);
+      start = nativeRange.end;
+      continue;
+    }
+    const piece = String.fromCodePoint(source.codePointAt(start));
+    ranges.push({ start, end: start + piece.length });
+    start += piece.length;
+  }
+  return ranges;
+}
+
+function previewEditorWordGroupsForRun(run) {
+  const units = [];
+  let offset = 0;
+  run.words.forEach(function (word) {
+    const text = String(word?.text || "");
+    if (!text) return;
+    units.push({ word, start: offset, end: offset + text.length });
+    offset += text.length;
+  });
+  const groups = [];
+  let unitIndex = 0;
+  previewEditorLexicalRanges(units.map(function (unit) { return String(unit.word?.text || ""); }).join(""))
+    .forEach(function (range) {
+      const words = [];
+      while (unitIndex < units.length && units[unitIndex].start < range.end) {
+        words.push(units[unitIndex].word);
+        unitIndex += 1;
+      }
+      if (words.length) groups.push({
+        text: words.map(function (word) { return String(word?.text || ""); }).join(""),
+        words,
+        locked: run.locked,
+        selected: run.selected,
+      });
+    });
+  while (unitIndex < units.length) {
+    const word = units[unitIndex].word;
+    groups.push({ text: String(word?.text || ""), words: [word], locked: run.locked, selected: run.selected });
+    unitIndex += 1;
+  }
+  return groups;
+}
 
 function previewEditorWordGroups(segment) {
-  const groups = [];
+  const runs = [];
   let current = null;
-  const words = previewSegmentWords(segment);
-  words.forEach(function (word, position) {
+  previewSegmentWords(segment).forEach(function (word) {
     const text = String(word?.text || "");
-    const wordLocked = segment?.selection_locked === true || isPreviewWordLocked(word);
-    const wordSelected = word?.selected !== false;
-    const wordLength = Math.max(1, Array.from(text).length);
-    const endsPhrase = /[\u3002\uff01\uff1f!?\uff1b;\u2026]$/.test(text);
+    const locked = segment?.selection_locked === true || isPreviewWordLocked(word);
+    const selected = word?.selected !== false;
     const previous = current?.words?.[current.words.length - 1];
     const previousEnd = Number(previous?.end);
     const wordStart = Number(word?.start);
     const hasPause = Number.isFinite(previousEnd) && Number.isFinite(wordStart) && wordStart - previousEnd > 0.32;
-    const followingText = words.slice(position).map(function (item) { return String(item?.text || ""); }).join("");
-    const boundaryAhead = Boolean(current) && previewWordBlockBoundaries.some(function (term) { return followingText.startsWith(term); });
-    const canJoin = current && current.locked === wordLocked && current.selected === wordSelected && !current.endsPhrase && !hasPause && !boundaryAhead && current.length + wordLength <= 4;
-    if (!canJoin) {
-      current = { text: "", words: [], locked: wordLocked, selected: wordSelected, length: 0, endsPhrase: false };
-      groups.push(current);
+    const previousEndsPhrase = /[\u3002\uff01\uff1f!?\uff1b;\u2026]$/.test(String(previous?.text || ""));
+    if (!current || current.locked !== locked || current.selected !== selected || hasPause || previousEndsPhrase) {
+      current = { words: [], locked, selected };
+      runs.push(current);
     }
-    current.text += text;
-    current.words.push(word);
-    current.length += wordLength;
-    current.endsPhrase = endsPhrase;
+    if (text) current.words.push(word);
   });
-  return groups;
+  return runs.flatMap(previewEditorWordGroupsForRun);
 }
 
 function togglePreviewWordGroupSelection(clipIndex, segmentIndex, rawIndices, scope = "smart") {
@@ -9530,9 +9865,9 @@ function renderPreviewEditorSentence(scope, clip, segment, position) {
       }
       const deleted = group.words.length > 0 && group.words.every(function (word) { return word?.selected === false; });
       const indices = group.words.map(function (word) { return Number(word.index); }).filter(Number.isInteger).join(",");
-      return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-group-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word-group="' + indices + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd\u5757' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd\u5757') + '">' + groupText + '</button>';
+        return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-group-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word-group="' + indices + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd') + '">' + groupText + '</button>';
     }).join("");
-    wordHint = '<small class="preview-editor-word-hint">\u70b9\u8bcd\u5757\u5220\u9664\uff0c\u518d\u70b9\u4e00\u6b21\u5373\u53ef\u6062\u590d</small>';
+    wordHint = '<small class="preview-editor-word-hint">\u70b9\u8bcd\u5220\u9664\uff0c\u518d\u70b9\u4e00\u6b21\u5373\u53ef\u6062\u590d</small>';
   }
   return '<article class="preview-editor-sentence ' + (!selected ? 'is-deleted' : '') + ' ' + (locked ? 'is-locked' : '') + '"><div class="preview-editor-sentence-head"><label><input type="checkbox" data-preview-segment data-preview-scope="' + scope + '" data-preview-segment-parent="' + Number(clip.index) + '" data-preview-segment-index="' + Number(segment.index) + '" ' + (selected ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '><strong>\u7b2c ' + (position + 1) + ' \u53e5</strong></label><span>' + (locked ? '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009' : (selected ? '\u5df2\u4fdd\u7559' : '\u5df2\u5220\u9664')) + '</span></div><div class="preview-editor-words">' + wordRows + '</div>' + wordHint + (reason ? '<small class="preview-editor-lock-reason">' + escapeHtml(reason) + '</small>' : '') + '</article>';
 }

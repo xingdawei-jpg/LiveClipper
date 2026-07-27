@@ -158,6 +158,7 @@ class DurationContract:
 class SelectionStatus(str, Enum):
     SUCCESS = "success"
     PARTIAL_INSUFFICIENT = "partial_insufficient"
+    INSUFFICIENT_SAFE_MATERIAL = "insufficient_safe_material"
     AI_INVALID = "ai_invalid"
     SAFETY_BLOCKED = "safety_blocked"
     RENDER_FAILED = "render_failed"
@@ -389,11 +390,26 @@ class SelectionResult:
             details=dict(details or {}),
         )
 
+    @classmethod
+    def insufficient_safe_material(
+        cls,
+        *,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> "SelectionResult":
+        """Represent a hard precondition failure, never an exportable success."""
+        return cls(
+            status=SelectionStatus.INSUFFICIENT_SAFE_MATERIAL,
+            failure_code="insufficient_safe_material",
+            message=str(message or ""),
+            details=dict(details or {}),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "status": self.status.value,
-            "ok": self.status in {SelectionStatus.SUCCESS, SelectionStatus.PARTIAL_INSUFFICIENT},
+            "ok": self.status == SelectionStatus.SUCCESS,
             "failure_code": self.failure_code,
             "message": self.message,
             "details": dict(self.details or {}),

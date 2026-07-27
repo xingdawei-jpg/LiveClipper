@@ -26,8 +26,6 @@ a = Analysis(
         "uvicorn",
         "webview",
         "openpyxl",
-        "faster_whisper",
-        "ctranslate2",
     ],
     noarchive=False,
 )

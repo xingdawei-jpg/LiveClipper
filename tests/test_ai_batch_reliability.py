@@ -75,6 +75,20 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertTrue(audit["duration_long"])
         self.assertTrue(any("超过目标上限" in issue for issue in audit["issues"]))
 
+    def test_ai_director_requires_exact_source_min_not_acceptance_margin(self) -> None:
+        contract = selection_contracts.DurationContract.create(90, 1.15)
+        clips = [
+            ("product", "完整安全卖点", 0.0, contract.source_min - 0.1, 50, contract.source_min - 0.1, "面料质感"),
+        ]
+        _safe, audit = ai_clipper._director_hard_audit(
+            clips,
+            contract.ai_target_seconds,
+            8,
+            duration_contract=contract,
+        )
+        self.assertTrue(audit["duration_short"])
+        self.assertTrue(any("低于目标下限" in issue for issue in audit["issues"]))
+
     def test_mix_source_quota_repairs_then_warns_instead_of_failing(self) -> None:
         clips = [
             ("hook", "[V1]这件上衣穿上很显精神。", 0.0, 3.0, 50, 3.0, "版型"),
@@ -146,7 +160,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             5.0,
         )
 
-    def test_verified_best_effort_policy_allows_dynamic_duration_grace(self) -> None:
+    def test_verified_best_effort_policy_no_longer_bypasses_duration_contract(self) -> None:
         metadata = {
             "duration_relaxation": {
                 "applied": True,
@@ -158,22 +172,21 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         }
         grace = cutter_logic._selection_shortage_grace_seconds(metadata)
         clips = [("product", "安全候选用尽后的最佳完整片单", 0.0, 28.75, 50, 28.75)]
-        selected = cutter_logic._validate_selected_duration_contract(
-            clips,
-            60,
-            1.15,
-            shortage_grace_seconds=grace,
+        self.assertEqual(grace, 0.0)
+        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
+            cutter_logic._validate_selected_duration_contract(
+                clips,
+                60,
+                1.15,
+                shortage_grace_seconds=grace,
+            )
+        self.assertFalse(
+            cutter_logic._validate_actual_duration_contract(
+                25.0,
+                60,
+                shortage_grace_seconds=grace,
+            )[0]
         )
-        actual_ok, _actual_message = cutter_logic._validate_actual_duration_contract(
-            25.0,
-            60,
-            shortage_grace_seconds=grace,
-        )
-
-        self.assertEqual(grace, 25.0)
-        self.assertTrue(selected["used_shortage_grace"])
-        self.assertAlmostEqual(selected["projected_final"], 25.0, places=2)
-        self.assertTrue(actual_ok)
 
     def test_best_effort_policy_rejects_inconsistent_or_unsafe_metadata(self) -> None:
         for relaxation in (
@@ -199,7 +212,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
                 0.0,
             )
 
-    def test_best_effort_success_is_visible_in_batch_summary(self) -> None:
+    def test_best_effort_metadata_is_not_reported_as_success(self) -> None:
         result = {
             "ok": True,
             "analysis_metadata": {
@@ -212,18 +225,17 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             },
         }
         detail = server._batch_best_effort_detail("短素材.mp4", result)
-        self.assertIsNotNone(detail)
-        self.assertEqual(detail["code"], "content_shortage_output")
+        self.assertIsNone(detail)
         summary = server._batch_summary_message(
             "智能成片完成",
+            2,
             3,
-            3,
-            [],
+            [{"code": "insufficient_safe_material"}],
             "个",
-            [detail],
+            [],
         )
-        self.assertIn("成功 3/3", summary)
-        self.assertIn("内容不足但已成片 1", summary)
+        self.assertIn("成功 2/3", summary)
+        self.assertIn("内容不足 1", summary)
 
         self.assertIsNone(server._batch_best_effort_detail("普通素材.mp4", {"ok": True}))
         self.assertIsNone(server._batch_best_effort_detail("普通素材.mp4", {
@@ -237,10 +249,11 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             },
         }))
 
-    def test_duration_grace_survives_ai_metadata_bridge_to_cutter_contract(self) -> None:
+    def test_stale_best_effort_metadata_cannot_cross_ai_to_cutter_contract(self) -> None:
         metadata = ai_clipper._begin_analysis_metadata()
         metadata["duration_relaxation"] = {
             "applied": True,
+            "policy": "safe_best_effort_v1",
             "grace_seconds": 5.0,
             "reason": "safe_candidates_exhausted",
             "projected_final_duration": 52.0 / 1.15,
@@ -251,22 +264,10 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         public_metadata = ai_clipper.get_last_analysis_metadata()
         grace = cutter_logic._selection_shortage_grace_seconds(public_metadata)
         clips = [("product", "安全候选已经用尽后的完整片单", 0.0, 52.0, 50, 52.0)]
-        accepted = cutter_logic._validate_selected_duration_contract(
-            clips,
-            60,
-            1.15,
-            shortage_grace_seconds=grace,
-        )
-
-        self.assertEqual(grace, 5.0)
-        self.assertTrue(accepted["used_shortage_grace"])
-        self.assertAlmostEqual(accepted["projected_final"], 52.0 / 1.15, places=2)
-        self.assertAlmostEqual(accepted["low"], 45.0, places=2)
-
-        too_short = [("product", "仍低于宽限下限的片单", 0.0, 50.0, 50, 50.0)]
+        self.assertEqual(grace, 0.0)
         with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
             cutter_logic._validate_selected_duration_contract(
-                too_short,
+                clips,
                 60,
                 1.15,
                 shortage_grace_seconds=grace,
@@ -284,7 +285,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual(trimmed[0]["text"], "而且")
         self.assertAlmostEqual(trimmed[0]["start"], 0.25, places=2)
 
-    def test_invalid_ai_hook_is_restored_without_rebuilding_products(self) -> None:
+    def test_structure_allows_product_opening_when_no_real_hook_exists(self) -> None:
         entries = [
             (0.0, 3.0, "这件套装穿上特别轻松。"),
             (3.0, 8.0, "周末和朋友逛街很有松弛感。"),
@@ -305,10 +306,11 @@ class AiCandidateReliabilityTests(unittest.TestCase):
                 "requested_focus": "场景搭配",
             },
         )
-        self.assertEqual([clip[0] for clip in stabilized], ["hook", "product", "product", "close"])
-        self.assertEqual([clip[1] for clip in stabilized[1:]], [clip[1] for clip in parsed_after_invalid_hook])
+        self.assertEqual([clip[0] for clip in stabilized], ["product", "product", "close"])
+        self.assertEqual([clip[1] for clip in stabilized], [clip[1] for clip in parsed_after_invalid_hook])
         _safe, audit = ai_clipper._director_hard_audit(stabilized, 18, 8)
-        self.assertFalse(any("Hook必须" in issue for issue in audit["issues"]))
+        self.assertFalse(any("Hook" in issue for issue in audit["issues"]))
+        self.assertTrue(any("Product自然开场" in warning for warning in audit["warnings"]))
 
     def test_complete_story_repair_api_has_been_removed(self) -> None:
         self.assertFalse(hasattr(ai_clipper, "_director_repair_instruction"))
@@ -678,6 +680,26 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             allowed_hook_indices={1},
         )
         self.assertEqual([clip[0] for clip in valid], ["hook", "product"])
+
+    def test_completed_empty_hook_contract_forces_product_opening(self) -> None:
+        entries = [
+            (0.0, 3.0, "全松紧腰穿上不勒，裤子不挑人。"),
+            (3.0, 7.0, "天丝亚麻成分让裤子更轻薄透气。"),
+        ]
+        clips = ai_clipper._parse_ai_response(
+            json.dumps([
+                {"clip_type": "hook", "srt_indices": [1], "focus": "版型显瘦"},
+                {"clip_type": "product", "srt_indices": [2], "focus": "面料质感"},
+            ], ensure_ascii=False),
+            None,
+            entries,
+            set(),
+            require_srt_indices=True,
+            allowed_hook_indices=set(),
+        )
+
+        self.assertEqual([clip[0] for clip in clips], ["product"])
+        self.assertEqual(clips[0][1], entries[1][2])
 
     def test_selection_duration_contract_accepts_only_projected_final_range(self) -> None:
         valid = [("product", "完整卖点", 0.0, 69.0, 50, 69.0)]

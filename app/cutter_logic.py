@@ -252,6 +252,37 @@ def _mix_semantic_segments_for_source(srt_entries, word_segments, marker, source
     return result
 
 
+def _copy_srt_with_word_timing_sidecar(source_srt, destination_srt):
+    """Copy an SRT cache together with its matching word-timing sidecar.
+
+    The sidecar name is derived from the SRT path, so moving only the subtitle
+    silently downgrades subsequent AI selection to sentence-level timing.
+    """
+    from volcengine_asr import word_timing_sidecar_path
+
+    source_srt = os.path.abspath(os.fspath(source_srt))
+    destination_srt = os.path.abspath(os.fspath(destination_srt))
+    same_target = os.path.normcase(source_srt) == os.path.normcase(destination_srt)
+    if not same_target:
+        shutil.copy2(source_srt, destination_srt)
+
+    source_sidecar = word_timing_sidecar_path(source_srt)
+    destination_sidecar = word_timing_sidecar_path(destination_srt)
+    if os.path.isfile(source_sidecar):
+        if not same_target:
+            shutil.copy2(source_sidecar, destination_sidecar)
+        return True
+
+    # A newly generated SRT must never reuse an older timing file for a
+    # different transcript.
+    if not same_target:
+        try:
+            os.remove(destination_sidecar)
+        except FileNotFoundError:
+            pass
+    return False
+
+
 def _get_video_encoder():
     global _hw_encoder_checked, _hw_encoder
     if not _hw_encoder_checked:
@@ -1037,17 +1068,12 @@ def _selection_shortage_grace_seconds(analysis_metadata):
     relaxation = dict((analysis_metadata or {}).get("duration_relaxation") or {})
     if not relaxation.get("applied"):
         return 0.0
+    # Shortage is now a structured AI-selection failure. Never revive a stale
+    # best-effort preview as an automatically exportable short video.
+    if relaxation.get("policy") == "safe_best_effort_v1":
+        return 0.0
     try:
         reported_grace = max(0.0, float(relaxation.get("grace_seconds") or 0.0))
-        if relaxation.get("policy") == "safe_best_effort_v1":
-            standard_low = float(relaxation.get("standard_final_min") or 0.0)
-            relaxed_low = float(relaxation.get("relaxed_final_min") or 0.0)
-            if standard_low <= 1.0 or relaxed_low < 1.0 or relaxed_low > standard_low:
-                return 0.0
-            derived_grace = standard_low - relaxed_low
-            if abs(reported_grace - derived_grace) > 1.0:
-                return 0.0
-            return min(max(reported_grace, derived_grace), standard_low - 1.0)
         return min(
             float(SHORTAGE_GRACE_SECONDS),
             reported_grace,
@@ -2494,7 +2520,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                             else:
                                 _log("⚠️ 云端语音识别失败，已自动切换到本地识别")
                         else:
-                            _log("音频提取失败，降级到本地 Whisper")
+                            _log("音频提取失败，改用本地 SenseVoice")
                     elif _volc_used:
                         pass  # 阿里云已成功
                     else:
@@ -2504,36 +2530,15 @@ def process_video(video_path, srt_path=None, output_path=None,
         
         if not _volc_used and not srt_path:
             _log("[STEP] 🎬 语音识别中...")
-            _log("启动本地语音识别 (Whisper)...")
+            _log("启动本地语音识别 (SenseVoice)...")
             try:
                 from stt import generate_srt
-                # Read whisper model preference from settings
-                _wmodel = "small"
-                try:
-                    import json as _json
-                    _spath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_settings.json")
-                    if os.path.exists(_spath):
-                        with open(_spath, "r", encoding="utf-8-sig") as _sf:
-                            _sdata = _json.load(_sf)
-                        _wmodel = _sdata.get("whisper_model", "small")
-                        _local_asr_engine = _sdata.get("local_asr_engine", "sensevoice")
-                except Exception:
-                    _LOG.warning("unexpected error", exc_info=True)
-                    pass
-                temp_srt = generate_srt(video_path, log_fn=_log, whisper_model=_wmodel, asr_engine=locals().get("_local_asr_engine", "sensevoice"))
-            except Exception as _whisper_err:
-                _err_str = str(_whisper_err).lower()
-                if "huggingface" in _err_str or "hf_hub" in _err_str:
-                    _log("❌ Whisper 模型下载失败（国内可能无法访问 HuggingFace）")
-                    _log("💡 建议：1) 开启云端ASR（火山引擎）或 2) 手动提供 SRT 字幕文件")
-                elif "winerror" in _err_str or "connection" in _err_str or "connect" in _err_str:
-                    _log("❌ Whisper 模型下载失败：网络连接被中断")
-                    _log("💡 建议：检查网络连接，或开启云端ASR / 提供SRT字幕文件")
-                elif "cuda" in _err_str or "gpu" in _err_str:
-                    _log("❌ Whisper GPU 加载失败，请尝试在设置中切换为 CPU 模式")
-                else:
-                    _log(f"❌ 语音识别失败: {_whisper_err}")
-                    _log("💡 建议：开启云端ASR 或 手动提供 SRT 字幕文件")
+                temp_srt = generate_srt(video_path, log_fn=_log)
+                if not temp_srt:
+                    _log("❌ SenseVoice 本地识别失败；请检查本地模型环境、开启云端 ASR 或提供 SRT 字幕文件")
+            except Exception as _sensevoice_err:
+                _log(f"❌ SenseVoice 本地识别失败: {_sensevoice_err}")
+                _log("💡 建议：开启云端 ASR 或手动提供 SRT 字幕文件")
                 temp_srt = None
         if not temp_srt:
             _log("语音识别失败！")
@@ -2544,16 +2549,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 _cache_path = os.path.splitext(original_video_path)[0] + ".srt"
                 if _cache_path != srt_path:  # 避免自拷贝
-                    import shutil as _shutil
-                    _shutil.copy2(srt_path, _cache_path)
-                    try:
-                        from volcengine_asr import word_timing_sidecar_path as _word_sidecar_path
-                        _source_words = _word_sidecar_path(srt_path)
-                        if os.path.exists(_source_words):
-                            _shutil.copy2(_source_words, _word_sidecar_path(_cache_path))
-                    except Exception:
-                        _LOG.warning("unexpected error", exc_info=True)
-                        pass
+                    _copy_srt_with_word_timing_sidecar(srt_path, _cache_path)
                     _log(f"SRT已缓存: {os.path.basename(_cache_path)}")
             except Exception:
                 _LOG.warning("unexpected error", exc_info=True)
@@ -3551,23 +3547,23 @@ def process_video(video_path, srt_path=None, output_path=None,
     _log(f"字幕={will_subtitle}, 画中画={has_pip} ({pip_path})")
     _subtitle_stage_started = time.time()
     if will_subtitle and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 10000:
-        _mapped_subtitles = _build_mapped_subtitle_segments(
-            locals().get("_clip_cut_maps", []),
-            _srt_segments_for_cut,
-            _subtitle_speed_factor,
-            transition_overlaps=_transition_overlaps,
+        # Source SRT mapping can reintroduce words that were removed during the
+        # preview's word-level edit.  The final picture and audio are the sole
+        # subtitle source of truth, so both smart-cut and mix re-recognize this
+        # exact assembled file before burning subtitles.
+        _log("字幕时间轴: 重新识别最终成片音频（跟随云端/本地设置，AI仅修正文案）。")
+        _add_subtitles_final(
+            nosub_file,
+            output_path,
+            w,
+            h,
+            temp_dir,
+            _log,
+            pip_path,
+            pip_size,
+            pip_opacity,
+            pip_pos,
         )
-        if _mapped_subtitles:
-            _log(f"字幕时间轴: 源SRT映射 {len(_mapped_subtitles)} 条，变速倍率 {_subtitle_speed_factor:.3f}x")
-            _mapped_ok = _burn_mapped_subtitles_final(
-                nosub_file, output_path, w, h, temp_dir, _log, _mapped_subtitles,
-                pip_path, pip_size, pip_opacity, pip_pos,
-            )
-            if not _mapped_ok:
-                _add_subtitles_final(nosub_file, output_path, w, h, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
-        else:
-            _log("字幕时间轴: 源SRT映射不可用，回退成片语音识别。")
-            _add_subtitles_final(nosub_file, output_path, w, h, temp_dir, _log, pip_path, pip_size, pip_opacity, pip_pos)
     elif has_pip and os.path.exists(nosub_file):
         # auto模式用视频本身做画中画素材
         _effective_pip = video_path if pip_path == "auto" else pip_path
@@ -4269,12 +4265,9 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
 
 
 def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
-    """Use the same SenseVoice-first local ASR policy as smart-cut preview."""
-    selected_engine = str(settings.get("local_asr_engine", "sensevoice") or "sensevoice").strip().lower()
-    whisper_model = str(settings.get("whisper_model", "small") or "small")
-    engine_label = "SenseVoice" if selected_engine in ("sensevoice", "auto") else "Whisper"
+    """Use the same SenseVoice-only local ASR policy as smart-cut preview."""
     local_srt = os.path.join(temp_dir, "final_local_asr.srt")
-    log_fn(f"字幕阶段：正在使用本地 {engine_label} 识别最终视频音频...")
+    log_fn("字幕阶段：正在使用本地 SenseVoice 识别最终视频音频...")
 
     try:
         from stt import transcribe_local_audio_to_srt
@@ -4283,8 +4276,6 @@ def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
             wav_path,
             local_srt,
             log_fn=log_fn,
-            whisper_model=whisper_model,
-            asr_engine=selected_engine,
         )
     except Exception as exc:
         log_fn(f"本地语音识别失败: {exc}")
@@ -4320,6 +4311,31 @@ def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
             normalized.append({"start": start, "end": end, "text": segment_text})
     log_fn(f"本地语音识别完成: {len(normalized)} 条语音段")
     return normalized
+
+
+def _apply_final_subtitle_text_repairs(raw_segments, fixed_text):
+    """Apply AI subtitle text repairs without ever accepting AI timestamps."""
+    source = [
+        {
+            "start": float(segment.get("start") or 0),
+            "end": float(segment.get("end") or 0),
+            "text": str(segment.get("text") or "").strip(),
+        }
+        for segment in raw_segments or []
+        if isinstance(segment, dict)
+    ]
+    repaired_texts = []
+    for line in str(fixed_text or "").splitlines():
+        match = re.match(r"\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]\s*(.*)", line.strip())
+        if match:
+            repaired_texts.append(match.group(3).strip())
+    if len(repaired_texts) != len(source):
+        return None
+    return [
+        {"start": segment["start"], "end": segment["end"], "text": text}
+        for segment, text in zip(source, repaired_texts)
+    ]
+
 
 def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
     """
@@ -4363,15 +4379,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 
     def _run_aliyun_asr_subtitle():
         """阿里云 ASR：高精度字级时间戳+按标点断句"""
-        try:
-            with open(sp, "r", encoding="utf-8-sig") as _af:
-                _acfg = _json.load(_af)
-                if not _acfg.get("asr_enabled", False):
-                    _log("云端ASR未启用，跳过阿里云")
-                    return
-        except Exception:
-            _LOG.warning("unexpected error", exc_info=True)
-            pass
         nonlocal raw_segments, volcengine_success
         try:
             _log("正在尝试阿里云 ASR...")
@@ -4402,15 +4409,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 
     def _run_volcengine_asr():
         """火山引擎大模型 ASR：高精度时间戳+断句"""
-        # 仅当云端ASR启用时才执行
-        try:
-            with open(sp, "r", encoding="utf-8-sig") as _vf:
-                if not _json.load(_vf).get("asr_enabled", False):
-                    _log("云端ASR未启用，跳过火山引擎")
-                    return
-        except Exception:
-            _LOG.warning("unexpected error", exc_info=True)
-            pass
         nonlocal raw_segments, volcengine_success
         try:
             _log("正在尝试火山引擎 ASR...")
@@ -4445,7 +4443,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             _log(f"火山引擎 ASR 异常: {e}")
 
     def _run_local_asr():
-        """Reuse the selected local engine and fallback policy from smart cut."""
+        """Reuse the SenseVoice-only local ASR policy from smart cut."""
         nonlocal raw_segments
         try:
             from ai_clipper import load_settings as load_local_settings
@@ -4453,7 +4451,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             local_settings = load_local_settings()
         except Exception as exc:
             _log(f"读取本地 ASR 设置失败，使用 SenseVoice 默认值: {exc}")
-            local_settings = {"local_asr_engine": "sensevoice", "whisper_model": "small"}
+            local_settings = {}
         raw_segments = _final_subtitle_local_asr_segments(
             wav_path,
             temp_dir,
@@ -4616,7 +4614,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 1. 修正错别字（女装术语：网纱、晴纶、锦纶、阔腿裤、罩衫、连衣裙、风衣、夹克等）
 2. 繁体字转简体（褲→裤、襯→衬、風→风、夾→夹、羽絨→羽绒等）
 3. 去除废话词(呕嗯然后对对对就是那个这个) + 句内重复词(已经。已经→已经) + 填充音(啊啊啊)
-4. 保持时间戳不变，严格按行输出，每行格式：[start-end] 文本
+4. 必须逐行对应原始字幕；不可合并、删除、增加或调整时间戳。若某行仅是填充音可输出空文本，但仍必须保留该行和原时间戳。
+5. 严格按行输出，每行格式：[start-end] 文本。
 
 原始字幕：
 {seg_text}
@@ -4649,25 +4648,12 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     fixed_text = re.sub(r"^```[a-z]*\n?|\n?```$", "", fixed_text).strip()
                 _log("DeepSeek修复完成")
 
-                import re as _re
-                fixed_segments = []
-                for line in fixed_text.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    m = _re.match(r'\[(\d+\.?\d*)-(\d+\.?\d*)\]\s*(.*)', line)
-                    if m:
-                        fixed_segments.append({
-                            "start": float(m.group(1)),
-                            "end": float(m.group(2)),
-                            "text": m.group(3).strip()
-                        })
-
-                if len(fixed_segments) < len(raw_segments) // 2:
-                    _log(f"DeepSeek返回解析异常（{len(fixed_segments)}条 vs 原始{len(raw_segments)}条），回退到 ASR 原始文本")
+                fixed_segments = _apply_final_subtitle_text_repairs(raw_segments, fixed_text)
+                if fixed_segments is None:
+                    _log("DeepSeek返回行数异常，回退到 ASR 原始文本以保持字幕时间轴。")
                     fixed_segments = raw_segments
                 else:
-                    _log(f"DeepSeek修复: {len(fixed_segments)} 条字幕")
+                    _log(f"DeepSeek修复: {len(fixed_segments)} 条字幕（保留最终ASR时间轴）")
             except Exception as e:
                 _log(f"DeepSeek修复失败: {e}，回退到 ASR 原始文本")
                 fixed_segments = raw_segments
@@ -5317,7 +5303,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                         _log(f"  找到匹配 SRT: {_f}")
                         break
         if not os.path.exists(_sc):
-            # Cloud ASR + Whisper fallback
+            # Cloud ASR + SenseVoice fallback
             try:
                 from ai_clipper import load_settings as _ld_mix
                 _cfg4 = _ld_mix()
@@ -5392,10 +5378,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     from stt import generate_srt
                     _temp = generate_srt(vp, log_fn=_log)
                     if _temp and os.path.exists(_temp):
-                        shutil.copy2(_temp, _sc)
-                        _log(f"  Whisper ASR 成功")
+                        _has_word_timing = _copy_srt_with_word_timing_sidecar(_temp, _sc)
+                        if _has_word_timing:
+                            _log("  SenseVoice ASR 成功，已保存词级时间")
+                        else:
+                            _log("  SenseVoice ASR 成功，但未返回词级时间")
                 except Exception as e:
-                    _log(f"  Whisper ASR 失败: {e}")
+                    _log(f"  SenseVoice ASR 失败: {e}")
         if os.path.exists(_sc):
             with open(_sc, "r", encoding="utf-8", errors="replace") as f:
                 _srt_text = f.read()

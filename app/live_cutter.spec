@@ -36,7 +36,6 @@ _require_modules("funasr", "modelscope", "torch", "torchaudio")
 
 ffmpeg_dir = os.path.join(SPECPATH, 'ffmpeg')
 cv2_data_dir = _module_file('cv2', 'data')
-fw_assets_dir = _module_file('faster_whisper', 'assets')
 certifi_pem = _module_file('certifi', 'cacert.pem')
 funasr_version = _module_file('funasr', 'version.txt')
 
@@ -97,8 +96,6 @@ a = Analysis(
         (os.path.join(cv2_data_dir, 'haarcascade_frontalface_default.xml') if cv2_data_dir else '', '.'),
         (os.path.join(cv2_data_dir, 'haarcascade_upperbody.xml') if cv2_data_dir else '', '.'),
         (os.path.join(cv2_data_dir, 'haarcascade_fullbody.xml') if cv2_data_dir else '', '.'),
-        # Silero VAD
-        (os.path.join(fw_assets_dir, 'silero_vad_v6.onnx') if fw_assets_dir else '', 'faster_whisper/assets'),
         # HTTPS certificate bundle used by requests/tos in frozen builds
         (certifi_pem if certifi_pem else '', 'certifi'),
         (funasr_version if funasr_version else '', 'funasr'),
@@ -114,9 +111,12 @@ a = Analysis(
         'email.mime', 'email.mime.multipart', 'email.mime.text',
         'email.mime.application', 'cgi', 'html',
         'PIL._tkinter_finder',
-        'cv2', 'numpy', 'ctranslate2', 'tokenizers', 'faster_whisper', 'local_asr', 'local_asr_quality',
-        'funasr', 'funasr.auto.auto_model', 'funasr.models.sense_voice.model', 'modelscope', 'torch', 'torchaudio', 'unittest', 'unittest.mock', 'pdb', 'scipy',
-        'av', 'av.descriptor', 'tos', 'fsspec', 'packaging', 'anyio', 'httpx', 'httpcore', 'schedule_splitter', 'openpyxl',
+        'cv2', 'numpy', 'tokenizers', 'local_asr', 'local_asr_quality',
+        'funasr', 'funasr.register', 'funasr.auto.auto_model', 'funasr.tokenizer.sentencepiece_tokenizer', 'funasr.tokenizer.char_tokenizer',
+        'funasr.frontends.wav_frontend', 'funasr.models.ctc.ctc', 'funasr.models.paraformer.search', 'funasr.models.sense_voice.model',
+        'funasr.models.fsmn_vad_streaming.encoder', 'funasr.models.fsmn_vad_streaming.model', 'funasr.models.sanm.encoder', 'funasr.models.ct_transformer.model', 'funasr.models.specaug.specaug',
+        'modelscope', 'torch', 'torchaudio', 'unittest', 'unittest.mock', 'pdb', 'scipy',
+        'tos', 'fsspec', 'packaging', 'anyio', 'httpx', 'httpcore', 'schedule_splitter', 'openpyxl',
         'h11', 'sniffio', 'certifi', 'urllib3', 'charset_normalizer',
         'idna', 'cryptography', 'pytz', 'tqdm', 'rich', 'pygments',
         'click', 'requests', 'yaml',

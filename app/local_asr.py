@@ -1,18 +1,21 @@
-"""Local ASR engines normalized to LiveClipper's SRT + word-timing contract.
+"""SenseVoice local ASR normalized to LiveClipper's SRT + timing contract.
 
-The rest of the product must not need to know whether a transcript came from
-SenseVoice, Whisper, or a cloud provider.  In particular, consumers continue
-to read ``<subtitle>.words.json`` through ``volcengine_asr``.
+Consumers read ``<subtitle>.words.json`` through ``volcengine_asr`` without
+depending on the local model implementation.
 """
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import importlib
+import inspect
 import os
 import re
 import subprocess
 import sys
 import traceback
 from datetime import datetime
+from pathlib import Path
 import threading
 from typing import Any, Callable
 
@@ -22,9 +25,83 @@ _SENSEVOICE_PUNCTUATION = False
 _MODEL_LOCK = threading.Lock()
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z]+(?:['-][A-Za-z]+)*|\d+(?:[.,:]\d+)*")
 
+# FunASR discovers registered components dynamically in a normal Python
+# installation. PyInstaller does not expose every package file to that scan,
+# so package the exact components used by SenseVoice, VAD, and ct-punc and
+# import them explicitly before AutoModel reads a model configuration.
+_SENSEVOICE_REGISTRATION_MODULES = (
+    "funasr.tokenizer.sentencepiece_tokenizer",
+    "funasr.tokenizer.char_tokenizer",
+    "funasr.frontends.wav_frontend",
+    "funasr.models.ctc.ctc",
+    "funasr.models.paraformer.search",
+    "funasr.models.sense_voice.model",
+    "funasr.models.fsmn_vad_streaming.encoder",
+    "funasr.models.fsmn_vad_streaming.model",
+    "funasr.models.sanm.encoder",
+    "funasr.models.ct_transformer.model",
+    "funasr.models.specaug.specaug",
+)
+_SENSEVOICE_REQUIRED_COMPONENTS = (
+    ("tokenizer_classes", "SentencepiecesTokenizer"),
+    ("tokenizer_classes", "CharTokenizer"),
+    ("frontend_classes", "WavFrontend"),
+    ("frontend_classes", "WavFrontendOnline"),
+    ("encoder_classes", "SenseVoiceEncoderSmall"),
+    ("encoder_classes", "FSMN"),
+    ("encoder_classes", "SANMEncoder"),
+    ("model_classes", "SenseVoiceSmall"),
+    ("model_classes", "FsmnVADStreaming"),
+    ("model_classes", "CTTransformer"),
+    ("specaug_classes", "SpecAugLFR"),
+)
+
 
 class LocalASRUnavailable(RuntimeError):
     """The requested optional local ASR runtime or its model is unavailable."""
+
+
+def _run_modelscope_quietly(operation: Callable[[], Any]) -> Any:
+    """Run ModelScope work without tqdm writing to a windowed EXE handle."""
+    with open(os.devnull, "w", encoding="utf-8") as null_stream:
+        with redirect_stdout(null_stream), redirect_stderr(null_stream):
+            return operation()
+
+
+def _register_sensevoice_components() -> None:
+    """Load FunASR registry modules required by the three local models."""
+    original_getsourcelines = inspect.getsourcelines
+
+    def _frozen_safe_getsourcelines(target: object):
+        try:
+            return original_getsourcelines(target)
+        except OSError:
+            # FunASR records source locations as registry metadata. PyInstaller
+            # keeps these modules in a bytecode archive, where source text is
+            # intentionally unavailable; the metadata is not used for ASR.
+            return ([""], 0)
+
+    try:
+        inspect.getsourcelines = _frozen_safe_getsourcelines
+        try:
+            for module_name in _SENSEVOICE_REGISTRATION_MODULES:
+                importlib.import_module(module_name)
+            from funasr.register import tables
+        finally:
+            inspect.getsourcelines = original_getsourcelines
+    except Exception as exc:
+        raise LocalASRUnavailable(f"SenseVoice runtime component import failed: {exc}") from exc
+
+    missing = [
+        name
+        for table_name, name in _SENSEVOICE_REQUIRED_COMPONENTS
+        if not getattr(tables, table_name, {}).get(name)
+    ]
+    if missing:
+        raise LocalASRUnavailable(
+            "SenseVoice runtime is incomplete; missing registered components: "
+            + ", ".join(missing)
+        )
 
 
 def _normalize_punctuation_cluster(match: re.Match[str]) -> str:
@@ -74,6 +151,31 @@ def _format_srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
 
+def _cached_sensevoice_model_dir(configured: str = "") -> str | None:
+    """Return a complete ModelScope cache path without starting a download."""
+    candidates = [Path(configured)] if configured else []
+    cache_roots = [
+        os.environ.get("MODELSCOPE_CACHE", "").strip(),
+        os.environ.get("MODELSCOPE_HOME", "").strip(),
+        str(Path.home() / ".cache" / "modelscope"),
+    ]
+    for raw_root in cache_roots:
+        if not raw_root:
+            continue
+        root = Path(raw_root)
+        model_root = root / "models" / "iic--SenseVoiceSmall"
+        candidates.extend((model_root, root / "iic--SenseVoiceSmall"))
+        if model_root.is_dir():
+            candidates.extend(path for path in model_root.glob("snapshots/*") if path.is_dir())
+
+    for candidate in candidates:
+        if candidate.is_file():
+            candidate = candidate.parent
+        if (candidate / "model.pt").is_file():
+            return str(candidate.resolve())
+    return None
+
+
 def _sensevoice_model_dir(log_fn: Callable[[str], None] | None = None) -> str:
     """Download once and return a SentencePiece-safe model path.
 
@@ -82,12 +184,17 @@ def _sensevoice_model_dir(log_fn: Callable[[str], None] | None = None) -> str:
     library an ASCII-only view without copying the 936 MB model.
     """
     configured = os.environ.get("SENSEVOICE_MODEL_DIR", "").strip()
-    if configured and os.path.isfile(os.path.join(configured, "model.pt")):
-        model_dir = os.path.abspath(configured)
-    else:
+    model_dir = _cached_sensevoice_model_dir(configured)
+    if not model_dir:
         try:
             from modelscope import snapshot_download
-            model_dir = snapshot_download("iic/SenseVoiceSmall")
+
+            # The frozen desktop executable has no valid stderr handle. Newer
+            # ModelScope emits a tqdm progress bar during first download, which
+            # otherwise raises WinError 22 before the model is cached.
+            model_dir = _run_modelscope_quietly(
+                lambda: snapshot_download("iic/SenseVoiceSmall")
+            )
         except Exception as exc:
             raise LocalASRUnavailable(f"SenseVoice model download failed: {exc}") from exc
     if model_dir.isascii():
@@ -126,7 +233,8 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
         if _SENSEVOICE_MODEL is not None:
             return _SENSEVOICE_MODEL
         try:
-            from funasr import AutoModel
+            _register_sensevoice_components()
+            from funasr.auto.auto_model import AutoModel
         except ImportError as exc:
             raise LocalASRUnavailable("SenseVoice runtime is not installed") from exc
         if log_fn:
@@ -140,7 +248,9 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
             "disable_update": True,
         }
         try:
-            _SENSEVOICE_MODEL = AutoModel(punc_model="ct-punc", **model_kwargs)
+            _SENSEVOICE_MODEL = _run_modelscope_quietly(
+                lambda: AutoModel(punc_model="ct-punc", **model_kwargs)
+            )
             _SENSEVOICE_PUNCTUATION = True
             if log_fn:
                 log_fn("SenseVoice 标点恢复已启用")
@@ -160,7 +270,9 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
             if log_fn:
                 log_fn(f"标点恢复模型不可用，继续使用停顿断句: {punctuation_error}")
             try:
-                _SENSEVOICE_MODEL = AutoModel(**model_kwargs)
+                _SENSEVOICE_MODEL = _run_modelscope_quietly(
+                    lambda: AutoModel(**model_kwargs)
+                )
                 _SENSEVOICE_PUNCTUATION = False
             except Exception as exc:
                 # Write traceback for fallback failure
@@ -273,6 +385,10 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
             cache={},
             language="zh",
             use_itn=True,
+            # FunASR reads this at inference time. Keeping it only on
+            # AutoModel construction is not reliable across bundled runtime
+            # versions, and then an SRT is produced without CTC alignments.
+            output_timestamp=True,
             batch_size_s=120,
             merge_vad=False,
         )

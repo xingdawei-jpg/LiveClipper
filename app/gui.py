@@ -139,22 +139,13 @@ def _friendly_error(err_msg):
         return "视频格式不支持，请尝试转换为 MP4 后重试"
 
     # ASR 相关
-    if "whisper" in err_lower or "asr" in err_lower:
+    if "sensevoice" in err_lower or "asr" in err_lower:
         return "语音识别失败，可尝试提供 SRT 字幕文件"
 
     # 通用
     if len(err_msg) > 100:
         return "处理过程中出错，如需帮助请联系微信 LeyiDeco"
     return f"处理出错: {err_msg}（如需帮助请联系微信 LeyiDeco）"
-
-
-
-def _preload_whisper():
-    """后台预加载 faster-whisper，避免首次点击开始时的 torch 加载卡顿"""
-    try:
-        from faster_whisper import WhisperModel
-    except Exception:
-        pass  # 加载失败不影响，点击时会正常重试
 
 class App:
     def __init__(self, root):
@@ -179,8 +170,6 @@ class App:
         self.root.after(100, self._restore_toggle_states)
         self._log(f"[v{_get_installed_version()}] GUI 已启动 {__import__('time').strftime('%H:%M:%S')}")
         self.root.after(10 * 60 * 1000, self._periodic_license_refresh)
-        # 后台预加载 faster-whisper（避免首次点击卡顿数秒）
-        threading.Thread(target=_preload_whisper, daemon=True).start()
 
     def _periodic_license_refresh(self):
         try:
@@ -264,11 +253,6 @@ class App:
                 self.volc_bucket_var.set(s["volc_bucket"])
             if s.get("volc_api_key"):
                 self.volc_apikey_var.set(s["volc_api_key"])
-            if "whisper_model" in s:
-                self._whisper_model_var.set(s["whisper_model"])
-            if "local_asr_engine" in s:
-                self._local_asr_engine_var.set(s["local_asr_engine"])
-
             # ASR 预设
             asr_matched = s.get("asr_preset", "") or s.get("asr_provider", "")
             if asr_matched:
@@ -691,7 +675,7 @@ class App:
         self._asr_toggle_lbl.pack(side="left")
         self._asr_toggle_lbl.bind("<Button-1>", self._toggle_asr_collapse)
         self.asr_enabled_var = tk.BooleanVar(value=False)
-        asr_cb = tk.Checkbutton(asr_hdr, text="☁️ 云端ASR（替代 Whisper）", font=FNT_S,
+        asr_cb = tk.Checkbutton(asr_hdr, text="☁️ 云端ASR（火山引擎）", font=FNT_S,
                      variable=self.asr_enabled_var, fg="#81c784", bg=C["card"],
                      selectcolor=C["inp"], activebackground=C["card"],
                      activeforeground="#81c784", cursor="hand2",
@@ -700,21 +684,8 @@ class App:
         tk.Button(asr_hdr, text="💾 保存", font=FNT_S, fg="white", bg=C["btn_sel"],
               relief="flat", cursor="hand2", padx=8,
               command=self._save_ai).pack(side="left", padx=(8,0))
-        # Whisper模型选择
         tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
-        tk.Label(asr_hdr, text="Whisper:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
-        self._whisper_model_var = tk.StringVar(value="small")
-        self._local_asr_engine_var = tk.StringVar(value="sensevoice")
-        tk.Label(asr_hdr, text="Local:", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left", padx=(8, 0))
-        local_combo = ttk.Combobox(asr_hdr, textvariable=self._local_asr_engine_var,
-                                   values=["sensevoice", "whisper"], width=10, font=FNT_S, state="readonly")
-        local_combo.pack(side="left", padx=2)
-        local_combo.bind("<<ComboboxSelected>>", lambda e: self._save_ai())
-        wm_combo = ttk.Combobox(asr_hdr, textvariable=self._whisper_model_var,
-                                values=["small", "medium"],
-                                width=7, font=FNT_S, state="readonly")
-        wm_combo.pack(side="left", padx=2)
-        wm_combo.bind("<<ComboboxSelected>>", lambda e: self._save_ai())
+        tk.Label(asr_hdr, text="本地备用: SenseVoice", font=FNT_S, fg=C["dim"], bg=C["card"]).pack(side="left")
         # SRT 字幕（与云端ASR互斥）
         tk.Frame(asr_hdr, width=1, bg=C["dim"]).pack(side="left", fill="y", padx=8, pady=2)
         self.srt_var = tk.StringVar(value="留空 = 自动语音识别")
@@ -1841,7 +1812,7 @@ class App:
                 from ai_clipper import load_settings
                 settings = load_settings()
 
-                # 1. 生成 SRT（Whisper 本地 或 云端 ASR）
+                # 1. 生成 SRT（火山云端或本地 SenseVoice）
                 srt_path = video_path.rsplit(".", 1)[0] + ".srt"
                 if not os.path.exists(srt_path):
                     settings = load_settings()
@@ -1904,7 +1875,7 @@ class App:
                             _LOG.warning("failed to remove temp audio file", exc_info=True)
                             pass
                     if not srt_generated:
-                        self._log(f"本地Whisper: {os.path.basename(video_path)}", "info")
+                        self._log(f"本地 SenseVoice: {os.path.basename(video_path)}", "info")
                         from stt import generate_srt
                         srt_path = generate_srt(video_path, log_fn=lambda m: self._log(f"  {m}", "info"))
                         if not srt_path or not os.path.exists(srt_path):
@@ -2072,8 +2043,6 @@ class App:
             "volc_tos_ak": self.volc_tos_ak_var.get().strip() if hasattr(self, "volc_tos_ak_var") else "",
             "volc_tos_sk": self.volc_tos_sk_var.get().strip() if hasattr(self, "volc_tos_sk_var") else "",
             "volc_bucket": self.volc_bucket_var.get().strip() if hasattr(self, "volc_bucket_var") else "",
-            "whisper_model": self._whisper_model_var.get() if hasattr(self, "_whisper_model_var") else "small",
-            "local_asr_engine": self._local_asr_engine_var.get() if hasattr(self, "_local_asr_engine_var") else "sensevoice",
             "ai_preset": self.ai_preset_var.get() if hasattr(self, "ai_preset_var") else "",
             "asr_preset": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",
             "asr_provider": self.asr_preset_var.get() if hasattr(self, "asr_preset_var") else "",

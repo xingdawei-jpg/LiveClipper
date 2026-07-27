@@ -294,18 +294,24 @@ class ReleasePolicyTests(unittest.TestCase):
             any("app/unreviewed.py" in item for item in report.errors)
         )
 
-    def test_frozen_specs_bundle_funasr_version_metadata(self) -> None:
-        for relative in ("app/live_cutter.spec", "web_client/liveclipper_web.spec"):
-            source = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("funasr_version", source)
-            self.assertIn("version.txt", source)
-            self.assertIn("unittest.mock", source)
-            self.assertIn("pdb", source)
-            self.assertIn("scipy", source)
-            self.assertNotIn("'matplotlib', 'scipy', 'pandas'", source)
-            self.assertNotIn('"scipy",\n        "pandas"', source)
-            self.assertNotIn("'test', 'pdb', 'doctest'", source)
-            self.assertNotIn('"pdb",\n        "doctest"', source)
+    def test_web_frozen_spec_keeps_funasr_metadata_without_test_tools(self) -> None:
+        source = (ROOT / "web_client/liveclipper_web.spec").read_text(encoding="utf-8")
+        self.assertIn("funasr_version", source)
+        self.assertIn("version.txt", source)
+        self.assertIn("SENSEVOICE_RUNTIME_MODULES", source)
+        self.assertIn("funasr.tokenizer.sentencepiece_tokenizer", source)
+        self.assertIn("funasr.models.fsmn_vad_streaming.model", source)
+        self.assertIn("funasr.models.ct_transformer.model", source)
+        self.assertIn("funasr.models.specaug.specaug", source)
+        self.assertNotIn('"faster_whisper"', source)
+        self.assertNotIn('"ctranslate2"', source)
+        self.assertIn('"transformers.models.whisper"', source)
+        self.assertNotIn("unittest", source)
+        self.assertNotIn("pdb", source)
+        self.assertNotIn("hydra/test_utils", source)
+        self.assertNotIn('"scipy",', source)
+        self.assertNotIn("'matplotlib', 'scipy', 'pandas'", source)
+        self.assertNotIn('"scipy",\n        "pandas"', source)
 
     def test_development_preflight_accepts_registered_split_state(self) -> None:
         preflight = load_tool("release_preflight")

@@ -192,6 +192,17 @@ class ContentReviewValidationTests(unittest.TestCase):
     def test_structural_transcript_fragment_cannot_enter_review_pool(self) -> None:
         self.assertTrue(content_review._reviewable_candidate_text("\u54c7\uff0c\u8fd9\u53e5\u6709\u5b8c\u6574\u7684\u5546\u54c1\u4fe1\u606f"))
         self.assertFalse(content_review._reviewable_candidate_text("X, broken transcript fragment"))
+        self.assertFalse(
+            content_review._reviewable_hook_text(
+                "很 duang 的这个裤子它不是纯亚麻，它是天丝亚麻。"
+            )
+        )
+        self.assertFalse(content_review._reviewable_candidate_text("很 duang 的"))
+        self.assertFalse(
+            content_review._reviewable_candidate_text(
+                "我自己可能会这样穿，背面看一下，不挑人很舒服。"
+            )
+        )
         self.assertFalse(content_review._reviewable_candidate_text("\u9762\u6599\u5f88\u8584\uff0c\u522b\u5435\u522b\u5435"))
         self.assertFalse(content_review._reviewable_hook_text("\u7136\u540e\u8fd9\u4ef6\u8863\u670d\u5f88\u663e\u7626"))
         self.assertTrue(content_review._reviewable_hook_text("\u8fd9\u4ef6\u8863\u670d\u7a7f\u4e0a\u5f88\u663e\u7626"))
@@ -199,6 +210,23 @@ class ContentReviewValidationTests(unittest.TestCase):
         self.assertTrue(content_review._reviewable_candidate_text(malformed_hook))
         self.assertFalse(content_review._reviewable_hook_text(malformed_hook))
         self.assertFalse(content_review._reviewable_hook_text("\u4e0d\u642d\u8fb9\u7684\uff0c\u5b83\u5176\u5b9e\u662f\u7eb1\u7ebf\u3002"))
+
+    def test_chatty_doubt_opening_cannot_be_a_reviewed_hook(self) -> None:
+        self.assertFalse(
+            content_review._reviewable_hook_text(
+                "\u5582\u3002\u6211\u5176\u5b9e\u4e5f\u5f88\u8d28\u7591\u7684\uff0c\u4f46\u662f\u6211\u8ddf\u4f60\u4eec\u8bb2\u3002"
+            )
+        )
+        self.assertFalse(
+            content_review._reviewable_hook_text(
+                "\u4f60\u4eec\u7ec6\u54c1\u4e00\u4e0b\uff0c\u4f60\u770b\u5b83\u6240\u6709\u7684\u5305\u7ebf\u7f1d\u7ebf\u3002"
+            )
+        )
+        self.assertTrue(
+            content_review._reviewable_hook_text(
+                "\u80a9\u7ebf\u5411\u5185\u6536\uff0c\u7a7f\u4e0a\u540e\u770b\u8d77\u6765\u66f4\u5229\u843d\u3002"
+            )
+        )
 
         inventory = _inventory()
         inventory[3]["text"] = "X, broken transcript fragment"
@@ -210,6 +238,44 @@ class ContentReviewValidationTests(unittest.TestCase):
         ]
         bundle = self._validate(payload, inventory)
         self.assertNotIn(4, bundle.allowed_candidate_ids)
+
+    def test_unusable_transcript_price_and_body_measurement_never_enter_cards(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = "\u4ed6\u9ebb\u5dfe\u8ddf\u80a0\u6e29\u67d4\u8f6f\u4e86\u7136\u540e\u8fd8\u6709\u4e00\u70b9"
+        inventory[1]["text"] = "\u4f60\u5b50\u8eab\u9ad8170\uff0c\u4f53\u91cd105\uff0c\u4e0a\u8eab\u7684\u4e1c\u897f\u770b\u4e00\u4e0b\u5427"
+        inventory[2]["text"] = "\u9762\u6599\u6210\u672c210\uff0c\u6240\u4ee5\u4e0d\u4fbf\u5b9c"
+        inventory[3]["text"] = "\u80a9\u7ebf\u5411\u5185\u6536\uff0c\u89c6\u89c9\u66f4\u5229\u843d"
+
+        bundle = self._validate(_review_payload(), inventory)
+
+        self.assertEqual(bundle.allowed_candidate_ids, {4})
+        self.assertEqual([card.candidate_id for card in bundle.cards], [4])
+
+    def test_unreviewed_safe_candidate_is_not_promoted_to_a_reserve_card_for_duration(self) -> None:
+        inventory = _inventory()
+        inventory.append(
+            {
+                "srt_index": 5,
+                "source": "V1",
+                "duration_sec": 10.0,
+                "text": "\u4f60\u4eec\u6765\u770b\u4e00\u4e0b\u5427\uff0c\u4eca\u5929\u6d3b\u52a8\u8fd8\u4f1a\u6709\u7684\u3002",
+            }
+        )
+
+        bundle = self._validate(_review_payload(), inventory)
+
+        self.assertEqual([card.candidate_id for card in bundle.cards], [1, 2, 3, 4])
+        self.assertNotIn(5, bundle.allowed_candidate_ids)
+
+    def test_short_grounded_review_pool_remains_a_valid_quality_contract(self) -> None:
+        inventory = _inventory(duration=2.0)
+        payload = _review_payload()
+        payload["cards"] = [payload["cards"][0]]
+
+        bundle = self._validate(payload, inventory)
+
+        self.assertEqual(bundle.allowed_candidate_ids, {1})
+        self.assertEqual(bundle.retained_duration, 2.0)
 
     def test_missing_or_ungrounded_quote_binds_original_and_keeps_ai_semantics(self) -> None:
         inventory = _inventory(duration=60.0)
@@ -615,6 +681,33 @@ class ContentReviewIntegrationTests(unittest.TestCase):
         plan = ai_clipper._analysis_metadata_context()["expansion_plan"]
         self.assertEqual([item["srt_indices"] for item in plan], [[3]])
 
+    def test_expansion_cannot_reintroduce_an_unreviewed_candidate(self) -> None:
+        entries = [
+            (0.0, 3.0, "[V1] 肩线向内收，视觉上更利落。"),
+            (3.0, 6.0, "[V1] 高支亚麻摸起来细腻，贴身不扎。"),
+            (6.0, 9.0, "[V1] 姐妹们活动还有的，明天再来看。"),
+        ]
+        clips = [
+            ("product", entries[0][2], 0.0, 3.0, 50, 3.0, "版型显瘦"),
+            ("product", entries[1][2], 3.0, 6.0, 50, 3.0, "面料质感"),
+        ]
+        plan = [{
+            "priority": 1,
+            "after_srt_indices": [2],
+            "srt_indices": [3],
+            "focus": "无关直播话术",
+        }]
+
+        expanded = ai_clipper._apply_ai_expansion_plan(
+            clips,
+            plan,
+            entries,
+            12,
+            allowed_candidate_ids={1, 2},
+        )
+
+        self.assertEqual(expanded, [])
+
 
     def test_off_mode_never_calls_reviewer(self) -> None:
         settings = {
@@ -622,7 +715,9 @@ class ContentReviewIntegrationTests(unittest.TestCase):
             "model": "deepseek-v4-flash", "content_review_mode": "off",
         }
         srt = "1\n00:00:00,000 --> 00:01:05,000\n这件衣服肩线清楚而且完整说明版型效果。\n"
+        safe_inventory = [{"srt_index": 1, "source": "V1", "duration_sec": 65.0, "text": "完整卖点"}]
         with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
+             mock.patch.object(ai_clipper, "_director_safe_candidate_inventory", return_value=safe_inventory), \
              mock.patch.object(content_review, "review_candidates") as reviewer, \
              mock.patch.object(ai_clipper, "_call_ai", side_effect=RuntimeError("director-called")):
             with self.assertRaisesRegex(RuntimeError, "director-called"):
@@ -654,7 +749,7 @@ class ContentReviewIntegrationTests(unittest.TestCase):
                 ai_clipper.ai_analyze_clips(srt, target_duration=60)
 
         def capture_fallback(*_args, **kwargs):
-            self.assertIsNone(kwargs["allowed_candidate_ids"])
+            self.assertEqual(kwargs["allowed_candidate_ids"], {1})
             raise RuntimeError("fallback-director")
 
         with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
@@ -663,6 +758,112 @@ class ContentReviewIntegrationTests(unittest.TestCase):
              mock.patch.object(ai_clipper, "_call_ai", side_effect=capture_fallback):
             with self.assertRaisesRegex(RuntimeError, "fallback-director"):
                 ai_clipper.ai_analyze_clips(srt, target_duration=60)
+
+    def test_on_mode_keeps_a_viable_reviewed_pool_when_only_target_duration_is_short(self) -> None:
+        settings = {
+            "api_key": "key", "base_url": "https://example.com/v1",
+            "model": "deepseek-v4-flash", "content_review_mode": "on",
+        }
+        srt = (
+            "1\n00:00:00,000 --> 00:00:10,000\n这件衣服肩线清楚而且完整说明版型效果。\n\n"
+            "2\n00:00:10,000 --> 00:00:52,000\n面料很轻薄，夏天贴身穿也不会闷。\n\n"
+            "3\n00:00:52,000 --> 00:01:34,000\n肩部线条向内收，视觉上更利落。\n"
+        )
+        card = content_review.ContentCard(
+            1, "版型显瘦", "肩线", "修饰肩宽", "具体效果", "肩线清楚",
+            ("effect",), "independent", ("具体效果",), "main",
+        )
+        bundle = content_review.ContentReviewBundle(
+            "key", "digest", "上衣", "deepseek-v4-flash", (card,), 10.0,
+        )
+
+        def capture_reviewed(*_args, **kwargs):
+            self.assertEqual(kwargs["allowed_candidate_ids"], {1, 2, 3})
+            self.assertIn("审稿池时长不足", kwargs["content_review_hint"])
+            raise RuntimeError("review-priority-safe-reserve-director")
+
+        with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
+             mock.patch.object(ai_clipper, "_director_safe_candidate_inventory", return_value=[
+                 {"srt_index": 1, "source": "V1", "duration_sec": 10.0, "text": "完整卖点"},
+                 {"srt_index": 2, "source": "V1", "duration_sec": 42.0, "text": "完整面料卖点"},
+                 {"srt_index": 3, "source": "V1", "duration_sec": 42.0, "text": "完整版型卖点"},
+             ]), \
+             mock.patch.object(content_review, "review_candidates", return_value=bundle), \
+             mock.patch.object(ai_clipper, "_call_ai", side_effect=capture_reviewed):
+            with self.assertRaisesRegex(RuntimeError, "review-priority-safe-reserve-director"):
+                ai_clipper.ai_analyze_clips(srt, target_duration=90)
+
+    def test_on_mode_reviews_a_short_source_before_the_director_runs(self) -> None:
+        settings = {
+            "api_key": "key", "base_url": "https://example.com/v1",
+            "model": "deepseek-v4-flash", "content_review_mode": "on",
+        }
+        srt = "1\n00:00:00,000 --> 00:00:12,000\n这件衣服肩线清楚而且完整说明版型效果。\n"
+        card = content_review.ContentCard(
+            1, "版型显瘦", "肩线", "修饰肩宽", "具体效果", "肩线清楚",
+            ("effect",), "independent", ("具体效果",), "main",
+        )
+        bundle = content_review.ContentReviewBundle(
+            "key", "digest", "上衣", "deepseek-v4-flash", (card,), 12.0,
+        )
+
+        with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
+             mock.patch.object(ai_clipper, "_director_safe_candidate_inventory", return_value=[{"srt_index": 1, "source": "V1", "duration_sec": 12.0, "text": "完整卖点"}]), \
+             mock.patch.object(content_review, "review_candidates", return_value=bundle), \
+             mock.patch.object(ai_clipper, "_call_ai") as director:
+            self.assertEqual(ai_clipper.ai_analyze_clips(srt, target_duration=60), [])
+        director.assert_not_called()
+        metadata = ai_clipper.get_last_analysis_metadata()
+        self.assertEqual(metadata["selection_failure"]["code"], "insufficient_safe_material")
+        self.assertFalse(metadata["selection_result"]["ok"])
+        self.assertIn("可用安全内容仅12.0秒原片", ai_clipper.selection_failure_message(metadata))
+
+    def test_reviewed_ten_seconds_never_becomes_a_successful_ninety_second_plan(self) -> None:
+        contract = ai_clipper.DurationContract.create(90, 1.0)
+        inventory = [
+            {"srt_index": 1, "source": "V1", "duration_sec": 10.0, "text": "肩线向内收，视觉更利落。"},
+        ]
+        policy = ai_clipper._content_review_candidate_policy({1}, 10.0, inventory, contract)
+
+        self.assertEqual(policy["allowed_candidate_ids"], {1})
+        self.assertFalse(policy["reviewed_pool_covers_contract"])
+        self.assertFalse(policy["safe_pool_covers_contract"])
+        failure = ai_clipper._record_insufficient_safe_material(
+            candidate_count=1,
+            safe_candidate_duration=10.0,
+            duration_contract=contract,
+        )
+        metadata = ai_clipper.get_last_analysis_metadata()
+
+        self.assertEqual(failure["code"], "insufficient_safe_material")
+        self.assertFalse(metadata["selection_result"]["ok"])
+        self.assertEqual(metadata["selection_result"]["status"], "insufficient_safe_material")
+        self.assertIn("无法完成90秒目标", ai_clipper.selection_failure_message(metadata))
+
+    def test_safe_reserve_inventory_cannot_reintroduce_hard_exclusions(self) -> None:
+        entries = [
+            (0.0, 8.0, "肩线向内收，视觉上更利落。"),
+            (8.0, 16.0, "面料成本210元，所以这个价位很划算。"),
+            (16.0, 24.0, "姐妹点点关注，等会儿给大家上链接。"),
+            (24.0, 32.0, "我身高160体重105，穿M码刚刚好。"),
+            (32.0, 40.0, "姐妹你报个尺码，我给你看一下。"),
+            (40.0, 48.0, "麻巾跟肠温柔软了然后还很舒服。"),
+            (48.0, 56.0, "面料轻薄透气，夏天贴身穿也不会闷。"),
+        ]
+        ai_clipper._begin_analysis_metadata()
+        safe = ai_clipper._director_safe_candidate_inventory(entries, record_metrics=True)
+        safety = ai_clipper.get_last_analysis_metadata()["candidate_safety_summary"]
+
+        self.assertEqual([item["srt_index"] for item in safe], [1, 7])
+        joined = " ".join(item["text"] for item in safe)
+        self.assertNotIn("成本", joined)
+        self.assertNotIn("关注", joined)
+        self.assertNotIn("身高", joined)
+        self.assertNotIn("尺码", joined)
+        self.assertNotIn("麻巾", joined)
+        self.assertEqual(safety["before_count"], 7)
+        self.assertEqual(safety["after_count"], 2)
+        self.assertEqual(safety["removed_count"], 5)
 
 
 class FinalSequenceReviewTests(unittest.TestCase):
@@ -1045,6 +1246,71 @@ class FinalSequenceReviewTests(unittest.TestCase):
         self.assertTrue(ai_clipper._is_safety_blocked_text("这套我推荐你们拍的点是它很藏肉"))
         self.assertNotIn("CTA拍单变体", ai_clipper._content_safety_pattern_matches("这套很适合去拍照"))
         self.assertFalse(ai_clipper._is_safety_blocked_text("这套我很推荐拍照穿"))
+
+class FinalSequenceAuditTests(unittest.TestCase):
+    def _selected(self) -> list[dict]:
+        return [
+            {
+                "order": 1,
+                "clip_type": "hook",
+                "srt_indices": [1],
+                "duration_sec": 3.6,
+                "focus": "版型显瘦",
+                "text": "穿上以后肩线会往里收，看起来更利落。",
+            },
+            {
+                "order": 2,
+                "clip_type": "product",
+                "srt_indices": [2],
+                "duration_sec": 3.0,
+                "focus": "工艺细节",
+                "text": "肩部黑色编织线把视觉重心向内收。",
+            },
+        ]
+
+    def test_audit_is_read_only_and_ignores_a_model_rewrite_payload(self) -> None:
+        response = json.dumps(
+            {
+                "status": "flag",
+                "issues": ["开头不够具体"],
+                "opening_issue": True,
+                "clips": [{"clip_type": "hook", "srt_indices": [99]}],
+                "expansion_plan": [{"srt_indices": [99]}],
+            },
+            ensure_ascii=False,
+        )
+        with mock.patch.object(content_review, "_post_review_request", return_value=response) as request:
+            result = content_review.audit_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                hook_pairs=[{"hook_id": 1, "followup_id": 2}],
+            )
+
+        self.assertEqual(result.status, "flag")
+        self.assertTrue(result.opening_issue)
+        self.assertFalse(hasattr(result, "clips"))
+        self.assertNotIn("expansion_plan", request.call_args.args[3])
+        self.assertNotIn("安全候选", request.call_args.args[4])
+
+    def test_audit_forces_flag_when_local_check_detects_display_preamble(self) -> None:
+        selected = self._selected()
+        selected[0]["text"] = "想搭长裤的啊，给你看一眼长裤就这么搭。"
+        response = json.dumps({"status": "pass", "issues": [], "opening_issue": False}, ensure_ascii=False)
+
+        with mock.patch.object(content_review, "_post_review_request", return_value=response):
+            result = content_review.audit_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=selected,
+            )
+
+        self.assertEqual(result.status, "flag")
+        self.assertTrue(result.opening_issue)
+        self.assertIn("展示铺垫", " ".join(result.issues))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ APP_DIR = os.path.join(ROOT_DIR, "app")
 TOOLS_DIR = os.path.join(ROOT_DIR, "tools")
 WEB_TOOLS_DIR = os.path.join(WEB_DIR, "tools")
 FRONTEND_DIR = os.path.join(WEB_DIR, "frontend")
+NATIVE_FILE_DROP_BRIDGE = os.path.join(WEB_DIR, "native_file_drop_bridge.dll")
 DEFAULT_FFMPEG_DIR = os.path.join(APP_DIR, "ffmpeg")
 FFMPEG_DIR = os.path.abspath(
     os.environ.get("LIVECLIPPER_FFMPEG_DIR", "").strip()
@@ -106,6 +107,26 @@ def _require_modules(*module_names):
 _require_modules("funasr", "modelscope", "torch", "torchaudio")
 
 
+# FunASR relies on runtime package scanning to populate these registries. That
+# scan cannot discover modules that PyInstaller leaves outside the archive, so
+# include the exact SenseVoice, VAD, and punctuation components explicitly.
+SENSEVOICE_RUNTIME_MODULES = (
+    "funasr.register",
+    "funasr.auto.auto_model",
+    "funasr.tokenizer.sentencepiece_tokenizer",
+    "funasr.tokenizer.char_tokenizer",
+    "funasr.frontends.wav_frontend",
+    "funasr.models.ctc.ctc",
+    "funasr.models.paraformer.search",
+    "funasr.models.sense_voice.model",
+    "funasr.models.fsmn_vad_streaming.encoder",
+    "funasr.models.fsmn_vad_streaming.model",
+    "funasr.models.sanm.encoder",
+    "funasr.models.ct_transformer.model",
+    "funasr.models.specaug.specaug",
+)
+
+
 def _app_datas():
     datas = []
     skip_suffixes = (
@@ -165,13 +186,22 @@ def _tool_datas():
     return datas
 
 
+def _require_native_file_drop_bridge():
+    if not os.path.isfile(NATIVE_FILE_DROP_BRIDGE):
+        raise RuntimeError(
+            "native_file_drop_bridge.dll is required for zero-copy Explorer drag-and-drop; "
+            f"build web_client/native_file_drop_bridge.cs before packaging: {NATIVE_FILE_DROP_BRIDGE}"
+        )
+    return [(NATIVE_FILE_DROP_BRIDGE, "web_client")]
+
+
 cv2_data_dir = _module_file("cv2", "data")
-fw_assets_dir = _module_file("faster_whisper", "assets")
 certifi_pem = _module_file("certifi", "cacert.pem")
 funasr_version = _module_file("funasr", "version.txt")
 
 datas = []
 datas += [(FRONTEND_DIR, os.path.join("web_client", "frontend"))]
+datas += _require_native_file_drop_bridge()
 datas += _existing([(ICON_FILE, "assets")])
 datas += [(_require_fixed_webview2_runtime(), "webview2_runtime")]
 datas += _app_datas()
@@ -182,7 +212,6 @@ datas += _existing([
     (os.path.join(cv2_data_dir, "haarcascade_frontalface_default.xml") if cv2_data_dir else "", "."),
     (os.path.join(cv2_data_dir, "haarcascade_upperbody.xml") if cv2_data_dir else "", "."),
     (os.path.join(cv2_data_dir, "haarcascade_fullbody.xml") if cv2_data_dir else "", "."),
-    (os.path.join(fw_assets_dir, "silero_vad_v6.onnx") if fw_assets_dir else "", os.path.join("faster_whisper", "assets")),
     (certifi_pem if certifi_pem else "", "certifi"),
     (funasr_version if funasr_version else "", "funasr"),
 ])
@@ -222,13 +251,10 @@ a = Analysis(
         "openpyxl",
         "tos",
         "fsspec",
-        "av",
-        "av.descriptor",
-        "faster_whisper",
         "local_asr", "local_asr_quality",
         "torch", "torchaudio",
-        "ctranslate2",
         "tokenizers",
+        *SENSEVOICE_RUNTIME_MODULES,
         "ai_clipper",
         "category_profiles",
         "selection_contracts",
@@ -277,6 +303,9 @@ a = Analysis(
         "django",
         "graphviz",
         "notebook",
+        # Local ASR is SenseVoice-only. Keep Transformers' unused Whisper model
+        # family out of the frozen runtime instead of shipping dormant code.
+        "transformers.models.whisper",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

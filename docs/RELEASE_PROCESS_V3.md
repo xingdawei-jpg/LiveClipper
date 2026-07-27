@@ -32,19 +32,19 @@ python tools\release_preflight.py --phase development
 
 1. 审核所有修改和未跟踪文件。
 2. 运行 Python 编译、JavaScript 语法和完整测试。
-3. 决定 release_type：business_runtime 或 full_baseline。
-4. 选择未使用的新业务版本。
-5. 只有 full_baseline 且稳定组件真实变化时才修改 tools/runtime_v3_versions.py。
-6. 最后生成 app/version.json。
-7. 再次运行 git diff；若 runtime 文件在 manifest 之后变化，重新生成 manifest。
-8. 提交发布源码，不包含 release/stable.json。
-9. 确认构建使用的 HEAD 与 runtime_manifest.source_commit 一致。
+3. 选择未使用的新业务版本；发布类型在 staging 预算审计后确认。
+4. 只有稳定组件真实变化时才修改 tools/runtime_v3_versions.py；预算失败本身可以要求 full_baseline，但不要求伪造稳定组件版本变化。
+5. 最后生成 app/version.json。
+6. 再次运行 git diff；若 runtime 文件在 manifest 之后变化，重新生成 manifest。
+7. 提交发布源码，不包含 release/stable.json。
+8. 从该干净 commit 构建 frozen runtime 和 staging，完成 docs/PACKAGING_V3_HANDOFF.md 的依赖/增量预算审计，再确认 release_type：business_runtime 或 full_baseline。
+9. 确认构建使用的 HEAD 与 runtime_manifest.source_commit 一致；若审计促成 spec 或 runtime 源码修改，回到第 1 步重新冻结、构建和审计。
 
 禁止从脏源码或旧 dist 构建正式包。
 
 ## 4. 构建目标运行时
 
-所有发布都从干净 commit 构建 frozen runtime 和 Runtime V3 staging。business_runtime 到此为止，不生成新的全量 ZIP；只有 full_baseline 执行下面的完整包步骤：
+所有发布都从干净 commit 构建 frozen runtime 和 Runtime V3 staging。完成 staging 后，先对每个受支持基线生成或预览直接 patch 并执行依赖/预算审计。只有通过预算的 business_runtime 到此为止，不生成新的全量 ZIP；稳定组件变化、原生/ML 依赖膨胀或预算失败都必须切换为 full_baseline 并执行下面的完整包步骤：
 
 1. 用 web_client/liveclipper_web.spec 干净构建 frozen runtime。
    The PyInstaller input must contain the pinned WebView2 runtime; a missing runtime is a build failure, never a browser-fallback release.
@@ -63,16 +63,17 @@ python tools\release_preflight.py --phase development
 
 ## 5. 构建增量
 
-business_runtime 必须：
+只有通过 docs/PACKAGING_V3_HANDOFF.md 预算的 business_runtime 才能构建自动增量，并且必须：
 
 1. 使用 release/baselines.json 当前基线的精确全量包作为 source。
 2. 使用本次最终 V3 staging 目录作为 target；build_delta_package.py 支持目录，不要求先压制全量 ZIP。
 3. 运行 tools/build_delta_package.py。
 4. 复验外层 SHA256、patch manifest 签名、source/target runtime manifest 和 payload。
 5. stable_payload_files 必须等于 0。
-6. 补丁 URL 使用 GitHub Release 的 HTTPS URL。
-7. 当某个受支持版本到 latest 超过 2 条边时生成直达 rollup。
-8. updater 1.3.0 必须在安装前下载并验证整条链，完成后只切换一次 current.json。
+6. 每条直接 patch 不超过 50 MiB、500 个 runtime payload 文件，且不整体带入 ML/原生依赖树或测试/训练/示例目录。
+7. 补丁 URL 使用 GitHub Release 的 HTTPS URL。
+8. 当某个受支持版本到 latest 超过 2 条边时生成直达 rollup。
+9. updater 1.3.0 必须在安装前下载并验证整条链，完成后只切换一次 current.json。
 
 full_baseline 不允许从旧稳定层生成普通 delta。必须先通过全量包迁移，再用该新基线做合成下一版本 delta 测试。
 
@@ -88,7 +89,7 @@ full_baseline 不允许从旧稳定层生成普通 delta。必须先通过全量
 - channel_status 必须为 hold；
 - 候选可以包含完整 patch 图；
 - live release/stable.json 保持不变；
-- business_runtime 的 package 元数据为空，full_baseline 的 package 元数据指向本次全量 ZIP；
+- 通过预算的 business_runtime 的 package 元数据为空；full_baseline，包括预算失败升级而来的版本，package 元数据必须指向本次全量 ZIP；
 - patch source 只能是 github.com HTTPS Release URL；
 - minimum launcher/updater 必须与目标 runtime 和 release 类型一致。
 
@@ -110,7 +111,7 @@ build_release_channel.py 不能生成 ready，也不能写 release/stable.json�
 
 ### 全量包
 
-本节只适用于 full_baseline。business_runtime 跳过百度网盘。
+本节适用于 full_baseline，包括因自动更新预算失败而升级为 full_baseline 的版本。只有通过预算的 business_runtime 跳过百度网盘。
 
 - 上传百度网盘，不上传 GitHub Release。
 - 同时提供 .sha256.txt。
@@ -140,6 +141,7 @@ business_runtime 额外要求：
 - GitHub 回下载后的大小、SHA256 和 ZIP 完整性；
 - 错误补丁拒绝、失败回滚和用户数据保持；
 - 更新后 runtime manifest 文件完整性。
+- 每个 GitHub patch 的体积、文件数和依赖目录预算报告。
 
 补丁链、断点续传、签名错误和磁盘不足由 source test suite 持续覆盖；只有 updater、launcher 或安装事务代码变化时，才重复对应的人工端到端矩阵。
 
@@ -153,6 +155,7 @@ full_baseline 额外要求：
 - clean install、首次健康确认和回滚；
 - 从该基线构造合成下一版本 delta，stable payload 为 0；
 - exact baseline updater 成功应用合成 delta。
+- 本地 ASR 的真实首次模型下载和转写，SRT 与 `.words.json` 侧车文件保持契约。
 
 每个结果写入 acceptance.json，证据字段记录命令、输入文件、hash、设备和 /api/runtime 摘要。
 

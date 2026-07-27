@@ -1,50 +1,55 @@
-"""
-语音识别模块：用 faster_whisper 从视频音频自动生成 SRT 字幕
-"""
+"""Local SenseVoice speech recognition and subtitle generation."""
 
+from __future__ import annotations
+
+import hashlib
 import os
-import re
 import subprocess
 import tempfile
-
-_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-
-sys_path = os.path.dirname(os.path.abspath(__file__))
-if sys_path not in __import__('sys').path:
-    __import__('sys').path.insert(0, sys_path)
+from typing import Callable
 
 from config import FFMPEG_PATH
 
 
-def get_ffmpeg_cmd():
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def get_ffmpeg_cmd() -> str:
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
         return FFMPEG_PATH
     return "ffmpeg"
 
 
-def extract_audio(video_path, output_wav, log_fn=None):
-    """用 FFmpeg 从视频提取 16kHz 单声道 WAV 音频"""
-    def _log(msg):
+def extract_audio(video_path: str, output_wav: str, log_fn: Callable[[str], None] | None = None) -> bool:
+    """Extract 16 kHz mono WAV audio for the local SenseVoice engine."""
+    def _log(message: str) -> None:
         if log_fn:
-            log_fn(msg)
+            log_fn(message)
 
-    ffmpeg = get_ffmpeg_cmd()
     cmd = [
-        ffmpeg, "-y",
-        "-i", video_path,
+        get_ffmpeg_cmd(),
+        "-y",
+        "-i",
+        video_path,
         "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        output_wav
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        output_wav,
     ]
-
     _log("正在提取音频...")
     result = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace"
-    , creationflags=_NO_WINDOW)
-
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_NO_WINDOW,
+    )
     if result.returncode != 0 or not os.path.exists(output_wav):
         _log(f"音频提取失败: {result.stderr[:200]}")
         return False
@@ -54,254 +59,65 @@ def extract_audio(video_path, output_wav, log_fn=None):
     return True
 
 
-def _ensure_whisper_model(model_size="small", log_fn=None):
-    """确保 Whisper 模型已下载，支持多镜像源自动切换和重试"""
-    import os as _os
+def transcribe_local_audio_to_srt(
+    audio_path: str,
+    srt_output: str,
+    log_fn: Callable[[str], None] | None = None,
+    asr_engine: str = "sensevoice",
+) -> bool:
+    """Transcribe through SenseVoice only; never silently switch engines."""
+    def _log(message: str) -> None:
+        if log_fn:
+            log_fn(message)
 
-    # 1. 检查是否已捆绑（全量包内置模型）
-    _bundled = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "whisper_models", model_size)
-    if _os.path.exists(_bundled) and _os.path.isdir(_bundled):
-        if log_fn: log_fn(f"Whisper {model_size} 模型已捆绑，跳过下载")
-        return _bundled
-
-    # 2. 检查 HuggingFace 本地缓存
+    selected_engine = str(asr_engine or "sensevoice").strip().lower()
+    if selected_engine not in {"", "auto", "sensevoice"}:
+        _log("本地识别仅支持 SenseVoice，已忽略过期的本地模型设置。")
     try:
-        from huggingface_hub import scan_cache_dir
-        cache = scan_cache_dir()
-        for repo in cache.repos:
-            if f"faster-whisper-{model_size}" in repo.repo_id:
-                if log_fn: log_fn(f"Whisper {model_size} 模型已缓存，跳过下载")
-                return True
-    except Exception:
-        pass
+        from local_asr import LocalASRUnavailable, sensevoice_to_srt
 
-    # 需要下载：尝试多个镜像源
-    mirrors = [
-        ("hf-mirror.com", "https://hf-mirror.com"),
-        ("HuggingFace 官方", "https://huggingface.co"),
-    ]
-    for mirror_name, mirror_url in mirrors:
-        _os.environ['HF_ENDPOINT'] = mirror_url
-        if log_fn: log_fn(f"尝试从 {mirror_name} 下载 Whisper 模型...")
-        try:
-            from faster_whisper import WhisperModel
-            # 触发下载
-            _m = WhisperModel(model_size, device="cpu", compute_type="int8")
-            del _m
-            if log_fn: log_fn(f"✅ Whisper {model_size} 模型下载成功（{mirror_name}）")
-            return True
-        except Exception as e:
-            if log_fn: log_fn(f"⚠️ {mirror_name} 下载失败: {e}")
-            continue
-
-    if log_fn: log_fn("❌ 所有镜像源均下载失败")
+        return bool(sensevoice_to_srt(audio_path, srt_output, log_fn=log_fn))
+    except LocalASRUnavailable as exc:
+        _log(f"SenseVoice 本地识别不可用: {exc}")
+    except Exception as exc:
+        _log(f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
     return False
 
 
-def transcribe_to_srt(audio_path, srt_output, log_fn=None, whisper_model="small"):
-    """用 faster_whisper 识别音频，输出 SRT 字幕文件（支持多镜像源自动切换）"""
-    import os as _os
-
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as _e:
-        _log(f"Whisper 导入失败: {_e}")
-        return False
-
-    # 多镜像源尝试加载模型
-    mirrors = [
-        ("hf-mirror.com", "https://hf-mirror.com"),
-        ("HuggingFace 官方", "https://huggingface.co"),
-    ]
-    model = None
-    # 先检查是否有捆绑模型
-    _bundled_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "whisper_models", whisper_model)
-    if _os.path.exists(_bundled_path) and _os.path.isdir(_bundled_path):
-        try:
-            _log(f"检测到捆绑模型，直接加载...")
-            model = WhisperModel(_bundled_path, device="cpu", compute_type="int8")
-        except Exception as _e:
-            _log(f"捆绑模型加载失败: {_e}，尝试在线下载...")
-            model = None
-    
-    if model is None:
-        for mirror_name, mirror_url in mirrors:
-            _os.environ['HF_ENDPOINT'] = mirror_url
-            try:
-                _log(f"正在加载语音识别模型 ({whisper_model})...")
-                model = WhisperModel(whisper_model, device="cpu", compute_type="int8")
-                break  # 成功加载，跳出循环
-            except Exception as _e:
-                _log(f"⚠️ {mirror_name} 加载失败，尝试下一个源...")
-                continue
-
-    if model is None:
-        _log("❌ Whisper 模型下载失败，所有镜像源均不可用")
-        _log("💡 建议：1) 检查网络连接后重试  2) 开启云端ASR（火山引擎）")
-        return False
-
-    _log("正在识别语音（可能需要几分钟，请耐心等待）...")
-
-    segments_iter, info = model.transcribe(
-        audio_path,
-        language="zh",
-        beam_size=5,
-        vad_filter=True,
-        word_timestamps=True,
-    )
-
-    _log(f"识别语言: {info.language} (概率: {info.language_probability:.2f})")
-
-    # 逐段收集，给出进度反馈
-    segments = []
-    last_progress_time = 0
-    for seg in segments_iter:
-        segments.append(seg)
-        if seg.end > last_progress_time + 60:
-            _log(f"  已识别到 {int(seg.end)}s...")
-            last_progress_time = seg.end
-
-    _log(f"识别完成，共 {len(segments)} 条语音段")
-
-    # 生成 SRT 内容
-    srt_lines = []
-    for i, seg in enumerate(segments, 1):
-        start = seg.start
-        end = seg.end
-        text = seg.text.strip()
-
-        if not text:
-            continue
-
-        start_h = int(start // 3600)
-        start_m = int((start % 3600) // 60)
-        start_s = int(start % 60)
-        start_ms = int((start % 1) * 1000)
-
-        end_h = int(end // 3600)
-        end_m = int((end % 3600) // 60)
-        end_s = int(end % 60)
-        end_ms = int((end % 1) * 1000)
-
-        srt_lines.append(f"{i}")
-        srt_lines.append(
-            f"{start_h:02d}:{start_m:02d}:{start_s:02d},{start_ms:03d}"
-            f" --> "
-            f"{end_h:02d}:{end_m:02d}:{end_s:02d},{end_ms:03d}"
-        )
-        srt_lines.append(text)
-        srt_lines.append("")
-
-    srt_content = "\n".join(srt_lines)
-
-    with open(srt_output, "w", encoding="utf-8") as f:
-        f.write(srt_content)
-
-    # Keep local Whisper compatible with the provider-neutral word-timing sidecar.
-    try:
-        from volcengine_asr import write_word_timing_sidecar
-        timed_segments = []
-        for seg in segments:
-            words = []
-            for word in (getattr(seg, "words", None) or []):
-                text = str(getattr(word, "word", "")).strip()
-                start = float(getattr(word, "start", 0) or 0)
-                end = float(getattr(word, "end", start) or start)
-                if text and end > start:
-                    item = {"text": text, "start": start, "end": end}
-                    confidence = getattr(word, "probability", None)
-                    if confidence is not None:
-                        item["confidence"] = confidence
-                    words.append(item)
-            timed_segments.append({"text": seg.text.strip(), "start": seg.start, "end": seg.end, "words": words})
-        write_word_timing_sidecar(srt_output, timed_segments, provider="whisper", log_fn=_log)
-    except Exception as _timing_error:
-        _log(f"Whisper word timing save failed; using segment timestamps: {_timing_error}")
-
-    _log(f"字幕生成完成: {len(segments)} 条 -> {os.path.basename(srt_output)}")
-    return True
-
-
-def transcribe_local_audio_to_srt(
-    audio_path,
-    srt_output,
-    log_fn=None,
-    whisper_model="small",
-    asr_engine="sensevoice",
-):
-    """Transcribe an existing audio file through the shared local ASR policy."""
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-
-    selected_engine = (asr_engine or "sensevoice").strip().lower()
-    recognized = False
-    if selected_engine in ("sensevoice", "auto"):
-        try:
-            from local_asr import sensevoice_to_srt
-
-            recognized = sensevoice_to_srt(audio_path, srt_output, log_fn=log_fn)
-        except Exception as sensevoice_error:
-            _log(f"SenseVoice unavailable; falling back to local Whisper: {sensevoice_error}")
-    if recognized:
-        return True
-    return transcribe_to_srt(
-        audio_path,
-        srt_output,
-        log_fn,
-        whisper_model=whisper_model,
-    )
-
-
-def generate_srt(video_path, log_fn=None, whisper_model="small", asr_engine="sensevoice"):
-    """
-    从视频自动生成 SRT 字幕文件。
-    返回 SRT 文件路径，失败返回 None。
-    """
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-
+def generate_srt(
+    video_path: str,
+    log_fn: Callable[[str], None] | None = None,
+    asr_engine: str = "sensevoice",
+) -> str | None:
+    """Generate an SRT sidecar with SenseVoice, or return ``None`` on failure."""
     temp_dir = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
     os.makedirs(temp_dir, exist_ok=True)
-
-    # 生成临时文件名（用系统临时目录避免中文路径）
-    import hashlib
     video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
     wav_path = os.path.join(temp_dir, f"audio_{video_hash}.wav")
     srt_path = os.path.join(temp_dir, f"sub_{video_hash}.srt")
 
-    # 提取音频
-    if not extract_audio(video_path, wav_path, log_fn):
-        return None
-
-    # 语音识别
-    if not transcribe_local_audio_to_srt(
-        wav_path,
-        srt_path,
-        log_fn=log_fn,
-        whisper_model=whisper_model,
-        asr_engine=asr_engine,
-    ):
-        return None
-
-    # 清理临时音频文件
     try:
-        os.remove(wav_path)
-    except Exception:
-        pass
+        if not extract_audio(video_path, wav_path, log_fn):
+            return None
+        if not transcribe_local_audio_to_srt(
+            wav_path,
+            srt_path,
+            log_fn=log_fn,
+            asr_engine=asr_engine,
+        ):
+            return None
+        return srt_path if os.path.exists(srt_path) else None
+    finally:
+        try:
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+        except OSError:
+            pass
 
-    return srt_path
 
-
-def cleanup_srt(srt_path):
-    """清理临时 SRT 文件"""
+def cleanup_srt(srt_path: str | None) -> None:
     try:
         if srt_path and os.path.exists(srt_path):
             os.remove(srt_path)
-    except Exception:
+    except OSError:
         pass

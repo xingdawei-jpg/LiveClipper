@@ -30,7 +30,7 @@ from selection_contracts import (
     SelectionRequest, SelectionResult, SHORTAGE_GRACE_SECONDS,
 )
 from category_profiles import iter_vertical_profiles, resolve_vertical_profile
-from candidate_quality import filter_candidate_clips, leading_fragment_trim
+from candidate_quality import candidate_quality_flags, filter_candidate_clips, leading_fragment_trim
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
@@ -56,6 +56,7 @@ def _begin_analysis_metadata():
         "selection_result": {},
         "source_contract": {},
         "content_review_summary": {},
+        "candidate_safety_summary": {},
         "director_candidates": [],
     }
     _ANALYSIS_METADATA_CONTEXT.set(metadata)
@@ -122,6 +123,7 @@ def get_last_analysis_metadata():
         "selection_result": dict(metadata.get("selection_result") or {}),
         "source_contract": dict(metadata.get("source_contract") or {}),
         "content_review_summary": dict(metadata.get("content_review_summary") or {}),
+        "candidate_safety_summary": dict(metadata.get("candidate_safety_summary") or {}),
         "director_candidates": [
             dict(item)
             for item in (metadata.get("director_candidates") or [])
@@ -139,6 +141,17 @@ def selection_failure_message(metadata=None):
     best_duration = float(failure.get("best_duration") or 0.0)
     duration_low = float(failure.get("duration_low") or 0.0)
     duration_high = float(failure.get("duration_high") or 0.0)
+    if failure.get("code") == "insufficient_safe_material":
+        safe_duration = float(failure.get("safe_candidate_duration") or 0.0)
+        projected_final = float(failure.get("safe_projected_final_duration") or 0.0)
+        target_duration = float(failure.get("target_duration") or 0.0)
+        required_source = float(failure.get("required_source_duration") or duration_low or 0.0)
+        return (
+            f"可用安全内容仅{safe_duration:.1f}秒原片"
+            + (f"（预计成片{projected_final:.1f}秒）" if projected_final > 0 else "")
+            + f"，无法完成{target_duration:.0f}秒目标"
+            + (f"（至少需要{required_source:.1f}秒原片）" if required_source > 0 else "")
+        )
     if failure.get("code") == "insufficient_content":
         return (
             f"有效内容不足：可用候选{candidate_count}条，"
@@ -155,6 +168,39 @@ def selection_failure_message(metadata=None):
             f"要求{duration_low:.0f}-{duration_high:.0f}秒"
         )
     return f"AI片单质检未通过：{reason}"
+
+
+def _record_insufficient_safe_material(
+    *,
+    candidate_count,
+    safe_candidate_duration,
+    duration_contract,
+    reason="安全候选总时长不足",
+):
+    """Persist a non-exportable shortage result before the cutter sees clips."""
+    contract = DurationContract.coerce(duration_contract)
+    safe_duration = max(0.0, float(safe_candidate_duration or 0.0))
+    details = {
+        "code": "insufficient_safe_material",
+        "reason": str(reason or "安全候选总时长不足"),
+        "candidate_count": max(0, int(candidate_count or 0)),
+        "safe_candidate_duration": round(safe_duration, 3),
+        "safe_projected_final_duration": round(safe_duration / contract.speed_factor, 3),
+        "best_duration": round(safe_duration, 3),
+        "duration_low": round(contract.source_min, 3),
+        "duration_high": round(contract.source_max, 3),
+        "required_source_duration": round(contract.source_min, 3),
+        "target_duration": round(contract.final_target, 3),
+    }
+    _set_last_selection_failure(details)
+    message = selection_failure_message(_analysis_metadata_context())
+    _analysis_metadata_context()["selection_result"] = (
+        SelectionResult.insufficient_safe_material(
+            message=message,
+            details=details,
+        ).to_dict()
+    )
+    return details
 
 from ai_model_config import (
     DEEPSEEK_DEFAULT_BASE_URL,
@@ -2199,6 +2245,43 @@ def _merge_keyword_files(app_data, user_data):
     return merged
 
 
+_KEYWORD_MOJIBAKE_MARKERS = ("\u00c2", "\u00c3", "\u00e2", "\ufffd")
+
+
+def _keyword_text_is_corrupted(value):
+    """Detect common UTF-8-as-Latin-1 corruption before safety matching.
+
+    A corrupted forbidden phrase can normalize into one digit (for example a
+    byte fragment becomes ``1``), which would reject every ``[V1]`` candidate.
+    It is safer to ignore the damaged user vocabulary and restore the bundled
+    template than to silently over-filter finished videos.
+    """
+    text = str(value or "").strip()
+    return bool(
+        any(marker in text for marker in _KEYWORD_MOJIBAKE_MARKERS)
+        or any(ord(char) < 32 and not char.isspace() for char in text)
+    )
+
+
+def is_keyword_config_usable(data):
+    """Return false when a persisted keyword file is predominantly corrupted."""
+    if not isinstance(data, dict):
+        return False
+    values = []
+    for key in ("forbidden_phrases", "filler_words", "negative_signals", "detail_keywords"):
+        values.extend(data.get(key) or [])
+    for key in ("clip_keywords", "preference_keywords"):
+        mapping = data.get(key)
+        if isinstance(mapping, dict):
+            for items in mapping.values():
+                values.extend(items or [])
+    values = [str(item or "").strip() for item in values if str(item or "").strip()]
+    if not values:
+        return True
+    damaged = sum(1 for item in values if _keyword_text_is_corrupted(item))
+    return not (damaged and (len(values) <= 3 or damaged * 4 >= len(values)))
+
+
 def _clean_keyword_list(value):
     if not isinstance(value, list):
         return []
@@ -2254,7 +2337,8 @@ def load_keywords():
     app_kw_path, user_kw_path = _keyword_file_paths()
     app_data = _load_keyword_file(app_kw_path)
     user_data = _load_keyword_file(user_kw_path)
-    source = user_data if user_data else app_data
+    using_user_data = bool(user_data and is_keyword_config_usable(user_data))
+    source = user_data if using_user_data else app_data
 
     def _pick(key, fallback):
         if isinstance(source, dict) and key in source:
@@ -2296,7 +2380,7 @@ def load_keywords():
         "preference_keywords": merged_pref,
         "detail_keywords": _clean_keyword_list(_pick("detail_keywords", [])),
         "_web_vocab_full_override": True,
-        "_source": user_kw_path if user_data else app_kw_path,
+        "_source": user_kw_path if using_user_data else app_kw_path,
     }
 
 
@@ -2470,8 +2554,6 @@ def _default_settings():
     return {
         "api_key": "", "base_url": DEEPSEEK_DEFAULT_BASE_URL,
         "model": DEEPSEEK_DEFAULT_MODEL, "enabled": False,
-        "local_asr_engine": "sensevoice",
-        "whisper_model": "small",
         "style_profile_enabled": True,
         "style_profile_strength": "auto",
         "content_review_mode": "off",
@@ -3042,6 +3124,31 @@ def _filter_live_interaction_or_size_responses(clips, log_fn=None, *, label="选
     return kept
 
 
+def _filter_transcript_quality_clips(clips, log_fn=None, *, label="转写质量硬排除"):
+    """Remove deterministic transcript defects without changing a kept clip."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    kept = []
+    removed = []
+    for clip in clips or []:
+        text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
+        flags = candidate_quality_flags(text)
+        if flags:
+            removed.append((clip, flags))
+            continue
+        kept.append(clip)
+
+    if removed:
+        examples = "；".join(
+            f"{','.join(flags)}:{str(clip[1])[:26]}"
+            for clip, flags in removed[:3]
+        )
+        _log(f"{label}: 删除 {len(removed)} 段不可直接播出的候选（{examples}）")
+    return kept
+
+
 def _filter_hook_ineligible_clips(clips, log_fn=None, *, label="Hook硬排除"):
     """Remove only Hook-role clips that violate the opening contract.
 
@@ -3069,6 +3176,34 @@ def _filter_hook_ineligible_clips(clips, log_fn=None, *, label="Hook硬排除"):
             for clip, reason in removed[:3]
         )
         _log(f"{label}: 删除 {len(removed)} 段不可作Hook内容（{examples}）")
+    return kept
+
+
+def _filter_terminal_presentation_preamble_clips(
+    clips,
+    log_fn=None,
+    *,
+    label="首尾展示铺垫硬排除",
+):
+    """Drop pure live demonstration talk that cannot carry any story role."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    kept = []
+    removed = []
+    for clip in clips or []:
+        clip_type = str(clip[0] if isinstance(clip, (list, tuple)) and clip else "").lower()
+        text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
+        reason = hook_ineligible_reason(text)
+        if reason == "展示铺垫不可作Hook":
+            removed.append(clip)
+            continue
+        kept.append(clip)
+
+    if removed:
+        examples = "；".join(str(clip[1])[:26] for clip in removed[:3])
+        _log(f"{label}: 删除 {len(removed)} 段无独立购买价值的展示话术（{examples}）")
     return kept
 
 
@@ -3292,9 +3427,9 @@ DIRECTOR_SYSTEM_PROMPT = """你是带货短视频的最终剪辑导演。你必�
 硬性要求：
 1. 只输出JSON对象，不要解释，不要Markdown。对象必须包含clips和expansion_plan两个数组。
 2. 每项必须包含 clip_type、srt_indices、focus、reason、trim_priority。srt_indices只能使用输入中真实存在且未标记“不可选”的编号。
-3. 数组顺序就是成片顺序：必须恰好1个Hook且在第一项，恰好1个Close且在最后一项；Close之后不能有任何Product。
+3. 数组顺序就是成片顺序：最多1个Hook；若使用Hook，它必须在第一项。没有真正合格的Hook时，第一项必须是最完整、最具体的Product自然开场。最多1个Close且在最后一项；Close之后不能有任何Product。
 3a. Hook必须独立说清一个具体购买价值，并由第二段马上解释、证明或兑现。纯情绪、上新预告、“等很久/终于来了/拖欠大家”、或“给你看一眼/就这么搭”等直播铺垫没有商品价值，绝对不可作Hook；没有真实强开头时，使用最完整的Product自然开场。
-4. 叙事顺序应为：强Hook提出效果或痛点 -> 第二段立即兑现Hook -> 核心效果 -> 原因/细节证据 -> 不同场景或顾虑解除 -> 自然总结。不要按字幕时间排序，要按观众理解顺序排序。
+4. 叙事顺序应为：强Hook提出效果或痛点 -> 第二段立即兑现Hook -> 核心效果 -> 原因/细节证据 -> 不同场景或顾虑解除 -> 自然总结。没有强Hook时，直接以最具体的Product购买价值自然开场，再展开证据和场景。不要按字幕时间排序，要按观众理解顺序排序。
 5. 每个片段必须能独立听懂。srt_indices必须连续，通常1-2条；只有补齐主谓宾或完整句尾时才允许3条。禁止不连续编号，禁止以“而且、然后、所以、但是、因为、就是、还、大头含量是、还有一种人在”等半句开头或结尾。
 6. 严禁重复同一子主题。同一个显瘦部位、同一种帽子搭配、同一个面料结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
 7. 偏好是主线，不是凑数量。同一偏好下必须选择不同子主题；如果只有一个干净子主题，就只选一个，不得用三段近义表达冒充三段偏好。
@@ -4304,6 +4439,7 @@ def _director_safe_patch_candidate(
     focus="",
     forbidden_words=None,
     price_patterns=None,
+    allowed_candidate_ids=None,
 ):
     """Build a Product only from AI-declared immutable candidate indices."""
     if isinstance(indices, bool):
@@ -4322,6 +4458,13 @@ def _director_safe_patch_candidate(
         return None
     if normalized[0] < 1 or normalized[-1] > len(srt_entries or []):
         return None
+    if allowed_candidate_ids is not None:
+        try:
+            allowed_ids = {int(value) for value in allowed_candidate_ids}
+        except (TypeError, ValueError):
+            return None
+        if set(normalized) - allowed_ids:
+            return None
     if set(normalized) & set(selected_indices or set()):
         return None
 
@@ -4353,14 +4496,47 @@ def _director_safe_patch_candidate(
     return candidate
 
 
-def _director_safe_candidate_inventory(srt_entries):
+def _director_safe_candidate_inventory(srt_entries, *, record_metrics=False, log_fn=None):
+    """Return only hard-safe frozen candidates, without changing any boundary.
+
+    Content review is allowed to rank these candidates, but it must never be
+    able to re-admit text rejected here.  Metrics are recorded only for the
+    primary frozen inventory so expansion retries do not flood the log.
+    """
     try:
         forbidden_words = load_keywords().get("forbidden_phrases", [])
     except Exception:
         forbidden_words = []
     price_patterns = _safety_price_cta_patterns()
     inventory = []
+    before_count = 0
+    before_duration = 0.0
+    reasons = {}
+
+    def reject(reason, duration):
+        label = str(reason or "不可用安全候选")
+        current = reasons.setdefault(label, {"count": 0, "duration": 0.0})
+        current["count"] += 1
+        current["duration"] += max(0.0, float(duration or 0.0))
+
     for index, (start, end, text) in enumerate(srt_entries or [], 1):
+        duration = max(0.0, float(end) - float(start))
+        before_count += 1
+        before_duration += duration
+        quality_flags = candidate_quality_flags(text)
+        if quality_flags:
+            reject("转写质量:" + "/".join(quality_flags[:3]), duration)
+            continue
+        if _is_safety_blocked_text(text, forbidden_words, price_patterns):
+            reject("价格/CTA/违禁词", duration)
+            continue
+        if _is_backstage_instruction(text):
+            reject("直播现场调度", duration)
+            continue
+        _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        if starts_incomplete or ends_incomplete:
+            reject("不完整语义边界", duration)
+            continue
         candidate = _director_safe_patch_candidate(
             [index],
             srt_entries,
@@ -4368,14 +4544,88 @@ def _director_safe_candidate_inventory(srt_entries):
             price_patterns=price_patterns,
         )
         if candidate is None:
+            reject("不可用安全候选", duration)
             continue
         inventory.append({
             "srt_index": index,
             "source": _director_candidate_source(text),
-            "duration_sec": round(max(0.0, float(end) - float(start)), 1),
+            "duration_sec": round(max(0.0, float(end) - float(start)), 3),
             "text": re.sub(r"\s+", " ", str(text or "")).strip()[:180],
         })
+
+    if record_metrics:
+        kept_duration = sum(float(item.get("duration_sec") or 0.0) for item in inventory)
+        summary = {
+            "before_count": before_count,
+            "before_duration": round(before_duration, 3),
+            "after_count": len(inventory),
+            "after_duration": round(kept_duration, 3),
+            "removed_count": max(0, before_count - len(inventory)),
+            "removed_duration": round(max(0.0, before_duration - kept_duration), 3),
+            "removed_reasons": {
+                label: {
+                    "count": int(value["count"]),
+                    "duration": round(float(value["duration"]), 3),
+                }
+                for label, value in sorted(reasons.items())
+            },
+        }
+        _analysis_metadata_context()["candidate_safety_summary"] = summary
+        if log_fn:
+            reason_text = "、".join(
+                f"{label}={value['count']}条/{value['duration']:.1f}s"
+                for label, value in summary["removed_reasons"].items()
+            ) or "无"
+            log_fn(
+                f"AI安全候选: {before_count}条/{before_duration:.1f}s -> "
+                f"{len(inventory)}条/{kept_duration:.1f}s；"
+                f"硬排除{summary['removed_count']}条（{reason_text}）"
+            )
     return inventory
+
+
+def _content_review_candidate_policy(reviewed_ids, reviewed_duration, safe_inventory, duration_contract):
+    """Keep review as priority, never as an unproven duration gate."""
+    contract = DurationContract.coerce(duration_contract)
+    def as_positive_int(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed > 0 else 0
+
+    safe_ids = {
+        candidate_id
+        for item in safe_inventory or []
+        if isinstance(item, dict)
+        for candidate_id in (as_positive_int(item.get("srt_index")),)
+        if candidate_id
+    }
+    reviewed = {
+        candidate_id
+        for value in (reviewed_ids or set())
+        for candidate_id in (as_positive_int(value),)
+        if candidate_id in safe_ids
+    }
+    review_duration = max(0.0, float(reviewed_duration or 0.0))
+    safe_duration = sum(
+        max(0.0, float(item.get("duration_sec") or 0.0))
+        for item in safe_inventory or []
+    )
+    reviewed_only = bool(reviewed) and review_duration + 1e-6 >= contract.source_min
+    allowed_ids = reviewed if reviewed_only else safe_ids
+    reserve_ids = safe_ids - reviewed
+    return {
+        "allowed_candidate_ids": allowed_ids,
+        "reviewed_candidate_ids": reviewed,
+        "safe_reserve_ids": reserve_ids,
+        "reviewed_duration": round(review_duration, 3),
+        "safe_duration": round(safe_duration, 3),
+        "required_source_duration": round(contract.source_min, 3),
+        "reviewed_pool_covers_contract": reviewed_only,
+        "safe_pool_covers_contract": safe_duration + 1e-6 >= contract.source_min,
+        "pool_policy": "reviewed_only" if reviewed_only else "reviewed_priority_with_safe_reserve",
+    }
 
 
 def _director_source_requirements(required_sources):
@@ -4568,6 +4818,7 @@ def _apply_ai_expansion_plan(
     label="AI预排补片",
     duration_contract=None,
     required_sources=None,
+    allowed_candidate_ids=None,
 ):
     """Apply AI-declared insertions; the program only validates indices and duration."""
     def _log(message):
@@ -4614,6 +4865,7 @@ def _apply_ai_expansion_plan(
             selected_indices=selected_indices,
             selected_clips=working_clips,
             focus=raw.get("focus", ""),
+            allowed_candidate_ids=allowed_candidate_ids,
         )
         if candidate is None:
             continue
@@ -4936,7 +5188,13 @@ def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
 
 
 def _stabilize_director_structure(clips, srt_entries, hook_summary=None, log_fn=None):
-    """Repair clip roles and mechanical duplicates without rebuilding AI narration."""
+    """Apply only mechanical dedupe/overlap protection to an AI-authored story.
+
+    The director owns role assignment and order.  In particular, this function
+    must not promote a Product to Hook, restore a ranked lexical Hook, or move
+    an existing Hook to the front.  If the opening is invalid, the bounded AI
+    opening-repair operation handles it with a real Hook plus follow-up pair.
+    """
     def _log(message):
         if log_fn:
             log_fn(message)
@@ -4960,104 +5218,6 @@ def _stabilize_director_structure(clips, srt_entries, hook_summary=None, log_fn=
         deduped.append(clip)
     items = deduped
 
-    summary = dict(hook_summary or {})
-    ranked_hook_indices = [
-        int(value) for value in (
-            summary.get("ranked_hook_indices")
-            or summary.get("allowed_hook_indices")
-            or []
-        )
-        if str(value).strip().isdigit()
-    ]
-
-    valid_hook_position = None
-    for position, clip in enumerate(items):
-        if not _is_hook_clip(clip):
-            continue
-        text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
-        _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
-        if (
-            not starts_incomplete
-            and not ends_incomplete
-            and not _is_safety_blocked_text(text)
-            and not hook_ineligible_reason(text)
-            and not _is_bad_hook_candidate_text(text)
-        ):
-            valid_hook_position = position
-            break
-
-    restored_index = 0
-    if valid_hook_position is None:
-        chosen_clip = None
-        chosen_position = None
-        for entry_index in ranked_hook_indices:
-            if entry_index < 1 or entry_index > len(srt_entries or []):
-                continue
-            entry_start, entry_end, entry_text = srt_entries[entry_index - 1]
-            clean_text = re.sub(r"\[[vV]\d+\]\s*", "", str(entry_text or "")).strip()
-            _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(clean_text)
-            if (
-                not clean_text
-                or starts_incomplete
-                or ends_incomplete
-                or _is_safety_blocked_text(clean_text)
-                or _is_backstage_instruction(clean_text)
-                or hook_ineligible_reason(clean_text)
-                or _is_bad_hook_candidate_text(clean_text)
-            ):
-                continue
-            for position, clip in enumerate(items):
-                if abs(float(clip[2]) - float(entry_start)) < 0.05 and abs(float(clip[3]) - float(entry_end)) < 0.05:
-                    chosen_clip = _retag_clip_type(clip, "hook")
-                    chosen_position = position
-                    break
-            if chosen_clip is None:
-                duration = max(0.0, float(entry_end) - float(entry_start))
-                chosen_clip = (
-                    "hook", str(entry_text).strip(), float(entry_start), float(entry_end),
-                    50, duration, str(summary.get("requested_focus") or "开场"),
-                )
-            restored_index = entry_index
-            break
-
-        if chosen_clip is None:
-            for position, clip in enumerate(items):
-                if _is_close_clip(clip):
-                    continue
-                text = re.sub(r"\[[vV]\d+\]\s*", "", str(clip[1] or "")).strip()
-                _needs_prev, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
-                if (
-                    starts_incomplete
-                    or ends_incomplete
-                    or _is_safety_blocked_text(text)
-                    or hook_ineligible_reason(text)
-                    or _is_bad_hook_candidate_text(text)
-                ):
-                    continue
-                chosen_clip = _retag_clip_type(clip, "hook")
-                chosen_position = position
-                break
-
-        if chosen_clip is not None:
-            if chosen_position is not None:
-                items.pop(chosen_position)
-            items.insert(0, chosen_clip)
-            valid_hook_position = 0
-    elif valid_hook_position != 0:
-        chosen_clip = items.pop(valid_hook_position)
-        items.insert(0, chosen_clip)
-        valid_hook_position = 0
-
-    # One opening role and at most one final Close are structural invariants.
-    normalized = []
-    for position, clip in enumerate(items):
-        if _is_hook_clip(clip) and position != 0:
-            clip = _retag_clip_type(clip, "product")
-        if _is_close_clip(clip) and position != len(items) - 1:
-            clip = _retag_clip_type(clip, "product")
-        normalized.append(tuple(clip))
-    items = normalized
-
     # Remove only substantial same-source overlap. This is mechanical duplicate
     # media protection, not semantic selection or reordering.
     stable = []
@@ -5080,8 +5240,6 @@ def _stabilize_director_structure(clips, srt_entries, hook_summary=None, log_fn=
     items = stable
 
     changes = []
-    if restored_index:
-        changes.append(f"恢复Hook候选#{restored_index}")
     if duplicate_count:
         changes.append(f"移除{duplicate_count}段完全重复")
     if overlap_count:
@@ -5108,9 +5266,15 @@ def _director_hard_audit(
 
     original = list(clips or [])
     safe = _filter_price_and_cta(original, log_fn)
+    safe = _filter_transcript_quality_clips(safe, log_fn, label="AI转写质量硬质检")
     safe = _filter_celebrity(safe, log_fn)
     safe = _filter_live_interaction_or_size_responses(safe, log_fn, label="AI硬质检")
     safe = _filter_hook_ineligible_clips(safe, log_fn, label="AI Hook硬质检")
+    safe = _filter_terminal_presentation_preamble_clips(
+        safe,
+        log_fn,
+        label="AI首尾展示铺垫硬质检",
+    )
     safe = _filter_low_value_hook_clips(safe, log_fn, label="AI Hook质量硬质检")
 
     hard_removed = len(original) - len(safe)
@@ -5177,8 +5341,10 @@ def _director_hard_audit(
 
     hook_positions = [idx for idx, clip in enumerate(valid) if _is_hook_clip(clip)]
     close_positions = [idx for idx, clip in enumerate(valid) if _is_close_clip(clip)]
-    if hook_positions != [0]:
-        issues.append("Hook必须且只能位于首段")
+    if hook_positions and hook_positions != [0]:
+        issues.append("Hook如使用必须且只能位于首段")
+    elif not hook_positions:
+        warnings.append("无合格Hook，允许Product自然开场")
     # Close is desirable but optional after hard compliance cleanup. If an
     # incomplete Close was removed, the remaining AI order is still usable.
     if close_positions and close_positions != [len(valid) - 1]:
@@ -5277,10 +5443,10 @@ def _director_hard_audit(
     low, high = duration_status["low"], duration_status["high"]
     if total_duration < low:
         duration_message = f"总时长{total_duration:.1f}s低于目标下限{low:.0f}s"
-        if duration_status["short"]:
-            issues.append(f"{duration_message}，至少还需补足约{duration_status['gap']:.0f}s的不同卖点完整片段")
-        else:
-            warnings.append(duration_message)
+        # The source_min floor is a hard delivery contract. Acceptance margins
+        # are useful for rendered-duration measurement, not for declaring an
+        # automatically selected source list successful.
+        issues.append(f"{duration_message}，至少还需补足约{duration_status['gap']:.0f}s的不同卖点完整片段")
     elif total_duration > high:
         duration_message = f"总时长{total_duration:.1f}s超过目标上限{high:.0f}s"
         if duration_status["long"]:
@@ -5320,7 +5486,7 @@ def _director_hard_audit(
         "needs_repair": bool(issues),
         "hard_removed": hard_removed,
         "total_duration": total_duration,
-        "duration_short": bool(duration_status["short"]),
+        "duration_short": bool(total_duration + 1e-6 < low),
         "duration_long": bool(duration_status["long"]),
         "duration_low": low,
         "duration_high": high,
@@ -5498,6 +5664,7 @@ def _call_director_expand_selection(
     duration_contract=None,
     merge_mode=False,
     required_sources=None,
+    allowed_candidate_ids=None,
 ):
     """Ask AI for insert-only operations, then apply them without rebuilding the story."""
     def _log(message):
@@ -5515,10 +5682,16 @@ def _call_director_expand_selection(
         for clip in items
         for index in _director_clip_entry_indices(clip, srt_entries)
     }
+    allowed_ids = (
+        {int(value) for value in allowed_candidate_ids}
+        if allowed_candidate_ids is not None
+        else None
+    )
     inventory = [
         candidate
         for candidate in _director_safe_candidate_inventory(srt_entries)
         if int(candidate["srt_index"]) not in selected_indices
+        and (allowed_ids is None or int(candidate["srt_index"]) in allowed_ids)
     ]
     if not inventory:
         _log("AI增量补片: 没有剩余安全候选")
@@ -5626,6 +5799,7 @@ def _call_director_expand_selection(
             label="AI增量补片",
             duration_contract=duration_contract,
             required_sources=required_sources,
+            allowed_candidate_ids=allowed_ids,
         )
         if not expanded:
             _log("AI增量补片: AI操作未能产生可执行的新片段")
@@ -5643,6 +5817,211 @@ def _call_director_expand_selection(
         return []
     except Exception as error:
         _log(f"AI增量补片失败: {_friendly_msg(str(error))}")
+        return []
+
+
+def _apply_ai_opening_pair(
+    clips,
+    opening_pair,
+    srt_entries,
+    *,
+    allowed_candidate_ids=None,
+    focus="",
+):
+    """Apply one AI-declared opening pair without changing the body order.
+
+    The program only verifies IDs and hard safety here.  It never searches for
+    or scores a substitute Hook by itself.
+    """
+    if not isinstance(opening_pair, dict):
+        return None
+    try:
+        hook_id = int(opening_pair.get("hook_id") or 0)
+        followup_id = int(opening_pair.get("followup_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if hook_id < 1 or followup_id < 1 or hook_id == followup_id:
+        return None
+
+    allowed_ids = (
+        {int(value) for value in allowed_candidate_ids}
+        if allowed_candidate_ids is not None else None
+    )
+    if allowed_ids is not None and {hook_id, followup_id} - allowed_ids:
+        return None
+    if hook_id > len(srt_entries or []) or followup_id > len(srt_entries or []):
+        return None
+
+    hook_start, hook_end, hook_text = srt_entries[hook_id - 1]
+    followup_start, followup_end, followup_text = srt_entries[followup_id - 1]
+    hook_text = str(hook_text or "").strip()
+    followup_text = str(followup_text or "").strip()
+    if not hook_text or not followup_text or float(hook_end) <= float(hook_start) or float(followup_end) <= float(followup_start):
+        return None
+
+    for text, is_hook in ((hook_text, True), (followup_text, False)):
+        _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        if (
+            starts_incomplete
+            or ends_incomplete
+            or _is_safety_blocked_text(text)
+            or _is_backstage_instruction(text)
+            or live_interaction_or_size_response_reason(text)
+        ):
+            return None
+        if is_hook and (hook_ineligible_reason(text) or _is_bad_hook_candidate_text(text)):
+            return None
+
+    # Do not split an existing compound clip to force a new opening.  The AI
+    # may move one immutable candidate, but not carve it out of another claim.
+    pair_ids = {hook_id, followup_id}
+    removable_positions = set()
+    for position, clip in enumerate(clips or []):
+        entry_ids = _director_clip_entry_indices(clip, srt_entries)
+        overlap_ids = pair_ids.intersection(entry_ids)
+        if not overlap_ids:
+            continue
+        if len(entry_ids) != 1:
+            return None
+        removable_positions.add(position)
+
+    opening = [
+        (
+            "hook", hook_text, float(hook_start), float(hook_end), 50,
+            float(hook_end) - float(hook_start), str(focus or "开场"),
+        ),
+        (
+            "product", followup_text, float(followup_start), float(followup_end), 50,
+            float(followup_end) - float(followup_start), str(focus or "承接"),
+        ),
+    ]
+    remaining = []
+    for position, clip in enumerate(clips or []):
+        if position in removable_positions:
+            continue
+        # The AI has explicitly appointed a new opening. Preserve the former
+        # Hook's content in place, but remove its old role so there is one Hook.
+        remaining.append(_retag_clip_type(clip, "product") if _is_hook_clip(clip) else tuple(clip))
+    return opening + remaining
+
+
+def _call_director_opening_repair(
+    api_key,
+    base_url,
+    model,
+    clips,
+    srt_entries,
+    *,
+    allowed_candidate_ids=None,
+    preferred_focus="",
+    issue_hint="",
+    log_fn=None,
+):
+    """Ask the director for one Hook-plus-follow-up replacement operation."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    locked = list(clips or [])
+    if not locked:
+        return []
+    allowed_ids = (
+        {int(value) for value in allowed_candidate_ids}
+        if allowed_candidate_ids is not None else None
+    )
+    inventory = [
+        item for item in _director_safe_candidate_inventory(srt_entries)
+        if allowed_ids is None or int(item.get("srt_index") or 0) in allowed_ids
+    ]
+    if len(inventory) < 2:
+        _log("AI开头修复: 没有足够的安全候选，保留锁定片单")
+        return []
+
+    current_sequence = [
+        {
+            "order": order,
+            "clip_type": str(clip[0] if len(clip) > 0 else "product"),
+            "srt_indices": _director_clip_entry_indices(clip, srt_entries),
+            "text": re.sub(r"\s+", " ", str(clip[1] if len(clip) > 1 else "")).strip()[:220],
+        }
+        for order, clip in enumerate(locked, 1)
+    ]
+    system_prompt = (
+        "你是短视频带货导演，只修复成片开头。正文和结尾已经锁定，你无权重排、删改或补选正文。"
+        "请从安全候选中选择一组新的开头：第一句必须能独立说清具体购买价值，第二句必须立即解释、证明或兑现同一承诺。"
+        "直播互动、个人身高体重/报尺码、价格CTA、上新预告、展示铺垫、泛泛夸赞、半句都不能作为开头或承接。"
+        "偏好只在两组质量相近时作为择优条件，不能为了命中偏好选较弱的话。若没有真正合格的组合，返回空编号。"
+        "只输出JSON对象，不要解释。"
+    )
+    user_prompt = (
+        f"本次偏好：{preferred_focus or '全量选片'}。"
+        + (f"当前开头问题：{issue_hint[:360]}。" if issue_hint else "")
+        + "\n锁定片单：\n"
+        + json.dumps(current_sequence, ensure_ascii=False, separators=(",", ":"))
+        + "\n安全候选：\n"
+        + json.dumps(inventory, ensure_ascii=False, separators=(",", ":"))
+        + "\n返回格式：{\"opening_pair\":{\"hook_id\":12,\"followup_id\":13,\"reason\":\"首句承诺，次句兑现\"}}"
+        + "；没有合格组合时：{\"opening_pair\":{\"hook_id\":0,\"followup_id\":0,\"reason\":\"无合格开头\"}}"
+    )
+    body_dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "top_p": 0.8,
+        "max_tokens": 768,
+    }
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        body_dict["thinking"] = {"type": "disabled"}
+    if "seed" in model.lower():
+        body_dict["reasoning_effort"] = "low"
+
+    request = urllib.request.Request(
+        ai_chat_completions_url(base_url),
+        data=json.dumps(body_dict, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = create_ssl_context()
+        with urllib.request.urlopen(request, timeout=180, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", content)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        data = json.loads(match.group(0) if match else cleaned)
+        opening_pair = data.get("opening_pair") if isinstance(data, dict) else None
+        repaired = _apply_ai_opening_pair(
+            locked,
+            opening_pair,
+            srt_entries,
+            allowed_candidate_ids=allowed_ids,
+            focus=preferred_focus,
+        )
+        if repaired:
+            _log(
+                "AI开头修复: 仅替换为导演声明的Hook+承接组合，"
+                f"#{opening_pair.get('hook_id')} -> #{opening_pair.get('followup_id')}"
+            )
+            return repaired
+        _log("AI开头修复: 未返回可执行的强开头组合，保留锁定片单")
+        return []
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        message = f"AI 接口调用失败 (HTTP {error.code}): {_friendly_http(error.code, detail)}"
+        _log(f"警告: {message}")
+        if _is_non_retryable_http(error.code):
+            raise NonRetryableAIError(message) from error
+        return []
+    except Exception as error:
+        _log(f"AI开头修复失败: {_friendly_msg(str(error))}")
         return []
 
 
@@ -5801,13 +6180,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _director_focus_hint = focus_hint
     _director_focus_summary = {}
     _director_fallback_clips = []
-    _director_short_fallback_clips = []
-    _director_short_fallback_status = {}
     _director_last_audit = {}
     _director_best_duration = 0.0
     _director_candidate_count = 0
     _director_stage = "首次完整编排"
     _director_format_retry_used = False
+    _director_opening_repair_source_clips = None
+    _director_opening_repair_issue = ""
     _director_trim_source_clips = None
     _director_expand_source_clips = None
     # One complete composition plus bounded format/insert/remove operations.
@@ -5815,11 +6194,26 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     _indexed_srt_entries = _build_ai_srt_entry_index(cleaned_srt)
     _director_call_entries = _indexed_srt_entries
     _director_candidate_count = len(_indexed_srt_entries)
-    _director_safe_inventory = _director_safe_candidate_inventory(_indexed_srt_entries)
+    _director_safe_inventory = _director_safe_candidate_inventory(
+        _indexed_srt_entries,
+        record_metrics=True,
+        log_fn=_log,
+    )
     _director_safe_candidate_duration = sum(
         float(item.get("duration_sec") or 0.0)
         for item in _director_safe_inventory
     )
+    _hard_safe_candidate_ids = {
+        int(item.get("srt_index") or 0)
+        for item in _director_safe_inventory
+        if int(item.get("srt_index") or 0) > 0
+    }
+    _analysis_metadata["director_candidates"] = [
+        item
+        for item in (_analysis_metadata.get("director_candidates") or [])
+        if str(item.get("candidate_id") or "").strip().isdigit()
+        and int(item.get("candidate_id")) in _hard_safe_candidate_ids
+    ]
     _source_candidate_counts = {}
     _source_candidate_durations = {}
     for _candidate in _director_safe_inventory:
@@ -5878,7 +6272,9 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     # 内容审稿只读取冻结后的安全候选。任何异常都退回原导演候选，不能让审稿层阻断任务。
     _content_review_mode = "off"
     _content_review_version = "content-review-unavailable"
-    _content_review_allowed_ids = None
+    # Hard safety is the common candidate boundary for director, expansion and
+    # manual preview. Content review may narrow it only after proving coverage.
+    _content_review_allowed_ids = set(_hard_safe_candidate_ids) if _director_mode else None
     _content_review_hint = ""
     _content_review_topic_support = {}
     _content_review_hook_pairs = ()
@@ -5889,13 +6285,13 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     try:
         from content_review import (
             CONTENT_REVIEW_VERSION,
+            audit_final_sequence,
             repair_hook_pairs,
             resolve_review_mode,
             review_candidates,
-            review_final_sequence,
         )
         _content_review_version = CONTENT_REVIEW_VERSION
-        _final_sequence_reviewer = review_final_sequence
+        _final_sequence_reviewer = audit_final_sequence
 
         _content_review_mode = resolve_review_mode(settings)
         _content_review_summary = {
@@ -5908,17 +6304,21 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             "grounded_card_count": 0,
             "hook_pair_count": 0,
             "hook_pair_reviewed": False,
+            "hard_safe_count": len(_hard_safe_candidate_ids),
+            "hard_safe_duration": round(_director_safe_candidate_duration, 3),
+            "duration_contract_source_min": round(_duration_contract.source_min, 3),
+            "preview_candidate_count": len(_analysis_metadata["director_candidates"]),
+            "pool_policy": "hard_safe_only",
             "fallback_reason": "",
         }
         _analysis_metadata["content_review_summary"] = _content_review_summary
         if not _director_mode:
             _content_review_summary["fallback_reason"] = "not_director_mode"
         elif _content_review_mode != "off":
-            if _director_safe_candidate_duration + 0.1 < _duration_contract.source_min:
-                _content_review_summary["fallback_reason"] = "safe_candidate_duration_insufficient"
+            if _director_safe_candidate_duration <= 0.1:
+                _content_review_summary["fallback_reason"] = "no_safe_candidates"
                 _log(
-                    "AI\u5185\u5bb9\u5ba1\u7a3f: \u5b89\u5168\u5019\u9009\u65f6\u957f\u4e0d\u8db3\u4ee5\u6ee1\u8db3\u7247\u5355\u5408\u540c\uff0c\u76f4\u63a5\u6cbf\u7528\u65e7\u94fe\u8def\uff0c"
-                    "\u4e0d\u989d\u5916\u8c03\u7528\u5ba1\u7a3f\u6a21\u578b"
+                    "AI\u5185\u5bb9\u5ba1\u7a3f: \u6ca1\u6709\u53ef\u5ba1\u9605\u7684\u5b89\u5168\u5019\u9009\uff0c\u4e0d\u989d\u5916\u8c03\u7528\u5ba1\u7a3f\u6a21\u578b"
                 )
             else:
                 _review_controls = _normalize_ai_controls(ai_controls)
@@ -5960,33 +6360,69 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 _analysis_metadata["content_review_summary"] = _content_review_bundle.summary(
                     _content_review_mode
                 )
+                _content_review_summary = _analysis_metadata["content_review_summary"]
+                _content_review_summary.update({
+                    "hard_safe_count": len(_hard_safe_candidate_ids),
+                    "hard_safe_duration": round(_director_safe_candidate_duration, 3),
+                    "duration_contract_source_min": round(_duration_contract.source_min, 3),
+                    "preview_candidate_count": len(_analysis_metadata["director_candidates"]),
+                })
                 _log(
                     f"AI\u5185\u5bb9\u5ba1\u7a3f: {_content_review_mode}\u6a21\u5f0f\uff0c\u4fdd\u7559"
                     f"{len(_content_review_bundle.cards)}\u5f20\u6709\u539f\u6587\u8bc1\u636e\u7684\u5185\u5bb9\u5361/"
                     f"{_content_review_bundle.retained_duration:.1f}s"
                     + ("\uff08\u7f13\u5b58\u547d\u4e2d\uff09" if _content_review_bundle.cache_hit else "")
                 )
-                _review_run_min = min(
-                    _director_safe_candidate_duration,
-                    min(
-                        150.0,
-                        max(_duration_contract.source_min, _AI_TARGET_DURATION * 1.2),
-                    ),
-                )
-                if (
-                    _content_review_mode == "on"
-                    and _content_review_bundle.retained_duration + 0.1 < _review_run_min
-                ):
-                    _analysis_metadata["content_review_summary"]["fallback_reason"] = (
-                        "reviewed_candidate_duration_insufficient"
+                # Review ranks safe candidates. It may become the sole source
+                # only after its own cards cover the requested duration floor.
+                if _content_review_mode == "on":
+                    _review_policy = _content_review_candidate_policy(
+                        _content_review_bundle.allowed_candidate_ids,
+                        _content_review_bundle.retained_duration,
+                        _director_safe_inventory,
+                        _duration_contract,
                     )
-                    _log(
-                        f"AI\u5185\u5bb9\u5ba1\u7a3f: \u5ba1\u7a3f\u6c60{_content_review_bundle.retained_duration:.1f}s"
-                        f"\u4f4e\u4e8e\u672c\u6b21\u6240\u9700{_review_run_min:.1f}s\uff0c\u672c\u6b21\u9000\u56de\u65e7\u5019\u9009"
+                    _content_review_allowed_ids = set(_review_policy["allowed_candidate_ids"])
+                    _content_review_summary.update({
+                        "reviewed_candidate_count": len(_review_policy["reviewed_candidate_ids"]),
+                        "reviewed_duration": _review_policy["reviewed_duration"],
+                        "safe_reserve_count": len(_review_policy["safe_reserve_ids"]),
+                        "safe_reserve_duration": round(
+                            max(0.0, _review_policy["safe_duration"] - _review_policy["reviewed_duration"]),
+                            3,
+                        ),
+                        "allowed_candidate_count": len(_content_review_allowed_ids),
+                        "pool_policy": _review_policy["pool_policy"],
+                        "reviewed_pool_covers_contract": _review_policy["reviewed_pool_covers_contract"],
+                        "safe_pool_covers_contract": _review_policy["safe_pool_covers_contract"],
+                    })
+                    # The manual preview is part of the same candidate
+                    # contract as the director. Keeping unreviewed entries in
+                    # its alternate list lets a user reintroduce text the
+                    # review deliberately rejected.
+                    _analysis_metadata["director_candidates"] = [
+                        item
+                        for item in (_analysis_metadata.get("director_candidates") or [])
+                        if str(item.get("candidate_id") or "").strip().isdigit()
+                        and int(item.get("candidate_id")) in _hard_safe_candidate_ids
+                    ]
+                    _analysis_metadata["content_review_summary"]["preview_candidate_count"] = len(
+                        _analysis_metadata["director_candidates"]
                     )
-                elif _content_review_mode == "on":
-                    _content_review_allowed_ids = _content_review_bundle.allowed_candidate_ids
                     _content_review_hint = _content_review_bundle.director_hint()
+                    if not _review_policy["reviewed_pool_covers_contract"]:
+                        reserve_text = ",".join(
+                            str(value)
+                            for value in sorted(_review_policy["safe_reserve_ids"])[:80]
+                        ) or "无"
+                        _content_review_hint += (
+                            "\n★审稿池时长不足★ 审稿卡仅"
+                            f"{_review_policy['reviewed_duration']:.1f}s，时长合同至少需要"
+                            f"{_review_policy['required_source_duration']:.1f}s。"
+                            "审稿卡仍是优先内容；其余已通过硬安全规则的reserve仅用于补足时长、"
+                            "补充不同卖点或满足混剪来源，不得改写原句。"
+                            f"安全reserve编号:{reserve_text}。\n"
+                        )
                     _content_review_hook_pairs = tuple(
                         pair.to_dict() for pair in _content_review_bundle.hook_pairs
                     )
@@ -5998,9 +6434,17 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         _director_safe_inventory
                     )
                     _content_review_applied = True
+                    if not _review_policy["reviewed_pool_covers_contract"]:
+                        _analysis_metadata["content_review_summary"]["short_reviewed_pool"] = True
+                        _log(
+                            f"AI内容审稿: 审稿卡{_review_policy['reviewed_duration']:.1f}s不足"
+                            f"合同{_review_policy['required_source_duration']:.1f}s，"
+                            f"保留审稿优先并开放{len(_review_policy['safe_reserve_ids'])}条安全reserve补足"
+                        )
                     _log(
-                        f"AI\u5185\u5bb9\u5ba1\u7a3f: \u5bfc\u6f14\u5019\u9009 {_director_candidate_count} -> "
-                        f"{len(_content_review_allowed_ids)}\uff0c\u539f\u7f16\u53f7\u548c\u65f6\u95f4\u6233\u4fdd\u6301\u4e0d\u53d8"
+                        f"AI内容审稿: 导演候选 {_director_candidate_count} -> "
+                        f"{len(_content_review_allowed_ids)}（{_review_policy['pool_policy']}），"
+                        "原编号和时间戳保持不变"
                     )
     except Exception as _review_error:
         _analysis_metadata["content_review_summary"] = {
@@ -6015,7 +6459,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             "hook_pair_reviewed": False,
             "fallback_reason": str(_review_error)[:240],
         }
-        _content_review_allowed_ids = None
+        _content_review_allowed_ids = set(_hard_safe_candidate_ids) if _director_mode else None
         _content_review_hint = ""
         _content_review_topic_support = {}
         _content_review_hook_pairs = ()
@@ -6023,12 +6467,48 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         _content_review_applied = False
         if _content_review_mode != "off":
             _log(f"AI\u5185\u5bb9\u5ba1\u7a3f: {_review_error}\uff0c\u81ea\u52a8\u9000\u56de\u65e7\u5019\u9009\u94fe\u8def")
+    if (
+        _director_mode
+        and _director_safe_candidate_duration + 1e-6 < _duration_contract.source_min
+    ):
+        _failure = _record_insufficient_safe_material(
+            candidate_count=len(_hard_safe_candidate_ids),
+            safe_candidate_duration=_director_safe_candidate_duration,
+            duration_contract=_duration_contract,
+            reason="全部通过硬安全规则的候选仍不足时长合同",
+        )
+        _analysis_metadata["content_review_summary"].update({
+            "safe_pool_covers_contract": False,
+            "pool_policy": "insufficient_safe_material",
+            "fallback_reason": "safe_material_below_duration_contract",
+        })
+        _log(
+            "AI安全候选不足: "
+            f"{_failure['safe_candidate_duration']:.1f}s < "
+            f"合同{_failure['required_source_duration']:.1f}s，停止选片，不导出短成片"
+        )
+        return []
     for attempt in range(_max_attempts):
         if _director_mode:
             _log(f"AI: 调用 {model}（{_director_stage}）...")
         else:
             _log(f"AI: 调用 {model}(第 {attempt + 1} 次)...")
-        if _director_expand_source_clips is not None:
+        if _director_opening_repair_source_clips is not None:
+            clips = _call_director_opening_repair(
+                api_key,
+                base_url,
+                model,
+                _director_opening_repair_source_clips,
+                _indexed_srt_entries,
+                allowed_candidate_ids=_content_review_allowed_ids,
+                preferred_focus=_director_focus_hint,
+                issue_hint=_director_opening_repair_issue,
+                log_fn=log_fn,
+            )
+            if clips:
+                _director_opening_repair_source_clips = None
+                _director_opening_repair_issue = ""
+        elif _director_expand_source_clips is not None:
             clips = _call_director_expand_selection(
                 api_key,
                 base_url,
@@ -6041,6 +6521,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 duration_contract=_duration_contract,
                 merge_mode=merge_mode,
                 required_sources=_director_required_sources,
+                allowed_candidate_ids=_content_review_allowed_ids,
             )
         elif _director_trim_source_clips is not None:
             clips = _call_director_trim_selection(
@@ -6077,7 +6558,10 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 review_hook_pairs_checked=_content_review_hook_pairs_checked,
                 review_topic_support=_content_review_topic_support,
             )
-        if not clips and _director_expand_source_clips is not None:
+        if not clips and _director_opening_repair_source_clips is not None:
+            clips = list(_director_opening_repair_source_clips)
+            _log("AI开头修复未产生可执行组合，保留锁定片单，不回到完整重编")
+        elif not clips and _director_expand_source_clips is not None:
             clips = list(_director_expand_source_clips)
             _log("AI增量补片未产生可执行操作，保留锁定片单，不回到完整重编")
         elif not clips and _director_trim_source_clips is not None:
@@ -6155,6 +6639,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     log_fn,
                     duration_contract=_duration_contract,
                     required_sources=_director_required_sources,
+                    allowed_candidate_ids=_content_review_allowed_ids,
                 )
                 if _priority_trimmed:
                     clips, _director_audit = _director_hard_audit(
@@ -6237,25 +6722,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 clips,
                 _director_required_sources,
             )
-            _director_relaxed_duration = _director_duration_status(
-                clips,
-                _AI_TARGET_DURATION,
-                _duration_contract,
-                shortage_grace_seconds=SHORTAGE_GRACE_SECONDS,
-            )
-            if (
-                clips
-                and _director_audit.get("duration_short")
-                and not _director_fatal
-                and len(clips) >= 2
-                and _audit_total >= 5.0
-                and (
-                    not _director_short_fallback_clips
-                    or _audit_total > float(_director_short_fallback_status.get("total") or 0.0)
-                )
-            ):
-                _director_short_fallback_clips = list(clips)
-                _director_short_fallback_status = dict(_director_relaxed_duration)
             _director_has_hard_issue = bool(
                 _director_fatal
                 or _director_audit.get("duration_short")
@@ -6280,6 +6746,25 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 break
 
             if _director_fatal:
+                _opening_contract_issue = any(
+                    "Hook如使用必须且只能位于首段" in str(issue)
+                    for issue in _director_fatal
+                )
+                if (
+                    _opening_contract_issue
+                    and _director_opening_repair_source_clips is None
+                    and _director_expand_source_clips is None
+                    and _director_trim_source_clips is None
+                    and attempt + 1 < _max_attempts
+                ):
+                    _director_stage = "AI开头定点修复"
+                    _director_opening_repair_source_clips = list(clips)
+                    _director_opening_repair_issue = "；".join(_director_fatal[:3])
+                    _log(
+                        "AI叙事质检: 开头角色未通过，锁定正文和结尾，"
+                        "仅交回AI选择Hook+承接组合，程序不再自动升格或移动Hook"
+                    )
+                    continue
                 _log(
                     "AI叙事质检未通过: "
                     + "；".join(_director_fatal)
@@ -6417,15 +6902,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         base_url=base_url,
                         model=model,
                         selected_sequence=_selected_sequence,
-                        inventory=_review_inventory,
-                        allowed_candidate_ids=_content_review_allowed_ids,
-                        category=_cross_cat_preferred or "",
-                        preference=_audit_preferred_focus or "",
-                        duration_low=float(_director_audit.get("duration_low") or 0.0),
-                        duration_high=float(_director_audit.get("duration_high") or 0.0),
-                        required_sources=_director_required_sources,
                         hook_pairs=_content_review_hook_pairs,
-                        allowed_hook_ids=_final_review_allowed_hook_ids or None,
                         log_fn=_log,
                     )
                     _final_review_summary = _final_review.summary()
@@ -6436,6 +6913,66 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         _log(
                             "AI\u6210\u7247\u7ec8\u5ba1: \u901a\u8fc7\uff0cHook\u3001\u627f\u63a5\u3001\u6b63\u6587\u548c\u7ed3\u5c3e\u65e0\u9700\u6539\u5199"
                         )
+                    elif _final_review.status == "flag":
+                        _issue_text = "；".join(_final_review.issues[:3])
+                        _analysis_metadata["content_review_summary"]["final_review"] = (
+                            _final_review.summary()
+                        )
+                        _log(
+                            "AI成片终审: 标记问题但不重排片单"
+                            + (f"（{_issue_text}）" if _issue_text else "")
+                        )
+                        if _final_review.opening_issue:
+                            _opening_repaired = _call_director_opening_repair(
+                                api_key,
+                                base_url,
+                                model,
+                                clips,
+                                _indexed_srt_entries,
+                                allowed_candidate_ids=_content_review_allowed_ids,
+                                preferred_focus=_audit_preferred_focus,
+                                issue_hint=_issue_text,
+                                log_fn=_log,
+                            )
+                            if _opening_repaired:
+                                _opening_repaired, _opening_audit = _director_hard_audit(
+                                    _opening_repaired,
+                                    _AI_TARGET_DURATION,
+                                    _hook_cap_sec,
+                                    _log,
+                                    preferred_focus=_audit_preferred_focus,
+                                    require_preference_hook=False,
+                                    require_preference_mainline=_require_preference_mainline,
+                                    preference_target_duration=_final_target_duration,
+                                    duration_contract=_duration_contract,
+                                )
+                                _opening_failures = list(_director_fatal_issues(_opening_audit))
+                                if _opening_audit.get("duration_short"):
+                                    _opening_failures.append("开头修复后时长不足")
+                                if _opening_audit.get("duration_long"):
+                                    _opening_failures.append("开头修复后超时")
+                                if _director_missing_sources(
+                                    _opening_repaired,
+                                    _director_required_sources,
+                                ):
+                                    _opening_failures.append("开头修复后缺少混剪来源")
+                                if _opening_failures:
+                                    _reason = "；".join(_opening_failures[:3])
+                                    _analysis_metadata["content_review_summary"]["final_review"] = (
+                                        _final_review.summary(fallback_reason=_reason)
+                                    )
+                                    _log(
+                                        "AI成片终审: 开头定点修复未通过硬合同，"
+                                        f"保留导演原片单（{_reason}）"
+                                    )
+                                else:
+                                    clips = _opening_repaired
+                                    _director_audit = _opening_audit
+                                    _director_last_audit = dict(_opening_audit or {})
+                                    _analysis_metadata["content_review_summary"]["final_review"] = (
+                                        _final_review.summary(opening_repair_applied=True)
+                                    )
+                                    _log("AI成片终审: 已应用一次AI开头定点修复，正文顺序未改写")
                     elif _final_review.status == "revise":
                         _reviewed_clips = _parse_ai_response(
                             json.dumps(
@@ -6465,6 +7002,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                                 label="AI\u6210\u7247\u7ec8\u5ba1\u8865\u8db3",
                                 duration_contract=_duration_contract,
                                 required_sources=_director_required_sources,
+                                allowed_candidate_ids=_content_review_allowed_ids,
                             )
                             if _reviewed_expanded:
                                 _reviewed_clips = _reviewed_expanded
@@ -7050,92 +7588,6 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 f"目标下限{_fallback_duration['low']:.0f}s）"
             )
             return _director_fallback_clips
-        if _director_short_fallback_clips:
-            _source_duration = sum(
-                _clip_duration_value(clip) for clip in _director_short_fallback_clips
-            )
-            _projected_final_duration = _source_duration / max(
-                0.001, float(_duration_contract.speed_factor)
-            )
-            _output_margin_seconds = min(
-                8.0,
-                max(3.0, _projected_final_duration * 0.05),
-            )
-            _dynamic_grace = min(
-                max(0.0, float(_duration_contract.final_min) - 1.0),
-                max(
-                    0.0,
-                    float(_duration_contract.final_min) - _projected_final_duration,
-                ) + _output_margin_seconds,
-            )
-            _relaxed_duration = _director_duration_status(
-                _director_short_fallback_clips,
-                _AI_TARGET_DURATION,
-                _duration_contract,
-                shortage_grace_seconds=_dynamic_grace,
-            )
-            _relaxation = {
-                "applied": True,
-                "policy": "safe_best_effort_v1",
-                "grace_seconds": round(_dynamic_grace, 3),
-                "reason": "best_safe_story_below_target",
-                "source_duration": round(float(_relaxed_duration.get("total") or 0.0), 3),
-                "projected_final_duration": round(float(_relaxed_duration.get("projected_final") or 0.0), 3),
-                "standard_final_min": round(float(_duration_contract.final_min), 3),
-                "relaxed_final_min": round(
-                    max(1.0, float(_duration_contract.final_min) - _dynamic_grace),
-                    3,
-                ),
-                "standard_source_min": round(float(_duration_contract.source_min), 3),
-                "relaxed_source_min": round(float(_relaxed_duration.get("relaxed_low") or 0.0), 3),
-                "target_gap_seconds": round(
-                    max(0.0, float(_duration_contract.final_target) - _projected_final_duration),
-                    3,
-                ),
-                "output_margin_seconds": round(_output_margin_seconds, 3),
-                "minimum_safe_story_seconds": 5.0,
-            }
-            _analysis_metadata["duration_relaxation"] = _relaxation
-            _set_last_topic_coverage_summary(_topic_coverage_summary(
-                _director_short_fallback_clips,
-                _current_focus_used_label(),
-                _final_target_duration,
-                get_last_analysis_metadata()["preference_summary"].get("requested", "自动"),
-            ))
-            if merge_mode:
-                _selected_source_counts = _director_source_counts(_director_short_fallback_clips)
-                _source_distribution = _director_source_distribution_summary(
-                    _director_short_fallback_clips,
-                    _director_required_sources,
-                )
-                _source_contract_summary = dict(_analysis_metadata.get("source_contract") or {})
-                _source_contract_summary["selected_counts"] = dict(sorted(_selected_source_counts.items()))
-                _source_contract_summary["distribution"] = _source_distribution
-                _source_contract_summary["balanced"] = bool(_source_distribution.get("balanced"))
-                _analysis_metadata["source_contract"] = _source_contract_summary
-            _record_history_if_needed(_director_short_fallback_clips)
-            _selection_manifest = SelectionManifest.from_clips(
-                _director_short_fallback_clips,
-                candidate_digest=str((_analysis_metadata.get("candidate_contract") or {}).get("digest") or ""),
-                duration_contract=_duration_contract,
-            )
-            _analysis_metadata["selection_manifest"] = _selection_manifest.to_dict()
-            _partial_message = (
-                "有效内容不足，已保留AI选出的最佳安全片单继续成片"
-            )
-            _analysis_metadata["selection_result"] = SelectionResult.partial_insufficient(
-                _selection_manifest,
-                message=_partial_message,
-                details=_relaxation,
-            ).to_dict()
-            _log(
-                f"AI时长最佳结果: 补片与删片已完成，保留"
-                f"{len(_director_short_fallback_clips)}段/{_relaxed_duration.get('total', 0):.1f}s原片，"
-                f"预计成片{_relaxed_duration.get('projected_final', 0):.1f}s；"
-                f"标准下限{_duration_contract.final_min:.0f}s，"
-                f"本次按内容不足最佳结果输出并在摘要提示"
-            )
-            return _director_short_fallback_clips
         _final_issues = list(_director_last_audit.get("issues") or [])
         _duration_low = float(
             _director_last_audit.get("duration_low")
@@ -7154,14 +7606,14 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         _failure_code = "narrative_rejected"
         if _duration_short and not _fatal_without_duration:
             _failure_code = (
-                "insufficient_content"
-                if _director_safe_candidate_duration + 0.05 < _duration_low
+                "insufficient_safe_material"
+                if _director_safe_candidate_duration + 1e-6 < _duration_low
                 else "ai_duration_contract_failed"
             )
         elif _duration_long:
             _failure_code = "duration_out_of_range"
         _failure_reason = "；".join(_final_issues) or "AI响应未解析出可用片单"
-        _set_last_selection_failure({
+        _failure_payload = {
             "code": _failure_code,
             "reason": _failure_reason,
             "candidate_count": _director_candidate_count,
@@ -7170,7 +7622,20 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             "duration_high": round(_duration_high, 1),
             "target_duration": float(_AI_TARGET_DURATION or 0),
             "safe_candidate_duration": round(_director_safe_candidate_duration, 1),
-        })
+            "safe_projected_final_duration": round(
+                _director_safe_candidate_duration / max(0.001, _duration_contract.speed_factor), 1
+            ),
+            "required_source_duration": round(_duration_contract.source_min, 1),
+        }
+        if _failure_code == "insufficient_safe_material":
+            _record_insufficient_safe_material(
+                candidate_count=_director_candidate_count,
+                safe_candidate_duration=_director_safe_candidate_duration,
+                duration_contract=_duration_contract,
+                reason=_failure_reason,
+            )
+        else:
+            _set_last_selection_failure(_failure_payload)
         _log(
             "AI最终拒绝原因: "
             f"{_failure_reason}（候选{_director_candidate_count}条，"
@@ -7423,6 +7888,7 @@ _HOOK_GENERIC_PREAMBLE_PATTERNS = (
     re.compile(
         r"^(?:(?:\u975e\u5e38)|(?:\u7279\u522b)|\u592a|\u5f88){1,3}(?:\u72e0|\u7edd|\u70b8|\u65e0\u654c|\u597d\u770b|\u597d\u6f02\u4eae|\u725b|\u9876)(?:[\uff0c,\u3002.!\uff01?\uff1f]|$)"
     ),
+    re.compile(r"^(?:很|非常|特别|太)\s*[A-Za-z]{2,16}\s*的?(?:这个|这件|这条|它)"),
     re.compile(r"(?:拖欠|欠你们|等了?(?:很久|好久)|终于(?:来了|到[了啦])|刚到|新品(?:来了|到[了啦])|今天(?:上新|新上))"),
     re.compile(r"^(?:想(?:搭|看).{0,18}|(?:给你|我给你).{0,10}看一眼|(?:这个|这样的).{0,12}就这么搭)"),
     re.compile(r"(?:^|[，。！？?])(?:那)?我(?:明天|今天|等会|一会)?(?:穿啥|穿什么|怎么穿|穿哪件)[啊呀呢吗？?]*$"),
@@ -8100,6 +8566,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _manual_focus_label = _normalize_focus_label(focus_hint)
     if str(_manual_focus_label or "").strip().lower() in {"", "自动", "auto", "默认", "无"}:
         _manual_focus_label = ""
+    # Preferences affect ranking after a Hook is already good. They never form
+    # an exclusive opening contract by themselves.
+    _preference_only_hook_contract = False
     _hook_candidates, _hook_candidate_total = _collect_hook_candidates_from_entries(
         _entries_for_hook,
         hook_keywords=_hook_kw,
@@ -8115,12 +8584,15 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         "requested_focus": _manual_focus_label,
         "candidate_count": int(_hook_candidate_total),
         "preference_candidate_count": len(_preference_hook_candidates),
-        "preference_hook_required": bool(_manual_focus_label and _preference_hook_candidates and not _skip_focus),
+        # A preference is a tie-breaker between strong openings. It must not
+        # hide a clearly stronger general Hook from the director.
+        "preference_hook_required": False,
         "allowed_hook_indices": [],
     }
     _hook_hint = ""
     _allowed_hook_indices = set()
     _required_hook_followups = {}
+    _reviewed_no_hook_contract = False
     if review_hook_pairs:
         _valid_review_pairs = []
         for _pair in review_hook_pairs:
@@ -8150,14 +8622,17 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 if _hook_matches_preference(_pair_text, _manual_focus_label, None):
                     _preferred_review_pairs.append(_item)
         if _preferred_review_pairs:
-            _valid_review_pairs = _preferred_review_pairs
+            _valid_review_pairs = _preferred_review_pairs + [
+                item for item in _valid_review_pairs
+                if item not in _preferred_review_pairs
+            ]
         _allowed_hook_indices = {item[0] for item in _valid_review_pairs}
         _required_hook_followups = {
             hook_id: followup_id
             for hook_id, followup_id, _pair in _valid_review_pairs
         }
         _analysis_metadata_context()["hook_candidate_summary"].update({
-            "preference_hook_required": bool(_preferred_review_pairs),
+            "preference_hook_required": False,
             "preference_review_pair_count": len(_preferred_review_pairs),
             "allowed_hook_indices": sorted(_allowed_hook_indices),
             "ranked_hook_indices": [item[0] for item in _valid_review_pairs],
@@ -8176,38 +8651,25 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         )
         _log(f"AI: 内容审稿提供 {len(_valid_review_pairs)} 组Hook+承接组合")
     elif content_review_hint and review_hook_pairs_checked:
-        # A valid empty semantic review must never reopen the entire reviewed
-        # pool. Use only the short Hook set that already passed hard safety,
-        # boundary, and duration checks; the director still chooses its story.
-        _ranked_review_hook_candidates = sorted(
-            _hook_candidates,
-            key=lambda candidate: (-candidate[3], candidate[0]),
-        )[:12]
-        _allowed_hook_indices = {
-            candidate[0] for candidate in _ranked_review_hook_candidates
-        }
+        # A completed review with no verified pair is meaningful. Do not
+        # reopen a lexical Hook fallback and turn a weaker sentence into an
+        # opening merely to satisfy a template.
+        _reviewed_no_hook_contract = True
         _analysis_metadata_context()["hook_candidate_summary"].update({
             "preference_hook_required": False,
-            "allowed_hook_indices": sorted(_allowed_hook_indices),
-            "ranked_hook_indices": [
-                candidate[0] for candidate in _ranked_review_hook_candidates
-            ],
+            "allowed_hook_indices": [],
+            "ranked_hook_indices": [],
             "reviewed_pool_unrestricted": False,
-            "reviewed_pair_fallback": True,
+            "reviewed_pair_fallback": False,
+            "reviewed_no_hook_contract": True,
         })
-        _candidate_lines = [
-            f'#{candidate[0]:02d}"{candidate[1][:24]}"'
-            for candidate in _ranked_review_hook_candidates
-        ]
         _hook_hint = (
-            "\nCONTENT REVIEW DID NOT VERIFY A HOOK PAIR. "
-            "The Hook may only use one ID from this strict short-list; do not select any other reviewed line as an opening. "
-            "Do not use live interaction, sizing, personal try-on, generic chat, or presentation setup. "
-            "The Hook must independently state a concrete buyer value, and clip two must immediately explain or prove that same value. "
-            + (f"Allowed short Hook IDs: {', '.join(_candidate_lines)}" if _candidate_lines else "")
+            "\nCONTENT REVIEW DID NOT VERIFY A HOOK+FOLLOWUP PAIR. "
+            "Do not output any Hook clip_type in this composition. Start with the strongest complete Product naturally; "
+            "do not invent a Hook from generic chat, sizing, personal try-on, or presentation setup."
         )
         _log(
-            f"AI: content review found no verified Hook pair; strict fallback exposes only {len(_ranked_review_hook_candidates)} safe short Hooks, not the full reviewed pool"
+            "AI: content review found no verified Hook pair; require a natural Product opening instead of a lexical Hook fallback"
         )
     elif content_review_hint:
         _log("AI: content review did not complete Hook verification; using the original Hook contract")
@@ -8226,12 +8688,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         else:
             _ranked_hook_candidates = sorted(_hook_candidates, key=lambda c: (-c[3], c[0]))
         _picked_hook_candidates = _ranked_hook_candidates[:12]
-        if _manual_focus_label and _preference_hook_candidates and not _skip_focus:
-            _allowed_hook_indices = {
-                candidate[0] for candidate in _picked_hook_candidates
-                if candidate[0] in _preference_hook_ids
-            }
-        elif not _skip_focus:
+        if not _skip_focus:
             _allowed_hook_indices = {candidate[0] for candidate in _picked_hook_candidates}
         _analysis_metadata_context()["hook_candidate_summary"]["allowed_hook_indices"] = sorted(
             _allowed_hook_indices
@@ -8246,7 +8703,11 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             f'"{et[:18]}"({dur:.0f}s/{",".join(reasons[:2])})'
             for idx_k, et, dur, _score, reasons in _picked_hook_candidates
         ]
-        if _preference_hook_candidates and _manual_focus_label:
+        if (
+            _preference_hook_candidates
+            and _manual_focus_label
+            and _preference_only_hook_contract
+        ):
             _hook_hint = (
                 f"\n★用户明确指定“{_manual_focus_label}”。已找到{len(_preference_hook_candidates)}个合格偏好Hook，"
                 "Hook的srt_indices只能填写下列[偏好Hook]中的一个编号，禁止从全文其他编号自行挑Hook。"
@@ -8598,7 +9059,12 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             _hook_focus_rule = (
                 "★Hook优先服从内容审稿的强开头与直接承接组合，不得为了差异化选择较弱开头★"
             )
-    elif _manual_focus_label and _preference_hook_candidates and not _skip_focus:
+    elif (
+        _manual_focus_label
+        and _preference_hook_candidates
+        and not _skip_focus
+        and _preference_only_hook_contract
+    ):
         _hook_focus_rule = (
             f"★Hook必须体现用户指定偏好“{_manual_focus_label}”，第二段必须同主题兑现Hook；"
             "强度相近时选择偏好Hook，不得用其他主题的通用强Hook覆盖用户选择★"
@@ -8716,7 +9182,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
 {_hook_hint}
 
 重编规则：
-1. 只有1个Hook且位于首段；第2段必须直接兑现Hook；只有1个Close且位于末段，Close后不能再有Product。
+1. 最多1个Hook；若使用则位于首段，第2段必须直接兑现。没有真正合格Hook时，用最完整的Product自然开场，不得凑一个弱Hook；最多1个Close且位于末段，Close后不能再有Product。
 2. 来源均衡必须服从自然叙事：在效果、证据、场景、顾虑解除等阶段边界切换来源，不得逐句机械轮播，也不得把某个来源集中成连续长段。
 3. 通常选择{_clip_range}个片段，{_total_rule}；逐项相加候选秒数，落在目标范围内。
 4. 每个片段优先1个编号；只有补齐完整语义时可选2-3个连续编号。不得编造、跳号、重叠，不得选择标为不可选的条目。
@@ -8747,7 +9213,7 @@ Hook、第2段、Close的trim_priority必须为0；其他Product从1开始填写
 {_hook_hint}
 
 执行顺序：
-1. 先保留骨架中未被点名的问题项及其相对顺序，Hook仍是第1段，第二段仍直接兑现Hook，Close仍是末段。
+1. 先保留骨架中未被点名的问题项及其相对顺序。已有合格Hook时它仍是第1段且第二段直接兑现；没有合格Hook时保留最完整Product自然开场，Close仍是末段。
 2. 再从下方安全候选中补入或替换完整Product，必须真实达到检查项写明的偏好段数和时长区间。
 3. 输出前逐项相加候选标注的秒数；低于下限继续补，高于上限按trim_priority删低价值Product。
 4. 只使用连续srt_indices，不得编造编号、文本或时间，不得选择标为不可选的条目。
@@ -8769,7 +9235,7 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
 要求:
 1. {_dedup_rule}
 2. 像讲故事一样编排，每个片段自然衔接下一段，听起来是一段流畅的口播
-3. ★你是最终叙事负责人★ clips数组的顺序就是最终成片顺序，后续程序不会替你重排或替换主题；程序只会在低于时长下限时执行你声明的expansion_plan。必须只有1个Hook且位于首段，只有1个Close且位于末段；Close之后绝对不能再有Product。先兑现Hook，再展开效果、证据、场景或顾虑，最后自然收束
+3. ★你是最终叙事负责人★ clips数组的顺序就是最终成片顺序，后续程序不会替你重排或替换主题；程序只会在低于时长下限时执行你声明的expansion_plan。Hook最多1个，若使用必须位于首段；没有真正合格Hook时，直接用最完整、最具体的Product自然开场，绝不凑弱Hook。Close最多1个且位于末段；Close之后绝对不能再有Product。先兑现Hook或自然开场的核心价值，再展开效果、证据、场景或顾虑，最后自然收束
 4. 通常选择{_clip_range}个片段，{_total_rule}。数量不是硬指标；若安全且完整的内容不足，宁可略短也不要用重复、残句或无关内容凑数
 5. ★每个片段优先选1个编号条目；如果只选前一句会导致语义不完整，必须连带后一句，允许选2个连续编号条目；只有补齐完整主谓宾时才允许3个连续条目★ 完整句 > 短句；绝对不要在一句话中间截断
 6. ★片段之间禁止条目编号重叠★ 同一条目只能出现在一个片段中
@@ -8874,7 +9340,10 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
                 srt_entries,
                 _forbidden_indices,
                 require_srt_indices=bool(srt_entries) and not _orig_skip,
-                allowed_hook_indices=_allowed_hook_indices or None,
+                allowed_hook_indices=(
+                    _allowed_hook_indices
+                    if _reviewed_no_hook_contract else (_allowed_hook_indices or None)
+                ),
                 allowed_candidate_indices=_review_allowed_candidate_ids,
                 required_hook_followups=_required_hook_followups or None,
             )
@@ -8884,7 +9353,10 @@ Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填�
             srt_entries,
             _forbidden_indices,
             require_srt_indices=bool(srt_entries) and not _orig_skip,
-            allowed_hook_indices=_allowed_hook_indices or None,
+            allowed_hook_indices=(
+                _allowed_hook_indices
+                if _reviewed_no_hook_contract else (_allowed_hook_indices or None)
+            ),
             allowed_candidate_indices=_review_allowed_candidate_ids,
             required_hook_followups=_required_hook_followups or None,
         )
@@ -9090,10 +9562,12 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
     skipped_missing_indices = 0
     skipped_outside_review = 0
     skipped_invalid_hook = 0
-    allowed_hook_indices = {
-        int(index) for index in (allowed_hook_indices or [])
-        if str(index).strip().isdigit()
-    }
+    allowed_hook_indices_set = (
+        None if allowed_hook_indices is None else {
+            int(index) for index in allowed_hook_indices
+            if str(index).strip().isdigit()
+        }
+    )
     allowed_candidate_indices_set = (
         {int(index) for index in allowed_candidate_indices}
         if allowed_candidate_indices is not None else None
@@ -9137,12 +9611,15 @@ def _parse_ai_response(content, log_fn, srt_entries=None, forbidden_indices=None
             ):
                 skipped_outside_review += 1
                 continue
-            if ct == "hook" and allowed_hook_indices:
+            if ct == "hook" and allowed_hook_indices_set is not None:
                 try:
                     hook_indices = [int(index) for index in srt_idx]
                 except Exception:
                     hook_indices = []
-                if len(hook_indices) != 1 or hook_indices[0] not in allowed_hook_indices:
+                if (
+                    len(hook_indices) != 1
+                    or hook_indices[0] not in allowed_hook_indices_set
+                ):
                     skipped_invalid_hook += 1
                     continue
             # 排序+拆分不连续索引为多个clip
@@ -11550,7 +12027,7 @@ _WORD_EDGE_PREFIXES = (
     "你们知道的",
     "来准备好啊准备好", "来准备好啊", "来准备好", "准备好啊", "准备好",
     "然后", "而且", "但是", "不过", "因为", "没错", "是的", "好的", "好吧", "其实", "就是", "所以",
-    "是因为", "对吧", "是吧", "嗯嗯", "嗯", "呃", "啊",
+    "是因为", "对不对", "是不是", "对吧", "是吧", "嗯嗯", "嗯", "呃", "啊",
 )
 _WORD_EDGE_SUFFIXES = (
     "反正就是不显白怎么说呢", "是不是这种感觉", "是的为什么", "呀对不对", "能理解吗",
