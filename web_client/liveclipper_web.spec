@@ -173,6 +173,7 @@ def _app_datas():
 
 def _tool_datas():
     names = [
+        "local_asr_worker.py",
         "douyin_active_product_probe_poc.py",
         "douyin_chrome_live_poc.py",
     ]

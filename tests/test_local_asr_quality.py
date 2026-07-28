@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import inspect
 import json
 import os
@@ -267,18 +268,8 @@ class LocalAsrQualityTests(unittest.TestCase):
         self.assertIn("_copy_srt_with_word_timing_sidecar(_temp, _sc)", source)
         self.assertNotIn("shutil.copy2(_temp, _sc)", source)
 
-    def test_shared_audio_transcriber_uses_sensevoice_only(self) -> None:
-        calls = []
-
-        def fake_sensevoice(audio_path, srt_output, log_fn=None):
-            calls.append((audio_path, srt_output))
-            return True
-
-        fake_local_asr = types.SimpleNamespace(
-            LocalASRUnavailable=local_asr.LocalASRUnavailable,
-            sensevoice_to_srt=fake_sensevoice,
-        )
-        with mock.patch.dict(sys.modules, {"local_asr": fake_local_asr}):
+    def test_shared_audio_transcriber_uses_isolated_sensevoice_worker(self) -> None:
+        with mock.patch.object(stt, "_run_local_asr_worker", return_value=True) as worker:
             recognized = stt.transcribe_local_audio_to_srt(
                 "final.wav",
                 "final.srt",
@@ -286,23 +277,129 @@ class LocalAsrQualityTests(unittest.TestCase):
             )
 
         self.assertTrue(recognized)
-        self.assertEqual(calls, [("final.wav", "final.srt")])
+        worker.assert_called_once_with("final.wav", "final.srt", log_fn=None)
 
     def test_shared_audio_transcriber_returns_failure_without_an_engine_fallback(self) -> None:
         logs = []
-
-        def fail_sensevoice(*_args, **_kwargs):
-            raise local_asr.LocalASRUnavailable("runtime missing")
-
-        fake_local_asr = types.SimpleNamespace(
-            LocalASRUnavailable=local_asr.LocalASRUnavailable,
-            sensevoice_to_srt=fail_sensevoice,
-        )
-        with mock.patch.dict(sys.modules, {"local_asr": fake_local_asr}):
+        with mock.patch.object(stt, "_run_local_asr_worker", return_value=False):
             recognized = stt.transcribe_local_audio_to_srt("final.wav", "final.srt", logs.append)
 
         self.assertFalse(recognized)
-        self.assertTrue(any("SenseVoice 本地识别不可用" in message for message in logs))
+
+    def test_source_worker_streams_logs_and_keeps_word_timing_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_script = root / "fake_local_asr_worker.py"
+            output_srt = root / "result.srt"
+            worker_script.write_text(
+                "\n".join((
+                    "import json, sys",
+                    "from pathlib import Path",
+                    "target = Path(sys.argv[2])",
+                    "target.write_text('1\\n00:00:00,000 --> 00:00:01,000\\n测试\\n', encoding='utf-8')",
+                    "target.with_suffix('.words.json').write_text(json.dumps({'provider': 'sensevoice'}), encoding='utf-8')",
+                    "print('internal progress 100%', flush=True)",
+                    "print(json.dumps({'type': 'log', 'message': 'worker log'}), flush=True)",
+                    "print(json.dumps({'type': 'result', 'ok': True}), flush=True)",
+                )),
+                encoding="utf-8",
+            )
+            logs = []
+            with mock.patch.dict(
+                os.environ,
+                {"LIVECLIPPER_LOCAL_ASR_WORKER": str(worker_script)},
+                clear=False,
+            ):
+                recognized = stt.transcribe_local_audio_to_srt(
+                    "fake.wav",
+                    str(output_srt),
+                    logs.append,
+                )
+
+            self.assertTrue(recognized)
+            self.assertTrue(output_srt.is_file())
+            self.assertTrue(output_srt.with_suffix(".words.json").is_file())
+            self.assertTrue(any("worker log" in message for message in logs))
+            self.assertFalse(any("internal progress" in message for message in logs))
+            self.assertTrue(any("模型内存已释放" in message for message in logs))
+
+    def test_failed_worker_removes_stale_srt_and_word_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_script = root / "failed_local_asr_worker.py"
+            output_srt = root / "stale.srt"
+            output_srt.write_text("stale", encoding="utf-8")
+            output_srt.with_suffix(".words.json").write_text("{}", encoding="utf-8")
+            worker_script.write_text(
+                "import json\n"
+                "print(json.dumps({'type': 'result', 'ok': False}), flush=True)\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"LIVECLIPPER_LOCAL_ASR_WORKER": str(worker_script)},
+                clear=False,
+            ):
+                recognized = stt.transcribe_local_audio_to_srt("fake.wav", str(output_srt))
+
+            self.assertFalse(recognized)
+            self.assertFalse(output_srt.exists())
+            self.assertFalse(output_srt.with_suffix(".words.json").exists())
+
+    def test_worker_timeout_terminates_process_and_reports_memory_release(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO("")
+                self.killed = False
+
+            def poll(self):
+                return 1 if self.killed else None
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def wait(self, timeout=None):
+                return 1
+
+        process = FakeProcess()
+        logs = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_srt = Path(temp_dir) / "timeout.srt"
+            with (
+                mock.patch.object(stt, "_local_asr_worker_script", return_value=Path("worker.py")),
+                mock.patch.object(stt, "_local_asr_worker_command", return_value=["worker"]),
+                mock.patch.object(stt.subprocess, "Popen", return_value=process),
+                mock.patch.object(stt.time, "monotonic", side_effect=[0.0, 61.0]),
+                mock.patch.dict(os.environ, {"LIVECLIPPER_LOCAL_ASR_TIMEOUT_SECONDS": "60"}, clear=False),
+            ):
+                recognized = stt.transcribe_local_audio_to_srt(
+                    "fake.wav",
+                    str(output_srt),
+                    logs.append,
+                )
+
+        self.assertFalse(recognized)
+        self.assertTrue(process.killed)
+        self.assertTrue(any("识别超时" in message for message in logs))
+        self.assertTrue(any("模型内存已释放" in message for message in logs))
+
+    def test_frozen_worker_command_reenters_desktop_tool_runner(self) -> None:
+        worker = Path("C:/bundle/tools/local_asr_worker.py")
+        with mock.patch.object(stt.sys, "frozen", True, create=True):
+            with mock.patch.object(stt.sys, "executable", "C:/LiveClipper/LiveClipperWeb.exe"):
+                command = stt._local_asr_worker_command(worker, "audio.wav", "result.srt")
+
+        self.assertEqual(command[0], "C:/LiveClipper/LiveClipperWeb.exe")
+        self.assertEqual(command[1], "--liveclipper-run-tool")
+        self.assertEqual(command[2], str(worker))
+
+    def test_desktop_package_includes_local_asr_worker_script(self) -> None:
+        spec_source = (ROOT / "web_client" / "liveclipper_web.spec").read_text(encoding="utf-8")
+        manifest_source = (ROOT / "tools" / "build_update_manifest.py").read_text(encoding="utf-8")
+
+        self.assertIn('"local_asr_worker.py"', spec_source)
+        self.assertIn('WEB_DIR / "tools" / "local_asr_worker.py"', manifest_source)
 
     def test_final_subtitle_stage_uses_shared_local_asr_and_word_timing(self) -> None:
         semantic = [{"start": 1.2, "end": 2.8, "text": "亚麻肤感很舒服", "words": []}]
