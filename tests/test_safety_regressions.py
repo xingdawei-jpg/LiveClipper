@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "app"
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+WEB_ROOT = ROOT / "web_client"
+if str(WEB_ROOT) not in sys.path:
+    sys.path.insert(0, str(WEB_ROOT))
 
 
 def _function_node(path: Path, name: str) -> ast.FunctionDef:
@@ -27,6 +31,57 @@ def _function_node(path: Path, name: str) -> ast.FunctionDef:
 
 
 class SafetyRegressionTests(unittest.TestCase):
+    def test_single_task_stop_terminates_its_registered_media_processes(self) -> None:
+        server = importlib.import_module("server")
+        cutter_logic = importlib.import_module("cutter_logic")
+        original_tasks = server._TASKS
+        original_events = server._TASK_CANCEL_EVENTS
+        original_cancelled = server._CANCELLED_TASKS
+        try:
+            event = threading.Event()
+            server._TASKS = {
+                "task-one": {"id": "task-one", "scope": "smart-cut", "status": "running"}
+            }
+            server._TASK_CANCEL_EVENTS = {"task-one": event}
+            server._CANCELLED_TASKS = set()
+            with mock.patch.object(cutter_logic, "cancel_active_processes", return_value=1) as cancel:
+                stopped = server._cancel_task("task-one")
+            self.assertEqual(stopped, 1)
+            self.assertTrue(event.is_set())
+            cancel.assert_called_once_with(event)
+            self.assertEqual(server._TASKS["task-one"]["status"], "cancelled")
+        finally:
+            server._TASKS = original_tasks
+            server._TASK_CANCEL_EVENTS = original_events
+            server._CANCELLED_TASKS = original_cancelled
+
+    def test_local_asr_entrypoint_forwards_cancel_event(self) -> None:
+        stt = importlib.import_module("stt")
+        event = threading.Event()
+        with mock.patch.object(stt, "_run_local_asr_worker", return_value=False) as worker:
+            result = stt.transcribe_local_audio_to_srt(
+                "audio.wav",
+                "output.srt",
+                cancel_event=event,
+            )
+        self.assertFalse(result)
+        self.assertIs(worker.call_args.kwargs["cancel_event"], event)
+
+    def test_cta_roles_are_always_removed_without_missing_cta_warning(self) -> None:
+        ai_clipper = importlib.import_module("ai_clipper")
+        logs: list[str] = []
+        clips = [
+            ("product", "肩线利落，日常穿很显精神。", 0.0, 5.0, 50, 5.0),
+            ("call_to_action", "喜欢的姐妹直接拍下上链接。", 5.0, 8.0, 50, 3.0),
+            ("close", "这一身通勤穿很耐看。", 8.0, 11.0, 50, 3.0),
+        ]
+
+        filtered = ai_clipper._validate_cta(clips, logs.append)
+
+        self.assertEqual([clip[0] for clip in filtered], ["product", "close"])
+        self.assertTrue(any("CTA角色硬移除" in item for item in logs))
+        self.assertFalse(any("缺乏CTA力度" in item for item in logs))
+
     def test_smart_crop_imports_when_opencv_is_unavailable(self) -> None:
         path = ROOT / "app" / "smart_crop.py"
         module_name = "liveclipper_test_smart_crop_without_cv2"
@@ -138,6 +193,15 @@ class SafetyRegressionTests(unittest.TestCase):
                 created = Path(cutter_logic._create_processing_temp_dir("lc_test_"))
             self.assertEqual(created.parent, Path(temp) / "cache" / "processing")
             self.assertTrue(created.is_dir())
+
+    def test_run_logs_follow_user_data_location(self) -> None:
+        cutter_logic = importlib.import_module("cutter_logic")
+        config = importlib.import_module("config")
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(config, "USER_DATA_DIR", temp):
+                log_dir = Path(cutter_logic._run_log_directory())
+        self.assertEqual(log_dir, Path(temp) / "logs" / "runs")
+        self.assertNotEqual(log_dir.parent.parent, APP_ROOT)
 
     def test_ffmpeg_command_keeps_system_path_fallback(self) -> None:
         get_ffmpeg_cmd = _function_node(ROOT / "app" / "cutter_logic.py", "get_ffmpeg_cmd")

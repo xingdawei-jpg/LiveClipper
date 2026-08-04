@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import sys
 import tempfile
 import time
@@ -106,6 +107,14 @@ class DesktopMediaImportTests(unittest.TestCase):
                 self.render_handle = None
                 self.drop_callback = None
                 self.diagnostic_callback = None
+                self.registration = None
+
+            class Registration:
+                def __init__(self) -> None:
+                    self.disposed = False
+
+                def Dispose(self) -> None:
+                    self.disposed = True
 
             @staticmethod
             def FindRenderWidgetHost(_control_handle):
@@ -120,7 +129,8 @@ class DesktopMediaImportTests(unittest.TestCase):
                 self.render_handle = render_handle
                 self.drop_callback = drop_callback
                 self.diagnostic_callback = diagnostic_callback
-                return object()
+                self.registration = self.Registration()
+                return self.registration
 
         window = FakeWindow()
         bridge = FakeBridge()
@@ -155,6 +165,10 @@ class DesktopMediaImportTests(unittest.TestCase):
         self.assertTrue(any("native OLE hook ready" in item[1] for item in logs))
         self.assertTrue(any("native OLE DragEnter" in item[1] for item in logs))
         self.assertTrue(any("native OLE callback" in item[1] for item in logs))
+        self.assertFalse(bridge.registration.disposed)
+        desktop._dispose_native_file_drop_support(window, lambda *args: logs.append(args))
+        self.assertTrue(bridge.registration.disposed)
+        self.assertFalse(hasattr(window, "_liveclipper_native_file_drop_handlers"))
 
         desktop_source = (ROOT / "web_client" / "desktop.py").read_text(encoding="utf-8")
         bridge_source = (ROOT / "web_client" / "native_file_drop_bridge.cs").read_text(encoding="utf-8")
@@ -166,6 +180,101 @@ class DesktopMediaImportTests(unittest.TestCase):
         self.assertNotIn("DOMEventHandler", desktop_source)
         self.assertNotIn("pywebviewFullPath", desktop_source)
         self.assertNotIn("js_api=", desktop_source)
+
+    def test_close_without_running_tasks_releases_native_bridge(self) -> None:
+        class Event:
+            callback = None
+
+            def __iadd__(self, callback):
+                self.callback = callback
+                return self
+
+        window = type("Window", (), {"events": type("Events", (), {"closing": Event()})()})()
+        with mock.patch.object(desktop, "_running_tasks", return_value=[]), mock.patch.object(
+            desktop, "_dispose_native_file_drop_support"
+        ) as dispose, mock.patch.object(desktop, "_schedule_forced_process_exit") as watchdog:
+            desktop._protect_running_tasks_on_close(window, 8765, mock.Mock())
+            self.assertIsNone(window.events.closing.callback())
+        dispose.assert_called_once_with(window, mock.ANY)
+        watchdog.assert_called_once_with()
+
+    def test_close_with_running_task_can_be_cancelled(self) -> None:
+        class Event:
+            callback = None
+
+            def __iadd__(self, callback):
+                self.callback = callback
+                return self
+
+        window = type("Window", (), {"events": type("Events", (), {"closing": Event()})()})()
+        tasks = [{"id": "smart-1", "scope": "smart-cut", "status": "running"}]
+        with mock.patch.object(desktop, "_running_tasks", return_value=tasks), mock.patch.object(
+            desktop, "_confirm_close_with_running_tasks", return_value=False
+        ), mock.patch.object(desktop, "_stop_running_tasks") as stop, mock.patch.object(
+            desktop, "_dispose_native_file_drop_support"
+        ) as dispose, mock.patch.object(desktop, "_schedule_forced_process_exit") as watchdog:
+            desktop._protect_running_tasks_on_close(window, 8765, mock.Mock())
+            self.assertFalse(window.events.closing.callback())
+        stop.assert_not_called()
+        dispose.assert_not_called()
+        watchdog.assert_not_called()
+
+    def test_confirmed_close_stops_tasks_releases_bridge_and_arms_watchdog(self) -> None:
+        class Event:
+            callback = None
+
+            def __iadd__(self, callback):
+                self.callback = callback
+                return self
+
+        window = type("Window", (), {"events": type("Events", (), {"closing": Event()})()})()
+        tasks = [{"id": "mix-1", "scope": "mix", "status": "running"}]
+        emit_log = mock.Mock()
+        with mock.patch.object(desktop, "_running_tasks", return_value=tasks), mock.patch.object(
+            desktop, "_confirm_close_with_running_tasks", return_value=True
+        ), mock.patch.object(desktop, "_stop_running_tasks", return_value=1) as stop, mock.patch.object(
+            desktop, "_dispose_native_file_drop_support"
+        ) as dispose, mock.patch.object(desktop, "_schedule_forced_process_exit") as watchdog:
+            desktop._protect_running_tasks_on_close(window, 8765, emit_log)
+            self.assertIsNone(window.events.closing.callback())
+        stop.assert_called_once_with(8765, tasks, emit_log)
+        dispose.assert_called_once_with(window, emit_log)
+        watchdog.assert_called_once_with()
+
+    def test_stop_running_tasks_deduplicates_scopes_and_stops_unscoped_tasks(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"ok": true, "stopped": 1}'
+
+        requests = []
+
+        def fake_urlopen(request, timeout):
+            requests.append((request.full_url, json.loads(request.data.decode("utf-8")), timeout))
+            return Response()
+
+        tasks = [
+            {"id": "smart-1", "scope": "smart-cut", "status": "running"},
+            {"id": "smart-2", "scope": "smart-cut", "status": "queued"},
+            {"id": "legacy-1", "scope": "", "status": "running"},
+        ]
+        with mock.patch.object(desktop.urllib.request, "urlopen", side_effect=fake_urlopen):
+            stopped = desktop._stop_running_tasks(8765, tasks, mock.Mock())
+
+        self.assertEqual(stopped, 2)
+        self.assertEqual(
+            requests,
+            [
+                ("http://127.0.0.1:8765/api/tasks/stop-scope", {"scope": "smart-cut"}, 1.5),
+                ("http://127.0.0.1:8765/api/tasks/stop", {"task_id": "legacy-1"}, 1.5),
+            ],
+        )
 
     def test_frontend_keeps_upload_cache_out_of_desktop_drop_branch(self) -> None:
         source = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")

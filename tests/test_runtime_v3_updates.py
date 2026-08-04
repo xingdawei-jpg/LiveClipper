@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -876,18 +877,36 @@ class RuntimeV3UpdateTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch.dict(
-                os.environ,
-                {"LOCALAPPDATA": str(install_root / "local-data")},
-                clear=False,
-            ):
-                result = liveclipper_launcher.run(install_root, health_timeout=1.0)
+            launched_processes = []
+            real_launch = liveclipper_launcher._launch
+
+            def tracked_launch(*args, **kwargs):
+                process = real_launch(*args, **kwargs)
+                launched_processes.append(process)
+                return process
+
+            try:
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"LOCALAPPDATA": str(install_root / "local-data")},
+                        clear=False,
+                    ),
+                    patch.object(liveclipper_launcher, "_launch", side_effect=tracked_launch),
+                ):
+                    result = liveclipper_launcher.run(install_root, health_timeout=1.0)
+            finally:
+                for process in launched_processes:
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        process.wait(timeout=5)
             state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
             self.assertEqual(result, 2)
             self.assertEqual(state["current_version"], "2026.7.13.10")
             self.assertEqual(state["failed_version"], "2026.7.13.11")
             self.assertFalse(state["pending"])
-            time.sleep(0.5)
 
 
     def test_embedded_patch_takes_priority_over_adjacent_archives(self) -> None:

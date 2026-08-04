@@ -12,6 +12,7 @@ Smart Crop 智能裁切模块 v7
 import os
 import random
 import logging
+import shutil
 
 _LOG = logging.getLogger("liveclipper.smart_crop")
 _WARNED_FALLBACKS = set()
@@ -37,13 +38,85 @@ _HOG = None
 
 # Haar 级联检测器缓存
 _CASCADES = {}
+_CASCADE_CACHE_ROOT = None
+
+
+def _is_ascii_path(path):
+    try:
+        os.fspath(path).encode("ascii")
+        return True
+    except (TypeError, UnicodeEncodeError):
+        return False
+
+
+def _cascade_cache_root():
+    """Return a writable ASCII-only directory for OpenCV XML assets."""
+    global _CASCADE_CACHE_ROOT
+    if _CASCADE_CACHE_ROOT:
+        return _CASCADE_CACHE_ROOT
+
+    candidates = []
+    public_dir = os.environ.get("PUBLIC")
+    if public_dir:
+        candidates.append(os.path.join(public_dir, "Documents", "LiveClipper", "runtime-assets"))
+    program_data = os.environ.get("ProgramData")
+    if program_data:
+        candidates.append(os.path.join(program_data, "LiveClipper", "runtime-assets"))
+
+    for candidate in candidates:
+        if not _is_ascii_path(candidate):
+            continue
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            _CASCADE_CACHE_ROOT = candidate
+            return candidate
+        except OSError:
+            continue
+    return ""
+
+
+def _cascade_load_path(source_path, name):
+    """OpenCV 4.13 on Windows cannot load cascade XML from Unicode paths."""
+    if _is_ascii_path(source_path):
+        return source_path
+
+    cache_root = _cascade_cache_root()
+    if not cache_root:
+        _warn_once("Smart Crop cannot create an ASCII cascade cache; Haar fallback unavailable")
+        return source_path
+
+    cached_path = os.path.join(cache_root, name)
+    try:
+        if (
+            not os.path.exists(cached_path)
+            or os.path.getsize(cached_path) != os.path.getsize(source_path)
+        ):
+            shutil.copy2(source_path, cached_path)
+        return cached_path
+    except OSError:
+        _warn_once("Smart Crop failed to stage Haar cascades in the ASCII cache")
+        return source_path
 
 # 裁切程度配置
 CROP_LEVELS = {
-    'light':  {'max_zoom': 1.05, 'min_zoom': 1.02, 'keep_body': 0.94, 'head_pos': 0.055, 'label': '轻'},
-    'medium': {'max_zoom': 1.12, 'min_zoom': 1.055, 'keep_body': 0.88, 'head_pos': 0.070, 'label': '中'},
-    'heavy':  {'max_zoom': 1.25, 'min_zoom': 1.08, 'keep_body': 0.82, 'head_pos': 0.085, 'label': '重'},
+    'light':  {'max_zoom': 1.05, 'min_zoom': 1.02, 'label': '轻'},
+    'medium': {'max_zoom': 1.12, 'min_zoom': 1.055, 'label': '中'},
+    'heavy':  {'max_zoom': 1.25, 'min_zoom': 1.08, 'label': '重'},
 }
+
+# Detection boxes often start at the forehead or inside the hairline. Reserve
+# additional space before treating a detector box as the real top of the head.
+_HEAD_PAD_BY_DETECTOR = {
+    'body': (0.035, 0.080, 0.10),
+    'upper': (0.035, 0.080, 0.10),
+    'face_expanded': (0.030, 0.055, 0.12),
+    'skin': (0.040, 0.100, 0.20),
+}
+
+# Keep a visible strip above the estimated crown. This is deliberately larger
+# than the Ken Burns edge guard because detector boxes can begin at the
+# forehead/hairline rather than at the true top of the hair.
+HEADROOM_RATIO = 0.065
 
 
 def _get_hog():
@@ -66,14 +139,14 @@ def _get_cascade(name):
     _app_dir = os.path.dirname(os.path.abspath(__file__))
     _app_path = os.path.join(_app_dir, name)
     if os.path.exists(_app_path):
-        cascade = cv2.CascadeClassifier(_app_path)
+        cascade = cv2.CascadeClassifier(_cascade_load_path(_app_path, name))
         if not cascade.empty():
             _CASCADES[name] = cascade
             return cascade
     # Priority 2: cv2.data.haarcascades (system OpenCV installation)
     _cv2_path = os.path.join(cv2.data.haarcascades, name)
     if os.path.exists(_cv2_path):
-        cascade = cv2.CascadeClassifier(_cv2_path)
+        cascade = cv2.CascadeClassifier(_cascade_load_path(_cv2_path, name))
         if not cascade.empty():
             _CASCADES[name] = cascade
             return cascade
@@ -103,7 +176,12 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
             )
             if len(regions) > 0:
                 for idx, (x, y, rw, rh) in enumerate(regions):
-                    wt = float(weights[idx][0]) if idx < len(weights) else 0.0
+                    if idx < len(weights):
+                        # OpenCV returns either ``[[weight], ...]`` or scalar
+                        # weights depending on the build/version.
+                        wt = float(np.asarray(weights[idx]).reshape(-1)[0])
+                    else:
+                        wt = 0.0
                     if wt > conf_threshold:
                         all_detections.append((
                             int(x / scale), int(y / scale),
@@ -171,6 +249,32 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
         _warn_once("Smart Crop skin detection failed; falling back")
 
     return all_detections
+
+
+def _estimated_head_top_ratio(detection, frame_h):
+    """Convert a detector box top into a conservative crown position."""
+    if not detection or frame_h <= 0:
+        return 0.0
+    raw_top = max(0.0, float(detection[1]) / float(frame_h))
+    box_h = max(0.0, float(detection[3]) / float(frame_h))
+    detector_kind = detection[5] if len(detection) > 5 else 'body'
+    min_pad, max_pad, size_factor = _HEAD_PAD_BY_DETECTOR.get(
+        detector_kind, _HEAD_PAD_BY_DETECTOR['body']
+    )
+    head_pad = max(min_pad, min(max_pad, box_h * size_factor))
+    return max(0.0, raw_top - head_pad)
+
+
+def _supported_extreme(values, prefer_low):
+    """Ignore one isolated frame outlier but keep a repeated edge observation."""
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    if len(ordered) < 3:
+        return ordered[0] if prefer_low else ordered[-1]
+    return ordered[1] if prefer_low else ordered[-2]
+
+
 def prepare_face_detector(app_dir=None, log_fn=None):
     """初始化检测器（兼容旧接口）"""
     if not _CV2_AVAILABLE:
@@ -178,12 +282,19 @@ def prepare_face_detector(app_dir=None, log_fn=None):
             log_fn("SmartCrop: 需要完整安装包（当前为增量更新，使用标准裁切）")
         return False
 
-    # 预加载 HOG
-    _get_hog()
+    # 预加载所有层级，尽早暴露打包或路径问题。
+    hog = _get_hog()
+    upper = _get_cascade('haarcascade_upperbody.xml')
+    face = _get_cascade('haarcascade_frontalface_default.xml')
 
     if log_fn:
-        log_fn("SmartCrop: 检测器就绪（HOG人体+Haar级联）")
-    return True
+        log_fn(
+            "SmartCrop: 检测器就绪 "
+            f"(HOG={'ok' if hog is not None else 'unavailable'}, "
+            f"upper={'ok' if upper is not None else 'unavailable'}, "
+            f"face={'ok' if face is not None else 'unavailable'})"
+        )
+    return any(detector is not None for detector in (hog, upper, face))
 
 
 def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=0, frame_h=0):
@@ -211,11 +322,7 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
         end = clip[3]
         duration = end - start
 
-        sample_times = [
-            start + duration * 0.2,
-            start + duration * 0.5,
-            start + duration * 0.8,
-        ]
+        sample_times = [start + duration * ratio for ratio in (0.05, 0.25, 0.5, 0.75, 0.95)]
 
         person_xs = []
         person_ys = []
@@ -240,18 +347,19 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             if frame is None:
                 continue
 
+            detected_h, detected_w = frame.shape[:2]
             detections = _detect_persons(frame, _log_fn=log_fn)
             if detections:
                 best = max(detections, key=lambda d: d[2] * d[3])
-                cx = (best[0] + best[2] / 2) / frame_w
-                cy = (best[1] + best[3] / 2) / frame_h
+                cx = (best[0] + best[2] / 2) / detected_w
+                cy = (best[1] + best[3] / 2) / detected_h
                 person_xs.append(cx)
                 person_ys.append(cy)
-                person_sizes.append(max(best[2], best[3]) / max(frame_w, frame_h))
-                person_ws.append(best[2] / frame_w)
-                person_hs.append(best[3] / frame_h)
-                person_bottoms.append((best[1] + best[3]) / frame_h)
-                head_tops.append(best[1] / frame_h)
+                person_sizes.append(max(best[2], best[3]) / max(detected_w, detected_h))
+                person_ws.append(best[2] / detected_w)
+                person_hs.append(best[3] / detected_h)
+                person_bottoms.append(min(1.0, (best[1] + best[3]) / detected_h))
+                head_tops.append(_estimated_head_top_ratio(best, detected_h))
 
         if person_xs:
             cx = sorted(person_xs)[len(person_xs) // 2]
@@ -259,8 +367,14 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             avg_size = sum(person_sizes) / len(person_sizes)
             avg_w = sum(person_ws) / len(person_ws) if person_ws else 0
             avg_h = sum(person_hs) / len(person_hs) if person_hs else avg_size
-            avg_bottom = sum(person_bottoms) / len(person_bottoms) if person_bottoms else min(1.0, cy + avg_h / 2)
-            min_head_top = min(head_tops)
+            # A single false detector box must not disable crop and zoom for an
+            # entire clip. Two sampled edge observations still remain a hard
+            # protection boundary for the hair and body.
+            protected_bottom = (
+                _supported_extreme(person_bottoms, prefer_low=False)
+                if person_bottoms else min(1.0, cy + avg_h / 2)
+            )
+            min_head_top = _supported_extreme(head_tops, prefer_low=True)
 
             results[i] = {
                 'person_cx_ratio': cx,
@@ -268,7 +382,7 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
                 'person_size_ratio': avg_size,
                 'person_w_ratio': avg_w,
                 'person_h_ratio': avg_h,
-                'person_bottom_ratio': avg_bottom,
+                'person_bottom_ratio': protected_bottom,
                 'head_top_ratio': min_head_top,
                 'frame_w': frame_w,
                 'frame_h': frame_h,
@@ -331,28 +445,21 @@ def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_f
     level_cfg = CROP_LEVELS.get(crop_level, CROP_LEVELS['medium'])
     max_zoom = level_cfg['max_zoom']
     min_zoom = level_cfg.get('min_zoom', 1.03)
-    keep_body = level_cfg.get('keep_body', 0.88)
-    target_head_pos = level_cfg.get('head_pos', 0.07)
 
     if person_info is None:
         return _random_crop(max_zoom)
 
     cx = person_info['person_cx_ratio']
-    person_size = person_info.get('person_size_ratio', 0)
-    person_h = person_info.get('person_h_ratio', person_size)
-    person_bottom = person_info.get(
-        'person_bottom_ratio',
-        min(1.0, person_info.get('person_cy_ratio', 0.5) + person_h / 2),
-    )
     head_top = person_info.get('head_top_ratio', 0.1)
+    person_bottom = person_info.get('person_bottom_ratio', 1.0)
 
-    # 封面构图：优先保护头部，同时保留大部分身体，不再强制底部完全不裁。
-    head_margin = 0.035
-    body_margin = 0.025
-    safe_top = max(0.0, head_top - head_margin)
-    protected_bottom = min(1.0, min(person_bottom, head_top + person_h * keep_body) + body_margin)
-    protected_h = max(0.35, protected_bottom - safe_top)
-    safe_max_zoom = max(1.0, min(1.0 / protected_h, 2.0))
+    # 底部是硬约束；头部空间不足时降低 zoom，而不是向上移动裁切框。
+    head_margin = HEADROOM_RATIO
+    # ``0.0`` is a valid detector result: the estimated crown already touches
+    # the source top edge.  Treating it as missing data permits a bottom-locked
+    # zoom to cut directly through the forehead.
+    max_crop_top = max(0.0, head_top - head_margin)
+    safe_max_zoom = max(1.0, min(1.0 / max(1e-6, 1.0 - max_crop_top), 2.0))
 
     actual_max_zoom = min(max_zoom, safe_max_zoom)
 
@@ -372,16 +479,12 @@ def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_f
     crop_x = cx - crop_w / 2 + random.uniform(-0.015, 0.015)
     crop_x = max(0, min(crop_x, 1.0 - crop_w))
 
-    crop_y = head_top - (target_head_pos * crop_h)
-
-    if head_top > 0:
-        crop_y = min(crop_y, max(0.0, head_top - head_margin))
-    crop_y = max(0, min(crop_y, 1.0 - crop_h))
+    crop_y = max(0.0, 1.0 - crop_h)
 
     if log_fn:
         log_fn(
-            "SmartCrop: cover zoom=%.2fx (safe=%.2fx, level=%s, head=%.2f, body=%.2f, y=%.2f)"
-            % (zoom, safe_max_zoom, crop_level, head_top, person_h, crop_y)
+            "SmartCrop: bottom-locked zoom=%.2fx (safe=%.2fx, level=%s, head=%.2f, y=%.2f)"
+            % (zoom, safe_max_zoom, crop_level, head_top, crop_y)
         )
 
     return {
@@ -390,24 +493,25 @@ def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_f
         'crop_x': crop_x,
         'crop_y': crop_y,
         'method': 'smart',
+        # Preserve the sampled subject envelope for the later Ken Burns pass.
+        'subject_head_top_ratio': max(0.0, min(float(head_top), 1.0)),
+        'subject_bottom_ratio': max(0.0, min(float(person_bottom), 1.0)),
     }
 
 
 def _random_crop(max_zoom=1.08):
-    """无人检测时的随机裁切（保守，不裁头）"""
-    upper = min(0.04, max_zoom - 1.0)
-    if upper <= 0:
-        upper = 0.01
-    zoom = 1.0 + random.uniform(0.0, upper)
-    crop_w = 1.0 / zoom
-    crop_h = 1.0 / zoom
-    crop_x = random.uniform(0, 1.0 - crop_w)
-    crop_y = 1.0 - crop_h  # 底部不裁切
+    """无人检测时保留完整画面，避免把未识别到的人物头部裁掉。"""
+    zoom = 1.0
+    crop_w = 1.0
+    crop_h = 1.0
+    crop_x = 0.0
+    crop_y = 0.0
     return {
         'crop_w': crop_w,
         'crop_h': crop_h,
         'crop_x': crop_x,
         'crop_y': crop_y,
+        'zoom': zoom,
         'method': 'random',
     }
 
@@ -432,7 +536,7 @@ def _ken_burns_motion(intensity=None, max_zoom_delta=None):
         target_zoom = random.uniform(0.08, 0.25)
     if max_zoom_delta is not None:
         try:
-            cap = max(0.02, float(max_zoom_delta))
+            cap = max(0.0, float(max_zoom_delta))
             target_zoom = min(target_zoom, cap)
         except Exception:
             _warn_once("Smart Crop ignored an invalid Ken Burns zoom limit")
@@ -465,7 +569,7 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None, intensi
         cap_text = ""
         if max_zoom_delta is not None:
             try:
-                cap_text = ", 画质上限 %.0f%%" % (float(max_zoom_delta) * 100)
+                cap_text = ", 安全上限 %.0f%%" % (float(max_zoom_delta) * 100)
             except Exception:
                 cap_text = ""
         log_fn("KenBurns: %s %.0f%% (%d frames @ %.0ffps%s, FFmpeg)" % (label, target_zoom * 100, total_frames, target_fps, cap_text))

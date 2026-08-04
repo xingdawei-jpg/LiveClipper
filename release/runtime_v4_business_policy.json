@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "policy_id": "liveclipper-business-v1",
+  "compatible_core_versions": [
+    "4.0.0"
+  ],
+  "entrypoint": {
+    "path": "bundle_entry.py",
+    "callable": "create_application"
+  },
+  "import_roots": [
+    "app",
+    "web_client"
+  ],
+  "include": [
+    "bundle_entry.py",
+    "app/*.py",
+    "app/**/*.py",
+    "app/*.json",
+    "app/**/*.json",
+    "web_client/server.py",
+    "web_client/tools/*.py",
+    "web_client/tools/**/*.py",
+    "web_client/frontend/*.html",
+    "web_client/frontend/**/*.html",
+    "web_client/frontend/*.js",
+    "web_client/frontend/**/*.js",
+    "web_client/frontend/*.css",
+    "web_client/frontend/**/*.css",
+    "web_client/frontend/*.ico",
+    "web_client/frontend/**/*.ico"
+  ],
+  "exclude": [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "app/logs/**",
+    "app/feedback/**",
+    "app/dist/**",
+    "app/build/**",
+    "app/_*.py",
+    "app/*_BACKUP.py",
+    "app/**/*_BACKUP.py",
+    "app/clip_tuple_check.py",
+    "app/feishu_scheduler.py",
+    "app/gui_clean.py",
+    "app/gui_fresh.py",
+    "app/gui_tmp.py",
+    "app/license_feishu_backend.py",
+    "app/license_generator.py",
+    "app/license_server.py",
+    "app/license_stats_store.py",
+    "app/verify.py",
+    "app/release_signing.py",
+    "app/release_update_public_key.pem",
+    "app/license_public_key.txt",
+    "web_client/desktop.py",
+    "web_client/*.spec",
+    "web_client/native_file_drop_bridge.cs",
+    "web_client/native_file_drop_bridge.dll"
+  ],
+  "max_file_size": 20971520
+}

@@ -265,7 +265,10 @@ class LocalAsrQualityTests(unittest.TestCase):
     def test_mix_sensevoice_fallback_keeps_srt_and_word_timing_together(self) -> None:
         source = inspect.getsource(cutter_logic.process_video_mix)
 
-        self.assertIn("_copy_srt_with_word_timing_sidecar(_temp, _sc)", source)
+        self.assertIn("_copy_srt_with_word_timing_sidecar(", source)
+        self.assertIn("source_video=original_vp", source)
+        self.assertIn("provider=\"sensevoice\"", source)
+        self.assertIn("cancel_event=cancel_event", source)
         self.assertNotIn("shutil.copy2(_temp, _sc)", source)
 
     def test_shared_audio_transcriber_uses_isolated_sensevoice_worker(self) -> None:
@@ -277,7 +280,12 @@ class LocalAsrQualityTests(unittest.TestCase):
             )
 
         self.assertTrue(recognized)
-        worker.assert_called_once_with("final.wav", "final.srt", log_fn=None)
+        worker.assert_called_once_with(
+            "final.wav",
+            "final.srt",
+            log_fn=None,
+            cancel_event=None,
+        )
 
     def test_shared_audio_transcriber_returns_failure_without_an_engine_fallback(self) -> None:
         logs = []
@@ -321,6 +329,47 @@ class LocalAsrQualityTests(unittest.TestCase):
             self.assertTrue(output_srt.with_suffix(".words.json").is_file())
             self.assertTrue(any("worker log" in message for message in logs))
             self.assertFalse(any("internal progress" in message for message in logs))
+            self.assertTrue(any("模型内存已释放" in message for message in logs))
+
+    def test_task_scoped_worker_reuses_one_process_for_multiple_final_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            worker_script = root / "serve_local_asr_worker.py"
+            first_srt = root / "first.srt"
+            second_srt = root / "second.srt"
+            worker_script.write_text(
+                "\n".join((
+                    "import json, sys",
+                    "from pathlib import Path",
+                    "assert sys.argv[1:] == ['--serve']",
+                    "for raw in sys.stdin:",
+                    "    request = json.loads(raw)",
+                    "    if request.get('command') == 'shutdown':",
+                    "        break",
+                    "    target = Path(request['srt_output'])",
+                    "    target.write_text('1\\n00:00:00,000 --> 00:00:01,000\\n测试\\n', encoding='utf-8')",
+                    "    print(json.dumps({'type': 'log', 'id': request['id'], 'message': 'worker reused'}), flush=True)",
+                    "    print(json.dumps({'type': 'result', 'id': request['id'], 'ok': True}), flush=True)",
+                )),
+                encoding="utf-8",
+            )
+            logs = []
+            with mock.patch.dict(
+                os.environ,
+                {"LIVECLIPPER_LOCAL_ASR_WORKER": str(worker_script)},
+                clear=False,
+            ):
+                session = stt.LocalASRWorkerSession()
+                try:
+                    self.assertTrue(session.transcribe("first.wav", str(first_srt), log_fn=logs.append))
+                    self.assertTrue(session.transcribe("second.wav", str(second_srt), log_fn=logs.append))
+                finally:
+                    session.close(logs.append)
+
+            self.assertTrue(first_srt.is_file())
+            self.assertTrue(second_srt.is_file())
+            self.assertEqual(sum("正在启动可复用" in message for message in logs), 1)
+            self.assertEqual(sum("worker reused" in message for message in logs), 2)
             self.assertTrue(any("模型内存已释放" in message for message in logs))
 
     def test_failed_worker_removes_stale_srt_and_word_timing(self) -> None:
@@ -421,7 +470,10 @@ class LocalAsrQualityTests(unittest.TestCase):
                     )
 
         self.assertEqual(segments, [{"start": 1.2, "end": 2.8, "text": "亚麻肤感很舒服"}])
-        self.assertEqual(transcribe.call_args.kwargs, {"log_fn": logs.append})
+        self.assertEqual(
+            transcribe.call_args.kwargs,
+            {"log_fn": logs.append, "cancel_event": None},
+        )
         self.assertTrue(any("本地 SenseVoice" in message for message in logs))
 
     def test_final_subtitle_stage_uses_shared_sensevoice_entrypoint(self) -> None:

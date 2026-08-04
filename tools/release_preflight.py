@@ -82,10 +82,34 @@ def manifest_sha256(path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_signed(report: Report, value: dict[str, Any], label: str) -> None:
+ARCHIVED_PUBLIC_KEYS_DIR = ROOT / "release" / "keys_backup"
+
+
+def verify_signed(
+    report: Report,
+    value: dict[str, Any],
+    label: str,
+    *,
+    allow_archived_keys: bool = False,
+) -> None:
+    """Verify a signed release manifest.
+
+    Current production key is always required for candidates and patches.
+    ``allow_archived_keys`` is only used for the live V3 legacy channel
+    (``release/stable.json``), which stays signed with the archived pre-V4
+    key so existing V3 clients keep validating it.
+    """
     try:
         verify_manifest(value, PUBLIC_KEY)
+        return
     except Exception as exc:
+        if allow_archived_keys:
+            for archived in sorted(ARCHIVED_PUBLIC_KEYS_DIR.glob("*.pem")):
+                try:
+                    verify_manifest(value, archived)
+                    return
+                except Exception:
+                    continue
         report.error(f"{label} signature failed: {exc}")
 
 
@@ -521,7 +545,12 @@ def run_preflight(
         report.error(f"cannot load channel manifest: {exc}")
         git_paths(report)
         return report
-    verify_signed(report, channel, str(channel_path))
+    verify_signed(
+        report,
+        channel,
+        str(channel_path),
+        allow_archived_keys=(channel_path == STABLE),
+    )
     channel_version = str(channel.get("version") or channel.get("latest_version") or "")
     status = str(channel.get("channel_status") or "")
     report.facts.update(

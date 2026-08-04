@@ -207,6 +207,13 @@ def _report_launcher_health(
     token = str(os.environ.get("LIVECLIPPER_HEALTH_TOKEN") or "").strip()
     destination_text = str(os.environ.get("LIVECLIPPER_HEALTH_FILE") or "").strip()
     expected_version = str(os.environ.get("LIVECLIPPER_ACTIVE_VERSION") or "").strip()
+    expected_core_version = str(os.environ.get("LIVECLIPPER_V4_CORE_VERSION") or "").strip()
+    expected_core_manifest = str(
+        os.environ.get("LIVECLIPPER_V4_CORE_MANIFEST_SHA256") or ""
+    ).strip()
+    expected_bundle_manifest = str(
+        os.environ.get("LIVECLIPPER_V4_BUNDLE_MANIFEST_SHA256") or ""
+    ).strip()
     if not token or not destination_text or not expected_version:
         return False
 
@@ -234,6 +241,18 @@ def _report_launcher_health(
             ) as response:
                 runtime = json.loads(response.read().decode("utf-8-sig"))
             integrity = runtime.get("runtime_integrity") if isinstance(runtime, dict) else {}
+            v4_healthy = True
+            if RUNTIME_LAYOUT_VERSION == 4:
+                v4_healthy = bool(
+                    isinstance(runtime, dict)
+                    and expected_core_version
+                    and expected_core_manifest
+                    and expected_bundle_manifest
+                    and runtime.get("v4_core_version") == expected_core_version
+                    and runtime.get("v4_core_manifest_sha256") == expected_core_manifest
+                    and runtime.get("v4_bundle_manifest_sha256") == expected_bundle_manifest
+                    and runtime.get("v4_bundle_verified") is True
+                )
             healthy = bool(
                 isinstance(runtime, dict)
                 and runtime.get("version") == expected_version
@@ -241,6 +260,7 @@ def _report_launcher_health(
                 and runtime.get("code_source") == "bundled"
                 and isinstance(integrity, dict)
                 and integrity.get("ok") is True
+                and v4_healthy
             )
             if not healthy:
                 actual = {
@@ -250,6 +270,22 @@ def _report_launcher_health(
                     ),
                     "code_source": runtime.get("code_source") if isinstance(runtime, dict) else None,
                     "runtime_integrity": integrity,
+                    "v4_core_version": (
+                        runtime.get("v4_core_version") if isinstance(runtime, dict) else None
+                    ),
+                    "v4_core_manifest_sha256": (
+                        runtime.get("v4_core_manifest_sha256")
+                        if isinstance(runtime, dict)
+                        else None
+                    ),
+                    "v4_bundle_manifest_sha256": (
+                        runtime.get("v4_bundle_manifest_sha256")
+                        if isinstance(runtime, dict)
+                        else None
+                    ),
+                    "v4_bundle_verified": (
+                        runtime.get("v4_bundle_verified") if isinstance(runtime, dict) else None
+                    ),
                 }
                 raise RuntimeError(
                     "runtime validation failed: "
@@ -260,7 +296,11 @@ def _report_launcher_health(
             receipt = {
                 "token": token,
                 "version": expected_version,
+                "runtime_layout_version": RUNTIME_LAYOUT_VERSION,
                 "runtime_integrity_ok": True,
+                "core_version": expected_core_version,
+                "core_manifest_sha256": expected_core_manifest,
+                "bundle_manifest_sha256": expected_bundle_manifest,
                 "pid": os.getpid(),
                 "port": port,
                 "reported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -422,43 +462,137 @@ def _open_in_system_browser(url: str) -> None:
         return
 
 
-def _running_task_count(port: int) -> int:
+def _running_tasks(port: int) -> list[dict[str, Any]]:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/tasks", timeout=1.5) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace"))
     except Exception:
-        return 0
+        return []
     tasks = data.get("tasks") if isinstance(data, dict) else []
     if not isinstance(tasks, list):
-        return 0
-    return sum(1 for task in tasks if str((task or {}).get("status") or "").lower() in {"queued", "running"})
+        return []
+    return [
+        task
+        for task in tasks
+        if isinstance(task, dict)
+        and str(task.get("status") or "").lower() in {"queued", "running"}
+    ]
 
 
-def _minimize_window_later(window) -> None:
-    def _run() -> None:
-        time.sleep(0.05)
+def _running_task_count(port: int) -> int:
+    return len(_running_tasks(port))
+
+
+def _confirm_close_with_running_tasks(window: Any, count: int) -> bool:
+    message = (
+        f"当前还有 {count} 个任务正在运行。\n\n"
+        "选择“是”将停止任务并退出；选择“否”将继续处理。"
+    )
+    try:
+        return bool(window.create_confirmation_dialog("退出 LiveClipper", message))
+    except Exception:
+        root = None
         try:
-            window.minimize()
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            return bool(messagebox.askyesno("退出 LiveClipper", message))
         except Exception:
+            return False
+        finally:
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+
+
+def _stop_running_tasks(port: int, tasks: list[dict[str, Any]], emit_log) -> int:
+    requests: list[tuple[str, dict[str, str]]] = []
+    scopes = list(dict.fromkeys(str(task.get("scope") or "").strip() for task in tasks))
+    requests.extend(("/api/tasks/stop-scope", {"scope": scope}) for scope in scopes if scope)
+    requests.extend(
+        ("/api/tasks/stop", {"task_id": str(task.get("id") or "").strip()})
+        for task in tasks
+        if not str(task.get("scope") or "").strip() and str(task.get("id") or "").strip()
+    )
+
+    stopped = 0
+    for endpoint, payload in requests:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}{endpoint}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.5) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+            stopped += int(result.get("stopped") or 0) if isinstance(result, dict) else 0
+        except Exception as exc:
             try:
-                window.hide()
+                emit_log("warning", f"退出时停止后台任务失败：{exc}", "system")
             except Exception:
                 pass
+    return stopped
 
-    threading.Thread(target=_run, daemon=True).start()
+
+def _dispose_native_file_drop_support(window: Any, emit_log=None) -> None:
+    handlers = getattr(window, "_liveclipper_native_file_drop_handlers", None)
+    if not handlers:
+        return
+    registration = handlers[0] if isinstance(handlers, tuple) and handlers else handlers
+    try:
+        dispose = getattr(registration, "Dispose", None)
+        if callable(dispose):
+            dispose()
+    except Exception as exc:
+        if emit_log:
+            try:
+                emit_log("warning", f"关闭时释放桌面拖拽桥失败：{exc}", "system")
+            except Exception:
+                pass
+    finally:
+        try:
+            delattr(window, "_liveclipper_native_file_drop_handlers")
+        except Exception:
+            pass
+
+
+def _schedule_forced_process_exit(delay: float = 8.0) -> None:
+    if not getattr(sys, "frozen", False):
+        return
+
+    def _exit() -> None:
+        time.sleep(delay)
+        os._exit(0)
+
+    threading.Thread(target=_exit, daemon=True, name="liveclipper-close-watchdog").start()
 
 
 def _protect_running_tasks_on_close(window, port: int, emit_log) -> None:
+    exiting = False
+
     def _on_closing() -> bool | None:
-        count = _running_task_count(port)
-        if count <= 0:
+        nonlocal exiting
+        if exiting:
             return None
-        try:
-            emit_log("warning", f"检测到 {count} 个任务仍在运行，窗口已最小化到任务栏，后台继续处理。", "system")
-        except Exception:
-            pass
-        _minimize_window_later(window)
-        return False
+        tasks = _running_tasks(port)
+        if tasks and not _confirm_close_with_running_tasks(window, len(tasks)):
+            try:
+                emit_log("info", f"检测到 {len(tasks)} 个任务仍在运行，已取消退出。", "system")
+            except Exception:
+                pass
+            return False
+        exiting = True
+        if tasks:
+            _stop_running_tasks(port, tasks, emit_log)
+        _dispose_native_file_drop_support(window, emit_log)
+        _schedule_forced_process_exit()
+        return None
 
     try:
         window.events.closing += _on_closing
@@ -675,6 +809,7 @@ def main() -> None:
                 args=(window, emit_log),
                 gui="edgechromium",
             )
+        _dispose_native_file_drop_support(window, emit_log)
         server.should_exit = True
         return
     except Exception as exc:

@@ -1612,7 +1612,7 @@ class App:
             if log_var.get():
                 # 优先附加最近的运行日志文件
                 try:
-                    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                    log_dir = os.path.join(USER_DATA_DIR, "logs", "runs")
                     if os.path.isdir(log_dir):
                         logs = sorted([f for f in os.listdir(log_dir) if f.endswith(".json")])
                         if logs:
@@ -1631,7 +1631,7 @@ class App:
             if log_text:
                 msg += f"\n\n--- 运行日志（末尾2000字） ---\n{log_text[-2000:]}"
             # 保存本地备份
-            fb_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feedback")
+            fb_dir = os.path.join(USER_DATA_DIR, "feedback")
             os.makedirs(fb_dir, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
             fb_path = os.path.join(fb_dir, f"feedback_{ts}.txt")

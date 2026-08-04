@@ -696,6 +696,8 @@ class ReleaseArchitectureTests(unittest.TestCase):
             old_bundle.mkdir(parents=True)
             env = os.environ.copy()
             env["LIVECLIPPER_BUNDLE_DIR"] = str(old_bundle)
+            env["LIVECLIPPER_RUNTIME_LAYOUT"] = "3"
+            env["LIVECLIPPER_V4_BUNDLE_VERIFIED"] = "1"
             command = [
                 sys.executable,
                 "-c",
@@ -789,6 +791,49 @@ class ReleaseArchitectureTests(unittest.TestCase):
                 ),
             ):
                 self.assertTrue(desktop._report_launcher_health(8765, report_timeout=1.0))
+
+    def test_v4_launcher_health_binds_core_and_business_identity(self) -> None:
+        desktop = _load_desktop()
+        with tempfile.TemporaryDirectory() as temp:
+            local = Path(temp)
+            token = "d" * 32
+            core_manifest = "a" * 64
+            bundle_manifest = "b" * 64
+            destination = local / "LiveClipper" / "launcher_health" / f"{token}.json"
+            runtime = {
+                "version": "2026.7.30.1",
+                "runtime_layout_version": 4,
+                "code_source": "bundled",
+                "runtime_integrity": {"ok": True, "checked": 54, "mismatched": []},
+                "v4_core_version": "4.0.0",
+                "v4_core_manifest_sha256": core_manifest,
+                "v4_bundle_manifest_sha256": bundle_manifest,
+                "v4_bundle_verified": True,
+            }
+            environment = {
+                "LOCALAPPDATA": str(local),
+                "LIVECLIPPER_HEALTH_TOKEN": token,
+                "LIVECLIPPER_HEALTH_FILE": str(destination),
+                "LIVECLIPPER_ACTIVE_VERSION": "2026.7.30.1",
+                "LIVECLIPPER_V4_CORE_VERSION": "4.0.0",
+                "LIVECLIPPER_V4_CORE_MANIFEST_SHA256": core_manifest,
+                "LIVECLIPPER_V4_BUNDLE_MANIFEST_SHA256": bundle_manifest,
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(desktop, "RUNTIME_LAYOUT_VERSION", 4),
+                patch.object(
+                    desktop.urllib.request,
+                    "urlopen",
+                    return_value=_JsonResponse(runtime),
+                ),
+            ):
+                self.assertTrue(desktop._report_launcher_health(8765, report_timeout=1.0))
+            receipt = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["runtime_layout_version"], 4)
+            self.assertEqual(receipt["core_version"], "4.0.0")
+            self.assertEqual(receipt["core_manifest_sha256"], core_manifest)
+            self.assertEqual(receipt["bundle_manifest_sha256"], bundle_manifest)
             self.assertTrue(destination.is_file())
 
     def test_launcher_health_rejects_a_non_token_receipt_filename(self) -> None:

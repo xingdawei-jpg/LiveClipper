@@ -12,6 +12,7 @@ import os
 import sys
 import re
 import time
+import hashlib
 from ssl_context import create_ssl_context
 import shutil
 
@@ -24,6 +25,7 @@ import random
 import math
 import tempfile
 import threading
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,6 +45,35 @@ CLIP_AUDIO_TAIL_GUARD_SECONDS = 0.18
 LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS = 0.22
 CLIP_AUDIO_FADE_SECONDS = 0.015
 CLIP_VIDEO_TRANSITION_SECONDS = 0.12
+
+
+def _is_ascii_path(path):
+    try:
+        os.fspath(path).encode("ascii")
+        return True
+    except (TypeError, UnicodeEncodeError):
+        return False
+
+
+def _new_ascii_filter_asset_dir():
+    """Create an ASCII-only workspace for FFmpeg filter file options on Windows."""
+    candidates = []
+    public_dir = os.environ.get("PUBLIC")
+    if public_dir:
+        candidates.append(os.path.join(public_dir, "Documents", "LiveClipper", "filter-assets"))
+    program_data = os.environ.get("ProgramData")
+    if program_data:
+        candidates.append(os.path.join(program_data, "LiveClipper", "filter-assets"))
+
+    for root in candidates:
+        if not _is_ascii_path(root):
+            continue
+        try:
+            os.makedirs(root, exist_ok=True)
+            return tempfile.mkdtemp(prefix="subtitle_", dir=root)
+        except OSError:
+            continue
+    return None
 
 
 def _register_process(proc, cancel_event=None):
@@ -118,6 +149,7 @@ def _wait_process(proc, timeout=None, cancel_event=None, poll_interval=0.2):
                 return rc
             except subprocess.TimeoutExpired:
                 if deadline and time.time() >= deadline:
+                    _terminate_process(proc)
                     raise
     finally:
         _unregister_process(proc)
@@ -138,6 +170,7 @@ def _communicate_process(proc, timeout=None, cancel_event=None, poll_interval=0.
                 return result
             except subprocess.TimeoutExpired:
                 if deadline and time.time() >= deadline:
+                    _terminate_process(proc)
                     raise
     finally:
         _unregister_process(proc)
@@ -252,7 +285,14 @@ def _mix_semantic_segments_for_source(srt_entries, word_segments, marker, source
     return result
 
 
-def _copy_srt_with_word_timing_sidecar(source_srt, destination_srt):
+def _copy_srt_with_word_timing_sidecar(
+    source_srt,
+    destination_srt,
+    *,
+    source_video=None,
+    provider="",
+    model="",
+):
     """Copy an SRT cache together with its matching word-timing sidecar.
 
     The sidecar name is derived from the SRT path, so moving only the subtitle
@@ -268,19 +308,62 @@ def _copy_srt_with_word_timing_sidecar(source_srt, destination_srt):
 
     source_sidecar = word_timing_sidecar_path(source_srt)
     destination_sidecar = word_timing_sidecar_path(destination_srt)
-    if os.path.isfile(source_sidecar):
+    has_word_timing = os.path.isfile(source_sidecar)
+    if has_word_timing:
         if not same_target:
             shutil.copy2(source_sidecar, destination_sidecar)
-        return True
-
-    # A newly generated SRT must never reuse an older timing file for a
-    # different transcript.
-    if not same_target:
+    elif not same_target:
+        # A newly generated SRT must never reuse an older timing file for a
+        # different transcript.
         try:
             os.remove(destination_sidecar)
         except FileNotFoundError:
             pass
-    return False
+    if source_video:
+        try:
+            from asr_cache import write_metadata
+
+            write_metadata(
+                source_video,
+                destination_srt,
+                provider=provider or "unknown",
+                model=model,
+                timing_precision="word" if has_word_timing else "segment",
+            )
+        except Exception:
+            _LOG.warning("failed to write ASR cache metadata", exc_info=True)
+    return has_word_timing
+
+
+def _inspect_srt_cache(source_video, srt_path):
+    try:
+        from asr_cache import inspect_cache
+
+        return inspect_cache(source_video, srt_path)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "managed": True,
+            "reason": "cache_check_failed",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _discard_invalid_managed_srt_cache(srt_path, status):
+    """Remove only cache files carrying LiveClipper metadata."""
+    if not isinstance(status, dict) or not status.get("managed") or status.get("valid"):
+        return
+    try:
+        from asr_cache import metadata_path, word_timing_path
+
+        paths = (Path(srt_path), word_timing_path(srt_path), metadata_path(srt_path))
+    except Exception:
+        paths = (Path(srt_path), Path(srt_path).with_suffix(".words.json"))
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _LOG.warning("failed to remove stale managed ASR cache: %s", path)
 
 
 def _get_video_encoder():
@@ -763,18 +846,50 @@ def _smart_crop_zoom(sc_crop):
         return 1.0
 
 
-def _kb_quality_cap_for_zoom(smart_zoom):
+def _kb_quality_cap_for_zoom(smart_zoom, smart_crop=None):
     try:
         zoom = float(smart_zoom or 1.0)
     except Exception:
         return None
+    quality_cap = None
     if zoom >= 1.12:
-        return 0.05
-    if zoom >= 1.08:
-        return 0.08
-    if zoom >= 1.04:
-        return 0.10
-    return None
+        quality_cap = 0.05
+    elif zoom >= 1.08:
+        quality_cap = 0.08
+    elif zoom >= 1.04:
+        quality_cap = 0.10
+
+    crop = smart_crop or {}
+    if crop.get("method") != "smart":
+        # No reliable subject envelope: keep only a barely visible motion.
+        return 0.02 if crop else quality_cap
+
+    try:
+        head_top = float(crop["subject_head_top_ratio"])
+        subject_bottom = float(crop["subject_bottom_ratio"])
+        # Tiny Smart Crop values are deliberately not rendered by _smart_crop_vf.
+        crop_h = float(crop.get("crop_h", 1.0)) if zoom >= 1.04 else 1.0
+        crop_y = float(crop.get("crop_y", 0.0)) if zoom >= 1.04 else 0.0
+        visible_head = (head_top - crop_y) / max(crop_h, 1e-6)
+        visible_bottom = (subject_bottom - crop_y) / max(crop_h, 1e-6)
+        # Smart Crop promises visible space above the hair. A later centered
+        # Ken Burns zoom must preserve that promise instead of consuming it.
+        edge_margin = 0.065
+        clearance = min(
+            visible_head - edge_margin,
+            1.0 - visible_bottom - edge_margin,
+        )
+        if clearance <= 0:
+            subject_cap = 0.0
+        else:
+            # A centered zoom removes this fraction from both vertical edges.
+            clearance = min(clearance, 0.20)
+            subject_cap = (1.0 / max(1e-6, 1.0 - 2.0 * clearance)) - 1.0
+            subject_cap = max(0.0, min(subject_cap, 0.12))
+    except (KeyError, TypeError, ValueError):
+        subject_cap = 0.02
+
+    return subject_cap if quality_cap is None else min(quality_cap, subject_cap)
 
 
 def _final_sharpen_vf():
@@ -795,12 +910,13 @@ def _smart_crop_vf(sc_crop, src_w, src_h, out_w, out_h, even_fn, log_fn=None):
         ch = even_fn(int(src_h * crop["crop_h"]))
         cx = even_fn(int(src_w * crop["crop_x"]))
         cy = even_fn(int(src_h * crop["crop_y"]))
+        bottom_locked = abs(float(crop.get("crop_y", 0.0)) + float(crop.get("crop_h", 1.0)) - 1.0) <= 1e-6
         cw = max(2, min(cw, src_w))
         ch = max(2, min(ch, src_h))
         cx = max(0, min(cx, max(0, src_w - cw)))
-        cy = max(0, min(cy, max(0, src_h - ch)))
+        cy = max(0, src_h - ch) if bottom_locked else max(0, min(cy, max(0, src_h - ch)))
         if log_fn:
-            log_fn(f"SmartCrop: 应用封面构图 zoom={zoom:.2f}x crop={cw}x{ch}+{cx}+{cy}")
+            log_fn(f"SmartCrop: 应用封面构图(底部保留) zoom={zoom:.2f}x crop={cw}x{ch}+{cx}+{cy}")
         return "crop=%d:%d:%d:%d,scale=%d:%d:force_original_aspect_ratio=increase:flags=lanczos,crop=%d:%d" % (cw, ch, cx, cy, out_w, out_h, out_w, out_h)
 
     zoom = float(crop.get("zoom", 1.08) or 1.08)
@@ -859,6 +975,20 @@ def _create_processing_temp_dir(prefix="lc_temp_"):
     except Exception:
         _LOG.warning("failed to create managed processing cache; using system temp", exc_info=True)
         return tempfile.mkdtemp(prefix=prefix)
+
+
+def _run_log_directory():
+    """Keep mutable cut reports outside packaged or signed application files."""
+    try:
+        import config as _config
+
+        data_root = str(_config.USER_DATA_DIR)
+    except Exception:
+        data_root = os.path.join(
+            os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+            "LiveClipper",
+        )
+    return os.path.join(data_root, "logs", "runs")
 
 
 # ============================================================
@@ -1106,7 +1236,20 @@ def _validate_selected_duration_contract(
     target, high = contract.final_target, contract.final_max
     standard_low = contract.final_min
     low = float(status["relaxed_low"])
-    accepted = bool(status["accepted"] or (user_confirmed and source_total > 0))
+    # The configured upper bound is a publishing recommendation.  Anything
+    # beyond it stays exportable, but must be surfaced to the batch summary.
+    overlong = bool(projected > high + 1e-6)
+    accepted = bool(
+        status["accepted"]
+        or overlong
+        or (user_confirmed and source_total > 0)
+    )
+    soft_warning = ""
+    if overlong:
+        soft_warning = (
+            f"预计成片{projected:.1f}秒，超过建议上限{high:.0f}秒，"
+            "已保留片单继续成片"
+        )
     if log_fn:
         log_fn(
             f"时长合同: 片单原时长{source_total:.1f}s，按{speed:.2f}x预计成片{projected:.1f}s，"
@@ -1122,6 +1265,8 @@ def _validate_selected_duration_contract(
                 f"内容不足时长弹性: 标准下限{standard_low:.0f}s，"
                 f"本次宽限{float(shortage_grace_seconds):.0f}s后下限{low:.0f}s"
             )
+        if soft_warning:
+            log_fn(f"时长提示: {soft_warning}")
     if not accepted:
         raise RuntimeError(
             f"AI未满足时长：片单原时长{source_total:.1f}秒，预计成片{projected:.1f}秒，"
@@ -1137,6 +1282,8 @@ def _validate_selected_duration_contract(
         "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
         "used_shortage_grace": bool(status.get("used_shortage_grace")),
         "user_confirmed": bool(user_confirmed),
+        "overlong": overlong,
+        "duration_soft_warning": soft_warning,
         "duration_contract": contract.to_dict(),
     }
 
@@ -1160,7 +1307,16 @@ def _validate_actual_duration_contract(
         actual,
         shortage_grace_seconds=shortage_grace_seconds,
     )
-    ok = actual > 0 and bool(status["accepted"] or user_confirmed)
+    # Keep the generic contract's acceptance margin for diagnostics, while
+    # reporting every upper-bound overrun as a soft publishing warning.
+    overlong = bool(actual > contract.final_max + 1e-6)
+    soft_warning = ""
+    if overlong:
+        soft_warning = (
+            f"成片{actual:.1f}秒，超过建议上限{contract.final_max:.0f}秒，"
+            "已保留输出"
+        )
+    ok = actual > 0 and bool(status["accepted"] or overlong or user_confirmed)
     return ok, {
         "actual": actual,
         "target": contract.final_target,
@@ -1170,6 +1326,8 @@ def _validate_actual_duration_contract(
         "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
         "used_shortage_grace": bool(status.get("used_shortage_grace")),
         "user_confirmed": bool(user_confirmed),
+        "overlong": overlong,
+        "duration_soft_warning": soft_warning,
     }
 
 
@@ -2235,6 +2393,117 @@ def _log_final_clip_details(clips, log_fn=None, title="最终片段明细"):
             pass
 
 
+def _selection_audit_clip_key(clip):
+    try:
+        start = round(float(clip[2]), 3)
+        end = round(float(clip[3]), 3)
+    except (IndexError, TypeError, ValueError):
+        start, end = 0.0, 0.0
+    text = re.sub(r"\s+", "", str(clip[1] if len(clip) > 1 else ""))
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return f"{start:.3f}:{end:.3f}:{digest}"
+
+
+def _selection_audit_source(clip, text):
+    raw_source = clip[7] if isinstance(clip, (list, tuple)) and len(clip) > 7 else ""
+    source_path = "" if isinstance(raw_source, dict) else str(raw_source or "").strip()
+    marker = re.search(r"\[V\d+\]", str(text or ""), re.IGNORECASE)
+    return {
+        "marker": marker.group(0).upper() if marker else "",
+        "path": source_path,
+    }
+
+
+def _selection_audit_provenance(clip, provenance):
+    key = _selection_audit_clip_key(clip)
+    direct = provenance.get(key)
+    if isinstance(direct, dict):
+        return dict(direct)
+
+    # Word-level edge trimming can change timestamps after the director made a
+    # valid choice. Match it back to the immutable AI selection by source/span.
+    try:
+        start, end = float(clip[2]), float(clip[3])
+    except (IndexError, TypeError, ValueError):
+        return {}
+    text = str(clip[1] if len(clip) > 1 else "")
+    source = _selection_audit_source(clip, text).get("marker")
+    best = None
+    best_score = -1.0
+    for candidate in provenance.values():
+        if not isinstance(candidate, dict):
+            continue
+        candidate_source = str(candidate.get("source") or "").upper()
+        if source and candidate_source and source != candidate_source:
+            continue
+        try:
+            candidate_start = float(candidate.get("start"))
+            candidate_end = float(candidate.get("end"))
+        except (TypeError, ValueError):
+            continue
+        overlap = max(0.0, min(end, candidate_end) - max(start, candidate_start))
+        if overlap <= 0:
+            continue
+        score = overlap / max(0.1, min(end - start, candidate_end - candidate_start))
+        if candidate_start <= start + 0.4 and candidate_end >= end - 0.4:
+            score += 1.0
+        if score > best_score:
+            best, best_score = candidate, score
+    return dict(best) if best is not None else {}
+
+
+def _build_final_selection_audit(clips, analysis_metadata=None):
+    """Serialize the exact post-processing selection for a per-run JSON log."""
+    metadata = dict(analysis_metadata or {})
+    provenance = {
+        str(key): dict(value)
+        for key, value in dict(metadata.get("director_clip_provenance") or {}).items()
+        if isinstance(value, dict)
+    }
+    hook_events = [
+        dict(event)
+        for event in (metadata.get("hook_events") or [])
+        if isinstance(event, dict)
+    ]
+    postprocessed_hook_keys = {
+        str((event.get("after") or {}).get("key") or "")
+        for event in hook_events
+        if isinstance(event.get("after"), dict)
+    }
+    final_clips = []
+    total_duration = 0.0
+    for order, clip in enumerate(clips or [], 1):
+        if not isinstance(clip, (list, tuple)):
+            continue
+        c_type, text, start, end, duration, _source_name = _clip_log_fields(clip)
+        total_duration += max(0.0, duration)
+        clip_key = _selection_audit_clip_key(clip)
+        evidence = _selection_audit_provenance(clip, provenance)
+        final_clips.append({
+            "order": order,
+            "clip_type": c_type,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(max(0.0, duration), 3),
+            "text": text,
+            "source": _selection_audit_source(clip, text),
+            "candidate_indices": list(evidence.get("candidate_indices") or []),
+            "topic": str(clip[6] if len(clip) > 6 else evidence.get("focus") or "").strip(),
+            "reason": str(evidence.get("reason") or "").strip(),
+            "selection_origin": str(evidence.get("origin") or "unknown").strip(),
+            "hook_postprocessed": bool(c_type.lower() == "hook" and clip_key in postprocessed_hook_keys),
+        })
+    return {
+        "version": "final_selection_audit_v1",
+        "selected_duration": round(total_duration, 3),
+        "preference_summary": dict(metadata.get("preference_summary") or {}),
+        "content_review_summary": dict(metadata.get("content_review_summary") or {}),
+        "ai_plan_report": dict(metadata.get("ai_plan_report") or {}),
+        "hook_events": hook_events,
+        "final_clips": final_clips,
+    }
+
+
 def _print_cut_report(report, _log):
     """在日志中打印切割评分报告"""
     bar_len = 20
@@ -2276,7 +2545,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                    _clips_only=False, _asr_only=False, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                    target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
                    dedup_video_options=None, dedup_audio_options=None, transition_options=None,
-                   _user_confirmed_clips=False, duration_tolerance=None):
+                   _user_confirmed_clips=False, duration_tolerance=None, _result_cache=None,
+                   local_asr_session=None):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -2341,7 +2611,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         "错误": None,
     }
     _run_start = _time.time()
-    _run_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    _run_log_dir = _run_log_directory()
 
     def _save_run_log():
         """写入运行日志 JSON"""
@@ -2376,10 +2646,26 @@ def process_video(video_path, srt_path=None, output_path=None,
         # 先检查视频旁边是否有 SRT 缓存
         _srt_cache = os.path.splitext(original_video_path)[0] + ".srt"
         if os.path.exists(_srt_cache):
-            _log(f"使用本地SRT: {os.path.basename(_srt_cache)}")
-            srt_path = _srt_cache
-            temp_srt = _srt_cache
-            auto_srt = False
+            _cache_status = _inspect_srt_cache(original_video_path, _srt_cache)
+            if _cache_status.get("valid"):
+                if _cache_status.get("managed"):
+                    _log(
+                        "使用已验证ASR缓存: "
+                        f"{os.path.basename(_srt_cache)} "
+                        f"({_cache_status.get('provider') or 'unknown'}/"
+                        f"{_cache_status.get('timing_precision') or 'segment'})"
+                    )
+                else:
+                    _log(f"使用用户SRT: {os.path.basename(_srt_cache)}")
+                srt_path = _srt_cache
+                temp_srt = _srt_cache
+                auto_srt = False
+            else:
+                _log(
+                    "检测到ASR缓存与当前视频不匹配，重新识别："
+                    f"{_cache_status.get('reason') or 'unknown'}"
+                )
+                _discard_invalid_managed_srt_cache(_srt_cache, _cache_status)
         
         if not srt_path:
             # 使用缓存标志，让后面的代码知道用了缓存
@@ -2392,6 +2678,8 @@ def process_video(video_path, srt_path=None, output_path=None,
             # 检查云端ASR是否启用
             _volc_asr_on = False
         _volc_used = False
+        _asr_cache_provider = ""
+        _asr_cache_model = ""
         try:
             from ai_clipper import load_settings as _ld_asr
             _volc_asr_on = _ld_asr().get("asr_enabled", False)
@@ -2439,8 +2727,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                                 _ff_ali = get_ffmpeg_cmd()
                                 _ext_ali = [_ff_ali, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", _wav_ali]
                                 _pk_ali = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                _p_ali = subprocess.Popen(_ext_ali, **_pk_ali, creationflags=_NO_WINDOW)
-                                _p_ali.wait(timeout=120)
+                                _p_ali = _register_process(
+                                    subprocess.Popen(_ext_ali, **_pk_ali, creationflags=_NO_WINDOW),
+                                    cancel_event,
+                                )
+                                _wait_process(_p_ali, timeout=120, cancel_event=cancel_event)
                                 if _p_ali.returncode == 0 and _os2.path.exists(_wav_ali):
                                     _segs_ali = aliyun_asr(_wav_ali, app_key=_ali_api_key, model=_ali_model,
                                                            oss_ak=_ali_oss_ak, oss_sk=_ali_oss_sk,
@@ -2472,11 +2763,13 @@ def process_video(video_path, srt_path=None, output_path=None,
                                         auto_srt = True
                                         _volc_used = True
                                         temp_srt = _srt_ali
+                                        _asr_cache_provider = "aliyun"
+                                        _asr_cache_model = _ali_model
                                         _log(f"阿里云语音识别成功: {len(_segs_ali)} 条语音段")
                                     else:
                                         _log("阿里云 ASR 识别失败，将降级")
                                 else:
-                                    _log("音频提取失败，降级到本地 Whisper")
+                                    _log("音频提取失败，改用本地 SenseVoice")
                             except Exception as _e_ali:
                                 _log(f"阿里云 ASR 异常: {_e_ali}")
                         else:
@@ -2516,6 +2809,8 @@ def process_video(video_path, srt_path=None, output_path=None,
                                 auto_srt = True
                                 _volc_used = True
                                 temp_srt = _srt2
+                                _asr_cache_provider = "volcengine"
+                                _asr_cache_model = "volc.seedasr.auc"
                                 _log(f"火山引擎语音识别成功: {len(_segs2)} 条语音段")
                             else:
                                 _log("⚠️ 云端语音识别失败，已自动切换到本地识别")
@@ -2533,9 +2828,12 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log("启动本地语音识别 (SenseVoice)...")
             try:
                 from stt import generate_srt
-                temp_srt = generate_srt(video_path, log_fn=_log)
+                temp_srt = generate_srt(video_path, log_fn=_log, cancel_event=cancel_event)
                 if not temp_srt:
                     _log("❌ SenseVoice 本地识别失败；请检查本地模型环境、开启云端 ASR 或提供 SRT 字幕文件")
+                else:
+                    _asr_cache_provider = "sensevoice"
+                    _asr_cache_model = "iic/SenseVoiceSmall"
             except Exception as _sensevoice_err:
                 _log(f"❌ SenseVoice 本地识别失败: {_sensevoice_err}")
                 _log("💡 建议：开启云端 ASR 或手动提供 SRT 字幕文件")
@@ -2549,7 +2847,13 @@ def process_video(video_path, srt_path=None, output_path=None,
             try:
                 _cache_path = os.path.splitext(original_video_path)[0] + ".srt"
                 if _cache_path != srt_path:  # 避免自拷贝
-                    _copy_srt_with_word_timing_sidecar(srt_path, _cache_path)
+                    _copy_srt_with_word_timing_sidecar(
+                        srt_path,
+                        _cache_path,
+                        source_video=original_video_path,
+                        provider=_asr_cache_provider,
+                        model=_asr_cache_model,
+                    )
                     _log(f"SRT已缓存: {os.path.basename(_cache_path)}")
             except Exception:
                 _LOG.warning("unexpected error", exc_info=True)
@@ -2564,16 +2868,18 @@ def process_video(video_path, srt_path=None, output_path=None,
         output_path = os.path.join(output_dir, f"{video_name}_爆款切片_{time.strftime('%Y%m%d_%H%M%S')}.mp4")
 
     # 3. 解析字幕（AI 模式 或 关键词模式）
-    # 多版本缓存（global声明，供_asr_only和_clips_only使用）
+    # Legacy callers still use the module cache. Preview workers pass an
+    # invocation-local collector so smart and mix jobs cannot overwrite each other.
     global _multi_result_cache
+    _active_result_cache = _result_cache if isinstance(_result_cache, dict) else _multi_result_cache
     # _asr_only: 只做ASR，跳过AI选片
     if _asr_only:
-        if isinstance(_multi_result_cache, dict):
+        if isinstance(_active_result_cache, dict):
             _srt_file = srt_path
             if _srt_file and os.path.exists(_srt_file):
                 try:
                     with open(_srt_file, 'r', encoding='utf-8') as _f:
-                        _multi_result_cache['srt_text'] = _f.read()
+                        _active_result_cache['srt_text'] = _f.read()
                 except Exception:
                     _LOG.warning("unexpected error", exc_info=True)
                     pass
@@ -2625,6 +2931,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
+                allow_partial=_clips_only,
             )
             try:
                 analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
@@ -2682,29 +2989,33 @@ def process_video(video_path, srt_path=None, output_path=None,
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
     if not _clips_only:
         _log_final_clip_details(ordered_clips, _log)
+    _run_log["选片审计"] = _build_final_selection_audit(
+        ordered_clips,
+        analysis_metadata,
+    )
 
     try:
-        if isinstance(_multi_result_cache, dict):
-            _multi_result_cache['clips'] = list(ordered_clips)
-            _multi_result_cache['srt_path'] = srt_path
+        if isinstance(_active_result_cache, dict):
+            _active_result_cache['clips'] = list(ordered_clips)
+            _active_result_cache['srt_path'] = srt_path
             try:
                 import ai_clipper as _ai_meta
                 analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
                 _LOG.warning("unexpected error", exc_info=True)
                 pass
-            _multi_result_cache['analysis_metadata'] = dict(analysis_metadata or {})
-            _multi_result_cache['category_summary'] = dict(analysis_metadata.get('category_summary') or {})
-            _multi_result_cache['topic_coverage_summary'] = dict(analysis_metadata.get('topic_coverage_summary') or {})
-            _multi_result_cache['preference_summary'] = dict(analysis_metadata.get('preference_summary') or preference_summary or {})
-            _multi_result_cache['word_timings'] = list(_word_timings or [])
-            _multi_result_cache['requested_target_duration'] = target_duration
-            _multi_result_cache['ai_target_duration'] = _ai_target_duration
-            _multi_result_cache['duration_speed_factor'] = _planned_speed_factor
+            _active_result_cache['analysis_metadata'] = dict(analysis_metadata or {})
+            _active_result_cache['category_summary'] = dict(analysis_metadata.get('category_summary') or {})
+            _active_result_cache['topic_coverage_summary'] = dict(analysis_metadata.get('topic_coverage_summary') or {})
+            _active_result_cache['preference_summary'] = dict(analysis_metadata.get('preference_summary') or preference_summary or {})
+            _active_result_cache['word_timings'] = list(_word_timings or [])
+            _active_result_cache['requested_target_duration'] = target_duration
+            _active_result_cache['ai_target_duration'] = _ai_target_duration
+            _active_result_cache['duration_speed_factor'] = _planned_speed_factor
             # 保存SRT内容
             if srt_path and os.path.exists(srt_path):
                 with open(srt_path, "r", encoding="utf-8") as _f:
-                    _multi_result_cache['srt_text'] = _f.read()
+                    _active_result_cache['srt_text'] = _f.read()
     except Exception:
         _LOG.warning("unexpected error", exc_info=True)
         pass
@@ -2827,9 +3138,11 @@ def process_video(video_path, srt_path=None, output_path=None,
         else:
             _log(f"编码器: 软件编码 ({_software_encoder_name()})，硬件加速设置已关闭，整片处理会更慢")
         probe_cmd = [ffmpeg_cmd, "-i", video_path]
-        proc = subprocess.Popen(probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
-        _, stderr_data = proc.communicate(timeout=45)
+        proc = _register_process(subprocess.Popen(
+            probe_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+        ), cancel_event)
+        _, stderr_data = _communicate_process(proc, timeout=45, cancel_event=cancel_event)
         import re as _re
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", stderr_data)
         if m:
@@ -2987,6 +3300,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
             # Smart Crop VF
             _sc_zoom = 1.0
+            _sc_crop = {"method": "undetected"} if smart_crop_enabled else None
             if smart_crop_enabled and _sc_results is not None:
                 _sc_info = _sc_results.get(clip_idx, None)
                 _sc_crop = compute_smart_crop(_sc_info, _src_w, _src_h, crop_level=crop_level, log_fn=_log)
@@ -3073,7 +3387,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _clip_starts.append(start)
                 _clip_ends.append(end)
                 _clip_cut_maps.append({"start": start, "end": end, "text": _actual_clip_text, "type": c_type})
-                _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
+                _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
                 success_count += 1
             else:
                 _log(f"FAIL [{c_type}] rc={rc}")
@@ -3107,7 +3421,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                             _clip_starts.append(start)
                             _clip_ends.append(end)
                             _clip_cut_maps.append({"start": start, "end": end, "text": _actual_clip_text, "type": c_type})
-                            _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
+                            _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
                             success_count += 1
                         else:
                             _log(f"FAIL [{c_type}] {_sw_name} 也失败 rc={rc2}")
@@ -3152,6 +3466,9 @@ def process_video(video_path, srt_path=None, output_path=None,
                 _kb_dur = _clip_ends[_kbi] - _clip_starts[_kbi] if _kbi < len(_clip_starts) else 10.0
                 _kb_out = _clip_file.replace(".mp4", "_kb.mp4")
                 _kb_cap = _clip_kb_caps[_kbi] if _kbi < len(_clip_kb_caps) else None
+                if _kb_cap is not None and _kb_cap <= 0.005:
+                    _log(f"KenBurns: 片段{_kbi+1}人物接近画面边缘，跳过二次缩放以保护头部和身体")
+                    continue
                 if _ken_burns_opencv:
                     _kb_ok_flag = _ken_burns_opencv(
                         _clip_file, _kb_out, _kb_dur, w, h, cfg["fps"],
@@ -3510,6 +3827,14 @@ def process_video(video_path, srt_path=None, output_path=None,
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
         f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
     )
+    if _duration_contract.get("duration_soft_warning"):
+        _log(
+            f"时长提示: {_duration_contract['duration_soft_warning']}，"
+            "继续字幕烧录"
+        )
+    # Only the final, post-subtitle file may enter the task summary.  The
+    # preflight measurement is diagnostic and can differ by a few frames.
+    _duration_soft_warnings = []
     if not _duration_ok:
         _duration_error = (
             f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
@@ -3563,6 +3888,8 @@ def process_video(video_path, srt_path=None, output_path=None,
             pip_size,
             pip_opacity,
             pip_pos,
+            cancel_event=cancel_event,
+            local_asr_session=local_asr_session,
         )
     elif has_pip and os.path.exists(nosub_file):
         # auto模式用视频本身做画中画素材
@@ -3642,6 +3969,9 @@ def process_video(video_path, srt_path=None, output_path=None,
                 cleanup_srt(temp_srt)
             DEDUP_PRESET = old_preset
             raise RuntimeError(_duration_error)
+        if _final_contract.get("duration_soft_warning"):
+            _duration_soft_warnings.append(_final_contract["duration_soft_warning"])
+            _log(f"时长提示: {_final_contract['duration_soft_warning']}")
 
     # ---- 切割评分 ----
     report = _build_cut_report(ordered_clips, success_count, total_clips, output_path, size_mb)
@@ -3662,11 +3992,19 @@ def process_video(video_path, srt_path=None, output_path=None,
     _run_log["结果"] = "成功"
     _run_log["选片"] = report
     _run_log["输出"] = output_path
+    if _duration_soft_warnings:
+        _run_log["时长提示"] = "；".join(dict.fromkeys(_duration_soft_warnings))
     _save_run_log()
+    _result_metadata = dict(analysis_metadata or {})
+    if _duration_soft_warnings:
+        _result_metadata["duration_soft_warning"] = "；".join(
+            dict.fromkeys(_duration_soft_warnings)
+        )
     return {
         "ok": True,
         "report": report,
-        "analysis_metadata": dict(analysis_metadata or {}),
+        "analysis_metadata": _result_metadata,
+        "duration_soft_warning": _result_metadata.get("duration_soft_warning", ""),
     }
 
 
@@ -4264,7 +4602,14 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
         return False
 
 
-def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
+def _final_subtitle_local_asr_segments(
+    wav_path,
+    temp_dir,
+    settings,
+    log_fn,
+    cancel_event=None,
+    local_asr_session=None,
+):
     """Use the same SenseVoice-only local ASR policy as smart-cut preview."""
     local_srt = os.path.join(temp_dir, "final_local_asr.srt")
     log_fn("字幕阶段：正在使用本地 SenseVoice 识别最终视频音频...")
@@ -4272,14 +4617,24 @@ def _final_subtitle_local_asr_segments(wav_path, temp_dir, settings, log_fn):
     try:
         from stt import transcribe_local_audio_to_srt
 
+        transcribe_kwargs = {
+            "log_fn": log_fn,
+            "cancel_event": cancel_event,
+        }
+        if local_asr_session is not None:
+            transcribe_kwargs["worker_session"] = local_asr_session
         recognized = transcribe_local_audio_to_srt(
             wav_path,
             local_srt,
-            log_fn=log_fn,
+            **transcribe_kwargs,
         )
     except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled") from exc
         log_fn(f"本地语音识别失败: {exc}")
         return []
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("cancelled")
     if not recognized or not os.path.exists(local_srt):
         log_fn("本地语音识别未生成可用字幕")
         return []
@@ -4337,36 +4692,59 @@ def _apply_final_subtitle_text_repairs(raw_segments, fixed_text):
     ]
 
 
-def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path=None, pip_size=0.15, pip_opacity=0.03, pip_pos="右下"):
+def _add_subtitles_final(
+    video_path,
+    output_path,
+    w,
+    h,
+    temp_dir,
+    _log,
+    pip_path=None,
+    pip_size=0.15,
+    pip_opacity=0.03,
+    pip_pos="右下",
+    cancel_event=None,
+    local_asr_session=None,
+):
     """
     字幕后置处理：对去重后的视频做 ASR 识别（云端优先，本地与智能成片一致）→ DeepSeek修复 → 烧录字幕。
     时间戳来自最终视频本身，100% 对齐，不受镜像/拼接/变速影响。
     """
     import json as _json
+    filter_asset_dir = None
+    subtitle_applied = False
 
     _log("=" * 50)
     _log("第四步：字幕后置处理")
     _log("=" * 50)
 
     # --- 4a: 提取音频 ---
+    _subtitle_total_started = time.monotonic()
+    _subtitle_audio_started = time.monotonic()
     wav_path = os.path.join(temp_dir, "final_audio.wav")
     ffmpeg = get_ffmpeg_cmd()
     extract_cmd = [ffmpeg, "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path]
     try:
         popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        proc = subprocess.Popen(extract_cmd, **popen_kw, creationflags=_NO_WINDOW)
-        rc = proc.wait(timeout=60)
+        proc = _register_process(
+            subprocess.Popen(extract_cmd, **popen_kw, creationflags=_NO_WINDOW),
+            cancel_event,
+        )
+        rc = _wait_process(proc, timeout=60, cancel_event=cancel_event)
         if rc != 0 or not os.path.exists(wav_path):
             _log("音频提取失败，跳过字幕")
             import shutil as _shutil; _shutil.copy2(video_path, output_path)
             return
     except Exception as e:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled") from e
         _log(f"音频提取异常: {e}，跳过字幕")
         import shutil as _shutil; _shutil.copy2(video_path, output_path)
         return
 
     wav_mb = os.path.getsize(wav_path) / (1024 * 1024)
     _log(f"音频提取完成: {wav_mb:.1f}MB")
+    _log(f"字幕阶段耗时: 音频提取 {time.monotonic() - _subtitle_audio_started:.1f}s")
     _log("[PROGRESS] 0.65")
 
     # --- 4b: 云端 ASR 优先；本地路径复用智能成片的 SenseVoice 优先策略 ---
@@ -4457,6 +4835,8 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
             temp_dir,
             local_settings,
             _log,
+            cancel_event=cancel_event,
+            local_asr_session=local_asr_session,
         )
 
     def _build_fallback_segments(cloud_text, wav_path, _log):
@@ -4523,6 +4903,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _asr_preset_sub = _sub_cfg.get("asr_preset", "") or _sub_cfg.get("asr_provider", "")
     except Exception:
         _LOG.warning("failed to read asr preset", exc_info=True)
+    _subtitle_asr_started = time.monotonic()
     if _use_cloud_sub:
         if _asr_preset_sub == "阿里云":
             _log("字幕阶段：云端ASR已启用，优先阿里云")
@@ -4571,9 +4952,11 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                     import shutil as _shutil; _shutil.copy2(video_path, output_path)
                 return
 
+    _log(f"字幕阶段耗时: 语音识别 {time.monotonic() - _subtitle_asr_started:.1f}s")
     _log("[PROGRESS] 0.75")
 
 # --- 4c: DeepSeek修复错别字 + 繁简转换 + 长句切分 ---
+    _subtitle_repair_started = time.monotonic()
     if False:  # 始终走DeepSeek修复
         _log("云端ASR也需要DeepSeek修复")
         # 仍然清理标点符号和语气词（不跳过）
@@ -4658,6 +5041,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 _log(f"DeepSeek修复失败: {e}，回退到 ASR 原始文本")
                 fixed_segments = raw_segments
 
+    _log(f"字幕阶段耗时: 文案修复 {time.monotonic() - _subtitle_repair_started:.1f}s")
     _log("[PROGRESS] 0.85")
 
     # --- 去重叠：相邻 segment 时间交叉时截断前一个的 end ---
@@ -4810,17 +5194,19 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
     # --- 4d+4e: drawtext 逐条烧录字幕 ---
     # 不用 subtitles/ass 滤镜（Windows 上 fontconfig 不可靠）
     # 直接用 drawtext + textfile + enable 逐条烧录，最可靠
+    _subtitle_render_started = time.monotonic()
     _log("正在用 drawtext 烧录字幕...")
     from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_PATH, IS_MAC
-    # Copy font to temp dir to avoid Chinese path issues with fontconfig
-    _font_dest = os.path.join(temp_dir, "drawtext_font.ttc")
-    if os.path.exists(FONT_BOLD_PATH) and not os.path.exists(_font_dest):
-        import shutil as _shutil_font
-        _shutil_font.copy2(FONT_BOLD_PATH, _font_dest)
-    if os.path.exists(_font_dest):
-        _drawtext_font = _font_dest.replace(os.sep, "/").replace(":", "\\:")
-    else:
-        _drawtext_font = DRAWTEXT_FONT_PATH  # fallback
+    # drawtext parses filter option paths itself and fails on the Unicode user
+    # profile path common on Chinese Windows installations. Keep its text files
+    # in an ASCII-only workspace and use the system font's ASCII Windows path.
+    filter_asset_dir = _new_ascii_filter_asset_dir()
+    if not filter_asset_dir:
+        _log("字幕烧录无法创建 ASCII 滤镜目录，输出无字幕版本")
+        shutil.copy2(video_path, output_path)
+        _log("字幕未烧录，输出为无字幕版本")
+        return
+    _drawtext_font = DRAWTEXT_FONT_PATH
     sc = SUBTITLE_OVERLAY
     font_size = sc.get("font_size", 52)
     try:
@@ -4848,7 +5234,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 
             # 为每行创建一个 drawtext
             for li, line in enumerate(lines):
-                txt_path = os.path.join(temp_dir, f"sub_{seg['start']:.2f}_{li}.txt")
+                txt_path = os.path.join(filter_asset_dir, f"sub_{seg['start']:.2f}_{li}.txt")
                 with open(txt_path, "w", encoding="utf-8") as f:
                     f.write(line)
                 text_files.append(txt_path)
@@ -4933,24 +5319,6 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
 
             popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace")
-            # Windows 下禁用 fontconfig，避免 drawtext 初始化失败
-            fc_env = None
-            if sys.platform == "win32":
-                fc_conf = os.path.join(temp_dir, "fonts.conf")
-                with open(fc_conf, "w", encoding="utf-8") as f:
-                    f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig><include ignore_missing="yes"/></fontconfig>\n')
-                # FFmpeg 8.1+ 会尝试加载 DTD，写入最小有效内容避免解析失败
-                fc_dtd = os.path.join(temp_dir, "fonts.dtd")
-                if not os.path.exists(fc_dtd):
-                    with open(fc_dtd, "w", encoding="utf-8") as f:
-                        f.write('<!ELEMENT fontconfig (dir|cache|match)*>\n')
-                        f.write('<!ELEMENT dir (#PCDATA)>\n')
-                        f.write('<!ELEMENT cache (#PCDATA)>\n')
-                        f.write('<!ELEMENT match (test|edit)*>\n')
-                        f.write('<!ELEMENT test (#PCDATA)>\n')
-                        f.write('<!ELEMENT edit (#PCDATA)>\n')
-                popen_kw["env"] = dict(os.environ)
-                popen_kw["env"]["FONTCONFIG_FILE"] = fc_conf
             ok, rc, stderr_data = _run_ffmpeg_with_hw_fallback(
                 sub_cmd, popen_kw, 450, _log, "字幕烧录", output_path,
                 software_args=_final_software_vcodec_args()
@@ -4964,6 +5332,7 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
                 import shutil as _shutil; _shutil.copy2(video_path, output_path)
             else:
                 _log("字幕烧录成功！")
+                subtitle_applied = True
     except subprocess.TimeoutExpired:
         _log("字幕烧录超时，输出无字幕版本")
         import shutil as _shutil; _shutil.copy2(video_path, output_path)
@@ -4971,7 +5340,16 @@ def _add_subtitles_final(video_path, output_path, w, h, temp_dir, _log, pip_path
         _log(f"字幕烧录异常: {e}，输出无字幕版本")
         import shutil as _shutil; _shutil.copy2(video_path, output_path)
 
-    _log("字幕处理完成")
+    finally:
+        if filter_asset_dir:
+            shutil.rmtree(filter_asset_dir, ignore_errors=True)
+
+    if subtitle_applied:
+        _log("字幕处理完成")
+    else:
+        _log("字幕未烧录，输出为无字幕版本")
+    _log(f"字幕阶段耗时: 字幕烧录 {time.monotonic() - _subtitle_render_started:.1f}s")
+    _log(f"字幕阶段耗时: 总计 {time.monotonic() - _subtitle_total_started:.1f}s")
 
 
 def process_video_multi(video_path, srt_path=None, output_path=None,
@@ -4981,7 +5359,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                         num_versions=1, focus_hint="自动", smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                         target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
                         dedup_video_options=None, dedup_audio_options=None, transition_options=None,
-                        duration_tolerance=None):
+                        duration_tolerance=None, local_asr_session=None):
     """多版本输出：AI直接输出3个独立叙事方案，每个方案完整裁切
     
     策略(v2)：AI选片时直接出3个不同角度的方案，代码层只做裁切。
@@ -4995,7 +5373,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     
     _log(f"🎬 多版本模式(v2): AI直接出{num_versions}个独立叙事方案")
     
@@ -5007,7 +5385,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -5019,7 +5397,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                  force_category, cancel_event,
                   pip_path, pip_size, pip_opacity, pip_pos,
                   _asr_only=True,
-                  smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                  smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     
     _recorded_srt_text = _multi_result_cache.get('srt_text', '')
     
@@ -5031,7 +5409,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -5058,7 +5436,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     
     if len(versions_data) < 1:
         _log("无有效版本，输出单版本")
@@ -5066,7 +5444,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
                            dedup_preset, subtitle_overlay, log_fn,
                            force_category, cancel_event,
                                pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance)
+                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
@@ -5074,12 +5452,14 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     if output_path:
         output_dir = os.path.dirname(output_path)
+        output_stem = os.path.splitext(os.path.basename(output_path))[0]
     else:
         output_dir = os.path.join(os.path.dirname(video_path), "output")
+        output_stem = f"{video_name}_切片_{time.strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(output_dir, exist_ok=True)
     
     results = []
-    batch_stamp = time.strftime('%Y%m%d_%H%M%S')
+    generated_outputs = []
     for vi, ver in enumerate(versions_data):
         if cancel_event and cancel_event.is_set():
             break
@@ -5089,7 +5469,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         
         _log(f"\n🎬 === 版本 {vi+1}/{len(versions_data)} [{angle}] ===")
         
-        v_output = os.path.join(output_dir, f"{video_name}_切片_{batch_stamp}_v{vi+1}.mp4")
+        v_output = os.path.join(output_dir, f"{output_stem}_v{vi+1}.mp4")
         
         result = _process_version_with_clips(
             video_path, _multi_srt_path, v_output,
@@ -5100,9 +5480,12 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             mirror_enabled=mirror_enabled, kb_intensity=kb_intensity,
             target_duration=target_duration, duration_tolerance=duration_tolerance,
             dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
-            transition_options=transition_options
+            transition_options=transition_options,
+            local_asr_session=local_asr_session,
         )
         results.append(result)
+        if (result.get("ok", False) if isinstance(result, dict) else bool(result)) and os.path.exists(v_output):
+            generated_outputs.append(v_output)
     
     _log(f"\n✅ 多版本输出完成: {len(results)} 个版本")
     
@@ -5115,10 +5498,27 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
             _LOG.warning("unexpected error", exc_info=True)
             pass
     
+    _multi_metadata = dict(_multi_result_cache.get("analysis_metadata") or {})
+    _multi_duration_warnings = [
+        str(
+            item.get("duration_soft_warning")
+            or dict(item.get("analysis_metadata") or {}).get("duration_soft_warning")
+            or ""
+        ).strip()
+        for item in results
+        if isinstance(item, dict)
+    ]
+    _multi_duration_warnings = list(dict.fromkeys(
+        warning for warning in _multi_duration_warnings if warning
+    ))
+    if _multi_duration_warnings:
+        _multi_metadata["duration_soft_warning"] = "；".join(_multi_duration_warnings)
     return {
         "ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results),
         "版本数": len(results),
-        "analysis_metadata": dict(_multi_result_cache.get("analysis_metadata") or {}),
+        "outputs": generated_outputs,
+        "analysis_metadata": _multi_metadata,
+        "duration_soft_warning": _multi_metadata.get("duration_soft_warning", ""),
     }
 
 
@@ -5130,7 +5530,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                  smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                                   mirror_enabled=None, kb_intensity="中", target_duration=60,
                                   dedup_video_options=None, dedup_audio_options=None, transition_options=None,
-                                  duration_tolerance=None):
+                                  duration_tolerance=None, local_asr_session=None):
     """Process a single version with pre-determined clips (bypass AI selection)"""
     import time as _time
     from ai_clipper import is_enabled as ai_is_enabled
@@ -5185,7 +5585,8 @@ def _process_version_with_clips(video_path, srt_path, output_path,
                                 mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, target_duration=target_duration,
                                 dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
                                 transition_options=transition_options, _user_confirmed_clips=True,
-                                duration_tolerance=duration_tolerance)
+                                duration_tolerance=duration_tolerance,
+                                local_asr_session=local_asr_session)
         return result
     finally:
         _ai.ai_analyze_clips = _original_fn
@@ -5197,6 +5598,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                        smart_crop_enabled=True, crop_level="medium", ken_burns_enabled=True,
                        target_duration=60, focus_hint="\u81ea\u52a8", num_versions=1,
                        srt_path=None, force_category=None, duration_tolerance=None, **extra_kwargs):
+    global _multi_result_cache
 
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -5215,6 +5617,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     kb_intensity = extra_kwargs.get("kb_intensity", "中")
     _clips_only = bool(extra_kwargs.get("_clips_only"))
     _user_confirmed_clips = bool(extra_kwargs.get("_user_confirmed_clips"))
+    _provided_result_cache = extra_kwargs.get("_result_cache")
+    _local_asr_session = extra_kwargs.get("local_asr_session")
+    _active_result_cache = _provided_result_cache if isinstance(_provided_result_cache, dict) else _multi_result_cache
     global TARGET_DURATION, TARGET_DURATION_TOLERANCE, _hw_fallback, _hw_encoder_checked, _hw_encoder
     _hw_fallback = False
     _hw_encoder_checked = False
@@ -5292,17 +5697,20 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if _cancelled(): return False
         original_vp = original_video_list[_vi] if _vi < len(original_video_list) else vp
         _sc = os.path.splitext(original_vp)[0] + ".srt"
-        if not os.path.exists(_sc):
-            # Fallback scan
-            _srt_dir = os.path.dirname(original_vp)
-            _base = os.path.splitext(os.path.basename(original_vp))[0]
-            if os.path.isdir(_srt_dir):
-                for _f in os.listdir(_srt_dir):
-                    if _f.endswith(".srt") and _base in _f:
-                        _sc = os.path.join(_srt_dir, _f)
-                        _log(f"  找到匹配 SRT: {_f}")
-                        break
-        if not os.path.exists(_sc):
+        _sc_usable = os.path.exists(_sc)
+        if _sc_usable:
+            _cache_status = _inspect_srt_cache(original_vp, _sc)
+            if _cache_status.get("valid"):
+                cache_kind = "已验证ASR缓存" if _cache_status.get("managed") else "用户SRT"
+                _log(f"  使用{cache_kind}: {os.path.basename(_sc)}")
+            else:
+                _sc_usable = False
+                _log(
+                    "  ASR缓存与当前素材不匹配，重新识别："
+                    f"{_cache_status.get('reason') or 'unknown'}"
+                )
+                _discard_invalid_managed_srt_cache(_sc, _cache_status)
+        if not _sc_usable:
             # Cloud ASR + SenseVoice fallback
             try:
                 from ai_clipper import load_settings as _ld_mix
@@ -5341,8 +5749,20 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                         with open(_sc, "w", encoding="utf-8") as _fw:
                             _fw.write(semantic_segments_to_srt(_semantic_srts))
                         write_word_timing_sidecar(_sc, srts, log_fn=_log)
+                        try:
+                            from asr_cache import write_metadata as _write_asr_metadata
+                            _write_asr_metadata(
+                                original_vp,
+                                _sc,
+                                provider="volcengine",
+                                model="volc.seedasr.auc",
+                                timing_precision="word",
+                            )
+                        except Exception:
+                            _LOG.warning("failed to write mix ASR metadata", exc_info=True)
                         _log(f"  火山引擎 ASR 成功: {len(srts)} 条")
                         _asr_ok = True
+                        _sc_usable = True
                 except Exception as _ve:
                     _log(f"  火山引擎 ASR 失败: {_ve}")
                 if not _asr_ok:
@@ -5369,23 +5789,43 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                         _et_seg = _seg["end"] if isinstance(_seg, dict) else _seg[2]
                                         _tx_seg = _seg["text"] if isinstance(_seg, dict) else _seg[0]
                                         _fw.write(f"{_i_seg+1}\n{int(_st_seg//3600):02d}:{int((_st_seg%3600)//60):02d}:{int(_st_seg%60):02d},{int((_st_seg%1)*1000):03d} --> {int(_et_seg//3600):02d}:{int((_et_seg%3600)//60):02d}:{int(_et_seg%60):02d},{int((_et_seg%1)*1000):03d}\n{_tx_seg}\n\n")
+                                try:
+                                    from asr_cache import write_metadata as _write_asr_metadata
+                                    _write_asr_metadata(
+                                        original_vp,
+                                        _sc,
+                                        provider="aliyun",
+                                        model=str(_cfg4.get("asr_model") or "paraformer-v2"),
+                                        timing_precision="segment",
+                                    )
+                                except Exception:
+                                    _LOG.warning("failed to write mix ASR metadata", exc_info=True)
                                 _log(f"  阿里云 ASR 成功: {len(srts)} 条")
                                 _asr_ok = True
+                                _sc_usable = True
                     except Exception as _ae:
                         _log(f"  阿里云 ASR 失败: {_ae}")
             if not _asr_ok:
                 try:
                     from stt import generate_srt
-                    _temp = generate_srt(vp, log_fn=_log)
+                    _temp = generate_srt(vp, log_fn=_log, cancel_event=cancel_event)
                     if _temp and os.path.exists(_temp):
-                        _has_word_timing = _copy_srt_with_word_timing_sidecar(_temp, _sc)
+                        _has_word_timing = _copy_srt_with_word_timing_sidecar(
+                            _temp,
+                            _sc,
+                            source_video=original_vp,
+                            provider="sensevoice",
+                            model="iic/SenseVoiceSmall",
+                        )
                         if _has_word_timing:
                             _log("  SenseVoice ASR 成功，已保存词级时间")
                         else:
                             _log("  SenseVoice ASR 成功，但未返回词级时间")
+                        _asr_ok = True
+                        _sc_usable = True
                 except Exception as e:
                     _log(f"  SenseVoice ASR 失败: {e}")
-        if os.path.exists(_sc):
+        if _sc_usable and os.path.exists(_sc):
             with open(_sc, "r", encoding="utf-8", errors="replace") as f:
                 _srt_text = f.read()
             _source_srt_entries = []
@@ -5566,7 +6006,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           final_target_duration=target_duration,
                                           duration_contract=_duration_contract,
                                           ai_controls=ai_controls,
-                                          word_timings=_mix_word_timings)
+                                          record_history=not _clips_only,
+                                          word_timings=_mix_word_timings,
+                                          allow_partial=_clips_only)
         try:
             analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
             preference_summary = dict(analysis_metadata.get("preference_summary") or {})
@@ -5841,25 +6283,24 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     if not _clips_only:
         _log_final_clip_details(sorted_clips, _log, title="混剪最终片段明细")
     if _clips_only:
-        global _multi_result_cache
-        if isinstance(_multi_result_cache, dict):
-            _multi_result_cache["clips"] = list(sorted_clips)
-            _multi_result_cache["sources"] = list(video_list)
-            _multi_result_cache["srt_text"] = merged_srt
+        if isinstance(_active_result_cache, dict):
+            _active_result_cache["clips"] = list(sorted_clips)
+            _active_result_cache["sources"] = list(video_list)
+            _active_result_cache["srt_text"] = merged_srt
             try:
                 import ai_clipper as _ai_meta
                 analysis_metadata = dict(_ai_meta.get_last_analysis_metadata() or analysis_metadata or {})
             except Exception:
                 _LOG.warning("unexpected error", exc_info=True)
                 pass
-            _multi_result_cache["analysis_metadata"] = dict(analysis_metadata or {})
-            _multi_result_cache["category_summary"] = dict(analysis_metadata.get("category_summary") or {})
-            _multi_result_cache["topic_coverage_summary"] = dict(analysis_metadata.get("topic_coverage_summary") or {})
-            _multi_result_cache["preference_summary"] = dict(analysis_metadata.get("preference_summary") or preference_summary or {})
-            _multi_result_cache["word_timings"] = list(_mix_word_timings or [])
-            _multi_result_cache["requested_target_duration"] = target_duration
-            _multi_result_cache["ai_target_duration"] = _ai_target_duration
-            _multi_result_cache["duration_speed_factor"] = _planned_speed_factor
+            _active_result_cache["analysis_metadata"] = dict(analysis_metadata or {})
+            _active_result_cache["category_summary"] = dict(analysis_metadata.get("category_summary") or {})
+            _active_result_cache["topic_coverage_summary"] = dict(analysis_metadata.get("topic_coverage_summary") or {})
+            _active_result_cache["preference_summary"] = dict(analysis_metadata.get("preference_summary") or preference_summary or {})
+            _active_result_cache["word_timings"] = list(_mix_word_timings or [])
+            _active_result_cache["requested_target_duration"] = target_duration
+            _active_result_cache["ai_target_duration"] = _ai_target_duration
+            _active_result_cache["duration_speed_factor"] = _planned_speed_factor
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": True, "clips_cached": True}
 
@@ -6062,6 +6503,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
 
         # Smart crop or default 9:16
         _sc_zoom = 1.0
+        _sc_crop = {"method": "undetected"} if smart_crop_enabled else None
         _sw, _sh = _src_dims.get(vp, (w, h))
         _sc_info = _sc_results_all.get((vp, ci), None) if smart_crop_enabled and _sc_results_all else None
         if _sc_info:
@@ -6132,7 +6574,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
 
         if rc == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
             temp_files.append(out_clip)
-            _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
+            _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
             _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
         else:
             _log(f"  Cut failed (rc={rc})")
@@ -6159,7 +6601,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     rc2 = _wait_process(proc, timeout=300, cancel_event=cancel_event)
                     if rc2 == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
                         temp_files.append(out_clip)
-                        _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom))
+                        _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
                         _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
                         _log(f"  Cut retry OK ({_sw_name})")
                     else:
@@ -6189,6 +6631,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _kb_dur = _clip_ends[_kbi] - _clip_starts[_kbi] if _kbi < len(_clip_starts) else 10.0
                 _kb_out = _clip_file.replace(".mp4", "_kb.mp4")
                 _kb_cap = _clip_kb_caps[_kbi] if _kbi < len(_clip_kb_caps) else None
+                if _kb_cap is not None and _kb_cap <= 0.005:
+                    _log(f"KenBurns: 片段{_kbi+1}人物接近画面边缘，跳过二次缩放以保护头部和身体")
+                    continue
                 if _ken_burns_opencv:
                     _kb_ok_flag = _ken_burns_opencv(
                         _clip_file, _kb_out, _kb_dur, w, h, 30,
@@ -6519,6 +6964,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
         f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
     )
+    if _duration_contract.get("duration_soft_warning"):
+        _log(
+            f"时长提示: {_duration_contract['duration_soft_warning']}，"
+            "继续字幕烧录"
+        )
+    # Keep a single final-duration warning in batch summaries; this preflight
+    # value is still recorded in the detailed log above.
+    _duration_soft_warnings = []
     if not _duration_ok:
         _duration_error = (
             f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
@@ -6535,8 +6988,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _subtitle_stage_started = time.time()
     if subtitle_overlay and os.path.exists(nosub_file) and os.path.getsize(nosub_file) > 10000:
         try:
-            _add_subtitles_final(nosub_file, final, w, h, tmp, _log, pip_path, pip_size, pip_opacity, pip_pos)
+            _add_subtitles_final(
+                nosub_file, final, w, h, tmp, _log, pip_path, pip_size,
+                pip_opacity, pip_pos, cancel_event=cancel_event,
+                local_asr_session=_local_asr_session,
+            )
         except Exception as e:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("cancelled") from e
             _log(f"Subtitle overlay failed: {e}")
             shutil.copy2(nosub_file, final)
     else:
@@ -6587,6 +7046,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _LOG.warning("failed to remove temp file", exc_info=True)
             shutil.rmtree(tmp, ignore_errors=True)
             raise RuntimeError(_duration_error)
+        if _final_contract.get("duration_soft_warning"):
+            _duration_soft_warnings.append(_final_contract["duration_soft_warning"])
+            _log(f"时长提示: {_final_contract['duration_soft_warning']}")
 
     _report_old_dur, _report_old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
     try:
@@ -6621,11 +7083,17 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _log(f"  Size: {final_mb:.1f}MB")
     _log(f"  混剪总用时: {_elapsed_text}")
 
+    _result_metadata = dict(analysis_metadata or {})
+    if _duration_soft_warnings:
+        _result_metadata["duration_soft_warning"] = "；".join(
+            dict.fromkeys(_duration_soft_warnings)
+        )
     return {
         "ok": True,
         "output_path": final,
         "clips": len(sorted_clips),
         "sources": len(video_list),
         "size_mb": final_mb,
-        "analysis_metadata": dict(analysis_metadata or {}),
+        "analysis_metadata": _result_metadata,
+        "duration_soft_warning": _result_metadata.get("duration_soft_warning", ""),
     }

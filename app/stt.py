@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from config import FFMPEG_PATH
 
@@ -22,13 +22,22 @@ _LOCAL_ASR_TIMEOUT_SECONDS = 4 * 60 * 60
 _LOCAL_ASR_TOOL_FLAG = "--liveclipper-run-tool"
 
 
+class _CancelEvent(Protocol):
+    def is_set(self) -> bool: ...
+
+
 def get_ffmpeg_cmd() -> str:
     if FFMPEG_PATH and os.path.exists(FFMPEG_PATH):
         return FFMPEG_PATH
     return "ffmpeg"
 
 
-def extract_audio(video_path: str, output_wav: str, log_fn: Callable[[str], None] | None = None) -> bool:
+def extract_audio(
+    video_path: str,
+    output_wav: str,
+    log_fn: Callable[[str], None] | None = None,
+    cancel_event: _CancelEvent | None = None,
+) -> bool:
     """Extract 16 kHz mono WAV audio for the local SenseVoice engine."""
     def _log(message: str) -> None:
         if log_fn:
@@ -49,7 +58,7 @@ def extract_audio(video_path: str, output_wav: str, log_fn: Callable[[str], None
         output_wav,
     ]
     _log("正在提取音频...")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -58,8 +67,20 @@ def extract_audio(video_path: str, output_wav: str, log_fn: Callable[[str], None
         errors="replace",
         creationflags=_NO_WINDOW,
     )
-    if result.returncode != 0 or not os.path.exists(output_wav):
-        _log(f"音频提取失败: {result.stderr[:200]}")
+    stderr = ""
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            proc.kill()
+            proc.communicate(timeout=10)
+            _log("音频提取已停止。")
+            return False
+        try:
+            _stdout, stderr = proc.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    if proc.returncode != 0 or not os.path.exists(output_wav):
+        _log(f"音频提取失败: {str(stderr or '')[:200]}")
         return False
 
     size_mb = os.path.getsize(output_wav) / (1024 * 1024)
@@ -100,6 +121,18 @@ def _local_asr_worker_command(worker: Path, audio_path: str, srt_output: str) ->
     return [sys.executable, str(worker), audio_path, srt_output]
 
 
+def _local_asr_worker_serve_command(worker: Path) -> list[str]:
+    """Start the local worker in its task-scoped reusable mode."""
+    if getattr(sys, "frozen", False):
+        return [
+            sys.executable,
+            _LOCAL_ASR_TOOL_FLAG,
+            str(worker),
+            "--serve",
+        ]
+    return [sys.executable, str(worker), "--serve"]
+
+
 def _remove_local_asr_outputs(srt_output: str) -> None:
     srt_path = Path(srt_output)
     for path in (srt_path, srt_path.with_suffix(".words.json")):
@@ -127,10 +160,232 @@ def _decode_worker_message(raw_line: str) -> tuple[str, str | bool] | None:
     return None
 
 
+class LocalASRWorkerSession:
+    """A task-scoped SenseVoice worker that keeps its model warm between jobs.
+
+    The worker is never global: callers own the session and must close it when
+    their batch finishes.  This avoids a repeated model load for each final
+    subtitle while preserving the process boundary used to release model memory
+    deterministically after the task.
+    """
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen[str] | None = None
+        self._reader: threading.Thread | None = None
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._lock = threading.Lock()
+        self._request_index = 0
+        self._closed = False
+
+    @staticmethod
+    def _timeout_seconds() -> float:
+        try:
+            return max(
+                60.0,
+                float(os.environ.get("LIVECLIPPER_LOCAL_ASR_TIMEOUT_SECONDS", _LOCAL_ASR_TIMEOUT_SECONDS)),
+            )
+        except (TypeError, ValueError):
+            return float(_LOCAL_ASR_TIMEOUT_SECONDS)
+
+    def _start(self, log_fn: Callable[[str], None] | None) -> bool:
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        worker = _local_asr_worker_script()
+        if worker is None:
+            if log_fn:
+                log_fn("SenseVoice 独立识别进程缺少 worker 文件，请重新安装完整版本。")
+            return False
+        try:
+            worker_env = os.environ.copy()
+            worker_env["PYTHONIOENCODING"] = "utf-8"
+            if log_fn:
+                log_fn("正在启动可复用 SenseVoice 批量识别进程...")
+            self._lines = queue.Queue()
+            self._proc = subprocess.Popen(
+                _local_asr_worker_serve_command(worker),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=_NO_WINDOW,
+                env=worker_env,
+            )
+
+            def _read_output() -> None:
+                try:
+                    if self._proc and self._proc.stdout:
+                        for line in self._proc.stdout:
+                            self._lines.put(line)
+                finally:
+                    self._lines.put(None)
+
+            self._reader = threading.Thread(
+                target=_read_output,
+                name="liveclipper-local-asr-batch-log",
+                daemon=True,
+            )
+            self._reader.start()
+            return True
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            if log_fn:
+                log_fn(f"SenseVoice 批量识别进程启动失败: {exc}")
+            self._terminate()
+            return False
+
+    def _terminate(self) -> None:
+        proc = self._proc
+        reader = self._reader
+        self._proc = None
+        self._reader = None
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+        if reader is not None:
+            reader.join(timeout=2)
+
+    def transcribe(
+        self,
+        audio_path: str,
+        srt_output: str,
+        *,
+        log_fn: Callable[[str], None] | None = None,
+        cancel_event: _CancelEvent | None = None,
+    ) -> bool:
+        """Run one request, keeping the already-loaded model for the next one."""
+        with self._lock:
+            if self._closed:
+                if log_fn:
+                    log_fn("SenseVoice 批量识别进程已关闭，无法继续识别。")
+                return False
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            if not self._start(log_fn):
+                _remove_local_asr_outputs(srt_output)
+                return False
+            proc = self._proc
+            if proc is None or proc.stdin is None:
+                _remove_local_asr_outputs(srt_output)
+                return False
+
+            self._request_index += 1
+            request_id = str(self._request_index)
+            _remove_local_asr_outputs(srt_output)
+            try:
+                proc.stdin.write(json.dumps({
+                    "id": request_id,
+                    "audio_path": audio_path,
+                    "srt_output": srt_output,
+                }, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                if log_fn:
+                    log_fn(f"SenseVoice 批量识别请求发送失败: {exc}")
+                self._terminate()
+                _remove_local_asr_outputs(srt_output)
+                return False
+
+            deadline = time.monotonic() + self._timeout_seconds()
+            diagnostics: list[str] = []
+            result_ok: bool | None = None
+            while result_ok is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    if log_fn:
+                        log_fn("SenseVoice 本地识别已停止。")
+                    self._terminate()
+                    _remove_local_asr_outputs(srt_output)
+                    return False
+                if time.monotonic() >= deadline:
+                    if log_fn:
+                        log_fn("SenseVoice 本地识别超时，识别进程已结束。")
+                    self._terminate()
+                    _remove_local_asr_outputs(srt_output)
+                    return False
+                try:
+                    raw_line = self._lines.get(timeout=0.2)
+                except queue.Empty:
+                    raw_line = ""
+                if raw_line is None:
+                    if log_fn:
+                        log_fn("SenseVoice 批量识别进程意外退出。")
+                    self._terminate()
+                    _remove_local_asr_outputs(srt_output)
+                    return False
+                if not raw_line:
+                    if proc.poll() is not None:
+                        if log_fn:
+                            log_fn(f"SenseVoice 批量识别进程失败（返回码 {proc.returncode}）。")
+                        self._terminate()
+                        _remove_local_asr_outputs(srt_output)
+                        return False
+                    continue
+                try:
+                    payload = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    diagnostics.append(str(raw_line).strip())
+                    diagnostics = diagnostics[-5:]
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                message_type = str(payload.get("type") or "").strip().lower()
+                response_id = str(payload.get("id") or "")
+                if message_type == "log" and (not response_id or response_id == request_id):
+                    message = str(payload.get("message") or "").strip()
+                    if message and log_fn:
+                        log_fn(message)
+                elif message_type == "result" and response_id == request_id:
+                    result_ok = bool(payload.get("ok"))
+
+            srt_path = Path(srt_output)
+            succeeded = bool(result_ok) and srt_path.is_file() and srt_path.stat().st_size > 0
+            if not succeeded:
+                if log_fn:
+                    for diagnostic in diagnostics:
+                        log_fn(f"SenseVoice 诊断: {diagnostic[:300]}")
+                    log_fn("SenseVoice 批量识别未生成可用字幕。")
+                _remove_local_asr_outputs(srt_output)
+            return succeeded
+
+    def close(self, log_fn: Callable[[str], None] | None = None) -> None:
+        """Stop the process even after a failed/cancelled batch."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            proc = self._proc
+            if proc is not None and proc.poll() is None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+                    proc.stdin.flush()
+                    proc.wait(timeout=8)
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    pass
+            self._terminate()
+            if log_fn:
+                log_fn("SenseVoice 批量识别进程已退出，本地模型内存已释放。")
+
+
 def _run_local_asr_worker(
     audio_path: str,
     srt_output: str,
     log_fn: Callable[[str], None] | None = None,
+    cancel_event: _CancelEvent | None = None,
 ) -> bool:
     def _log(message: str) -> None:
         if log_fn and message:
@@ -186,6 +441,12 @@ def _run_local_asr_worker(
         deadline = time.monotonic() + timeout_seconds
 
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                proc.wait(timeout=10)
+                _log("SenseVoice 本地识别已停止。")
+                _remove_local_asr_outputs(srt_output)
+                return False
             if time.monotonic() >= deadline:
                 proc.kill()
                 proc.wait(timeout=10)
@@ -245,6 +506,8 @@ def transcribe_local_audio_to_srt(
     srt_output: str,
     log_fn: Callable[[str], None] | None = None,
     asr_engine: str = "sensevoice",
+    cancel_event: _CancelEvent | None = None,
+    worker_session: LocalASRWorkerSession | None = None,
 ) -> bool:
     """Transcribe through SenseVoice only; never silently switch engines."""
     def _log(message: str) -> None:
@@ -254,13 +517,26 @@ def transcribe_local_audio_to_srt(
     selected_engine = str(asr_engine or "sensevoice").strip().lower()
     if selected_engine not in {"", "auto", "sensevoice"}:
         _log("本地识别仅支持 SenseVoice，已忽略过期的本地模型设置。")
-    return _run_local_asr_worker(audio_path, srt_output, log_fn=log_fn)
+    if worker_session is not None:
+        return worker_session.transcribe(
+            audio_path,
+            srt_output,
+            log_fn=log_fn,
+            cancel_event=cancel_event,
+        )
+    return _run_local_asr_worker(
+        audio_path,
+        srt_output,
+        log_fn=log_fn,
+        cancel_event=cancel_event,
+    )
 
 
 def generate_srt(
     video_path: str,
     log_fn: Callable[[str], None] | None = None,
     asr_engine: str = "sensevoice",
+    cancel_event: _CancelEvent | None = None,
 ) -> str | None:
     """Generate an SRT sidecar with SenseVoice, or return ``None`` on failure."""
     temp_dir = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
@@ -270,13 +546,14 @@ def generate_srt(
     srt_path = os.path.join(temp_dir, f"sub_{video_hash}.srt")
 
     try:
-        if not extract_audio(video_path, wav_path, log_fn):
+        if not extract_audio(video_path, wav_path, log_fn, cancel_event=cancel_event):
             return None
         if not transcribe_local_audio_to_srt(
             wav_path,
             srt_path,
             log_fn=log_fn,
             asr_engine=asr_engine,
+            cancel_event=cancel_event,
         ):
             return None
         return srt_path if os.path.exists(srt_path) else None
@@ -289,8 +566,15 @@ def generate_srt(
 
 
 def cleanup_srt(srt_path: str | None) -> None:
-    try:
-        if srt_path and os.path.exists(srt_path):
-            os.remove(srt_path)
-    except OSError:
-        pass
+    if not srt_path:
+        return
+    path = Path(srt_path)
+    for target in (
+        path,
+        path.with_suffix(".words.json"),
+        path.with_suffix(".asr-cache.json"),
+    ):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass

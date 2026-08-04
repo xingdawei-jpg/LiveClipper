@@ -21,6 +21,7 @@
 7. .project_docs/docs/SOURCE_OF_TRUTH.md
 8. .project_docs/docs/PACKAGING_WINDOW_RUNBOOK.md
 9. .project_docs/docs/UPGRADE_RELEASE_RUNBOOK.md
+10. docs/RUNTIME_LAYOUT_STATUS.md
 
 ## Mandatory Cross-Window Sync Gate
 
@@ -60,6 +61,7 @@ Get-ChildItem release_dist -File -ErrorAction SilentlyContinue |
 - GitHub patch Release 规格；
 - launcher、updater 和公钥 hash。
 - 目标 runtime 相对每个受支持基线的新增/变更文件数、压缩 patch 大小和目录级依赖差异。
+- 本次目标是 V3 还是 V4；不得通过把 `app/version.json` 的布局字段直接改成 4 来制作 V4。
 
 先运行：
 
@@ -72,6 +74,7 @@ python tools\release_preflight.py --phase development
 ## 发布类型
 
 - launcher、updater、公钥、信任根、布局或安装状态格式变化：新全量基线，只通过百度网盘分发全量包。
+- V4 私测使用独立的 Core、business bundle、`current.json` 和签名 channel；不得混入 V3 delta。
 - 新增/整体替换原生或 ML runtime，或任一直接 patch 超过 50 MiB、500 个 runtime payload 文件：同样是新全量基线。不得因为源码文件属于业务层而降级为 GitHub delta。
 - 仅业务 runtime 变化且通过 docs/PACKAGING_V3_HANDOFF.md 的增量预算：才构建并发布 GitHub 签名 delta。
 - 单台电脑的本地配置或权限问题：先单机修复，不立即发布全体版本。

@@ -5,12 +5,104 @@
 """
 
 import json
-import os, re, subprocess
+import hashlib
+import os, re, shutil, subprocess, tempfile, time
 from config import sanitize_forbidden_title
 
 from datetime import datetime
 
 from typing import Optional, List
+
+
+_TS_EDIT_EXTENSIONS = {".ts", ".mts", ".m2ts"}
+_NORMALIZE_DISK_RESERVE = 2 * 1024 * 1024 * 1024
+
+
+def _needs_ts_normalization(path):
+    return os.path.splitext(str(path or ""))[1].lower() in _TS_EDIT_EXTENSIONS
+
+
+def _create_schedule_temp_dir():
+    try:
+        import config as _config
+
+        cache_root = os.path.join(str(_config.USER_DATA_DIR), "cache", "processing", "product_scan")
+        os.makedirs(cache_root, exist_ok=True)
+        return tempfile.mkdtemp(prefix="schedule_", dir=cache_root)
+    except Exception:
+        return tempfile.mkdtemp(prefix="liveclipper_schedule_")
+
+
+def _enough_normalize_space(source_path, temp_dir):
+    try:
+        source_size = max(0, os.path.getsize(source_path))
+        margin = max(512 * 1024 * 1024, int(source_size * 0.12))
+        return shutil.disk_usage(temp_dir).free >= source_size + margin + _NORMALIZE_DISK_RESERVE
+    except Exception:
+        return False
+
+
+def _prepare_ts_source(video, temp_dir, ffmpeg, log_fn=None):
+    if not _needs_ts_normalization(video):
+        return None
+    if not _enough_normalize_space(video, temp_dir):
+        if log_fn:
+            log_fn("  TS临时标准化空间不足，改用逐片同步处理: %s" % os.path.basename(video))
+        return None
+
+    digest = hashlib.sha256(os.path.abspath(video).encode("utf-8", errors="replace")).hexdigest()[:12]
+    output_path = os.path.join(temp_dir, "normalized_%s.mp4" % digest)
+    started = time.perf_counter()
+    source_offset = _probe_av_start_offset_seconds(video, ffmpeg)
+    if log_fn:
+        log_fn("  TS无损标准化中（不重新编码）: %s" % os.path.basename(video))
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg, "-y",
+                "-fflags", "+genpts",
+                "-i", video,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                output_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=1800,
+            creationflags=0x8000000,
+        )
+        usable = (
+            proc.returncode == 0
+            and os.path.isfile(output_path)
+            and os.path.getsize(output_path) > 1000
+        )
+        if usable:
+            output_offset = _probe_av_start_offset_seconds(output_path, ffmpeg)
+            usable = (
+                source_offset is not None
+                and output_offset is not None
+                and abs(output_offset - source_offset) <= 0.03
+            )
+        if usable:
+            if log_fn:
+                log_fn(
+                    "  TS无损标准化完成: %s（%.1fs，后续片段按同一时间轴同步切割）"
+                    % (os.path.basename(video), time.perf_counter() - started)
+                )
+            return output_path
+        if log_fn:
+            log_fn("  TS无损标准化未通过音画校验，改用逐片同步处理: %s" % os.path.basename(video))
+    except Exception as exc:
+        if log_fn:
+            log_fn("  TS无损标准化失败，改用逐片同步处理: %s" % str(exc)[:120])
+    try:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    except OSError:
+        pass
+    return None
 
 
 
@@ -32,7 +124,7 @@ def _ffprobe_for(ffmpeg):
     return "ffprobe"
 
 
-def _av_start_gap_seconds(path, ffmpeg):
+def _probe_av_start_offset_seconds(path, ffmpeg):
     try:
         proc = subprocess.run(
             [
@@ -51,32 +143,61 @@ def _av_start_gap_seconds(path, ffmpeg):
             creationflags=0x8000000,
         )
         if proc.returncode != 0:
-            return 0.0
+            return None
         data = json.loads((proc.stdout or b"{}").decode("utf-8", errors="replace") or "{}")
         streams = data.get("streams") or []
         video = next((item for item in streams if item.get("codec_type") == "video"), None)
         audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
-        if not video or not audio:
+        if not video:
+            return None
+        if not audio:
             return 0.0
-        return abs(float(video.get("start_time") or 0.0) - float(audio.get("start_time") or 0.0))
+        return float(audio.get("start_time") or 0.0) - float(video.get("start_time") or 0.0)
     except Exception:
+        return None
+
+
+def _probe_av_start_gap_seconds(path, ffmpeg):
+    offset = _probe_av_start_offset_seconds(path, ffmpeg)
+    return None if offset is None else abs(offset)
+
+
+def _av_start_gap_seconds(path, ffmpeg):
+    gap = _probe_av_start_gap_seconds(path, ffmpeg)
+    if gap is None:
         return 0.0
+    return gap
 
 
-def _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path):
+def _audio_sync_filter(av_start_offset=0.0):
+    offset = float(av_start_offset or 0.0)
+    if offset >= 0:
+        pts = "asetpts=PTS-STARTPTS-%.6f/TB" % offset
+    else:
+        pts = "asetpts=PTS-STARTPTS+%.6f/TB" % abs(offset)
+    return pts + ",aresample=async=1:first_pts=0"
+
+
+def _sync_reencode_segment(
+    ffmpeg, rel_st, part_dur, video, out_path, av_start_offset=0.0
+):
     return subprocess.run(
         [
             ffmpeg, "-y",
+            "-fflags", "+genpts",
             "-ss", str(float(rel_st)),
+            "-accurate_seek",
             "-i", video,
             "-t", str(float(part_dur)),
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
             "-vf", "setpts=PTS-STARTPTS,fps=30,format=yuv420p",
             "-r", "30",
             "-vsync", "cfr",
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "23",
-            "-af", "aresample=async=1:first_pts=0",
+            "-af", _audio_sync_filter(av_start_offset),
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
@@ -91,6 +212,77 @@ def _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path):
         timeout=600,
         creationflags=0x8000000,
     )
+
+
+def _fast_copy_segment(ffmpeg, rel_st, part_dur, video, out_path):
+    return subprocess.run(
+        [
+            ffmpeg, "-y",
+            "-ss", str(float(rel_st)),
+            "-i", video,
+            "-t", str(float(part_dur)),
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            out_path,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=600,
+        creationflags=0x8000000,
+    )
+
+
+def _probe_media_duration_seconds(path, ffmpeg):
+    try:
+        proc = subprocess.run(
+            [
+                _ffprobe_for(ffmpeg),
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            creationflags=0x8000000,
+        )
+        if proc.returncode != 0:
+            return None
+        raw = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        return float(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _validate_fast_copy_segment(path, ffmpeg, expected_duration, _expected_av_offset):
+    output_offset = _probe_av_start_offset_seconds(path, ffmpeg)
+    if output_offset is None:
+        return False, "无法读取切片音画起点"
+
+    # An arbitrary stream-copy seek starts on nearby codec packet boundaries,
+    # so its first packet offset is not expected to equal the container-level
+    # offset at the beginning of the full source.  The copied packets retain
+    # their timestamps; reject only an audible/visible output start gap.
+    output_gap = abs(float(output_offset))
+    if output_gap > 0.08:
+        return False, "切片音画起点相差 %.3fs" % output_gap
+
+    output_duration = _probe_media_duration_seconds(path, ffmpeg)
+    if output_duration is None:
+        return False, "无法读取切片时长"
+    # Stream copy can retain the preceding GOP.  A few seconds of boundary
+    # padding is acceptable for long product ranges and avoids hours of
+    # re-encoding; larger deviations still take the synchronized fallback.
+    duration_tolerance = max(3.0, min(8.0, float(expected_duration) * 0.01))
+    duration_error = abs(float(output_duration) - float(expected_duration))
+    if duration_error > duration_tolerance:
+        return False, "切片时长偏差 %.2fs" % duration_error
+
+    return True, "音画起点差 %.3fs" % output_gap
 
 
 
@@ -521,23 +713,22 @@ def _find_video_for_time(video_list, offset_sec, durations=None):
 
 def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None):
     """按分组切割导出每段独立文件，不拼接"""
-    import os, subprocess, shutil, tempfile
-
     results = []
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-
     video_list = sort_videos_by_start(video_list)
-
-    # 计算视频时长和时间线；有时间戳文件名时按文件名时间定位，否则按选择顺序连续拼接定位。
     durations = _probe_durations(video_list, log_fn=log_fn, ffmpeg_cmd=ffmpeg)
     if not durations or len(durations) != len(video_list):
         durations = [99999] * len(video_list)
     starts = _get_video_timeline(video_list, durations)
-    timeline = []
-    for i, v in enumerate(video_list):
-        dur = durations[i] if i < len(durations) else 0
-        timeline.append((v, starts[i], starts[i] + dur))
+    timeline = [
+        (video, starts[index], starts[index] + (durations[index] if index < len(durations) else 0))
+        for index, video in enumerate(video_list)
+    ]
+    normalized_sources = {}
+    normalized_offsets = {}
+    normalization_attempted = set()
+    schedule_temp_dir = None
 
     def _split_across_videos(start, end):
         parts = []
@@ -548,86 +739,219 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                 parts.append((video, cut_start - vs, cut_end - cut_start, cut_start, cut_end))
         return parts
 
-    for g in groups:
-        name = sanitize_forbidden_title(g.get("name", ""), fallback="未命名商品")
-        segs = g.get("segments", [])
-        if not segs:
-            continue
-        flat_output = bool(g.get("flat_output"))
-        exact_name = bool(g.get("exact_name"))
-        safe_name = _safe_output_stem(name, max_chars=140 if exact_name else 80)
-        safe_dir_name = _safe_output_stem(name, max_chars=80)
-        out_dir = output_dir if flat_output else os.path.join(output_dir, safe_name)
-        os.makedirs(out_dir, exist_ok=True)
-        exported = 0
-        for si, (st, et) in enumerate(segs):
-            dur = et - st
-            if dur < 10:
-                continue
-            parts = _split_across_videos(st, et)
-            if not parts:
-                if log_fn:
-                    log_fn("  未找到覆盖时段 %.0fs-%.0fs 的视频" % (st, et))
-                continue
+    def _source_for_cut(video):
+        nonlocal schedule_temp_dir
+        if not _needs_ts_normalization(video):
+            return video, False, 0.0
+        key = os.path.abspath(video)
+        if key not in normalization_attempted:
+            normalization_attempted.add(key)
+            if schedule_temp_dir is None:
+                schedule_temp_dir = _create_schedule_temp_dir()
+            normalized_sources[key] = _prepare_ts_source(
+                video,
+                schedule_temp_dir,
+                ffmpeg,
+                log_fn=log_fn,
+            )
+        normalized = normalized_sources.get(key)
+        cut_source = normalized or video
+        if key not in normalized_offsets:
+            normalized_offsets[key] = _probe_av_start_offset_seconds(cut_source, ffmpeg)
+        offset = normalized_offsets.get(key)
+        return cut_source, bool(normalized), float(offset or 0.0)
 
-            for part_idx, (video, rel_st, part_dur, _, _) in enumerate(parts):
-                suffix = "%d" % (si + 1) if len(parts) == 1 else "%d_%d" % (si + 1, part_idx + 1)
-                if exact_name and len(segs) == 1 and len(parts) == 1:
-                    out_path = os.path.join(out_dir, "%s.mp4" % safe_name)
-                else:
-                    out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_dir_name[:40], suffix))
-                last_error = ""
-                try:
-                    # 快切 -c copy
-                    r = subprocess.run([ffmpeg, "-y", "-ss", str(float(rel_st)), "-i", video,
-                        "-t", str(float(part_dur)), "-c", "copy",
-                        "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out_path],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300, creationflags=0x8000000)
-                    copy_ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
-                    if copy_ok:
-                        gap = _av_start_gap_seconds(out_path, ffmpeg)
-                        if gap > 0.08:
-                            if log_fn:
-                                log_fn("  音画时间戳偏移 %.3fs，切换同步安全重编码: %s" % (gap, os.path.basename(out_path)))
-                            r = _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path)
-                            copy_ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000
-                    if not copy_ok:
-                        last_error = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:] or [""]
-                        last_error = last_error[0]
-                        # 快切失败，重编码
-                        r = _sync_reencode_segment(ffmpeg, rel_st, part_dur, video, out_path)
-                        if r.returncode != 0:
-                            lines = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()
-                            last_error = lines[-1] if lines else last_error
-                    if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
-                        mb = os.path.getsize(out_path) / 1024 / 1024
-                        results.append({"name": name, "output_path": out_path, "size_mb": round(mb, 1)})
-                        exported += 1
-                    else:
-                        try:
-                            if os.path.exists(out_path):
-                                os.remove(out_path)
-                        except Exception:
-                            pass
-                        if log_fn:
-                            detail = (" " + last_error[:160]) if last_error else ""
-                            log_fn("  导出失败: %s%s" % (os.path.basename(out_path), detail))
-                except Exception as _ee:
-                    if log_fn: log_fn("  切割失败: " + str(_ee)[:60])
-        if exported and log_fn:
-            log_fn("  %s: %d\u6bb5" % (name, exported))
+    def _error_tail(process):
+        raw = getattr(process, "stderr", b"") or b""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        lines = str(raw).strip().splitlines()
+        return lines[-1] if lines else ""
 
-    # \u6e05\u7406\u4e34\u65f6\u76ee\u5f55
     try:
-        td = os.path.join(tempfile.gettempdir(), "livec_schedule")
-        if os.path.exists(td):
-            for f in os.listdir(td):
-                try: os.remove(os.path.join(td, f))
-                except: pass
-            try: os.rmdir(td)
-            except: pass
-    except:
-        pass
+        for group in groups:
+            name = sanitize_forbidden_title(group.get("name", ""), fallback="未命名商品")
+            segments = group.get("segments", [])
+            if not segments:
+                continue
+            flat_output = bool(group.get("flat_output"))
+            exact_name = bool(group.get("exact_name"))
+            safe_name = _safe_output_stem(name, max_chars=140 if exact_name else 80)
+            safe_dir_name = _safe_output_stem(name, max_chars=80)
+            out_dir = output_dir if flat_output else os.path.join(output_dir, safe_name)
+            os.makedirs(out_dir, exist_ok=True)
+            exported = 0
+            for segment_index, (start, end) in enumerate(segments):
+                if end - start < 10:
+                    continue
+                parts = _split_across_videos(start, end)
+                if not parts:
+                    if log_fn:
+                        log_fn("  未找到覆盖时段 %.0fs-%.0fs 的视频" % (start, end))
+                    continue
+
+                for part_index, (video, relative_start, part_duration, _, _) in enumerate(parts):
+                    suffix = (
+                        "%d" % (segment_index + 1)
+                        if len(parts) == 1
+                        else "%d_%d" % (segment_index + 1, part_index + 1)
+                    )
+                    if exact_name and len(segments) == 1 and len(parts) == 1:
+                        out_path = os.path.join(out_dir, "%s.mp4" % safe_name)
+                    else:
+                        out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_dir_name[:40], suffix))
+                    last_error = ""
+                    try:
+                        cut_source, normalized, av_start_offset = _source_for_cut(video)
+                        ts_source = _needs_ts_normalization(video)
+                        reencode_attempted = False
+                        if ts_source and normalized:
+                            if log_fn:
+                                log_fn(
+                                    "  TS片段快速切割（无重编码）: %.0fs-%.0fs"
+                                    % (relative_start, relative_start + part_duration)
+                                )
+                            process = _fast_copy_segment(
+                                ffmpeg,
+                                relative_start,
+                                part_duration,
+                                cut_source,
+                                out_path,
+                            )
+                            final_ok = (
+                                process.returncode == 0
+                                and os.path.isfile(out_path)
+                                and os.path.getsize(out_path) > 1000
+                            )
+                            validation_detail = ""
+                            if final_ok:
+                                final_ok, validation_detail = _validate_fast_copy_segment(
+                                    out_path,
+                                    ffmpeg,
+                                    part_duration,
+                                    av_start_offset,
+                                )
+                            if final_ok:
+                                if log_fn:
+                                    log_fn("  TS快速切割完成（%s）" % validation_detail)
+                            else:
+                                last_error = validation_detail or _error_tail(process)
+                                if log_fn:
+                                    log_fn(
+                                        "  TS快速切割校验未通过，改用同步转码: %s"
+                                        % (last_error or "输出无效")
+                                    )
+                                process = _sync_reencode_segment(
+                                    ffmpeg,
+                                    relative_start,
+                                    part_duration,
+                                    cut_source,
+                                    out_path,
+                                    av_start_offset=av_start_offset,
+                                )
+                                reencode_attempted = True
+                                final_ok = (
+                                    process.returncode == 0
+                                    and os.path.isfile(out_path)
+                                    and os.path.getsize(out_path) > 1000
+                                )
+                        elif ts_source:
+                            if log_fn:
+                                log_fn(
+                                    "  TS片段同步转码（保持原音画对应）: %.0fs-%.0fs"
+                                    % (relative_start, relative_start + part_duration)
+                                )
+                            process = _sync_reencode_segment(
+                                ffmpeg,
+                                relative_start,
+                                part_duration,
+                                cut_source,
+                                out_path,
+                                av_start_offset=av_start_offset,
+                            )
+                            reencode_attempted = True
+                            final_ok = (
+                                process.returncode == 0
+                                and os.path.isfile(out_path)
+                                and os.path.getsize(out_path) > 1000
+                            )
+                        else:
+                            process = subprocess.run(
+                                [
+                                    ffmpeg, "-y",
+                                    "-ss", str(float(relative_start)),
+                                    "-i", cut_source,
+                                    "-t", str(float(part_duration)),
+                                    "-c", "copy",
+                                    "-avoid_negative_ts", "make_zero",
+                                    "-movflags", "+faststart",
+                                    out_path,
+                                ],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE,
+                                timeout=300,
+                                creationflags=0x8000000,
+                            )
+                            final_ok = (
+                                process.returncode == 0
+                                and os.path.isfile(out_path)
+                                and os.path.getsize(out_path) > 1000
+                            )
+                        if final_ok and not ts_source:
+                            gap = _av_start_gap_seconds(out_path, ffmpeg)
+                            if gap > 0.08:
+                                if log_fn:
+                                    log_fn(
+                                        "  音画时间戳偏移 %.3fs，切换同步安全重编码: %s"
+                                        % (gap, os.path.basename(out_path))
+                                    )
+                                process = _sync_reencode_segment(
+                                    ffmpeg, relative_start, part_duration, cut_source, out_path
+                                )
+                                reencode_attempted = True
+                                final_ok = (
+                                    process.returncode == 0
+                                    and os.path.isfile(out_path)
+                                    and os.path.getsize(out_path) > 1000
+                                )
+                        if not final_ok and not reencode_attempted:
+                            last_error = _error_tail(process)
+                            process = _sync_reencode_segment(
+                                ffmpeg, relative_start, part_duration, cut_source, out_path
+                            )
+                            final_ok = (
+                                process.returncode == 0
+                                and os.path.isfile(out_path)
+                                and os.path.getsize(out_path) > 1000
+                            )
+                        if not final_ok:
+                            last_error = _error_tail(process) or last_error
+
+                        if final_ok:
+                            mb = os.path.getsize(out_path) / 1024 / 1024
+                            results.append({
+                                "name": name,
+                                "output_path": out_path,
+                                "size_mb": round(mb, 1),
+                            })
+                            exported += 1
+                        else:
+                            try:
+                                if os.path.exists(out_path):
+                                    os.remove(out_path)
+                            except OSError:
+                                pass
+                            if log_fn:
+                                detail = (" " + last_error[:160]) if last_error else ""
+                                log_fn("  导出失败: %s%s" % (os.path.basename(out_path), detail))
+                    except Exception as exc:
+                        if log_fn:
+                            log_fn("  切割失败: " + str(exc)[:60])
+            if exported and log_fn:
+                log_fn("  %s: %d段" % (name, exported))
+    finally:
+        if schedule_temp_dir:
+            shutil.rmtree(schedule_temp_dir, ignore_errors=True)
     return results
 def align_schedule_to_video(schedule, video_list, live_start, log_fn=None, ffmpeg_cmd=None):
     """Align schedule to each video's filename timestamp."""

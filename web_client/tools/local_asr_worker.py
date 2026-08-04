@@ -40,9 +40,51 @@ def _emit(message_type: str, **payload: object) -> None:
     print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
+def _serve() -> int:
+    """Keep one SenseVoice model alive for a caller-owned batch session."""
+    _configure_runtime_path()
+    try:
+        from local_asr import sensevoice_to_srt
+    except Exception as exc:
+        _emit("log", message=f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
+        return 1
+
+    for raw_line in sys.stdin:
+        try:
+            request = json.loads(raw_line)
+        except json.JSONDecodeError:
+            _emit("log", message="SenseVoice worker 收到无法解析的批量请求。")
+            continue
+        if not isinstance(request, dict):
+            continue
+        if request.get("command") == "shutdown":
+            return 0
+        request_id = str(request.get("id") or "")
+        audio_path = str(request.get("audio_path") or "")
+        srt_output = str(request.get("srt_output") or "")
+        if not request_id or not audio_path or not srt_output:
+            _emit("result", id=request_id, ok=False)
+            continue
+        try:
+            ok = bool(
+                sensevoice_to_srt(
+                    audio_path,
+                    srt_output,
+                    log_fn=lambda message, rid=request_id: _emit("log", id=rid, message=str(message)),
+                )
+            )
+            _emit("result", id=request_id, ok=ok)
+        except Exception as exc:
+            _emit("log", id=request_id, message=f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
+            _emit("result", id=request_id, ok=False)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--serve"]:
+        return _serve()
     if len(args) != 2:
         _emit("log", message="SenseVoice worker 参数不完整。")
         _emit("result", ok=False)

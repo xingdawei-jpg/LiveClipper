@@ -130,12 +130,10 @@
             </div>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="sc-duration">成片时长</label>
-                <select id="sc-duration">
-                  <option value="30">30秒</option>
-                  <option value="60" selected>60秒</option>
-                  <option value="90">90秒</option>
-                  <option value="120">120秒</option>
+                <label for="sc-output-naming">输出命名</label>
+                <select id="sc-output-naming">
+                  <option value="source">原视频命名</option>
+                  <option value="source_timestamp" selected>加时间戳</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -147,16 +145,27 @@
                 </select>
               </div>
             </div>
-            <div class="field-row compact">
-              <label for="sc-duration-tolerance">时长容差</label>
-              <select id="sc-duration-tolerance">
-                <option value="auto" selected>自动</option>
-                <option value="5">±5秒</option>
-                <option value="10">±10秒</option>
-                <option value="15">±15秒</option>
-                <option value="20">±20秒</option>
-                <option value="30">±30秒</option>
-              </select>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="sc-duration">成片时长</label>
+                <select id="sc-duration">
+                  <option value="30">30秒</option>
+                  <option value="60" selected>60秒</option>
+                  <option value="90">90秒</option>
+                  <option value="120">120秒</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="sc-duration-tolerance">时长容差</label>
+                <select id="sc-duration-tolerance">
+                  <option value="auto" selected>自动</option>
+                  <option value="5">±5秒</option>
+                  <option value="10">±10秒</option>
+                  <option value="15">±15秒</option>
+                  <option value="20">±20秒</option>
+                  <option value="30">±30秒</option>
+                </select>
+              </div>
             </div>
             <div class="field-row advanced-param">
               <label for="sc-dedup">去重强度</label>
@@ -617,12 +626,10 @@
             </div>
             <div class="field-pair">
               <div class="field-row compact">
-                <label for="mix-duration">成片时长</label>
-                <select id="mix-duration">
-                  <option value="30">30秒</option>
-                  <option value="60" selected>60秒</option>
-                  <option value="90">90秒</option>
-                  <option value="120">120秒</option>
+                <label for="mix-output-naming">输出命名</label>
+                <select id="mix-output-naming">
+                  <option value="source">原视频命名</option>
+                  <option value="source_timestamp" selected>加时间戳</option>
                 </select>
               </div>
               <div class="field-row compact">
@@ -634,16 +641,27 @@
                 </select>
               </div>
             </div>
-            <div class="field-row compact">
-              <label for="mix-duration-tolerance">时长容差</label>
-              <select id="mix-duration-tolerance">
-                <option value="auto" selected>自动</option>
-                <option value="5">±5秒</option>
-                <option value="10">±10秒</option>
-                <option value="15">±15秒</option>
-                <option value="20">±20秒</option>
-                <option value="30">±30秒</option>
-              </select>
+            <div class="field-pair">
+              <div class="field-row compact">
+                <label for="mix-duration">成片时长</label>
+                <select id="mix-duration">
+                  <option value="30">30秒</option>
+                  <option value="60" selected>60秒</option>
+                  <option value="90">90秒</option>
+                  <option value="120">120秒</option>
+                </select>
+              </div>
+              <div class="field-row compact">
+                <label for="mix-duration-tolerance">时长容差</label>
+                <select id="mix-duration-tolerance">
+                  <option value="auto" selected>自动</option>
+                  <option value="5">±5秒</option>
+                  <option value="10">±10秒</option>
+                  <option value="15">±15秒</option>
+                  <option value="20">±20秒</option>
+                  <option value="30">±30秒</option>
+                </select>
+              </div>
             </div>
             <div class="field-row advanced-param">
               <label for="mix-dedup">去重强度</label>
@@ -1913,7 +1931,7 @@
                   <button class="button button-primary" data-action="activate-license">激活</button>
                   <button class="button button-muted" data-action="unbind-device">解绑设备</button>
                   <button class="button button-secondary" data-action="check-update">检查更新</button>
-                  <button class="button button-secondary" data-action="apply-update">获取完整包</button>
+                  <button class="button button-secondary" data-action="apply-update" disabled>安装更新</button>
                   <button class="button button-secondary" data-action="feedback">反馈</button>
                   <button class="button button-secondary" data-action="apply-user-data-dir">应用数据目录</button>
                   <button class="button button-secondary" data-action="clear-cache">清理缓存</button>

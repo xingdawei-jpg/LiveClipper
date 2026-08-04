@@ -4767,6 +4767,54 @@ body.live-detail-modal-open {
   color: #b45309;
 }
 
+.run-summary-failure-list {
+  display: grid;
+  gap: 4px;
+  max-height: 92px;
+  overflow-y: auto;
+  padding: 2px 0 1px;
+}
+
+.run-summary-failure-item {
+  display: grid;
+  grid-template-columns: minmax(78px, 0.42fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 6px;
+  border-left: 3px solid currentColor;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  font-size: 12px;
+}
+
+.run-summary-failure-item strong,
+.run-summary-failure-item span,
+.run-summary-failure-more {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-summary-failure-item strong {
+  color: inherit;
+  font-size: 12px;
+}
+
+.run-summary-failure-item span {
+  color: var(--text);
+}
+
+.run-summary-failure-more {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .run-summary-failure-item {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
 .log-progress-percent {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -5816,6 +5864,19 @@ textarea,
   white-space: nowrap;
 }
 
+.video-title .video-retry {
+  display: inline-grid;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  place-items: center;
+  color: var(--danger-text);
+  font-size: 15px;
+  line-height: 1;
+}
+
 .preview-sequence-scroll {
   display: flex;
   flex-direction: column;
@@ -6431,6 +6492,279 @@ textarea,
   opacity: 0.35;
 }
 
+/* Current-film overview stays compact and recalculates from the manual assembly. */
+.preview-film-overview {
+  margin-bottom: 10px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.preview-film-overview-head {
+  display: grid;
+  grid-template-columns: minmax(142px, auto) minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 66px;
+  padding: 9px 12px;
+}
+
+.preview-film-status {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+
+.preview-film-status > i {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ok-text);
+}
+
+.preview-film-overview.is-warn .preview-film-status > i {
+  background: var(--warn-text);
+}
+
+.preview-film-overview.is-block .preview-film-status > i {
+  background: var(--danger);
+}
+
+.preview-film-status > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.preview-film-status strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.preview-film-status small {
+  overflow: hidden;
+  color: var(--ok-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-film-overview.is-warn .preview-film-status small {
+  color: var(--warn-text);
+}
+
+.preview-film-overview.is-block .preview-film-status small {
+  color: var(--danger-text);
+}
+
+.preview-film-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(104px, 1fr));
+  min-width: 0;
+}
+
+.preview-film-metrics > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 0 12px;
+  border-left: 1px solid var(--border);
+}
+
+.preview-film-metrics small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.preview-film-metrics strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-film-metrics em {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 500;
+}
+
+.preview-film-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.preview-film-duration {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  background: var(--neutral-soft);
+}
+
+.preview-film-duration-range,
+.preview-film-duration-value,
+.preview-film-duration > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.preview-film-duration-range {
+  background: var(--focus-soft);
+}
+
+.preview-film-duration-value {
+  top: 2px;
+  bottom: 1px;
+  background: var(--ok-text);
+}
+
+.preview-film-overview.is-warn .preview-film-duration-value {
+  background: var(--warn-text);
+}
+
+.preview-film-overview.is-block .preview-film-duration-value {
+  background: var(--danger);
+}
+
+.preview-film-duration > i {
+  width: 2px;
+  background: var(--text);
+  transform: translateX(-1px);
+}
+
+.preview-film-details {
+  border-top: 1px solid var(--border);
+}
+
+.preview-film-details > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.preview-film-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.preview-film-details > summary small {
+  color: var(--muted);
+}
+
+.preview-film-detail-rows {
+  display: grid;
+  gap: 0;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+}
+
+.preview-film-detail-rows > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.preview-film-detail-rows > div > strong {
+  color: var(--muted);
+}
+
+.preview-film-detail-rows > div > span {
+  min-width: 0;
+  color: var(--text);
+}
+
+.preview-film-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.preview-film-source-list > span {
+  display: inline-flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.preview-film-source-list strong {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-film-source-list small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.preview-film-issue-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0 12px 8px;
+  list-style: none;
+}
+
+.preview-film-issue-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-film-issue-list li:last-child {
+  border-bottom: 0;
+}
+
+.preview-film-issue-list li > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.preview-film-issue-list strong {
+  color: var(--warn-text);
+  font-size: 11px;
+}
+
+.preview-film-issue-list small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.preview-film-issue-list li.is-ok strong {
+  color: var(--ok-text);
+}
+
+.preview-film-issue-list button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--focus);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.preview-film-issue-list button:hover {
+  text-decoration: underline;
+}
+
 /* Direct AI selection workbench: compact lists with video and word editing. */
 .preview-selection-workbench.preview-workbench-unified {
   display: grid;
@@ -6477,6 +6811,32 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.preview-workbench-unified .preview-duration-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 132px;
+  text-align: right;
+}
+
+.preview-workbench-unified .preview-duration-control small {
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.preview-workbench-unified .preview-duration-control small.is-ok {
+  color: var(--ok-text);
+}
+
+.preview-workbench-unified .preview-duration-control small.is-warn {
+  color: var(--warn-text);
+}
+
+.preview-workbench-unified .preview-duration-control .button {
+  flex: 0 0 auto;
 }
 
 .preview-workbench-unified .preview-candidate-list,
@@ -6974,6 +7334,20 @@ textarea,
 }
 
 @media (max-width: 1040px) {
+  .preview-film-overview-head {
+    grid-template-columns: minmax(142px, auto) minmax(0, 1fr);
+  }
+
+  .preview-film-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  .preview-film-metrics {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    row-gap: 8px;
+  }
+
   .preview-selection-workbench.preview-workbench-unified {
     grid-template-columns: minmax(225px, 0.75fr) minmax(350px, 1.25fr);
     height: min(74vh, 700px);
@@ -6997,6 +7371,36 @@ textarea,
 }
 
 @media (max-width: 760px) {
+  .preview-film-overview-head {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-film-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .preview-film-metrics > span {
+    padding: 0 8px;
+  }
+
+  .preview-film-actions {
+    grid-column: auto;
+    justify-content: stretch;
+  }
+
+  .preview-film-actions .button {
+    flex: 1 1 0;
+  }
+
+  .preview-film-detail-rows > div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .preview-film-issue-list li {
+    align-items: flex-start;
+  }
+
   .preview-selection-workbench.preview-workbench-unified {
     grid-template-columns: 1fr;
     min-height: 0;

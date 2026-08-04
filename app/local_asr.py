@@ -13,11 +13,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
 import threading
 from typing import Any, Callable
+
+from local_asr_chunking import build_pause_aware_audio_chunks, write_audio_chunk
 
 
 _SENSEVOICE_MODEL: Any | None = None
@@ -325,7 +328,7 @@ def _sensevoice_is_decimal_point(words: list[object] | tuple[object, ...], index
     return bool(previous_text[-1:].isdigit() and following_text[:1].isdigit())
 
 
-def _sensevoice_segments(result: object) -> list[dict[str, Any]]:
+def _sensevoice_segments(result: object, time_offset: float = 0.0) -> list[dict[str, Any]]:
     records = result if isinstance(result, list) else [result]
     segments: list[dict[str, Any]] = []
     for record in records:
@@ -357,21 +360,86 @@ def _sensevoice_segments(result: object) -> list[dict[str, Any]]:
                     if spoken_text:
                         words.append({
                             "text": spoken_text,
-                            "start": round(start_value, 3),
-                            "end": round(end_value, 3),
+                            "start": round(start_value + time_offset, 3),
+                            "end": round(end_value + time_offset, 3),
                         })
             else:
                 words = _words_from_timestamp(text, raw_timestamp)
+                if time_offset and words:
+                    words = [
+                        {
+                            **word,
+                            "start": round(float(word["start"]) + time_offset, 3),
+                            "end": round(float(word["end"]) + time_offset, 3),
+                        }
+                        for word in words
+                    ]
             start = _as_seconds(sentence.get("start"))
             end = _as_seconds(sentence.get("end"))
             if start is None and words:
                 start = words[0]["start"]
+            elif start is not None:
+                start += time_offset
             if end is None and words:
                 end = words[-1]["end"]
+            elif end is not None:
+                end += time_offset
             if not text or start is None or end is None or end <= start:
                 continue
             segments.append({"text": text, "start": round(start, 3), "end": round(end, 3), "words": words})
     return segments
+
+
+def _generate_sensevoice(model: Any, audio_path: str) -> object:
+    """Keep all SenseVoice inference arguments identical for every chunk."""
+    return model.generate(
+        input=audio_path,
+        cache={},
+        language="zh",
+        use_itn=True,
+        # FunASR reads this at inference time. Keeping it only on AutoModel
+        # construction is not reliable across bundled runtime versions, and
+        # then an SRT is produced without CTC alignments.
+        output_timestamp=True,
+        batch_size_s=120,
+        merge_vad=False,
+    )
+
+
+def _sensevoice_pause_aware_segments(
+    model: Any,
+    audio_path: str,
+    log_fn: Callable[[str], None] | None = None,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Run local ASR on pause-aware WAV chunks and restore global timestamps."""
+    chunks = build_pause_aware_audio_chunks(audio_path)
+    if not chunks:
+        return _sensevoice_segments(_generate_sensevoice(model, audio_path)), 1, 0
+    if len(chunks) == 1:
+        return _sensevoice_segments(_generate_sensevoice(model, audio_path)), 1, 0
+
+    hard_boundaries = sum(1 for chunk in chunks if chunk.boundary_reason == "hard_limit")
+    if log_fn:
+        suffix = f"，其中 {hard_boundaries} 处无静音按时长切分" if hard_boundaries else ""
+        log_fn(f"SenseVoice 音频停顿分段: {len(chunks)} 段（目标9s，最长12s）{suffix}")
+
+    segments: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="liveclipper_sensevoice_") as temp_dir:
+        for index, chunk in enumerate(chunks, 1):
+            chunk_path = str(Path(temp_dir) / f"chunk_{index:04d}.wav")
+            write_audio_chunk(audio_path, chunk_path, chunk)
+            result = _generate_sensevoice(model, chunk_path)
+            chunk_segments = _sensevoice_segments(result, time_offset=float(chunk.start))
+            if not chunk_segments:
+                # A pause-only tail may legitimately yield no tokens. Do not
+                # turn that into a failed job or fabricate a transcript.
+                if log_fn:
+                    log_fn(f"SenseVoice 音频分段 {index}/{len(chunks)} 未检测到语音，已跳过")
+                continue
+            segments.extend(chunk_segments)
+
+    segments.sort(key=lambda segment: (float(segment["start"]), float(segment["end"])))
+    return segments, len(chunks), hard_boundaries
 
 
 def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], None] | None = None) -> bool:
@@ -380,21 +448,13 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
     if log_fn:
         log_fn("启动本地 SenseVoice 高质量识别（标点恢复 + CTC 时间对齐）...")
     try:
-        result = model.generate(
-            input=audio_path,
-            cache={},
-            language="zh",
-            use_itn=True,
-            # FunASR reads this at inference time. Keeping it only on
-            # AutoModel construction is not reliable across bundled runtime
-            # versions, and then an SRT is produced without CTC alignments.
-            output_timestamp=True,
-            batch_size_s=120,
-            merge_vad=False,
+        segments, input_chunk_count, _hard_boundaries = _sensevoice_pause_aware_segments(
+            model,
+            audio_path,
+            log_fn=log_fn,
         )
     except Exception as exc:
         raise LocalASRUnavailable(f"SenseVoice inference failed: {exc}") from exc
-    segments = _sensevoice_segments(result)
     if not segments:
         raise LocalASRUnavailable("SenseVoice returned no timestamped speech segments")
 
@@ -426,7 +486,9 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
         visible_count = len(semantic_segments) if semantic_segments else len(segments)
         punctuation = "标点恢复" if _SENSEVOICE_PUNCTUATION else "停顿断句"
         log_fn(
-            f"SenseVoice 识别完成：{len(segments)} 条语音段 -> "
+            f"SenseVoice 识别完成：{len(segments)} 条原始语音段"
+            + (f"（音频输入{input_chunk_count}段）" if input_chunk_count > 1 else "")
+            + " -> "
             f"{visible_count} 条字幕（{punctuation}）{suffix}"
         )
     return True

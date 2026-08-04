@@ -14,6 +14,8 @@ const state = {
   diagnosticsVisible: false,
   videoInfoByTarget: {},
   videoInfoRequestSeq: {},
+  videoInfoRetryKeys: {},
+  videoInfoRetryTimers: {},
   pipPoolByPrefix: {},
   pipPoolRequestSeq: {},
   keywordConfig: {},
@@ -56,6 +58,7 @@ const state = {
     total: 0,
   },
   runtime: null,
+  backgroundRefreshStarted: false,
   liveRoomActivity: {},
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
@@ -80,6 +83,15 @@ const state = {
     "live-rec": 0,
   },
 };
+
+function startBackgroundRefreshLoops() {
+  if (state.backgroundRefreshStarted) return;
+  state.backgroundRefreshStarted = true;
+  window.setInterval(refreshTasks, 2500);
+  window.setInterval(loadScanResults, 4000);
+  window.setInterval(loadLatestSmartPreview, 5000);
+  window.setInterval(loadLatestMixPreview, 5000);
+}
 
 const previewInlineAudioStorageKey = "lc:preview:inline-audio";
 const desktopVideoDropTargetIds = new Set([
@@ -747,6 +759,7 @@ const featurePreferenceGroups = {
     prefixes: ["sc"],
     ids: [
       "output-dir",
+      "sc-output-naming",
       "sc-duration",
       "sc-duration-tolerance",
       "sc-versions",
@@ -796,6 +809,7 @@ const featurePreferenceGroups = {
     prefixes: ["mix"],
     ids: [
       "mix-output-dir",
+      "mix-output-naming",
       "mix-duration",
       "mix-duration-tolerance",
       "mix-versions",
@@ -1146,6 +1160,7 @@ const aiPresets = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  startBackgroundRefreshLoops();
   bindNavigation();
   bindSettingsTabs();
   bindLiveRecTabs();
@@ -1179,10 +1194,6 @@ document.addEventListener("DOMContentLoaded", () => {
       console.warn("Update check failed", error);
     });
   }, 1200);
-  setInterval(refreshTasks, 2500);
-  setInterval(loadScanResults, 4000);
-  setInterval(loadLatestSmartPreview, 5000);
-  setInterval(loadLatestMixPreview, 5000);
   window.addEventListener("resize", () => {
     updatePreviewStickyOffset("smart");
     updatePreviewStickyOffset("mix");
@@ -1368,6 +1379,7 @@ function bindActions() {
       if (action === "stop-scope") await stopScope(target.dataset.scope || state.page);
       if (action === "clear-video-list") clearVideoList(target.dataset.target);
       if (action === "remove-video") removeVideoPath(target.dataset.target, Number(target.dataset.index));
+      if (action === "retry-video-inspection") retryVideoInspection(target.dataset.target, Number(target.dataset.index));
       if (action === "move-video") moveVideoPath(target.dataset.target, Number(target.dataset.index), Number(target.dataset.direction));
       if (action === "mix-new-group") newMixGroup();
       if (action === "mix-toggle-group-select") toggleMixGroupSelection(Number(target.dataset.index), Boolean(target.checked));
@@ -1387,6 +1399,9 @@ function bindActions() {
       if (action === "preview-workbench-inspect-clip") inspectPreviewWorkbenchClip(Number(target.dataset.previewIndex), target.dataset.previewScope || "smart");
       if (action === "preview-assembly-move") movePreviewAssemblyClip(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex), Number(target.dataset.direction));
       if (action === "preview-assembly-auto-arrange") autoArrangePreviewAssembly(target.dataset.previewScope || "smart");
+      if (action === "preview-duration-fit") autoFitPreviewDuration(target.dataset.previewScope || "smart");
+      if (action === "preview-overview-toggle") togglePreviewOverviewDetails(target.dataset.previewScope || "smart");
+      if (action === "preview-overview-locate") locatePreviewOverviewIssue(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-smart-from-preview") await startSmartFromPreview();
@@ -2028,7 +2043,7 @@ function setupLogProgressBars() {
           </div>
           <div class="run-summary-main">
             <div class="log-progress-meta">
-              <span class="log-progress-title">当前步骤</span>
+              <span class="log-progress-title">当前任务</span>
               <strong class="log-progress-label">等待任务</strong>
               <span class="log-progress-percent">0%</span>
             </div>
@@ -2232,30 +2247,38 @@ function progressFromTask(task) {
   const status = task.status || "queued";
   const text = [task.title, task.message, task.error].filter(Boolean).join(" ");
   const inferred = inferProgressStage(text);
+  const structuredLabel = String(task.phase_label || "").trim();
   const batch = batchProgressFromTask(task);
-  const explicitProgress = Number(task.progress);
-  const hasExplicitProgress = Number.isFinite(explicitProgress);
+  const overallPercent = taskOverallPercent(task);
+  const itemPercent = taskItemPercent(task, batch);
+  const hasExplicitProgress = Number.isFinite(Number(task.progress));
+  const itemCurrent = batch?.current || (Number(task.item_total || 0) > 1 ? Number(task.item_current || 0) : 0);
   const statusLabels = {
     queued: "排队中",
-    running: task.message || inferred.label || "运行中",
+    running: structuredLabel || task.message || inferred.label || "运行中",
     completed: "已完成",
     failed: "失败",
     cancelled: "已停止",
   };
 
-  if (status === "completed") return { taskId: task.id, label: statusLabels.completed, percent: 100, status, source: "task", batch };
-  if (status === "failed") return { taskId: task.id, label: task.error || statusLabels.failed, percent: 100, status, source: "task", batch };
-  if (status === "cancelled") return { taskId: task.id, label: statusLabels.cancelled, percent: 100, status, source: "task", batch };
+  if (status === "completed") return { taskId: task.id, label: statusLabels.completed, percent: 100, overallPercent: 100, itemPercent: 100, itemCurrent, status, source: "task", batch };
+  if (status === "failed") return { taskId: task.id, label: task.error || statusLabels.failed, percent: 100, overallPercent, itemPercent: 100, itemCurrent, status, source: "task", batch };
+  if (status === "cancelled") return { taskId: task.id, label: statusLabels.cancelled, percent: 100, overallPercent, itemPercent: 100, itemCurrent, status, source: "task", batch };
   if (status === "queued") {
-    return { taskId: task.id, label: task.message || statusLabels.queued, percent: hasExplicitProgress ? explicitProgress : 6, status, source: "task", batch };
+    const percent = hasExplicitProgress ? itemPercent : 0;
+    return { taskId: task.id, label: task.message || statusLabels.queued, percent, overallPercent, itemPercent: percent, itemCurrent, status, source: "task", batch };
   }
 
   const previous = state.progressByScope[scope];
-  const previousPercent = previous?.taskId === task.id ? previous.percent || 0 : 0;
+  const sameItem = previous?.taskId === task.id && Number(previous?.itemCurrent || 0) === Number(itemCurrent || 0);
+  const previousPercent = sameItem ? previous.percent || 0 : 0;
   return {
     taskId: task.id,
     label: statusLabels.running,
-    percent: Math.max(previousPercent, hasExplicitProgress ? explicitProgress : inferred.percent || 10),
+    percent: Math.max(previousPercent, hasExplicitProgress ? itemPercent : inferred.percent || 10),
+    overallPercent,
+    itemPercent,
+    itemCurrent,
     status,
     source: "task",
     batch,
@@ -2314,6 +2337,32 @@ function taskPercent(task) {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? Math.round(value) : 0));
 }
 
+function taskOverallPercent(task) {
+  const value = Number(task?.overall_percent);
+  return Number.isFinite(value) ? clampProgressPercent(value) : taskPercent(task);
+}
+
+function taskItemPercent(task, batch = null) {
+  const explicit = Number(task?.item_progress);
+  if (Number.isFinite(explicit)) return clampProgressPercent(explicit);
+
+  const phaseCurrent = Number(task?.phase_current);
+  const phaseTotal = Number(task?.phase_total);
+  if (Number.isFinite(phaseCurrent) && Number.isFinite(phaseTotal) && phaseTotal > 0) {
+    return clampProgressPercent((phaseCurrent / phaseTotal) * 100);
+  }
+
+  if (!hasBatchProgress(batch)) return taskOverallPercent(task);
+  const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
+  const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
+  const current = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.current))));
+  if (!current || done >= total) return done >= total ? 100 : 0;
+
+  // Compatibility for task records created before item_progress existed.
+  const estimated = ((taskOverallPercent(task) - 10) / 84) * total - done;
+  return clampProgressPercent(estimated * 100);
+}
+
 function clampProgressPercent(value, fallback = 0) {
   const number = Number(value);
   const safeFallback = Number(fallback);
@@ -2345,14 +2394,20 @@ function isPreviewOutputTask(task) {
 function totalProgressFromSummary(progress, task, batch) {
   const progressStatus = progress?.status || "idle";
   const status = progressStatus !== "idle" ? progressStatus : (task?.status || batch?.status || "idle");
-  const stepPercent = clampProgressPercent(progress?.percent, taskPercent(task));
+  const overallPercent = clampProgressPercent(progress?.overallPercent, taskOverallPercent(task));
+  const itemPercent = clampProgressPercent(progress?.itemPercent ?? progress?.percent, taskItemPercent(task, batch));
   if (batch?.total > 1) {
     const total = Math.max(1, Math.floor(batchNumber(batch.total, 1)));
     const done = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.done))));
     const completedPercent = Math.round((done / total) * 100);
+    const current = Math.max(0, Math.min(total, Math.floor(batchNumber(batch.current))));
     const percent = ["failed", "cancelled"].includes(status)
       ? completedPercent
-      : (status === "completed" ? 100 : Math.max(completedPercent, stepPercent));
+      : status === "completed"
+        ? 100
+        : current > 0
+          ? Math.round(((done + (itemPercent / 100)) / total) * 100)
+          : completedPercent;
     return {
       percent,
       text: `${percent}%`,
@@ -2360,27 +2415,27 @@ function totalProgressFromSummary(progress, task, batch) {
     };
   }
   if (!task) {
-    return { percent: stepPercent, text: `${stepPercent}%`, status };
+    return { percent: overallPercent, text: `${overallPercent}%`, status };
   }
   if (status === "failed") {
-    return { percent: Math.min(99, stepPercent), text: "失败", status };
+    return { percent: Math.min(99, overallPercent), text: "失败", status };
   }
   if (status === "cancelled") {
-    return { percent: Math.min(99, stepPercent), text: "停止", status };
+    return { percent: Math.min(99, overallPercent), text: "停止", status };
   }
   if (isPreviewOutputTask(task)) {
-    const percent = status === "completed" ? 100 : Math.min(99, 50 + Math.round(stepPercent * 0.5));
+    const percent = status === "completed" ? 100 : Math.min(99, 50 + Math.round(overallPercent * 0.5));
     return { percent, text: `${percent}%`, status };
   }
   if (isAiSelectionPreviewTask(task)) {
-    const percent = status === "completed" ? 50 : Math.min(50, Math.round(stepPercent * 0.5));
+    const percent = status === "completed" ? 50 : Math.min(50, Math.round(overallPercent * 0.5));
     return { percent, text: `${percent}%`, status };
   }
   if (status === "completed" || taskHasOutput(task)) {
-    const percent = status === "completed" ? 100 : stepPercent;
+    const percent = status === "completed" ? 100 : overallPercent;
     return { percent, text: `${percent}%`, status };
   }
-  return { percent: stepPercent, text: `${stepPercent}%`, status };
+  return { percent: overallPercent, text: `${overallPercent}%`, status };
 }
 
 function newestScopedTasks(tasks, scope) {
@@ -2404,26 +2459,72 @@ function issueSuggestion(message) {
   return "打开高级诊断查看详细原因。";
 }
 
+function failureDetailsForTask(task) {
+  if (!task) return [];
+  const details = Array.isArray(task.batch_failure_details) ? task.batch_failure_details : [];
+  const normalized = details.map((item, index) => ({
+    label: String(item?.label || `失败任务 ${index + 1}`).trim(),
+    message: String(item?.message || "任务处理失败。").trim(),
+    code: String(item?.code || "processing_failed").trim(),
+  })).filter((item) => item.label || item.message);
+  if (normalized.length || !task.error) return normalized;
+  return [{
+    label: String(task.title || "任务").trim(),
+    message: String(task.error || task.message || "任务处理失败。").trim(),
+    code: "processing_failed",
+  }];
+}
+
+function historyFailureIssueForScope(scope) {
+  const grouped = new Map();
+  for (const item of state.outputHistory || []) {
+    if (String(item?.scope || "") !== String(scope || "")) continue;
+    const taskId = String(item?.task_id || "").trim();
+    const key = taskId || `${item?.created_at || ""}:${item?.title || ""}`;
+    const previous = grouped.get(key);
+    if (!previous || Number(item?.created_at || 0) > Number(previous.created_at || 0)) {
+      grouped.set(key, item);
+    }
+  }
+  const latest = [...grouped.values()].sort((a, b) => Number(b?.created_at || 0) - Number(a?.created_at || 0))[0];
+  const details = Array.isArray(latest?.batch_failure_details) ? latest.batch_failure_details : [];
+  if (!latest || !details.length) return null;
+  const first = details[0] || {};
+  const message = String(first.message || "部分素材未生成成片。");
+  return {
+    title: "最近批量存在失败任务",
+    message,
+    suggestion: issueSuggestion(message),
+    tone: "warning",
+    details: details.map((item, index) => ({
+      label: String(item?.label || `失败任务 ${index + 1}`),
+      message: String(item?.message || "任务处理失败。"),
+      code: String(item?.code || "processing_failed"),
+    })),
+  };
+}
+
 function issueForScope(scope, scopedTasks) {
   const failed = newestTask(scopedTasks.filter((task) => task.status === "failed"));
   if (failed) {
-    const failureDetails = Array.isArray(failed.batch_failure_details) ? failed.batch_failure_details : [];
-    const message = failureDetails[0]?.message || failed.error || failed.message || "任务处理失败。";
+    const details = failureDetailsForTask(failed);
+    const message = details[0]?.message || failed.error || failed.message || "任务处理失败。";
     return {
       title: failed.title || "任务失败",
       message,
       suggestion: issueSuggestion(message),
       tone: "error",
+      details,
     };
   }
 
-  const partial = newestTask(scopedTasks.filter((task) => task.status === "completed" && Number(task.batch_failed || 0) > 0));
+  const partial = newestTask(scopedTasks.filter((task) => Number(task.batch_failed || 0) > 0));
   if (partial) {
-    const failureDetails = Array.isArray(partial.batch_failure_details) ? partial.batch_failure_details : [];
-    const first = failureDetails[0] || {};
+    const details = failureDetailsForTask(partial);
+    const first = details[0] || {};
     const message = first.message || partial.message || "部分素材未生成成片。";
     const hasInsufficient = Number(partial.batch_insufficient || 0) > 0;
-    const hasDurationMismatch = failureDetails.some((item) => item?.code === "duration_mismatch");
+    const hasDurationMismatch = details.some((item) => item?.code === "duration_mismatch");
     let title = "部分素材处理失败";
     if (hasInsufficient && hasDurationMismatch) title = "部分素材内容或时长不符合";
     else if (hasInsufficient) title = "部分素材内容不足";
@@ -2433,6 +2534,7 @@ function issueForScope(scope, scopedTasks) {
       message,
       suggestion: issueSuggestion(message),
       tone: "warning",
+      details,
     };
   }
 
@@ -2444,9 +2546,29 @@ function issueForScope(scope, scopedTasks) {
       message: issue.message,
       suggestion: issueSuggestion(issue.message),
       tone: issue.level === "warning" ? "warning" : "error",
+      details: [],
     };
   }
+  if (!active) {
+    const historicalIssue = historyFailureIssueForScope(scope);
+    if (historicalIssue) return historicalIssue;
+  }
   return null;
+}
+
+function renderIssueFailureRows(details = []) {
+  const visible = details.slice(0, 3);
+  if (!visible.length) return "";
+  const rows = visible.map((item) => `
+    <div class="run-summary-failure-item" title="${escapeHtml(item.message)}">
+      <strong>${escapeHtml(item.label || "失败任务")}</strong>
+      <span>${escapeHtml(item.message || "任务处理失败。")}</span>
+    </div>
+  `).join("");
+  const more = details.length > visible.length
+    ? `<span class="run-summary-failure-more">另有 ${details.length - visible.length} 个失败任务，请打开高级诊断查看。</span>`
+    : "";
+  return `<div class="run-summary-failure-list">${rows}${more}</div>`;
 }
 
 function fileNameFromPath(path) {
@@ -2574,6 +2696,7 @@ function renderRunSummary(scope) {
       ? `
         <strong>${escapeHtml(issue.title)}</strong>
         <span>${escapeHtml(issue.message)}</span>
+        ${renderIssueFailureRows(issue.details)}
         <em>${escapeHtml(issue.suggestion)}</em>
       `
       : "<span>暂无异常</span>";
@@ -2651,9 +2774,12 @@ function updateLogProgressBar(scope, progress) {
     batch: incomingBatch || fallbackBatch || (sameTask ? preservedBatch : null),
   };
   const percent = Math.max(0, Math.min(100, Math.round(Number(effectiveProgress.percent) || 0)));
+  const overallPercent = Math.max(0, Math.min(100, Math.round(Number.isFinite(Number(effectiveProgress.overallPercent))
+    ? Number(effectiveProgress.overallPercent)
+    : (sameTask ? Number(previous.overallPercent || percent) : percent))));
   const status = effectiveProgress.status || "idle";
   const label = effectiveProgress.label || "等待任务";
-  state.progressByScope[scope] = { ...effectiveProgress, percent, label, status };
+  state.progressByScope[scope] = { ...effectiveProgress, percent, overallPercent, label, status };
 
   el.className = `log-progress is-${status}`;
   const labelEl = el.querySelector(".log-progress-label");
@@ -2697,6 +2823,7 @@ function updatePanelSummary(panel) {
   if (!prefix || !kind || !summary || !button) return;
   let text = "";
   if (kind === "params") {
+    const outputNaming = fieldText(`${prefix}-output-naming`, "加时间戳");
     const duration = fieldText(`${prefix}-duration`);
     const tolerance = fieldText(`${prefix}-duration-tolerance`, "自动");
     const versions = fieldText(`${prefix}-versions`);
@@ -2707,7 +2834,7 @@ function updatePanelSummary(panel) {
       checkedText(`${prefix}-kenburns`, "缩放"),
       checkedText(`${prefix}-mirror`, "镜像"),
     ].filter(Boolean).join("、") || "基础模式";
-    text = `${duration} · 容差${tolerance} · ${versions}版 · ${dedup}去重 · ${flags}`;
+    text = `${outputNaming} · ${versions}版 · ${duration} · 容差${tolerance} · ${dedup}去重 · ${flags}`;
   } else if (kind === "pip") {
     const mode = fieldText(`${prefix}-pip-mode`, "关闭");
     if ($( `${prefix}-pip-mode`)?.value === "off") {
@@ -3710,6 +3837,11 @@ function renderUpdateState() {
     applyButton.textContent = fullPackageRequired ? "获取完整包" : "安装";
     applyButton.disabled = !hasUpdate || busy || (fullPackageRequired && !info.has_package);
   }
+  document.querySelectorAll('[data-action="apply-update"]').forEach((button) => {
+    if (button === applyButton) return;
+    button.textContent = fullPackageRequired ? "获取完整包" : "安装更新";
+    button.disabled = !hasUpdate || busy || (fullPackageRequired && !info.has_package);
+  });
 }
 
 function openUpdateCard() {
@@ -3748,13 +3880,19 @@ async function checkUpdate(options = {}) {
   try {
     const result = await api("/api/update/check");
     if (!result.update_available) {
+      const noUpdateMessage = result.msg || "当前已是最新版本";
       setUpdateState({
         checking: false,
         available: false,
         info: null,
-        message: "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c",
+        message: noUpdateMessage,
       });
-      if (!quiet) toast("\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c", "success");
+      if (!quiet) {
+        const tone = ["channel_not_configured", "channel_hold", "channel_paused", "channel_disabled"].includes(result.reason)
+          ? "warning"
+          : "success";
+        toast(noUpdateMessage, tone);
+      }
       return result;
     }
     const update = result.update || {};
@@ -4516,6 +4654,9 @@ function renderVideoList(targetId) {
       isInvalid ? `<span class="video-badge is-invalid">无效</span>` : "",
       isDuplicate ? `<span class="video-badge is-duplicate">重复</span>` : "",
     ].join("");
+    const retryButton = isInvalid
+      ? `<button class="icon-button video-retry" type="button" title="重新检测" aria-label="重新检测 ${escapeHtml(name)}" data-action="retry-video-inspection" data-target="${targetId}" data-index="${index}">&#8635;</button>`
+      : "";
     if (targetId === "mix-video-paths") {
       const thumbnailUrl = thumbnailMap[path] || thumbnailMap[normalizeVideoPath(path)] || "";
       const thumbnail = thumbnailUrl
@@ -4527,7 +4668,7 @@ function renderVideoList(targetId) {
           <span class="mix-video-index">${index + 1}</span>
           <div class="mix-video-thumb-wrap">${thumbnail}</div>
           <div class="video-main">
-            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}</div>
+            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}${retryButton}</div>
             <span class="video-meta">${escapeHtml(compactVideoMetaText(info))}</span>
           </div>
           <button class="video-remove" type="button" aria-label="删除 ${escapeHtml(name)}" data-action="remove-video" data-target="${targetId}" data-index="${index}">&times;</button>
@@ -4537,7 +4678,7 @@ function renderVideoList(targetId) {
         <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
           <div class="video-drag" title="拖拽排序">≡</div>
           <div class="video-main">
-            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}</div>
+            <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}${retryButton}</div>
             <span class="video-meta">${escapeHtml(compactVideoMetaText(info))}</span>
           </div>
           <button class="video-remove" type="button" title="删除" data-action="remove-video" data-target="${targetId}" data-index="${index}">×</button>
@@ -4547,7 +4688,7 @@ function renderVideoList(targetId) {
       <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
         <div class="video-drag" title="拖拽排序">≡</div>
         <div class="video-main">
-          <div class="video-title"><strong>${escapeHtml(name)}</strong>${badges}</div>
+          <div class="video-title"><strong>${escapeHtml(name)}</strong>${badges}${retryButton}</div>
           <span class="video-meta">${escapeHtml(videoMetaText(info))}</span>
           <span class="video-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
         </div>
@@ -4583,21 +4724,24 @@ function setButtonsEnabled(selector, enabled, reason = "") {
   });
 }
 
-function previewReady(preview) {
-  return preview?.id && preview.status === "ready" && (preview.clips || []).some((clip) => clip?.selected !== false);
+function previewReady(preview, scope = "smart") {
+  if (!preview?.id || preview.status !== "ready") return false;
+  return previewWorkbenchSelectedClips(scope, preview).some((clip) => effectiveClipDuration(clip) > 0.05);
 }
 
 function syncFlowActionState() {
   const smartHasVideos = getVideoPaths().length > 0;
   const mixHasVideos = getLines("mix-video-paths").length > 0;
   const runningScopes = state.runningScopes instanceof Set ? state.runningScopes : new Set();
+  const mediaPipelineBusy = runningScopes.has("smart-cut") || runningScopes.has("mix");
+  const mediaPipelineReason = "智能成片与混剪不能同时运行";
 
-  setButtonsEnabled('[data-action="start-smart-preview"]', smartHasVideos, "先添加视频素材");
-  setButtonsEnabled('[data-action="start-smart-cut"]', smartHasVideos, "先添加视频素材");
-  setButtonsEnabled('[data-action="start-smart-from-preview"]', previewReady(state.smartPreview), "先生成并保留 AI 选片预览");
-  setButtonsEnabled('[data-action="start-mix-preview"]', mixHasVideos, "先添加混剪视频素材");
-  setButtonsEnabled('[data-action="feature-submit"][data-feature="mix"]', mixHasVideos, "先添加混剪视频素材");
-  setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview), "先生成并保留混剪 AI 选片预览");
+  setButtonsEnabled('[data-action="start-smart-preview"]', smartHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-cut"]', smartHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-from-preview"]', previewReady(state.smartPreview, "smart") && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "当前编排没有可用片段");
+  setButtonsEnabled('[data-action="start-mix-preview"]', mixHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="feature-submit"][data-feature="mix"]', mixHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview, "mix") && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "当前编排没有可用片段");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="smart-cut"]', runningScopes.has("smart-cut"), "当前没有智能成片任务");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="mix"]', runningScopes.has("mix"), "当前没有混剪任务");
 }
@@ -4638,13 +4782,51 @@ function reorderVideoPath(targetId, from, to) {
   setLines(targetId, lines);
 }
 
-async function inspectVideoList(targetId, lines = getLines(targetId)) {
+function clearVideoInspectionRetry(targetId) {
+  const timer = state.videoInfoRetryTimers[targetId];
+  if (timer) clearTimeout(timer);
+  delete state.videoInfoRetryTimers[targetId];
+  delete state.videoInfoRetryKeys[targetId];
+}
+
+function scheduleVideoInspectionRetry(targetId, lines, items) {
+  const retryable = (items || []).some((item) => item?.retryable && !item?.valid);
+  if (!retryable) {
+    clearVideoInspectionRetry(targetId);
+    return;
+  }
+  const key = lines.map(normalizeVideoPath).join("\n");
+  if (!key || state.videoInfoRetryKeys[targetId] === key) return;
+  clearVideoInspectionRetry(targetId);
+  state.videoInfoRetryKeys[targetId] = key;
+  state.videoInfoRetryTimers[targetId] = setTimeout(() => {
+    delete state.videoInfoRetryTimers[targetId];
+    const currentLines = getLines(targetId);
+    if (currentLines.map(normalizeVideoPath).join("\n") !== key) return;
+    inspectVideoList(targetId, currentLines, true);
+  }, 1200);
+}
+
+function retryVideoInspection(targetId, index) {
+  const lines = getLines(targetId);
+  const path = lines[index];
+  if (!path) return;
+  clearVideoInspectionRetry(targetId);
+  const infoMap = { ...videoInfoMap(targetId) };
+  delete infoMap[path];
+  delete infoMap[normalizeVideoPath(path)];
+  state.videoInfoByTarget[targetId] = infoMap;
+  renderVideoList(targetId);
+}
+
+async function inspectVideoList(targetId, lines = getLines(targetId), force = false) {
   if (!lines.length) {
     state.videoInfoByTarget[targetId] = {};
+    clearVideoInspectionRetry(targetId);
     return;
   }
   const currentMap = videoInfoMap(targetId);
-  if (lines.every((path) => currentMap[path] || currentMap[normalizeVideoPath(path)])) return;
+  if (!force && lines.every((path) => currentMap[path] || currentMap[normalizeVideoPath(path)])) return;
   const seq = (state.videoInfoRequestSeq[targetId] || 0) + 1;
   state.videoInfoRequestSeq[targetId] = seq;
   try {
@@ -4660,6 +4842,7 @@ async function inspectVideoList(targetId, lines = getLines(targetId)) {
     });
     state.videoInfoByTarget[targetId] = infoMap;
     if (getLines(targetId).join("\n") === lines.join("\n")) renderVideoList(targetId);
+    scheduleVideoInspectionRetry(targetId, lines, result.items || []);
   } catch (error) {
     // Metadata helps users but should never block adding videos.
   }
@@ -4940,6 +5123,7 @@ function collectSmartPayload(options = {}) {
     video_paths: videoPaths,
     srt_path: $("srt-path").value.trim(),
     output_dir: $("output-dir").value.trim(),
+    output_naming_mode: $("sc-output-naming")?.value || "source_timestamp",
     primary_category: primaryCategory,
     category: backendCategoryForPrimary(primaryCategory),
     focus_hint: $("sc-focus").value,
@@ -6376,13 +6560,14 @@ async function loadLatestSmartPreview() {
     const isNewPreview = !state.smartPreview || preview.id !== state.smartPreview.id;
     const isNewerPreview = preview.created_at > (state.smartPreview?.created_at || 0);
     const statusChanged = preview.status !== state.smartPreview?.status;
-    if (isNewPreview || isNewerPreview || statusChanged) {
+    const workbenchMissing = previewWorkbenchNeedsRender("smart", preview);
+    if (isNewPreview || isNewerPreview || statusChanged || workbenchMissing) {
       state.smartPreview = preview;
       renderSmartPreview(preview);
       if (preview.status === "running" || preview.status === "queued") pollSmartPreview(preview.id);
     }
   } catch (error) {
-    // Preview is optional.
+    console.warn("Failed to refresh smart preview", error);
   }
 }
 
@@ -6393,18 +6578,27 @@ async function loadLatestMixPreview() {
     const isNewPreview = !state.mixPreview || preview.id !== state.mixPreview.id;
     const isNewerPreview = preview.created_at > (state.mixPreview?.created_at || 0);
     const statusChanged = preview.status !== state.mixPreview?.status;
-    if (isNewPreview || isNewerPreview || statusChanged) {
+    const workbenchMissing = previewWorkbenchNeedsRender("mix", preview);
+    if (isNewPreview || isNewerPreview || statusChanged || workbenchMissing) {
       state.mixPreview = preview;
       renderMixPreview(preview);
       if (preview.status === "running" || preview.status === "queued") pollMixPreview(preview.id);
     }
   } catch (error) {
-    // Preview is optional.
+    console.warn("Failed to refresh mix preview", error);
   }
 }
 
+const previewPollMaxAttempts = 1800;
+
+function previewWorkbenchNeedsRender(scope, preview) {
+  if (preview?.status !== "ready" || !Array.isArray(preview.clips) || !preview.clips.length) return false;
+  const box = previewBox(scope);
+  return Boolean(box && !box.querySelector(`[data-preview-workbench="${scope}"]`));
+}
+
 async function pollSmartPreview(previewId, attempt = 0) {
-  if (!previewId || attempt > 180) return;
+  if (!previewId || attempt > previewPollMaxAttempts) return;
   try {
     const preview = await api(`/api/smart-cut/preview/${encodeURIComponent(previewId)}`);
     state.smartPreview = preview;
@@ -6417,7 +6611,7 @@ async function pollSmartPreview(previewId, attempt = 0) {
 }
 
 async function pollMixPreview(previewId, attempt = 0) {
-  if (!previewId || attempt > 180) return;
+  if (!previewId || attempt > previewPollMaxAttempts) return;
   try {
     const preview = await api(`/api/mix/preview/${encodeURIComponent(previewId)}`);
     state.mixPreview = preview;
@@ -6932,11 +7126,18 @@ function removePreviewAssemblyCandidate(scope = "smart", index) {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
+  const order = previewAssemblyOrder(scope, preview);
+  const position = order.indexOf(Number(index));
+  const neighborIndex = position >= 0 ? (order[position + 1] ?? order[position - 1] ?? null) : null;
   clip.selected = false;
   previewSegments(clip).forEach((segment) => { segment.selected = false; });
   setPreviewAssemblyMembership(scope, Number(index), false);
+  if (Number(state.previewDetailSelection?.[scope]) === Number(index)) {
+    state.previewCandidateSelections[scope] = null;
+    state.previewDetailSelection[scope] = neighborIndex;
+  }
   commitPreviewDraft(scope);
-  renderPreviewState(scope);
+  renderPreviewStateKeepStoryScroll(scope);
 }
 
 function autoArrangePreviewAssembly(scope = "smart") {
@@ -6951,6 +7152,169 @@ function autoArrangePreviewAssembly(scope = "smart") {
   state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
   commitPreviewDraft(scope);
   renderPreviewState(scope);
+}
+
+function previewDurationFitState(scope = "smart", preview = getPreviewState(scope), targetId = "") {
+  const prefix = scope === "mix" ? "mix" : "sc";
+  const resolvedTargetId = targetId || `${prefix}-duration`;
+  const target = Math.max(1, Number(preview?.target_duration || $(resolvedTargetId)?.value || 60));
+  const savedTolerance = preview?.duration_tolerance;
+  const explicitTolerance = savedTolerance !== null && savedTolerance !== undefined && savedTolerance !== ""
+    ? Number(savedTolerance)
+    : selectedDurationTolerance(prefix);
+  const tolerance = Number.isFinite(explicitTolerance)
+    ? Math.max(0, explicitTolerance)
+    : Math.max(5, target / 6);
+  const speed = Math.max(0.1, Number(preview?.dedup_summary?.duration_speed_factor || 1) || 1);
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const rawTotal = selected.reduce((sum, clip) => sum + effectiveClipDuration(clip), 0);
+  const projected = rawTotal / speed;
+  const low = Math.max(1, target - tolerance);
+  const high = target + tolerance;
+  return {
+    target,
+    tolerance,
+    speed,
+    selected,
+    rawTotal,
+    projected,
+    low,
+    high,
+    sourceTarget: target * speed,
+    sourceLow: low * speed,
+    sourceHigh: high * speed,
+    accepted: projected >= low - 0.001 && projected <= high + 0.001,
+  };
+}
+
+function previewCandidateSelectableDuration(clip) {
+  const segments = previewSegments(clip);
+  if (!segments.length) return previewWorkbenchCandidateDuration(clip);
+  return segments
+    .filter((segment) => segment?.selection_locked !== true)
+    .reduce((sum, segment) => {
+      const start = Number(segment?.start || 0);
+      const end = Number(segment?.end || start);
+      return sum + Math.max(0, Number(segment?.duration || end - start));
+    }, 0);
+}
+
+function autoFitPreviewDuration(scope = "smart") {
+  const preview = getPreviewState(scope);
+  if (!preview?.clips?.length) return;
+  syncPreviewClipSelections(scope);
+  const before = previewDurationFitState(scope, preview);
+  const byIndex = new Map(preview.clips.map((clip) => [Number(clip.index), clip]));
+  let order = [...previewAssemblyOrder(scope, preview)];
+  let rawTotal = before.rawTotal;
+  let added = 0;
+  let removed = 0;
+
+  const selectedSourceCounts = () => {
+    const counts = new Map();
+    order.forEach((index) => {
+      const source = String(byIndex.get(index)?.source || byIndex.get(index)?.source_name || "");
+      if (source) counts.set(source, (counts.get(source) || 0) + 1);
+    });
+    return counts;
+  };
+  const selectedTopics = () => new Set(
+    order.map((index) => previewWorkbenchTopicLabel(byIndex.get(index))).filter(Boolean)
+  );
+
+  while (rawTotal < before.sourceLow - 0.01 && added < 8) {
+    const sources = selectedSourceCounts();
+    const topics = selectedTopics();
+    const candidates = preview.clips
+      .filter((clip) => !order.includes(Number(clip.index)))
+      .filter((clip) => !["hook", "close"].includes(previewWorkbenchRoleKey(clip)))
+      .map((clip, position) => {
+        const duration = previewCandidateSelectableDuration(clip);
+        const nextTotal = rawTotal + duration;
+        const source = String(clip.source || clip.source_name || "");
+        const minSourceCount = sources.size ? Math.min(...sources.values()) : 0;
+        return {
+          clip,
+          position,
+          duration,
+          nextTotal,
+          inside: nextTotal >= before.sourceLow - 0.01 && nextTotal <= before.sourceHigh + 0.01,
+          sourceNeed: source && (sources.get(source) || 0) <= minSourceCount,
+          newTopic: !topics.has(previewWorkbenchTopicLabel(clip)),
+          extraCandidate: clip.recommended === false || clip.candidate_origin === "director",
+          distance: Math.abs(nextTotal - before.sourceTarget),
+        };
+      })
+      .filter((item) => item.duration > 0.05 && item.nextTotal <= before.sourceHigh + 0.01)
+      .sort((left, right) =>
+        Number(right.inside) - Number(left.inside)
+        || Number(right.sourceNeed) - Number(left.sourceNeed)
+        || Number(right.newTopic) - Number(left.newTopic)
+        || Number(right.extraCandidate) - Number(left.extraCandidate)
+        || left.distance - right.distance
+        || left.position - right.position
+      );
+    if (!candidates.length) break;
+    const chosen = candidates[0];
+    const clip = chosen.clip;
+    clip.selected = true;
+    previewSegments(clip).forEach((segment) => {
+      segment.selected = segment.selection_locked !== true;
+      resetPreviewSegmentWords(segment);
+    });
+    const closePosition = order.findIndex((index) => previewWorkbenchRoleKey(byIndex.get(index)) === "close");
+    order.splice(closePosition >= 0 ? closePosition : order.length, 0, Number(clip.index));
+    rawTotal += effectiveClipDuration(clip);
+    added += 1;
+  }
+
+  while (rawTotal > before.sourceHigh + 0.01 && removed < 8) {
+    const removable = order
+      .map((index, position) => ({ clip: byIndex.get(index), index, position }))
+      .filter((item) => item.position >= 2)
+      .filter((item) => !["hook", "close"].includes(previewWorkbenchRoleKey(item.clip)))
+      .map((item) => {
+        const duration = effectiveClipDuration(item.clip);
+        const nextTotal = rawTotal - duration;
+        return {
+          ...item,
+          duration,
+          nextTotal,
+          inside: nextTotal >= before.sourceLow - 0.01 && nextTotal <= before.sourceHigh + 0.01,
+          supplement: item.clip?.recommended === false || item.clip?.candidate_origin === "director",
+          weak: previewWorkbenchRoleKey(item.clip) === "weak",
+          score: Number(item.clip?.score || 0),
+          distance: Math.abs(nextTotal - before.sourceTarget),
+        };
+      })
+      .filter((item) => item.duration > 0.05 && item.nextTotal >= before.sourceLow - 0.01)
+      .sort((left, right) =>
+        Number(right.inside) - Number(left.inside)
+        || Number(right.supplement) - Number(left.supplement)
+        || Number(right.weak) - Number(left.weak)
+        || left.score - right.score
+        || left.distance - right.distance
+        || right.position - left.position
+      );
+    if (!removable.length) break;
+    const chosen = removable[0];
+    chosen.clip.selected = false;
+    previewSegments(chosen.clip).forEach((segment) => { segment.selected = false; });
+    order = order.filter((index) => index !== chosen.index);
+    rawTotal = chosen.nextTotal;
+    removed += 1;
+  }
+
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
+  commitPreviewDraft(scope);
+  renderPreviewStateKeepStoryScroll(scope);
+  const after = previewDurationFitState(scope, preview);
+  const actionText = [added ? `补入${added}段` : "", removed ? `移出${removed}段` : ""].filter(Boolean).join("、");
+  if (after.accepted) {
+    toast(`时长已适配：${actionText || "无需改动"}，预计成片${after.projected.toFixed(1)}秒。`);
+  } else {
+    toast(`现有安全候选仍无法进入${after.low.toFixed(0)}-${after.high.toFixed(0)}秒区间。`, "warning");
+  }
 }
 
 function renderPreviewTriageRoleFilters(scope, preview, session) {
@@ -7533,6 +7897,12 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const total = rawTotal / durationSpeedFactor;
   const riskByIndex = new Map();
   const warnings = [];
+  const selectionResult = dedupSummary.selection_result || {};
+  const planQualityReport = dedupSummary.plan_quality_report || {};
+  if (selectionResult.status === "partial_insufficient") {
+    const projected = Number(selectionResult?.details?.projected_final_duration || total);
+    warnings.push(`安全内容不足，本次仅生成${projected.toFixed(1)}s人工预览；确认片段后才能成片。`);
+  }
   const durationRelaxation = dedupSummary.duration_relaxation || {};
   if (durationRelaxation.applied) {
     const grace = Number(durationRelaxation.grace_seconds || 5);
@@ -7655,6 +8025,7 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     preferenceHitCount,
     topicCoverage,
     salesChain,
+    planQualityReport,
   };
 }
 
@@ -7834,6 +8205,7 @@ function collectFeaturePayload(feature) {
     return {
       video_paths: getLines("mix-video-paths"),
       output_dir: $("mix-output-dir").value.trim(),
+      output_naming_mode: $("mix-output-naming")?.value || "source_timestamp",
       primary_category: primaryCategory,
       category: backendCategoryForPrimary(primaryCategory),
       versions: Number($("mix-versions").value || 1),
@@ -8959,13 +9331,21 @@ function effectiveClipBounds(clip) {
   return { start, end, duration: Math.max(0, Number(clip?.duration || end - start)) };
 }
 
+function previewCandidateKey(clip) {
+  return String(clip?.candidate_key || "").trim();
+}
+
 function buildPreviewDraftFromState(scope = "smart") {
   const preview = getPreviewState(scope);
-  const draft = { preview_id: preview?.id || "", scope, order: [], selected_indices: [], selected_segments: {}, selected_words: {}, updated_at: Date.now() };
+  const draft = {
+    preview_id: preview?.id || "", scope, order: [], order_keys: [], selected_indices: [], selected_keys: [],
+    selected_segments: {}, selected_words: {}, selected_segments_by_key: {}, selected_words_by_key: {}, updated_at: Date.now(),
+  };
   const clipsByIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
   const selectedOrder = previewAssemblyOrder(scope, preview);
   const remaining = (preview?.clips || []).map((clip) => Number(clip.index)).filter((index) => Number.isInteger(index) && !selectedOrder.includes(index));
   draft.order = [...selectedOrder, ...remaining];
+  draft.order_keys = draft.order.map((index) => previewCandidateKey(clipsByIndex.get(index))).filter(Boolean);
   selectedOrder.forEach((clipIndex) => {
     const clip = clipsByIndex.get(clipIndex);
     if (!clip) return;
@@ -8973,14 +9353,22 @@ function buildPreviewDraftFromState(scope = "smart") {
     const keptSegments = segments.filter(isPreviewSegmentSelected).map((segment) => Number(segment.index)).filter(Number.isInteger);
     if (clip.selected === false || (segments.length && !keptSegments.length)) return;
     draft.selected_indices.push(clipIndex);
-    if (segments.length) draft.selected_segments[String(clipIndex)] = keptSegments;
+    const candidateKey = previewCandidateKey(clip);
+    if (candidateKey) draft.selected_keys.push(candidateKey);
+    if (segments.length) {
+      draft.selected_segments[String(clipIndex)] = keptSegments;
+      if (candidateKey) draft.selected_segments_by_key[candidateKey] = keptSegments;
+    }
     const explicitWords = {};
     segments.forEach((segment) => {
       if (!segment.wordSelectionExplicit || !previewSegmentWords(segment).length) return;
       const segmentIndex = Number(segment.index);
       if (Number.isInteger(segmentIndex)) explicitWords[String(segmentIndex)] = selectedPreviewWords(segment).map((word) => Number(word.index)).filter(Number.isInteger);
     });
-    if (Object.keys(explicitWords).length) draft.selected_words[String(clipIndex)] = explicitWords;
+    if (Object.keys(explicitWords).length) {
+      draft.selected_words[String(clipIndex)] = explicitWords;
+      if (candidateKey) draft.selected_words_by_key[candidateKey] = explicitWords;
+    }
   });
   return draft;
 }
@@ -8990,13 +9378,21 @@ function buildPreviewDraftFromState(scope = "smart") {
 function applyPreviewDraftToState(scope = "smart", draft = null) {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length || !draft) return;
-  const order = normalizedIntegerList(draft.order);
-  const hasSelectedIndices = Array.isArray(draft.selected_indices);
-  const selectedSet = new Set(normalizedIntegerList(draft.selected_indices));
+  const keyToIndex = new Map(preview.clips.map((clip) => [previewCandidateKey(clip), Number(clip.index)]).filter(([key, index]) => key && Number.isInteger(index)));
+  const selectedKeys = Array.isArray(draft.selected_keys) ? draft.selected_keys.map(String).filter(Boolean) : [];
+  const orderKeys = Array.isArray(draft.order_keys) ? draft.order_keys.map(String).filter(Boolean) : [];
+  const hasSelectedKeys = selectedKeys.length > 0;
+  const hasSelectedIndices = hasSelectedKeys || Array.isArray(draft.selected_indices);
+  const selectedByKey = selectedKeys.map((key) => keyToIndex.get(key)).filter(Number.isInteger);
+  const selectedSet = new Set(hasSelectedKeys ? selectedByKey : normalizedIntegerList(draft.selected_indices));
+  const order = orderKeys.length ? orderKeys.map((key) => keyToIndex.get(key)).filter(Number.isInteger) : normalizedIntegerList(draft.order);
   const segmentMap = draft.selected_segments && typeof draft.selected_segments === "object" ? draft.selected_segments : {};
   const wordMap = draft.selected_words && typeof draft.selected_words === "object" ? draft.selected_words : {};
+  const segmentKeyMap = draft.selected_segments_by_key && typeof draft.selected_segments_by_key === "object" ? draft.selected_segments_by_key : {};
+  const wordKeyMap = draft.selected_words_by_key && typeof draft.selected_words_by_key === "object" ? draft.selected_words_by_key : {};
   preview.clips.forEach((clip) => {
     const clipIndex = Number(clip.index);
+    const candidateKey = previewCandidateKey(clip);
     const segments = previewSegments(clip);
     const selectedByDraft = hasSelectedIndices ? selectedSet.has(clipIndex) : clip.selected !== false;
     if (!selectedByDraft) {
@@ -9004,14 +9400,15 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
       segments.forEach((segment) => { segment.selected = false; previewSegmentWords(segment).forEach((word) => { word.selected = false; }); });
       return;
     }
-    const segmentValues = segmentMap[String(clipIndex)];
+    const segmentValues = Array.isArray(segmentKeyMap[candidateKey]) ? segmentKeyMap[candidateKey] : segmentMap[String(clipIndex)];
     if (segments.length && Array.isArray(segmentValues)) {
       const segmentSet = new Set(normalizedIntegerList(segmentValues));
       segments.forEach((segment) => { segment.selected = segment.selection_locked === true ? false : segmentSet.has(Number(segment.index)); });
     } else if (segments.length) {
       segments.forEach((segment) => { if (segment.selection_locked === true) segment.selected = false; else if (segment.selected === undefined) segment.selected = true; });
     }
-    const clipWordMap = wordMap[String(clipIndex)] && typeof wordMap[String(clipIndex)] === "object" ? wordMap[String(clipIndex)] : {};
+    const keyedWordMap = wordKeyMap[candidateKey];
+    const clipWordMap = keyedWordMap && typeof keyedWordMap === "object" ? keyedWordMap : (wordMap[String(clipIndex)] && typeof wordMap[String(clipIndex)] === "object" ? wordMap[String(clipIndex)] : {});
     segments.forEach((segment) => {
       const words = previewSegmentWords(segment);
       if (!words.length) return;
@@ -9029,7 +9426,7 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
     });
     clip.selected = !segments.length || segments.some(isPreviewSegmentSelected);
   });
-  const selectedOrder = normalizedIntegerList(draft.selected_indices);
+  const selectedOrder = hasSelectedKeys ? selectedByKey : normalizedIntegerList(draft.selected_indices);
   const fallbackOrder = order.filter((index) => selectedSet.has(index));
   const preferred = (selectedOrder.length ? selectedOrder : fallbackOrder).filter((index) => selectedSet.has(index));
   preview.clips.forEach((clip) => {
@@ -9114,7 +9511,12 @@ function togglePreviewWordSelection(clipIndex, segmentIndex, wordIndex, scope = 
 function collectPreviewSelection(scope = "smart") {
   syncPreviewClipSelections(scope);
   const draft = commitPreviewDraft(scope, { remote: true });
-  return { selectedIndices: draft.selected_indices || [], order: draft.order || [], selectedSegments: draft.selected_segments || {}, selectedWords: draft.selected_words || {} };
+  return {
+    selectedIndices: draft.selected_indices || [], selectedKeys: draft.selected_keys || [],
+    order: draft.order || [], orderKeys: draft.order_keys || [], selectedSegments: draft.selected_segments || {},
+    selectedWords: draft.selected_words || {}, selectedSegmentsByKey: draft.selected_segments_by_key || {},
+    selectedWordsByKey: draft.selected_words_by_key || {},
+  };
 }
 
 // [AI_WORKBENCH_SELECTION_END]
@@ -9170,9 +9572,13 @@ async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspect
         clip_index: clipIndex,
         scope,
         selected_indices: draft.selected_indices || [],
+        selected_keys: draft.selected_keys || [],
         order: draft.order || [],
+        order_keys: draft.order_keys || [],
         selected_segments: draft.selected_segments || {},
         selected_words: draft.selected_words || {},
+        selected_segments_by_key: draft.selected_segments_by_key || {},
+        selected_words_by_key: draft.selected_words_by_key || {},
         updated_at: draft.updated_at || Date.now(),
       }),
     });
@@ -9186,7 +9592,7 @@ async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspect
 // [AI_WORKBENCH_VIDEO_END]
 
 const directPreviewWorkbenchCandidateCategories = [
-  ["hook", "\u5f00\u573a\u5438\u5f15"], ["pref_fabric", "\u9762\u6599\u8d28\u611f"], ["pref_fit", "\u7248\u578b\u663e\u7626"],
+  ["hook", "\u5f00\u573a\u5438\u5f15"], ["pref_fabric", "\u9762\u6599\u8d28\u611f"], ["pref_quality", "\u54c1\u8d28\u7ec6\u8282"], ["pref_fit", "\u7248\u578b\u663e\u7626"],
   ["pref_color", "\u989c\u8272\u6c1b\u56f4"], ["pref_scene", "\u573a\u666f\u642d\u914d"], ["pref_emotion", "\u60c5\u7eea\u611f\u67d3"],
   ["pref_value", "\u6027\u4ef7\u6bd4"], ["pref_urgency", "\u7d27\u8feb\u7a00\u7f3a"], ["pref_trend", "\u6d41\u884c\u8d8b\u52bf"],
   ["food_taste", "\u53e3\u611f\u98df\u6b32"], ["food_quality", "\u65b0\u9c9c\u54c1\u8d28"], ["food_origin", "\u4ea7\u5730\u6eaf\u6e90"],
@@ -9208,8 +9614,8 @@ function previewWorkbenchCandidateCategory(clip) {
   return "core";
 }
 
-function previewWorkbenchCategoryLabel(clip) {
-  const key = previewWorkbenchCandidateCategory(clip);
+function previewWorkbenchCategoryLabel(clip, scope = "smart") {
+  const key = previewWorkbenchCandidateCategory(clip, scope);
   return directPreviewWorkbenchCandidateCategories.find(([item]) => item === key)?.[1] || "\u5546\u54c1\u4eae\u70b9";
 }
 
@@ -9280,7 +9686,7 @@ function renderPreviewCandidateGroups(scope, preview) {
   const activeCandidate = state.previewCandidateSelections?.[scope];
   const hasActiveCandidate = activeCandidate !== null && activeCandidate !== undefined;
   return directPreviewWorkbenchCandidateCategories.map(([key, label]) => {
-    const clips = (preview?.clips || []).filter((clip) => previewWorkbenchCandidateCategory(clip) === key);
+    const clips = (preview?.clips || []).filter((clip) => previewWorkbenchCandidateCategory(clip, scope) === key);
     if (!clips.length) return "";
     const rows = clips.map((clip) => {
       const selected = isPreviewWorkbenchSelected(clip);
@@ -9297,7 +9703,7 @@ function renderPreviewSelectedRows(scope, selected) {
   const activeIndex = Number(state.previewDetailSelection?.[scope]);
   return selected.map((clip, position) => {
     const text = selectedPreviewText(clip) || String(clip.text || "");
-    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" data-preview-drag-handle data-preview-scope="${scope}" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
+    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" data-preview-drag-handle data-preview-scope="${scope}" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip, scope))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
   }).join("");
 }
 
@@ -9310,7 +9716,7 @@ function renderPreviewWorkbenchVideoStage(scope, preview, current) {
   const selected = isPreviewWorkbenchSelected(clip);
   const text = current.inspectOnly ? String(clip.text || '\u672a\u8bc6\u522b\u53e3\u64ad') : selectedPreviewText(clip);
   const addButton = selected ? '' : '<button class="button button-secondary button-small" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165\u5df2\u9009</button>';
-  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div><p class="preview-current-text">' + escapeHtml(text || '\u672a\u8bc6\u522b\u53e3\u64ad') + '</p>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
+  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div><p class="preview-current-text">' + escapeHtml(text || '\u672a\u8bc6\u522b\u53e3\u64ad') + '</p>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
 }
 
 function renderPreviewEditorSentence(scope, clip, segment, position) {
@@ -9422,9 +9828,13 @@ async function startSmartFromPreview() {
     ...collectSmartPayload({ requireVideos: false }),
     preview_id: state.smartPreview.id,
     selected_indices: selection.selectedIndices,
+    selected_keys: selection.selectedKeys,
     order: selection.order,
+    order_keys: selection.orderKeys,
     selected_segments: selection.selectedSegments,
     selected_words: selection.selectedWords,
+    selected_segments_by_key: selection.selectedSegmentsByKey,
+    selected_words_by_key: selection.selectedWordsByKey,
   };
   await runPreflight('smart-from-preview', payload, 'smart-cut');
   const result = await api('/api/smart-cut/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
@@ -9448,9 +9858,13 @@ async function startMixFromPreview() {
     ...collectFeaturePayload('mix'),
     preview_id: state.mixPreview.id,
     selected_indices: selection.selectedIndices,
+    selected_keys: selection.selectedKeys,
     order: selection.order,
+    order_keys: selection.orderKeys,
     selected_segments: selection.selectedSegments,
     selected_words: selection.selectedWords,
+    selected_segments_by_key: selection.selectedSegmentsByKey,
+    selected_words_by_key: selection.selectedWordsByKey,
   };
   await runPreflight('mix-from-preview', payload, 'mix');
   const result = await api('/api/mix/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
@@ -9507,9 +9921,13 @@ async function previewClipVideo(index, scope = 'smart') {
         clip_index: Number(index),
         scope,
         selected_indices: draft.selected_indices || [],
+        selected_keys: draft.selected_keys || [],
         order: draft.order || [],
+        order_keys: draft.order_keys || [],
         selected_segments: draft.selected_segments || {},
         selected_words: draft.selected_words || {},
+        selected_segments_by_key: draft.selected_segments_by_key || {},
+        selected_words_by_key: draft.selected_words_by_key || {},
         updated_at: draft.updated_at || Date.now(),
       }),
     });
@@ -9555,8 +9973,23 @@ function renderPreviewEditorSentence(scope, clip, segment, position) {
 // Keep candidate categories focused on the decision a user needs to make.  In
 // particular, live-chat and low-confidence fragments must not flood the main
 // product-selling category.
-function previewWorkbenchPreferenceCategory(text) {
-  if (/\u9762\u6599|\u6750\u8d28|\u8d28\u611f|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb|\u5de5\u827a|\u505a\u5de5/.test(text)) return "pref_fabric";
+function previewWorkbenchCategoryDomain(scope = "smart", clip = null) {
+  const prefix = scope === "mix" ? "mix" : "sc";
+  const primary = primaryCategoryValue(prefix);
+  const evidence = `${primary} ${clip?.focus || ""} ${clip?.focus_block || ""} ${clip?.text || ""}`;
+  if (/\u751f\u9c9c|\u98df\u54c1|\u996e\u6599/.test(primary)) return "food";
+  if (/\u670d\u9970|\u5185\u8863|\u978b|\u7bb1\u5305|\u914d\u9970|\u73e0\u5b9d/.test(primary)) return "apparel";
+  if (/\u9762\u6599|\u7248\u578b|\u663e\u7626|\u906e\u8089|\u6536\u8170|\u8863\u670d|\u88d9\u5b50|\u886c\u886b|\u88e4\u5b50|\u62c9\u94fe|\u9886\u53e3|\u8896\u53e3/.test(evidence)) return "apparel";
+  if (/\u73b0\u6458|\u73b0\u635e|\u51b7\u94fe|\u679c\u5f84|\u51c0\u542b\u91cf|\u53e3\u611f|\u597d\u5403|\u9c9c\u6d3b|\u4ea7\u5730/.test(evidence)) return "food";
+  return "general";
+}
+
+function previewWorkbenchPreferenceCategory(text, domain = "general") {
+  const allowApparel = domain !== "food";
+  const allowFood = domain !== "apparel";
+  const hasQualityDetail = /\u54c1\u8d28\u7ec6\u8282|\u54c1\u8d28|\u8d28\u91cf|\u505a\u5de5|\u5de5\u827a|\u7ec6\u8282|\u8d70\u7ebf|\u62c9\u94fe|\u6263\u5b50|\u7ebd\u6263|\u9886\u53e3|\u53e3\u888b|\u91cc\u886c|\u4e94\u91d1|\u8d28\u68c0|\u7cbe\u81f4/.test(text);
+  if (allowApparel && /\u9762\u6599|\u6750\u8d28|\u8d28\u611f|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb/.test(text)) return "pref_fabric";
+  if (domain !== "food" && hasQualityDetail) return "pref_quality";
   if (/\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u6536\u8170|\u8170\u7ebf|\u817f\u957f|\u80a9|\u80ef|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab|\u7a7f\u7740\u4f53\u9a8c|\u5305\u5bb9/.test(text)) return "pref_fit";
   if (/\u989c\u8272|\u6c1b\u56f4|\u663e\u767d|\u663e\u6c14\u8272|\u629ac\u8272|\u56fe\u6848|\u5370\u82b1|\u590d\u53e4|\u98ce\u683c|\u5143\u7d20/.test(text)) return "pref_color";
   if (/\u573a\u666f|\u642d\u914d|\u7a7f\u642d|\u901a\u52e4|\u7ea6\u4f1a|\u65e5\u5e38|\u51fa\u95e8|\u4e0a\u73ed|\u62cd\u7167|\u53e0\u7a7f|\u5185\u642d|\u5916\u642d/.test(text)) return "pref_scene";
@@ -9564,30 +9997,40 @@ function previewWorkbenchPreferenceCategory(text) {
   if (/\u6027\u4ef7\u6bd4|\u5212\u7b97|\u503c|\u4ef7\u683c|\u798f\u5229|\u4f18\u60e0|\u4fbf\u5b9c|\u7701\u94b1/.test(text)) return "pref_value";
   if (/\u7d27\u8feb|\u7a00\u7f3a|\u9650\u91cf|\u5e93\u5b58|\u79d2\u6740|\u62a2|\u4e0a\u8f66|\u4e0b\u5355|\u6700\u540e|\u9519\u8fc7/.test(text)) return "pref_urgency";
   if (/\u6d41\u884c|\u8d8b\u52bf|\u7206\u6b3e|\u4eca\u5e74|\u5f53\u4e0b|\u65b0\u6b3e|\u4e0a\u65b0/.test(text)) return "pref_trend";
-  if (/\u53e3\u611f|\u98df\u6b32|\u597d\u5403|\u9999|\u8106|\u7cef|\u751c|\u6c41|\u5165\u5473|\u89e3\u998b/.test(text)) return "food_taste";
-  if (/\u65b0\u9c9c|\u54c1\u8d28|\u8d28\u91cf|\u9c9c|\u73b0\u6458|\u73b0\u505a|\u5e72\u51c0/.test(text)) return "food_quality";
-  if (/\u4ea7\u5730|\u6eaf\u6e90|\u539f\u4ea7|\u519c\u573a|\u679c\u56ed|\u6d77\u57df|\u6e90\u5934/.test(text)) return "food_origin";
-  if (/\u89c4\u683c|\u5206\u91cf|\u51c0\u542b\u91cf|\u4e00\u7bb1|\u4e00\u888b|\u4e00\u65a4|\u5927\u679c|\u5c0f\u679c|\u4efd\u91cf/.test(text)) return "food_spec";
-  if (/\u53d1\u8d27|\u4fdd\u9c9c|\u51b7\u94fe|\u5305\u88c5|\u987a\u4e30|\u5230\u8d27|\u73b0\u53d1/.test(text)) return "food_fresh";
-  if (/\u5403\u6cd5|\u505a\u6cd5|\u706b\u9505|\u714e|\u716e|\u70e4|\u62cc|\u65e9\u9910|\u591c\u5bb5|\u9001\u793c|\u5bb6\u5ead/.test(text)) return "food_scene";
+  if (allowFood && /\u53e3\u611f|\u98df\u6b32|\u597d\u5403|\u9999\u6c14|\u9165\u8106|\u8f6f\u7cef|\u9c9c\u751c|\u7206\u6c41|\u5165\u5473|\u89e3\u998b/.test(text)) return "food_taste";
+  if (allowFood && /\u65b0\u9c9c|\u9c9c\u6d3b|\u73b0\u6458|\u73b0\u91c7|\u73b0\u6355|\u73b0\u635e|\u5f53\u5929\u53d1|\u9c9c\u5ea6|\u679c\u5f62|\u679c\u5f84|\u9971\u6ee1|\u574f\u679c/.test(text)) return "food_quality";
+  if (allowFood && /\u4ea7\u5730|\u6eaf\u6e90|\u539f\u4ea7|\u519c\u573a|\u679c\u56ed|\u6d77\u57df|\u6e90\u5934/.test(text)) return "food_origin";
+  if (allowFood && /\u89c4\u683c|\u5206\u91cf|\u51c0\u542b\u91cf|\u4e00\u7bb1|\u4e00\u888b|\u4e00\u65a4|\u5927\u679c|\u5c0f\u679c|\u4efd\u91cf/.test(text)) return "food_spec";
+  if (allowFood && /\u53d1\u8d27|\u4fdd\u9c9c|\u51b7\u94fe|\u5305\u88c5|\u987a\u4e30|\u5230\u8d27|\u73b0\u53d1/.test(text)) return "food_fresh";
+  if (allowFood && /\u5403\u6cd5|\u505a\u6cd5|\u706b\u9505|\u714e|\u716e|\u70e4|\u62cc|\u65e9\u9910|\u591c\u5bb5|\u9001\u793c|\u5bb6\u5ead/.test(text)) return "food_scene";
+  if (hasQualityDetail) return "pref_quality";
   return "";
 }
 
-function previewWorkbenchCandidateCategory(clip) {
+function previewWorkbenchCandidateCategory(clip, scope = "smart") {
   const role = previewWorkbenchRoleKey(clip);
   const text = (String(clip?.focus || "") + " " + String(clip?.focus_block || "") + " " + String(clip?.text || "")).toLowerCase();
+  const spokenText = String(clip?.text || "").toLowerCase();
   const focus = String(clip?.focus_block || clip?.focus || "").toLowerCase();
   const explicitRole = String(clip?.sales_role || "").toLowerCase();
   const denseText = text.replace(/\s+/g, "");
   if (explicitRole === "weak_fragment") return "unclear";
   if (explicitRole === "hook" || explicitRole === "hook_followup") return "hook";
   if (explicitRole === "natural_close") return "close";
-  const focusCategory = previewWorkbenchPreferenceCategory(focus);
+  const domain = previewWorkbenchCategoryDomain(scope, clip);
+  const incompatibleFocus = (
+    domain === "apparel"
+    && /\u53e3\u611f\u98df\u6b32|\u65b0\u9c9c\u54c1\u8d28|\u4ea7\u5730\u6eaf\u6e90|\u89c4\u683c\u5206\u91cf|\u53d1\u8d27\u4fdd\u9c9c|\u573a\u666f\u5403\u6cd5/.test(focus)
+  ) || (
+    domain === "food"
+    && /\u7248\u578b\u663e\u7626|\u9762\u6599\u8d28\u611f|\u7a7f\u7740\u4f53\u9a8c|\u54c1\u8d28\u7ec6\u8282|\u5c3a\u5bf8\u957f\u5ea6|\u989c\u8272\u6c1b\u56f4|\u573a\u666f\u642d\u914d/.test(focus)
+  );
+  const focusCategory = incompatibleFocus ? "" : previewWorkbenchPreferenceCategory(focus, domain);
   if (focusCategory) return focusCategory;
   if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(text)) return "hook";
   if (role === "close" || /\u6536\u5c3e|\u6700\u540e|\u4e0d\u8981\u9519\u8fc7/.test(text)) return "close";
   if (/\u4e0b\u4e00\u4f4d|\u7c89\u4e1d|\u4e3e\u62a5|\u6295\u7968|\u76f4\u64ad\u95f4|\u4e0a\u8f66|\u4e0b\u5355|\u5ba2\u670d|\u94fe\u63a5|\u53d1\u8d27|\u552e\u540e|\u5e93\u5b58|\u79d2\u6740|\u8ba2\u5355|\u62a2|\u5f00\u6389|\u542c\u6b4c|\u97f3\u4e50|\u7a0d\u7b49|\d+\s*\u5355/.test(text)) return "live";
-  const textCategory = previewWorkbenchPreferenceCategory(text);
+  const textCategory = previewWorkbenchPreferenceCategory(spokenText, domain);
   if (textCategory) return textCategory;
   if (role === "product" || /\u8863\u670d|\u88d9\u5b50|\u8fd9\u4e2a\u6b3e|\u8fd9\u4ef6|\u6b3e\u5f0f|\u8bbe\u8ba1|\u590f\u6b3e|\u4e0a\u65b0|\u5355\u54c1|\u7cbe\u81f4/.test(text)) return "pref_fabric";
   if ((role === "core" || role === "product") && denseText.length >= 18) return "pref_fabric";
@@ -9608,12 +10051,12 @@ function isPreviewWorkbenchHardWasteCandidate(clip) {
   return false;
 }
 
-function previewWorkbenchCandidateQualityScore(clip) {
+function previewWorkbenchCandidateQualityScore(clip, scope = "smart") {
   if (isPreviewWorkbenchHardWasteCandidate(clip)) return -100;
   const explicitRole = String(clip?.sales_role || "").toLowerCase();
   const text = previewWorkbenchCandidateText(clip);
   const dense = text.replace(/[\s，。！？,.!?、：:；;"'“”‘’（）()【】\[\]-]/g, "");
-  const category = previewWorkbenchCandidateCategory(clip);
+  const category = previewWorkbenchCandidateCategory(clip, scope);
   let score = 0;
   if (previewWorkbenchCandidateOrigin(clip) === "recommended") score += 8;
   if (clip?.selected !== false) score += 5;
@@ -9627,13 +10070,13 @@ function previewWorkbenchCandidateQualityScore(clip) {
   return score;
 }
 
-function isPreviewWorkbenchUsefulCandidate(clip) {
+function isPreviewWorkbenchUsefulCandidate(clip, scope = "smart") {
   if (isPreviewWorkbenchHardWasteCandidate(clip)) return false;
   const explicitRole = String(clip?.sales_role || "").toLowerCase();
   if (explicitRole === "weak_fragment") return false;
   const text = previewWorkbenchCandidateText(clip);
   const dense = text.replace(/[\s，。！？,.!?、：:；;"'“”‘’（）()【】\[\]-]/g, "");
-  const category = previewWorkbenchCandidateCategory(clip);
+  const category = previewWorkbenchCandidateCategory(clip, scope);
   if (category === "live" || category === "unclear") return false;
   if (dense.length < 10 && !["hook", "close"].includes(category)) return false;
   return true;
@@ -9656,7 +10099,7 @@ function previewWorkbenchSourceCandidatesFor(scope, preview, source) {
   const pool = (preview?.clips || []).filter(function (clip) {
     return previewWorkbenchCandidateOrigin(clip) === source && !isPreviewWorkbenchHardWasteCandidate(clip);
   });
-  const useful = pool.filter(isPreviewWorkbenchUsefulCandidate);
+  const useful = pool.filter(function (clip) { return isPreviewWorkbenchUsefulCandidate(clip, scope); });
   const selectedCount = previewWorkbenchSelectedClips(scope, preview).length;
   const targetCount = Math.min(pool.length, Math.max(8, selectedCount + 4, Math.ceil(selectedCount * 1.5)));
   if (useful.length >= targetCount) return useful;
@@ -9664,7 +10107,7 @@ function previewWorkbenchSourceCandidatesFor(scope, preview, source) {
   const supplements = pool
     .filter(function (clip) { return !usefulSet.has(Number(clip.index)); })
     .sort(function (a, b) {
-      const scoreDiff = previewWorkbenchCandidateQualityScore(b) - previewWorkbenchCandidateQualityScore(a);
+      const scoreDiff = previewWorkbenchCandidateQualityScore(b, scope) - previewWorkbenchCandidateQualityScore(a, scope);
       if (scoreDiff !== 0) return scoreDiff;
       return Number(a.index) - Number(b.index);
     })
@@ -9679,7 +10122,7 @@ function previewWorkbenchSourceCandidates(scope, preview) {
 function previewWorkbenchFilteredCandidates(scope, preview) {
   const category = previewWorkbenchCategoryFilter(scope);
   return previewWorkbenchSourceCandidates(scope, preview).filter(function (clip) {
-    return category === "all" || previewWorkbenchCandidateCategory(clip) === category;
+    return category === "all" || previewWorkbenchCandidateCategory(clip, scope) === category;
   });
 }
 
@@ -9722,7 +10165,7 @@ function renderPreviewCandidateFilterBar(scope, preview) {
   }).join("");
   const present = new Map();
   previewWorkbenchSourceCandidates(scope, preview).forEach(function (clip) {
-    const key = previewWorkbenchCandidateCategory(clip);
+    const key = previewWorkbenchCandidateCategory(clip, scope);
     present.set(key, (present.get(key) || 0) + 1);
   });
   const categoryButtons = ['<button type="button" class="' + (category === 'all' ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="all"><span>\u5168\u90e8\u54c1\u7c7b</span><em>' + stats.source + '</em></button>'];
@@ -9741,7 +10184,7 @@ function renderPreviewCandidateGroups(scope, preview) {
   const candidates = previewWorkbenchFilteredCandidates(scope, preview);
   const groups = [];
   candidates.forEach(function (clip) {
-    const key = previewWorkbenchCandidateCategory(clip);
+    const key = previewWorkbenchCandidateCategory(clip, scope);
     const last = groups[groups.length - 1];
     if (!last || last.key !== key) groups.push({ key: key, label: labels.get(key) || "\u5f85\u786e\u8ba4", clips: [] });
     groups[groups.length - 1].clips.push(clip);
@@ -9928,7 +10371,217 @@ function renderPreviewSentenceEditor(scope, current) {
   if (!isPreviewWorkbenchSelected(clip)) return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u5148\u770b\u89c6\u9891\uff0c\u52a0\u5165\u5df2\u9009\u540e\u518d\u7cbe\u4fee</span></div></div><div class="preview-sequence-empty"><strong>\u786e\u8ba4\u8fd9\u6bb5\u89c6\u9891\u540e\u70b9\u201c\u52a0\u5165\u5df2\u9009\u201d</strong><span>\u5df2\u9009\u7247\u6bb5\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u5168\u90e8\u53e5\u5b50\u548c\u53ef\u5220\u8bcd\u5757\u3002</span></div></section>';
   const segments = previewSegments(clip);
   const body = segments.length ? segments.map(function (segment, position) { return renderPreviewEditorSentence(scope, clip, segment, position); }).join("") : '<article class="preview-editor-sentence"><div class="preview-editor-words"><span class="preview-word is-static">' + escapeHtml(String(clip.text || "\u672a\u8bc6\u522b\u53e3\u64ad")) + '</span></div></article>';
-  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52fe\u9009\u4fdd\u7559\u6574\u53e5\uff1b\u70b9\u8bcd\u5757\u5220\u9664\u6216\u6062\u590d</span></div><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip)) + '</small></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
+  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52fe\u9009\u4fdd\u7559\u6574\u53e5\uff1b\u70b9\u8bcd\u5757\u5220\u9664\u6216\u6062\u590d</span></div><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</small></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
+}
+
+function previewOverviewSourceValue(clip) {
+  return String(clip?.source || clip?.source_name || clip?.source_marker || "").trim();
+}
+
+function previewOverviewSelectedSourceStats(scope, preview, selected, durationSpeed) {
+  const stats = new Map();
+  selected.forEach(function (clip) {
+    const raw = previewOverviewSourceValue(clip);
+    const key = raw ? raw.toLowerCase() : `missing:${Number(clip?.index)}`;
+    const existing = stats.get(key) || {
+      key,
+      label: raw ? sourceBaseName(raw) : "来源待确认",
+      alias: previewSourceAlias(scope, preview, clip),
+      count: 0,
+      rawDuration: 0,
+    };
+    existing.count += 1;
+    existing.rawDuration += effectiveClipDuration(clip);
+    stats.set(key, existing);
+  });
+  const speed = Math.max(0.1, Number(durationSpeed || 1) || 1);
+  const total = Array.from(stats.values()).reduce(function (sum, item) { return sum + item.rawDuration; }, 0);
+  return Array.from(stats.values()).map(function (item) {
+    return {
+      ...item,
+      duration: item.rawDuration / speed,
+      ratio: total > 0 ? item.rawDuration / total : 0,
+    };
+  });
+}
+
+function previewOverviewExpectedSourceCount(preview) {
+  const declared = Array.isArray(preview?.sources) ? preview.sources : [];
+  const values = declared.map(function (item) {
+    if (item && typeof item === "object") return String(item.path || item.source || item.name || "").trim();
+    return String(item || "").trim();
+  }).filter(Boolean);
+  if (values.length) return new Set(values.map(function (item) { return item.toLowerCase(); })).size;
+  return new Set((preview?.clips || []).map(previewOverviewSourceValue).filter(Boolean).map(function (item) { return item.toLowerCase(); })).size;
+}
+
+function buildPreviewFilmOverview(scope, preview, targetId, selected, duration) {
+  const prefix = scope === "mix" ? "mix" : "sc";
+  const dedup = preview?.dedup_summary || {};
+  const plan = dedup.plan_quality_report || {};
+  const category = dedup.category_summary || {};
+  const preference = dedup.preference_summary || {};
+  const roleCounts = { hook: 0, product: 0, proof: 0, scene: 0, close: 0, weak: 0 };
+  const topics = new Set();
+  const issues = [];
+  const duplicateTexts = new Map();
+
+  selected.forEach(function (clip, position) {
+    const role = previewWorkbenchRoleKey(clip);
+    roleCounts[role] = (roleCounts[role] || 0) + 1;
+    const topic = previewWorkbenchTopicLabel(clip);
+    if (topic && topic !== "\u5176\u4ed6") topics.add(topic);
+
+    const clipIndex = Number(clip?.index);
+    const clipDuration = effectiveClipDuration(clip);
+    if (clipDuration > 0 && clipDuration < 1.2) {
+      issues.push({ kind: "short", label: `\u7b2c${position + 1}\u6bb5\u8fc7\u77ed`, detail: `\u5f53\u524d\u4ec5${clipDuration.toFixed(1)}s\uff0c\u53ef\u80fd\u5f71\u54cd\u89c2\u611f`, clipIndex });
+    }
+
+    const normalizedText = selectedPreviewText(clip).replace(/[^0-9a-z\u4e00-\u9fff]+/gi, "").toLowerCase();
+    if (normalizedText.length >= 4 && duplicateTexts.has(normalizedText)) {
+      issues.push({ kind: "duplicate", label: `\u7b2c${position + 1}\u6bb5\u6587\u6848\u91cd\u590d`, detail: `\u4e0e\u7b2c${duplicateTexts.get(normalizedText) + 1}\u6bb5\u6587\u6848\u76f8\u540c`, clipIndex });
+    } else if (normalizedText.length >= 4) {
+      duplicateTexts.set(normalizedText, position);
+    }
+
+    if (position === 0) return;
+    const previous = selected[position - 1];
+    const previousSource = previewOverviewSourceValue(previous).toLowerCase();
+    const currentSource = previewOverviewSourceValue(clip).toLowerCase();
+    const sameSource = scope !== "mix" || (previousSource && currentSource && previousSource === currentSource);
+    if (!sameSource) return;
+    const previousBounds = effectiveClipBounds(previous);
+    const currentBounds = effectiveClipBounds(clip);
+    if (currentBounds.start + 0.05 < previousBounds.start) {
+      issues.push({ kind: "reverse", label: `\u7b2c${position + 1}\u6bb5\u65f6\u95f4\u5012\u5e8f`, detail: "\u540c\u4e00\u7d20\u6750\u4e2d\u540e\u4e00\u6bb5\u6392\u5230\u4e86\u66f4\u65e9\u7684\u65f6\u95f4", clipIndex });
+    } else if (currentBounds.start < previousBounds.end - 0.05) {
+      issues.push({ kind: "overlap", label: `\u7b2c${position + 1}\u6bb5\u65f6\u95f4\u91cd\u53e0`, detail: `\u4e0e\u524d\u4e00\u6bb5\u91cd\u53e0${(previousBounds.end - currentBounds.start).toFixed(2)}s`, clipIndex });
+    }
+  });
+
+  if (!selected.length || duration.rawTotal <= 0.05) {
+    issues.unshift({ kind: "empty", label: "\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u7247\u6bb5", detail: "\u8bf7\u5148\u52a0\u5165\u7247\u6bb5\u5e76\u4fdd\u7559\u81f3\u5c11\u4e00\u53e5\u5185\u5bb9", blocking: true });
+  } else if (!duration.accepted) {
+    issues.unshift({ kind: "duration", label: duration.projected < duration.low ? "\u9884\u8ba1\u6210\u7247\u504f\u77ed" : "\u9884\u8ba1\u6210\u7247\u504f\u957f", detail: `\u5f53\u524d${duration.projected.toFixed(1)}s\uff0c\u5141\u8bb8${duration.low.toFixed(0)}-${duration.high.toFixed(0)}s`, action: "fit" });
+  }
+  if (selected.length && roleCounts.hook === 0) issues.push({ kind: "structure", label: "\u7f3a\u5c11\u5f00\u573a\u5438\u5f15", detail: "\u5f53\u524d\u7f16\u6392\u6ca1\u6709\u660e\u786e\u7684\u5f00\u573a\u7247\u6bb5" });
+  if (selected.length && roleCounts.close === 0) issues.push({ kind: "structure", label: "\u7f3a\u5c11\u5b8c\u6574\u6536\u5c3e", detail: "\u5f53\u524d\u7f16\u6392\u6ca1\u6709\u660e\u786e\u7684\u6536\u5c3e\u7247\u6bb5" });
+
+  const sourceStats = previewOverviewSelectedSourceStats(scope, preview, selected, duration.speed);
+  const expectedSourceCount = scope === "mix" ? previewOverviewExpectedSourceCount(preview) : sourceStats.length;
+  if (scope === "mix" && selected.length) {
+    const unresolved = selected.find(function (clip) { return !previewOverviewSourceValue(clip); });
+    if (unresolved) {
+      issues.push({ kind: "source", label: "\u5b58\u5728\u7d20\u6750\u6765\u6e90\u5f85\u786e\u8ba4", detail: "\u8fd9\u4f1a\u5f71\u54cd\u6df7\u526a\u7d20\u6750\u5b9a\u4f4d", clipIndex: Number(unresolved.index) });
+    }
+    if (expectedSourceCount > sourceStats.length) {
+      issues.push({ kind: "source", label: `\u7d20\u6750\u4f7f\u7528${sourceStats.length}/${expectedSourceCount}`, detail: "\u5f53\u524d\u6ca1\u6709\u8986\u76d6\u5168\u90e8\u6df7\u526a\u7d20\u6750" });
+    }
+    const largest = sourceStats.reduce(function (best, item) { return !best || item.ratio > best.ratio ? item : best; }, null);
+    if (sourceStats.length >= 2 && largest && largest.ratio > 0.65) {
+      issues.push({ kind: "balance", label: "\u6df7\u526a\u7d20\u6750\u5360\u6bd4\u4e0d\u5747", detail: `${largest.alias || largest.label}\u5360\u9884\u8ba1\u6210\u7247${(largest.ratio * 100).toFixed(0)}%` });
+    }
+  }
+
+  const blocking = issues.some(function (item) { return item.blocking === true; });
+  const status = blocking ? "block" : (issues.length ? "warn" : "ok");
+  const statusLabel = blocking ? "\u6682\u4e0d\u80fd\u6210\u7247" : (issues.length ? `\u5efa\u8bae\u68c0\u67e5 ${issues.length} \u9879` : "\u53ef\u4ee5\u6210\u7247");
+  const mainProduct = String($(`${prefix}-main-product`)?.value || plan?.product?.locked || plan?.product?.selected || "").trim();
+  const mainCategory = String(category.main_category || $(`${prefix}-primary-category`)?.selectedOptions?.[0]?.textContent || "").trim();
+  const preferenceLabel = String(preference.used_label || preference.label || "").trim();
+  const salesChain = buildSalesChainSummary(selected);
+  const sellingCount = roleCounts.product + roleCounts.proof + roleCounts.scene + roleCounts.weak;
+  const naming = String($(`${prefix}-output-naming`)?.selectedOptions?.[0]?.textContent || "").trim();
+  const versions = Number($(`${prefix}-versions`)?.value || 1) || 1;
+  const subtitles = Boolean($(`${prefix}-subtitle`)?.checked);
+  return {
+    status,
+    statusLabel,
+    issues,
+    roleCounts,
+    sellingCount,
+    topics: Array.from(topics),
+    sourceStats,
+    expectedSourceCount,
+    mainProduct,
+    mainCategory,
+    preferenceLabel,
+    salesChain,
+    naming,
+    versions,
+    subtitles,
+    initialPlanStatus: String(plan.status || ""),
+  };
+}
+
+function renderPreviewFilmOverview(scope, preview, targetId, selected, duration) {
+  const overview = buildPreviewFilmOverview(scope, preview, targetId, selected, duration);
+  const maxDuration = Math.max(duration.high, duration.projected, 1);
+  const currentPercent = Math.min(100, Math.max(0, duration.projected / maxDuration * 100));
+  const lowPercent = Math.min(100, Math.max(0, duration.low / maxDuration * 100));
+  const highPercent = Math.min(100, Math.max(lowPercent, duration.high / maxDuration * 100));
+  const targetPercent = Math.min(100, Math.max(0, duration.target / maxDuration * 100));
+  const structureText = `\u5f00\u573a${overview.roleCounts.hook} \u00b7 \u5356\u70b9${overview.sellingCount} \u00b7 \u6536\u5c3e${overview.roleCounts.close}`;
+  const sourceText = scope === "mix"
+    ? `\u7d20\u6750 ${overview.sourceStats.length}/${overview.expectedSourceCount || overview.sourceStats.length}`
+    : (overview.sourceStats[0]?.label || "\u7d20\u6750\u5f85\u786e\u8ba4");
+  const issueRows = overview.issues.length ? overview.issues.map(function (issue) {
+    let action = "";
+    if (issue.action === "fit") {
+      action = `<button type="button" data-action="preview-duration-fit" data-preview-scope="${scope}">\u9002\u914d\u65f6\u957f</button>`;
+    } else if (Number.isInteger(issue.clipIndex)) {
+      action = `<button type="button" data-action="preview-overview-locate" data-preview-scope="${scope}" data-preview-index="${issue.clipIndex}">\u5b9a\u4f4d\u7247\u6bb5</button>`;
+    }
+    return `<li><span><strong>${escapeHtml(issue.label)}</strong><small>${escapeHtml(issue.detail)}</small></span>${action}</li>`;
+  }).join("") : '<li class="is-ok"><span><strong>\u672a\u53d1\u73b0\u660e\u663e\u95ee\u9898</strong><small>\u5f53\u524d\u65f6\u957f\u3001\u7ed3\u6784\u548c\u65f6\u95f4\u987a\u5e8f\u53ef\u7528</small></span></li>';
+  const sourceRows = overview.sourceStats.length ? overview.sourceStats.map(function (item) {
+    const prefix = item.alias ? `${item.alias} ` : "";
+    return `<span title="${escapeHtml(item.label)}"><strong>${escapeHtml(prefix + item.label)}</strong><small>${item.count}\u6bb5 \u00b7 ${item.duration.toFixed(1)}s \u00b7 ${(item.ratio * 100).toFixed(0)}%</small></span>`;
+  }).join("") : '<span><strong>\u6682\u65e0\u7d20\u6750\u5206\u5e03</strong></span>';
+  const contentParts = [overview.mainProduct && `\u4e3b\u5546\u54c1\uff1a${overview.mainProduct}`, overview.mainCategory && `\u54c1\u7c7b\uff1a${overview.mainCategory}`, overview.preferenceLabel && `AI\u504f\u597d\uff1a${overview.preferenceLabel}`, overview.topics.length && `\u4e3b\u9898\uff1a${overview.topics.join("/")}`].filter(Boolean);
+  const outputParts = [overview.naming, `${overview.versions}\u4e2a\u7248\u672c`, overview.subtitles ? "\u5b57\u5e55\u5f00\u542f" : "\u5b57\u5e55\u5173\u95ed", `\u9884\u8ba1\u53d8\u901f${duration.speed.toFixed(2)}x`].filter(Boolean);
+  const initialPlan = overview.initialPlanStatus ? (overview.initialPlanStatus === "pass" ? "AI\u521d\u59cb\u7247\u5355\u901a\u8fc7" : "AI\u521d\u59cb\u7247\u5355\u6709\u63d0\u9192") : "AI\u521d\u59cb\u7247\u5355\u672a\u8bb0\u5f55";
+  return `<section class="preview-film-overview is-${overview.status}" data-preview-film-overview="${scope}">
+    <div class="preview-film-overview-head">
+      <div class="preview-film-status"><i></i><span><strong>\u5f53\u524d\u6210\u7247</strong><small>${escapeHtml(overview.statusLabel)}</small></span></div>
+      <div class="preview-film-metrics">
+        <span><small>\u9884\u8ba1\u65f6\u957f</small><strong>${duration.projected.toFixed(1)}s <em>/ ${duration.target.toFixed(0)}s\u00b1${duration.tolerance.toFixed(0)}s</em></strong></span>
+        <span><small>\u5df2\u9009\u7247\u6bb5</small><strong>${selected.length}\u6bb5</strong></span>
+        <span><small>\u5185\u5bb9\u7ed3\u6784</small><strong>${escapeHtml(structureText)}</strong></span>
+        <span><small>${scope === "mix" ? "\u6df7\u526a\u6765\u6e90" : "\u539f\u89c6\u9891"}</small><strong title="${escapeHtml(sourceText)}">${escapeHtml(sourceText)}</strong></span>
+      </div>
+      <div class="preview-film-actions"><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="${scope}">\u9002\u914d\u65f6\u957f</button><button class="button button-secondary button-small" data-action="preview-overview-toggle" data-preview-scope="${scope}">${overview.issues.length ? "\u67e5\u770b\u95ee\u9898" : "\u67e5\u770b\u8be6\u60c5"}</button></div>
+    </div>
+    <div class="preview-film-duration" title="\u53ef\u63a5\u53d7 ${duration.low.toFixed(1)}-${duration.high.toFixed(1)}s\uff0c\u5f53\u524d\u9884\u8ba1 ${duration.projected.toFixed(1)}s"><span class="preview-film-duration-range" style="left:${lowPercent.toFixed(2)}%;width:${Math.max(0, highPercent - lowPercent).toFixed(2)}%"></span><span class="preview-film-duration-value" style="width:${currentPercent.toFixed(2)}%"></span><i style="left:${targetPercent.toFixed(2)}%"></i></div>
+    <details class="preview-film-details" data-preview-film-details="${scope}"><summary><span>\u6210\u7247\u8be6\u60c5</span><small>${overview.issues.length ? `${overview.issues.length}\u9879\u5f85\u68c0\u67e5` : "\u5f53\u524d\u7f16\u6392\u6b63\u5e38"}</small></summary>
+      <div class="preview-film-detail-rows">
+        <div><strong>\u5185\u5bb9</strong><span>${escapeHtml(contentParts.join(" \u00b7 ") || "\u6682\u65e0\u4e3b\u5546\u54c1\u6216\u4e3b\u9898\u4fe1\u606f")}</span></div>
+        <div><strong>\u7ed3\u6784</strong><span>${escapeHtml(`\u6210\u4ea4\u7ed3\u6784 ${overview.salesChain.label}\uff1b${overview.salesChain.title}`)}</span></div>
+        <div><strong>\u7d20\u6750</strong><span class="preview-film-source-list">${sourceRows}</span></div>
+        <div><strong>\u8f93\u51fa</strong><span>${escapeHtml(outputParts.join(" \u00b7 "))}</span></div>
+        <div><strong>AI\u521d\u59cb\u7ed3\u679c</strong><span>${escapeHtml(initialPlan)}\uff1b\u4e0b\u65b9\u68c0\u67e5\u5df2\u6309\u5f53\u524d\u624b\u5de5\u7f16\u6392\u91cd\u65b0\u8ba1\u7b97</span></div>
+      </div>
+      <ul class="preview-film-issue-list">${issueRows}</ul>
+    </details>
+  </section>`;
+}
+
+function togglePreviewOverviewDetails(scope = "smart") {
+  const box = $(scope === "mix" ? "mix-preview" : "smart-preview");
+  const details = box?.querySelector(`[data-preview-film-details="${scope}"]`);
+  if (!details) return;
+  details.open = true;
+  details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function locatePreviewOverviewIssue(scope = "smart", index) {
+  if (!Number.isInteger(index)) return;
+  setPreviewDetailSelection(scope, index);
+  const box = $(scope === "mix" ? "mix-preview" : "smart-preview");
+  const row = box?.querySelector(`[data-preview-row][data-preview-index="${index}"]`);
+  row?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  ensureInlinePreviewVideo(scope, index);
 }
 
 function renderPreviewWorkbench(scope, preview, targetId) {
@@ -9936,11 +10589,12 @@ function renderPreviewWorkbench(scope, preview, targetId) {
   ensurePreviewDraft(scope);
   const selected = previewWorkbenchSelectedClips(scope, preview);
   const current = previewWorkbenchCurrentClip(scope, preview, selected);
-  const totalDuration = selected.reduce(function (sum, clip) { return sum + effectiveClipDuration(clip); }, 0);
+  const duration = previewDurationFitState(scope, preview, targetId);
   const candidateStats = previewWorkbenchCandidateFilterStats(scope, preview);
   const candidateHead = '<div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>\u5148\u770b AI \u7c97\u7b5b\uff0c\u518d\u6309\u54c1\u7c7b\u7b5b\u9009</span></div><small>' + candidateStats.filtered + ' / ' + candidateStats.source + ' \u6bb5</small></div>';
-  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>\u5df2\u9009\u7247\u6bb5</strong><span>\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb</span></div><small>' + selected.length + ' \u6bb5 \u00b7 ' + totalDuration.toFixed(1) + 's</small></div>';
-  return '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
+  const durationClass = duration.accepted ? "is-ok" : "is-warn";
+  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>\u5df2\u9009\u7247\u6bb5</strong><span>\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb</span></div><div class="preview-duration-control"><small class="' + durationClass + '" title="\u539f\u7247\u5408\u8ba1 ' + duration.rawTotal.toFixed(1) + 's\uff0c\u6309 ' + duration.speed.toFixed(2) + 'x \u9884\u8ba1\u53d8\u901f\u6298\u7b97">' + selected.length + ' \u6bb5 \u00b7 \u9884\u8ba1 ' + duration.projected.toFixed(1) + 's<br>\u5141\u8bb8 ' + duration.low.toFixed(0) + '-' + duration.high.toFixed(0) + 's</small><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="' + scope + '">\u9002\u914d\u65f6\u957f</button></div></div>';
+  return renderPreviewFilmOverview(scope, preview, targetId, selected, duration) + '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
 }
 
 function toast(message, type = "success") {

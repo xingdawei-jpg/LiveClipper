@@ -224,6 +224,8 @@ class SelectionCandidate:
     end: float
     text: str
     hook_eligible: bool
+    story_block_id: str = ""
+    continuity_group_id: str = ""
 
     @property
     def duration(self) -> float:
@@ -237,6 +239,8 @@ class SelectionCandidate:
             "end": round(self.end, 3),
             "text": self.text,
             "hook_eligible": self.hook_eligible,
+            "story_block_id": self.story_block_id,
+            "continuity_group_id": self.continuity_group_id,
         }
 
 

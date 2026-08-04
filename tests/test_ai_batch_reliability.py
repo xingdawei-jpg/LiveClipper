@@ -24,6 +24,110 @@ volcengine_asr = importlib.import_module("volcengine_asr")
 
 
 class AiCandidateReliabilityTests(unittest.TestCase):
+    def test_focus_detection_does_not_treat_apparel_quality_as_food_freshness(self) -> None:
+        self.assertEqual(
+            ai_clipper._detect_focus_point(
+                "这件衣服的拉链做工和品质都很好",
+                main_category="服饰内衣",
+            ),
+            "品质",
+        )
+        self.assertNotEqual(
+            ai_clipper._detect_focus_point(
+                "这件新款刚刚新鲜出炉",
+                main_category="服饰内衣",
+            ),
+            "新鲜品质",
+        )
+        self.assertEqual(
+            ai_clipper._detect_focus_point(
+                "当天现摘，果形饱满而且新鲜",
+                main_category="食品/生鲜",
+            ),
+            "新鲜品质",
+        )
+        self.assertNotEqual(
+            ai_clipper._detect_focus_point(
+                "这个产品品质很好",
+                main_category="食品/生鲜",
+            ),
+            "新鲜品质",
+        )
+        self.assertEqual(
+            ai_clipper._clip_focus_block(
+                ("product", "这件衣服的拉链做工和品质都很好", 0, 5, 8, 5, "新鲜品质")
+            ),
+            "品质细节",
+        )
+        self.assertEqual(
+            ai_clipper._clip_focus_block(
+                ("product", "果园当天现摘，果形饱满", 0, 5, 8, 5, "新鲜品质")
+            ),
+            "新鲜品质",
+        )
+        self.assertEqual(
+            ai_clipper._clip_focus_block(
+                ("product", "这件新款刚刚上新", 0, 5, 8, 5, "新鲜品质")
+            ),
+            "流行趋势",
+        )
+
+    def test_long_preview_candidates_cover_each_source_and_timeline(self) -> None:
+        candidates = []
+        candidate_id = 1
+        for source_id, count in (("[V1]", 180), ("[V2]", 60), ("[V3]", 6)):
+            for index in range(count):
+                candidates.append(selection_contracts.SelectionCandidate(
+                    candidate_id=candidate_id,
+                    source_id=source_id,
+                    start=float(index * 5),
+                    end=float(index * 5 + 4),
+                    text=f"{source_id} candidate {index}",
+                    hook_eligible=False,
+                ))
+                candidate_id += 1
+
+        sampled = ai_clipper._stratified_preview_candidates(candidates, limit=30)
+
+        self.assertEqual(len(sampled), 30)
+        self.assertEqual([item.candidate_id for item in sampled], sorted(item.candidate_id for item in sampled))
+        by_source = {}
+        for item in sampled:
+            by_source.setdefault(item.source_id, []).append(item.start)
+        self.assertEqual(set(by_source), {"[V1]", "[V2]", "[V3]"})
+        self.assertEqual(len(by_source["[V3]"]), 6)
+        self.assertEqual(by_source["[V1]"][0], 0.0)
+        self.assertEqual(by_source["[V1]"][-1], 895.0)
+        self.assertEqual(by_source["[V2]"][0], 0.0)
+        self.assertEqual(by_source["[V2]"][-1], 295.0)
+
+    def test_partial_shortage_is_preview_only_and_never_success(self) -> None:
+        ai_clipper._begin_analysis_metadata()
+        contract = selection_contracts.DurationContract.create(60, 1.0, tolerance=10)
+        clips = [
+            ("hook", "这件上衣肩线很利落。", 0.0, 4.0, 50, 4.0, "版型"),
+            ("product", "面料轻薄透气，夏天穿不会闷。", 4.0, 29.0, 50, 25.0, "面料"),
+        ]
+
+        details = ai_clipper._record_partial_insufficient(
+            clips,
+            candidate_count=2,
+            duration_contract=contract,
+        )
+        metadata = ai_clipper.get_last_analysis_metadata()
+
+        self.assertTrue(details["preview_only"])
+        self.assertTrue(details["requires_user_confirmation"])
+        self.assertFalse(details["export_allowed"])
+        self.assertEqual(metadata["selection_result"]["status"], "partial_insufficient")
+        self.assertFalse(metadata["selection_result"]["ok"])
+        self.assertEqual(metadata["selection_manifest"]["selected_count"], 2)
+
+    def test_only_preview_paths_enable_partial_ai_selection(self) -> None:
+        source = inspect.getsource(cutter_logic)
+        self.assertGreaterEqual(source.count("allow_partial=_clips_only"), 2)
+        self.assertGreaterEqual(source.count("record_history=not _clips_only"), 2)
+
     def test_custom_duration_tolerance_is_preserved_across_contract_validation(self) -> None:
         contract = selection_contracts.DurationContract.create(60, 1.0, tolerance=15)
         self.assertEqual((contract.final_min, contract.final_max), (45.0, 75.0))
@@ -61,7 +165,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertFalse(any("超过目标上限" in issue for issue in audit["issues"]))
         self.assertTrue(any("超过目标上限" in warning for warning in audit["warnings"]))
 
-    def test_duration_fraction_outside_acceptance_margin_remains_failure(self) -> None:
+    def test_duration_overrun_is_warning_after_trim_attempts(self) -> None:
         contract = selection_contracts.DurationContract.create(60, 1.0)
         clips = [
             ("hook", "这件上衣穿上很显精神。", 0.0, 3.0, 50, 3.0, "版型"),
@@ -75,9 +179,10 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             duration_contract=contract,
         )
         self.assertTrue(audit["duration_long"])
-        self.assertTrue(any("超过目标上限" in issue for issue in audit["issues"]))
+        self.assertFalse(any("超过目标上限" in issue for issue in audit["issues"]))
+        self.assertTrue(any("超过目标上限" in warning for warning in audit["warnings"]))
 
-    def test_ai_director_requires_exact_source_min_not_acceptance_margin(self) -> None:
+    def test_ai_director_treats_subsecond_source_shortage_as_warning(self) -> None:
         contract = selection_contracts.DurationContract.create(90, 1.15)
         clips = [
             ("product", "完整安全卖点", 0.0, contract.source_min - 0.1, 50, contract.source_min - 0.1, "面料质感"),
@@ -88,8 +193,37 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             8,
             duration_contract=contract,
         )
-        self.assertTrue(audit["duration_short"])
-        self.assertTrue(any("低于目标下限" in issue for issue in audit["issues"]))
+        self.assertFalse(audit["duration_short"])
+        self.assertFalse(any("低于目标下限" in issue for issue in audit["issues"]))
+        self.assertTrue(any("编码误差" in warning for warning in audit["warnings"]))
+
+    def test_local_duration_fit_reuses_safe_candidate_without_reordering_story(self) -> None:
+        entries = [
+            (0.0, 4.0, "穿上以后整个人很显精神。"),
+            (4.0, 10.0, "肩线和版型会立即显得很利落。"),
+            (10.0, 18.0, "面料轻薄透气，夏天穿也不会闷。"),
+            (18.0, 30.0, "通勤和日常出门都可以直接搭配。"),
+            (30.0, 34.0, "这一身日常穿很耐看。"),
+        ]
+        selected = [
+            ("hook", entries[0][2], 0.0, 4.0, 50, 4.0, "版型"),
+            ("product", entries[1][2], 4.0, 10.0, 50, 6.0, "版型"),
+            ("close", entries[4][2], 30.0, 34.0, 50, 4.0, "场景"),
+        ]
+        fitted = ai_clipper._fit_director_duration_from_existing_candidates(
+            selected,
+            entries,
+            30,
+            duration_contract=selection_contracts.DurationContract.create(30, 1.0),
+            allowed_candidate_ids={1, 2, 3, 4, 5},
+            safe_inventory=[{"srt_index": index} for index in range(1, 6)],
+        )
+
+        self.assertEqual([clip[0] for clip in fitted], ["hook", "product", "product", "close"])
+        self.assertEqual(fitted[0][1], selected[0][1])
+        self.assertEqual(fitted[1][1], selected[1][1])
+        self.assertEqual(fitted[-1][1], selected[-1][1])
+        self.assertGreaterEqual(sum(float(clip[5]) for clip in fitted), 25.0)
 
     def test_mix_source_quota_repairs_then_warns_instead_of_failing(self) -> None:
         clips = [
@@ -250,6 +384,20 @@ class AiCandidateReliabilityTests(unittest.TestCase):
                 },
             },
         }))
+
+    def test_duration_overrun_output_is_reported_as_completed_warning(self) -> None:
+        detail = server._batch_best_effort_detail("超时素材.mp4", {
+            "ok": True,
+            "duration_soft_warning": "成片78.7秒，超过建议上限75秒，已保留输出",
+        })
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["code"], "duration_overrun_output")
+        self.assertEqual(server._batch_best_effort_prefix(detail), "时长超出建议范围但已成片")
+        summary = server._batch_summary_message(
+            "智能成片完成", 3, 3, [], "个", [detail]
+        )
+        self.assertIn("成功 3/3", summary)
+        self.assertIn("时长超出建议范围但已成片 1", summary)
 
     def test_stale_best_effort_metadata_cannot_cross_ai_to_cutter_contract(self) -> None:
         metadata = ai_clipper._begin_analysis_metadata()
@@ -416,6 +564,195 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(legacy_clips, [])
 
+    def test_director_merges_only_dependent_fragments_and_keeps_complete_blocks_free(self) -> None:
+        source = (
+            "1\n00:00:10,000 --> 00:00:13,000\n你看她穿上以后整个人的气质\n\n"
+            "2\n00:00:13,400 --> 00:00:18,000\n一般加上衣品一般就会显得整张脸有点浪费了。\n\n"
+            "3\n00:00:25,000 --> 00:00:29,000\n八九月份穿这件薄长袖也没有问题。\n"
+        )
+
+        frozen = ai_clipper._freeze_director_candidates(source)
+        entries = ai_clipper._parse_srt_entries_for_hook(frozen)
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0][:2], (10.0, 18.0))
+        self.assertIn("整个人的气质一般加上衣品一般", entries[0][2])
+        self.assertEqual(entries[1][:2], (25.0, 29.0))
+        self.assertEqual(entries[1][2], "八九月份穿这件薄长袖也没有问题。")
+        self.assertEqual(ai_clipper._director_standalone_boundary_reason(entries[0][2]), "")
+        self.assertEqual(ai_clipper._director_standalone_boundary_reason(entries[1][2]), "")
+
+    def test_director_rejects_mid_clause_opening_and_unclosed_condition_as_standalone(self) -> None:
+        mid_clause = "平庸的没有没有啊我很讨厌平庸和中庸两个字"
+        unclosed_close = "我觉得既然大家来一趟"
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason(mid_clause),
+            "开头承接上句",
+        )
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason(unclosed_close),
+            "结尾未说完",
+        )
+
+        clips = ai_clipper._parse_ai_response(
+            json.dumps([
+                {"clip_type": "close", "srt_indices": [1], "focus": "情绪感染", "reason": "错误收尾"},
+            ], ensure_ascii=False),
+            None,
+            [(0.0, 4.0, unclosed_close)],
+            set(),
+            require_srt_indices=True,
+        )
+        self.assertEqual(clips, [])
+
+    def test_auto_focus_respects_current_selling_points_before_global_weights(self) -> None:
+        entries = [
+            (0.0, 3.0, "这件衬衫修饰腰线，视觉上很显瘦。"),
+            (3.2, 6.5, "通勤搭直筒裤去上班很利落。"),
+            (6.7, 10.0, "周末出门配平底鞋也很轻松。"),
+        ]
+        source = (
+            "00:00:00,000 --> 00:00:03,000\n这件衬衫修饰腰线，视觉上很显瘦。\n\n"
+            "00:00:03,200 --> 00:00:06,500\n通勤搭直筒裤去上班很利落。\n\n"
+            "00:00:06,700 --> 00:00:10,000\n周末出门配平底鞋也很轻松。"
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": json.dumps([
+                {"clip_type": "hook", "srt_indices": [2], "focus": "场景搭配", "reason": "通勤开场"},
+                {"clip_type": "product", "srt_indices": [3], "focus": "场景搭配", "reason": "周末场景"},
+                {"clip_type": "close", "srt_indices": [1], "focus": "版型显瘦", "reason": "补充版型"},
+            ], ensure_ascii=False)}}]
+        }).encode("utf-8")
+        ai_clipper._begin_analysis_metadata()
+        with (
+            mock.patch.object(ai_clipper, "load_settings", return_value={"preference_weights": {"版型显瘦": 99.0}}),
+            mock.patch.object(ai_clipper.urllib.request, "urlopen", return_value=response),
+        ):
+            clips = ai_clipper._call_ai(
+                "key",
+                "https://example.com/v1",
+                "deepseek-test",
+                source,
+                None,
+                srt_entries=entries,
+                ai_controls={"selling_points": ["场景搭配"]},
+                main_category="上衣",
+            )
+
+        metadata = ai_clipper.get_last_analysis_metadata()
+        self.assertTrue(clips)
+        self.assertEqual(metadata["preference_summary"]["used_label"], "场景搭配")
+        self.assertEqual(metadata["preference_summary"]["allowed_labels"], ["场景搭配"])
+        self.assertEqual(
+            metadata["hook_candidate_summary"]["automatic_allowed_focuses"],
+            ["场景搭配"],
+        )
+
+    def test_standalone_dangling_fragments_are_rejected_but_complete_group_is_kept(self) -> None:
+        ai_clipper._begin_analysis_metadata()
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason("完整卖点说到一半呃"),
+            "结尾语气残留",
+        )
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason("吧对上班族日常都能穿"),
+            "开头承接上句",
+        )
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason("颜色它又是属于"),
+            "结尾未说完",
+        )
+        entries = [
+            (0.0, 3.0, "这件衬衫把腰线收得很自然，"),
+            (3.1, 6.0, "也很显瘦，视觉比例更利落。"),
+            (6.1, 8.0, "如果说给你做那种"),
+            (8.1, 11.0, "纯色的话就会显得太普通。"),
+        ]
+        clips = ai_clipper._parse_ai_response(
+            json.dumps([
+                {"clip_type": "hook", "srt_indices": [2], "focus": "版型显瘦", "reason": "错误残句"},
+                {"clip_type": "product", "srt_indices": [3], "focus": "颜色氛围", "reason": "错误条件残句"},
+                {"clip_type": "product", "srt_indices": [1, 2], "focus": "版型显瘦", "reason": "完整表达"},
+            ], ensure_ascii=False),
+            None,
+            entries,
+            set(),
+            require_srt_indices=True,
+        )
+
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0][2:4], (0.0, 6.0))
+        self.assertIn("也很显瘦", clips[0][1])
+        metadata = ai_clipper.get_last_analysis_metadata()
+        provenance = next(iter(metadata["director_clip_provenance"].values()))
+        self.assertEqual(provenance["candidate_indices"], [1, 2])
+        self.assertEqual(provenance["reason"], "完整表达")
+
+    def test_selected_word_tail_completion_uses_only_exact_adjacent_word_pair(self) -> None:
+        clips = [
+            ("product", "[V1] 这张脸有点浪费了的那种感", 10.0, 12.0, 50, 2.0, "情绪感染"),
+        ]
+        word_timings = [{
+            "source_marker": "V1",
+            "words": [
+                {"text": "感", "start": 11.88, "end": 12.0},
+                {"text": "觉", "start": 12.06, "end": 12.14},
+            ],
+        }, {
+            "source_marker": "V2",
+            "words": [
+                {"text": "觉", "start": 12.04, "end": 12.10},
+            ],
+        }]
+
+        repaired = ai_clipper._complete_selected_word_tail_boundaries(clips, word_timings)
+
+        self.assertEqual(repaired[0][1], "[V1] 这张脸有点浪费了的那种感觉")
+        self.assertEqual(repaired[0][3], 12.14)
+        self.assertAlmostEqual(repaired[0][5], 2.14)
+
+        delayed = ai_clipper._complete_selected_word_tail_boundaries(
+            clips,
+            [{
+                "source_marker": "V1",
+                "words": [{"text": "觉", "start": 12.25, "end": 12.35}],
+            }],
+        )
+        self.assertEqual(delayed, clips)
+
+    def test_final_selection_audit_uses_postprocessed_final_clips(self) -> None:
+        ai_clipper._begin_analysis_metadata()
+        hook = ("hook", "通勤穿这一件肩线很利落。", 0.0, 3.0, 50, 3.0, "场景搭配")
+        product = ("product", "袖口走线很细致，日常穿也耐看。", 3.0, 8.0, 50, 5.0, "品质细节")
+        ai_clipper._record_director_clip_provenance(
+            hook,
+            candidate_indices=[4],
+            reason="通勤开场",
+        )
+        ai_clipper._record_director_clip_provenance(
+            product,
+            candidate_indices=[8],
+            reason="工艺证明",
+        )
+        ai_clipper._record_hook_audit_event(
+            "dynamic_score_replace",
+            after=hook,
+            details={"replacement_score": 42.0},
+        )
+        audit = cutter_logic._build_final_selection_audit(
+            [hook, product],
+            ai_clipper.get_last_analysis_metadata(),
+        )
+
+        self.assertEqual(audit["version"], "final_selection_audit_v1")
+        self.assertEqual(audit["selected_duration"], 8.0)
+        self.assertEqual(audit["final_clips"][0]["order"], 1)
+        self.assertEqual(audit["final_clips"][0]["candidate_indices"], [4])
+        self.assertEqual(audit["final_clips"][1]["reason"], "工艺证明")
+        self.assertTrue(audit["final_clips"][0]["hook_postprocessed"])
+        json.dumps(audit, ensure_ascii=False)
+
     def test_director_candidates_never_merge_across_mix_sources(self) -> None:
         source = (
             "1\n00:00:01,000 --> 00:00:04,000\n[V1] 这个领口拉开以后，\n\n"
@@ -438,7 +775,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertIn("16.5秒", message)
         self.assertIn("至少58秒", message)
 
-    def test_overlong_director_result_is_a_hard_failure(self) -> None:
+    def test_overlong_director_result_is_a_soft_warning(self) -> None:
         clips = [
             ("hook", "这件上衣很显精神", 0.0, 5.0, 50, 5.0, "效果"),
             ("product", "肩线自然而且整体轮廓很利落。", 5.0, 75.0, 50, 70.0, "版型"),
@@ -446,7 +783,71 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         ]
         _safe, audit = ai_clipper._director_hard_audit(clips, 60, 8)
         self.assertTrue(audit["duration_long"])
-        self.assertTrue(any("超过目标上限70s" in issue for issue in audit["issues"]))
+        self.assertFalse(any("超过目标上限70s" in issue for issue in audit["issues"]))
+        self.assertTrue(any("超过目标上限70s" in warning for warning in audit["warnings"]))
+
+    def test_director_duration_contract_splits_only_at_complete_frozen_candidates(self) -> None:
+        entries = [
+            (0.0, 4.0, "这件上衣上身很显精神。"),
+            (4.0, 10.0, "肩线会把整个人的轮廓撑得更利落。"),
+            (10.0, 17.0, "面料轻薄透气，夏天穿起来不会闷。"),
+            (17.0, 22.0, "通勤出门直接搭配牛仔裤就很好看。"),
+            (22.0, 26.0, "这一身日常穿很耐看。"),
+        ]
+        clips = [
+            ("hook", entries[0][2], 0.0, 4.0, 50, 4.0, "版型显瘦"),
+            (
+                "product",
+                "".join(item[2] for item in entries[1:4]),
+                4.0,
+                22.0,
+                50,
+                18.0,
+                "穿着体验",
+            ),
+            ("close", entries[4][2], 22.0, 26.0, 50, 4.0, "场景搭配"),
+        ]
+
+        safe, audit = ai_clipper._director_hard_audit(
+            clips,
+            24,
+            8,
+            duration_contract=selection_contracts.DurationContract.create(24, 1.0),
+            srt_entries=entries,
+        )
+
+        products = [clip for clip in safe if clip[0] == "product"]
+        self.assertEqual([round(clip[5], 1) for clip in products], [6.0, 12.0])
+        self.assertTrue(all(clip[5] <= 12.2 for clip in products))
+        self.assertEqual(audit["per_clip_duration"]["split_count"], 1)
+        self.assertEqual(audit["per_clip_duration"]["removed_count"], 0)
+        self.assertEqual(sum(clip[5] for clip in safe), 26.0)
+
+    def test_director_duration_contract_rejects_unsplittable_long_product(self) -> None:
+        entries = [
+            (0.0, 4.0, "这件上衣上身很显精神。"),
+            (4.0, 21.0, "这是一段完整但过长的商品讲解，内容不能在冻结候选边界内拆开。"),
+            (21.0, 25.0, "这一身日常穿很耐看。"),
+        ]
+        clips = [
+            ("hook", entries[0][2], 0.0, 4.0, 50, 4.0, "版型显瘦"),
+            ("product", entries[1][2], 4.0, 21.0, 50, 17.0, "品质细节"),
+            ("close", entries[2][2], 21.0, 25.0, 50, 4.0, "场景搭配"),
+        ]
+
+        safe, audit = ai_clipper._director_hard_audit(
+            clips,
+            20,
+            8,
+            duration_contract=selection_contracts.DurationContract.create(20, 1.0),
+            srt_entries=entries,
+        )
+
+        self.assertEqual([clip[0] for clip in safe], ["hook", "close"])
+        self.assertTrue(all(clip[5] <= 12.2 for clip in safe if clip[0] == "product"))
+        self.assertEqual(audit["per_clip_duration"]["split_count"], 0)
+        self.assertEqual(audit["per_clip_duration"]["removed_count"], 1)
+        self.assertAlmostEqual(audit["per_clip_duration"]["removed_duration"], 17.0)
 
     def test_specialized_ai_trim_applies_ai_removal_priority_with_exact_arithmetic(self) -> None:
         clips = [
@@ -484,6 +885,25 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             20,
         )
         self.assertEqual([clip[1] for clip in trimmed], ["开场", "承接开场", "核心证据", "自然收尾"])
+
+    def test_ai_removal_priority_keeps_safe_partial_trim_when_overrun_remains(self) -> None:
+        clips = [
+            ("hook", "开场", 0.0, 5.0, 50, 5.0, "版型显瘦"),
+            ("product", "承接开场", 5.0, 10.0, 50, 5.0, "版型显瘦"),
+            ("product", "低价值补充", 10.0, 24.0, 50, 14.0, "场景搭配"),
+            ("product", "核心证据", 24.0, 42.0, 50, 18.0, "面料质感"),
+            ("close", "自然收尾", 42.0, 47.0, 50, 5.0, "场景搭配"),
+        ]
+        logs = []
+        trimmed = ai_clipper._apply_ai_removal_priority(
+            clips,
+            [3],
+            20,
+            log_fn=logs.append,
+        )
+
+        self.assertEqual([clip[1] for clip in trimmed], ["开场", "承接开场", "核心证据", "自然收尾"])
+        self.assertTrue(any("仍超过建议上限" in message for message in logs))
 
     def test_ai_removal_priority_cannot_break_mix_source_contract(self) -> None:
         clips = [
@@ -718,20 +1138,33 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual([clip[0] for clip in clips], ["product"])
         self.assertEqual(clips[0][1], entries[1][2])
 
-    def test_selection_duration_contract_accepts_only_projected_final_range(self) -> None:
+    def test_selection_duration_contract_keeps_overlong_output_as_warning(self) -> None:
         valid = [("product", "完整卖点", 0.0, 69.0, 50, 69.0)]
         result = cutter_logic._validate_selected_duration_contract(valid, 60, 1.15)
         self.assertAlmostEqual(result["projected_final"], 60.0, places=1)
 
-        for duration in (46.3, 137.1):
-            clips = [("product", "完整卖点", 0.0, duration, 50, duration)]
-            with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-                cutter_logic._validate_selected_duration_contract(clips, 60, 1.15)
+        short = [("product", "完整卖点", 0.0, 46.3, 50, 46.3)]
+        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
+            cutter_logic._validate_selected_duration_contract(short, 60, 1.15)
 
-    def test_actual_duration_contract_rejects_previous_bad_outputs(self) -> None:
+        overlong = [("product", "完整卖点", 0.0, 137.1, 50, 137.1)]
+        overlong_result = cutter_logic._validate_selected_duration_contract(
+            overlong, 60, 1.15,
+        )
+        self.assertTrue(overlong_result["overlong"])
+        self.assertIn("超过建议上限", overlong_result["duration_soft_warning"])
+
+    def test_actual_duration_contract_keeps_overrun_output_but_rejects_shortage(self) -> None:
         self.assertTrue(cutter_logic._validate_actual_duration_contract(60.0, 60)[0])
         self.assertFalse(cutter_logic._validate_actual_duration_contract(44.6, 60)[0])
-        self.assertFalse(cutter_logic._validate_actual_duration_contract(124.1, 60)[0])
+        accepted, detail = cutter_logic._validate_actual_duration_contract(
+            78.7, 60, duration_tolerance=15,
+        )
+        self.assertTrue(accepted)
+        self.assertTrue(detail["overlong"])
+        self.assertEqual(detail["high"], 75.0)
+        self.assertIn("超过建议上限", detail["duration_soft_warning"])
+        self.assertTrue(cutter_logic._validate_actual_duration_contract(124.1, 60)[0])
 
     def test_tiny_mapped_subtitle_fragments_are_merged(self) -> None:
         segments = cutter_logic._prepare_mapped_subtitle_segments([
@@ -1237,6 +1670,7 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
             self.assertEqual(seen_tolerances, [20, 20, 20])
 
     def test_mix_summary_fields_survive_output_history(self) -> None:
+        failure_detail = server._batch_failure_detail("第3组", "有效内容不足：可用候选5条，最佳片单16.5秒，目标至少58秒")
         task = {
             "id": "mix-test",
             "scope": "mix",
@@ -1248,12 +1682,21 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
             "batch_succeeded": 2,
             "batch_failed": 1,
             "batch_insufficient": 1,
+            "batch_failure_details": [failure_detail],
         }
         records = server._output_history_records_from_task(task)
         self.assertEqual(len(records), 2)
         self.assertTrue(all(item["batch_done"] == 3 for item in records))
         self.assertTrue(all(item["batch_succeeded"] == 2 for item in records))
         self.assertTrue(all(item["batch_insufficient"] == 1 for item in records))
+        self.assertTrue(all(
+            item["batch_failure_details"] == [{
+                "label": failure_detail["label"],
+                "code": failure_detail["code"],
+                "message": failure_detail["message"],
+            }]
+            for item in records
+        ))
 
     def test_prefixed_batch_summary_is_parsed_as_all_items_processed(self) -> None:
         updates = server._task_batch_updates_from_message("批量混剪完成：成功 2/3 组 · 内容不足 1")
@@ -1297,6 +1740,86 @@ class BatchSummaryReliabilityTests(unittest.TestCase):
             task = server._TASKS[task_id]
             self.assertEqual(task["progress"], 90)
             self.assertEqual(task["message"], "裁剪片段")
+        finally:
+            server._TASKS.pop(task_id, None)
+
+    def test_task_progress_exposes_structured_phase_and_batch_item_fields(self) -> None:
+        task_id = server._new_task("smart-cut", "阶段测试")
+        try:
+            server._set_task_progress(task_id, 72, "裁剪片段", phase_current=7, phase_total=19)
+            server._set_task(task_id, batch_total=3, batch_current=2)
+            task = server._TASKS[task_id]
+            self.assertEqual(task["phase"], "cut")
+            self.assertEqual(task["phase_label"], "裁剪片段")
+            self.assertEqual(task["phase_current"], 7)
+            self.assertEqual(task["phase_total"], 19)
+            self.assertEqual(task["item_total"], 3)
+            self.assertEqual(task["item_current"], 2)
+        finally:
+            server._TASKS.pop(task_id, None)
+
+    def test_asr_phase_wins_when_recognition_message_mentions_subtitles(self) -> None:
+        phase, label = server._task_phase_from_message("正在使用本地语音识别并生成字幕")
+        self.assertEqual(phase, "asr")
+        self.assertEqual(label, "识别字幕")
+
+    def test_bare_progress_marker_does_not_replace_subtitle_phase(self) -> None:
+        task_id = server._new_task("smart-cut", "字幕阶段测试")
+        try:
+            log = server._task_log_fn(task_id, "smart-cut")
+            log("[STEP] 📝 字幕处理中...")
+            self.assertEqual(server._TASKS[task_id]["phase"], "subtitle")
+            log("[PROGRESS] 0.65")
+            self.assertEqual(server._TASKS[task_id]["phase"], "subtitle")
+        finally:
+            server._TASKS.pop(task_id, None)
+
+    def test_batch_task_keeps_overall_and_current_item_progress_separate(self) -> None:
+        task_id = server._new_task("smart-cut", "批量进度测试")
+        try:
+            server._set_task(task_id, batch_total=3, batch_done=1, batch_current=2)
+            server._set_task_progress(task_id, 48, "裁剪片段", item_progress=64)
+            task = server._TASKS[task_id]
+            self.assertEqual(task["overall_percent"], 55)
+            self.assertEqual(task["item_progress"], 64)
+
+            server._set_task(task_id, batch_current=3)
+            self.assertEqual(server._TASKS[task_id]["item_progress"], 0)
+        finally:
+            server._TASKS.pop(task_id, None)
+
+    def test_batch_progress_uses_completed_materials_and_monotonic_current_item(self) -> None:
+        task_id = server._new_task("smart-cut", "批量进度回归")
+        try:
+            server._set_task(task_id, batch_total=2, batch_done=1, batch_current=2)
+            server._set_task_progress(task_id, 90, "去重处理", item_progress=90)
+            self.assertEqual(server._TASKS[task_id]["overall_percent"], 95)
+
+            # Subtitle extraction reports a lower internal scale, but it is
+            # still part of the same second material and must not regress.
+            server._set_task_progress(task_id, 65, "字幕处理", item_progress=65)
+            task = server._TASKS[task_id]
+            self.assertEqual(task["item_progress"], 90)
+            self.assertEqual(task["overall_percent"], 95)
+
+            server._set_task(task_id, batch_done=2, batch_current=0)
+            self.assertEqual(server._TASKS[task_id]["overall_percent"], 100)
+        finally:
+            server._TASKS.pop(task_id, None)
+
+    def test_worker_logs_are_bound_to_the_owning_task(self) -> None:
+        task_id = server._new_task("mix", "日志绑定测试")
+        last_id = server._LOG_SEQ
+        try:
+            server._run_task_worker(task_id, lambda: server.emit_log("warning", "当前素材失败，已继续下一个。", "mix"))
+            events = server._snapshot_logs(last_id)
+            event = next(item for item in events if item["message"] == "当前素材失败，已继续下一个。")
+            self.assertEqual(event["task_id"], task_id)
+            self.assertEqual(event["kind"], "warning")
+            self.assertEqual(server._TASKS[task_id]["warnings"][-1]["message"], event["message"])
+            restored = server.task_logs(task_id, after_id=last_id)
+            self.assertEqual(restored["task_id"], task_id)
+            self.assertEqual(restored["events"][-1]["id"], event["id"])
         finally:
             server._TASKS.pop(task_id, None)
 
