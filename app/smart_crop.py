@@ -161,46 +161,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
     h, w = frame.shape[:2]
     all_detections = []
 
-    # Level 1: HOG 人体检测（检测全身/半身）
-    hog = _get_hog()
-    if hog is not None:
-        try:
-            scale = min(1.0, 960.0 / max(w, h))
-            if scale < 1.0:
-                small = cv2.resize(frame, (int(w * scale), int(h * scale)))
-            else:
-                small = frame
-                scale = 1.0
-            regions, weights = hog.detectMultiScale(
-                small, winStride=(8, 8), padding=(4, 4), scale=1.05
-            )
-            if len(regions) > 0:
-                for idx, (x, y, rw, rh) in enumerate(regions):
-                    if idx < len(weights):
-                        wt = float(np.asarray(weights[idx]).reshape(-1)[0])
-                    else:
-                        wt = 0.0
-                    if wt > conf_threshold:
-                        all_detections.append((
-                            int(x / scale), int(y / scale),
-                            int(rw / scale), int(rh / scale),
-                            wt, 'body'
-                        ))
-        except Exception:
-            _warn_once("Smart Crop HOG detection failed; falling back")
-
-    # Level 2: Haar 上半身检测（并行收集，不短路）
-    upper_cascade = _get_cascade('haarcascade_upperbody.xml')
-    if upper_cascade is not None:
-        try:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(60, 60))
-            for x, y, bw, bh in bodies:
-                all_detections.append((x, y, bw, bh, 0.8, 'upper'))
-        except Exception:
-            _warn_once("Smart Crop upper-body detection failed; falling back")
-
-    # Level 3: Haar 人脸检测 → 扩展为上半身估算（显式运行，不依赖 Levels 1/2 失败）
+    # Level 1: Haar 人脸检测（最快+最准）→ 扩展为上半身估算
     face_cascade = _get_cascade('haarcascade_frontalface_default.xml')
     if face_cascade is not None:
         try:
@@ -217,6 +178,46 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
         except Exception:
             _warn_once("Smart Crop face detection failed; falling back")
 
+    # Level 2: Haar 上半身检测（只在人脸不足时补充）
+    if not all_detections:
+        upper_cascade = _get_cascade('haarcascade_upperbody.xml')
+        if upper_cascade is not None:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(60, 60))
+                for x, y, bw, bh in bodies:
+                    all_detections.append((x, y, bw, bh, 0.8, 'upper'))
+            except Exception:
+                _warn_once("Smart Crop upper-body detection failed; falling back")
+
+    # Level 3: HOG 人体检测（最慢，只在前两级都失败时兜底）
+    if not all_detections:
+        hog = _get_hog()
+        if hog is not None:
+            try:
+                scale = min(1.0, 960.0 / max(w, h))
+                if scale < 1.0:
+                    small = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                else:
+                    small = frame
+                    scale = 1.0
+                regions, weights = hog.detectMultiScale(
+                    small, winStride=(8, 8), padding=(4, 4), scale=1.05
+                )
+                if len(regions) > 0:
+                    for idx, (x, y, rw, rh) in enumerate(regions):
+                        if idx < len(weights):
+                            wt = float(np.asarray(weights[idx]).reshape(-1)[0])
+                        else:
+                            wt = 0.0
+                        if wt > conf_threshold:
+                            all_detections.append((
+                                int(x / scale), int(y / scale),
+                                int(rw / scale), int(rh / scale),
+                                wt, 'body'
+                            ))
+            except Exception:
+                _warn_once("Smart Crop HOG detection failed; falling back")
     # 合并后择优：按面积加权排名，人脸检测优先
     if all_detections:
         scored = []
@@ -392,7 +393,7 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             smart_count += 1
         else:
             # 5 个标准采样帧全空时，用额外 3 帧复检（片段中部附近）
-            retry_times = [start + duration * ratio for ratio in (0.15, 0.65, 0.85)]
+            retry_times = [start + duration * ratio for ratio in (0.35, 0.70)]
             retry_detections = []
             for t in retry_times:
                 frame = _extract_frame_ffmpeg(ffmpeg_cmd, video_path, t, log_fn) if use_ffmpeg else None
