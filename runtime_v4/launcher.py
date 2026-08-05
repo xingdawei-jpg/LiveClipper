@@ -483,7 +483,7 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch the active Runtime V4 selection.")
     parser.add_argument("--install-root", default="")
-    parser.add_argument("--health-timeout", type=float, default=45.0)
+    parser.add_argument("--health-timeout", type=float, default=90.0)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
     return run(
