@@ -199,7 +199,7 @@ button {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: #f6f8fb;
+  background: var(--surface-soft);
   border: 1px solid var(--border);
   overflow: hidden;
 }
@@ -6783,7 +6783,7 @@ textarea,
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   overflow: hidden;
-  background: #fbfcfe;
+  background: var(--surface-soft);
 }
 
 .preview-workbench-unified .preview-candidate-sidebar {
@@ -6852,7 +6852,7 @@ textarea,
   gap: 6px;
   padding: 7px 8px;
   border-bottom: 1px solid var(--border);
-  background: #fff;
+  background: var(--surface);
 }
 
 .preview-workbench-unified .preview-candidate-source-filter,
@@ -6867,11 +6867,11 @@ textarea,
   align-items: center;
   gap: 4px;
   min-height: 24px;
-  border: 1px solid #dce3ec;
+  border: 1px solid var(--border);
   border-radius: 5px;
   padding: 2px 6px;
-  background: #f8fafc;
-  color: #5f6b7a;
+  background: var(--surface-soft);
+  color: var(--muted);
   cursor: pointer;
   font: inherit;
   font-size: 11px;
@@ -6879,13 +6879,13 @@ textarea,
 }
 
 .preview-workbench-unified .preview-candidate-filterbar button:hover:not(:disabled) {
-  border-color: #b9d8f4;
-  background: #f0f7ff;
+  border-color: var(--accent-border);
+  background: var(--focus-soft);
   color: var(--focus);
 }
 
 .preview-workbench-unified .preview-candidate-filterbar button.is-active {
-  border-color: #9bc9f4;
+  border-color: var(--accent-border);
   background: var(--focus-soft);
   color: var(--focus);
 }
@@ -6942,8 +6942,8 @@ textarea,
   justify-content: space-between;
   min-height: 30px;
   padding: 0 12px;
-  border-bottom: 1px solid #edf0f4;
-  background: #f6f8fb;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
   color: var(--muted);
   font-size: 11px;
 }
@@ -6959,8 +6959,8 @@ textarea,
   min-width: 18px;
   height: 18px;
   border-radius: 10px;
-  background: #e9edf3;
-  color: #5b6575;
+  background: var(--neutral-soft);
+  color: var(--muted);
   font-size: 10px;
 }
 
@@ -6989,7 +6989,7 @@ textarea,
 }
 
 .preview-workbench-unified .preview-candidate-main:hover {
-  background: #f0f7ff;
+  background: var(--focus-soft);
 }
 
 .preview-workbench-unified .preview-candidate-row.is-active .preview-candidate-main {
@@ -7103,7 +7103,7 @@ textarea,
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface);
 }
 
 .preview-workbench-unified .preview-sentence-editor > .preview-workbench-column-head {
@@ -7115,16 +7115,16 @@ textarea,
   display: grid;
   gap: 5px;
   padding: 8px 10px;
-  border-bottom: 1px solid #edf0f4;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .preview-workbench-unified .preview-editor-sentence.is-deleted {
-  background: #fafafa;
+  background: var(--surface-soft);
 }
 
 .preview-workbench-unified .preview-editor-sentence.is-locked {
-  background: #fffaf8;
+  background: var(--warn-soft);
 }
 
 .preview-workbench-unified .preview-editor-sentence-head {
@@ -7158,11 +7158,11 @@ textarea,
 }
 
 .preview-workbench-unified .preview-word {
-  border: 1px solid #d5e9fb;
+  border: 1px solid var(--accent-border);
   border-radius: 4px;
   padding: 2px 6px;
-  background: #f2f8ff;
-  color: #1669b4;
+  background: var(--accent-bg);
+  color: var(--accent-text);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -7170,13 +7170,13 @@ textarea,
 }
 
 .preview-workbench-unified .preview-word:hover {
-  background: #dcefff;
+  background: var(--focus-soft);
 }
 
 .preview-workbench-unified .preview-word.is-deleted {
   border-color: transparent;
-  background: #f4f5f7;
-  color: #9aa2ad;
+  background: var(--neutral-soft);
+  color: var(--subtle);
   text-decoration: line-through;
 }
 
@@ -7184,8 +7184,8 @@ textarea,
   display: inline-block;
   border-radius: 4px;
   padding: 2px 6px;
-  background: #fff0ed;
-  color: #c84a35;
+  background: var(--danger-soft);
+  color: var(--danger-text);
   cursor: not-allowed;
   font-size: 13px;
   line-height: 1.45;
@@ -7200,7 +7200,7 @@ textarea,
 
 .preview-workbench-unified .preview-editor-lock-reason,
 .preview-workbench-unified .preview-editor-word-hint {
-  color: #b85b49;
+  color: var(--danger-text);
   font-size: 10.5px;
   line-height: 1.35;
 }
@@ -7212,8 +7212,8 @@ textarea,
   align-items: start;
   min-height: 66px;
   padding: 10px 10px 11px 9px;
-  border-bottom: 1px solid #edf0f4;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .preview-workbench-unified .preview-selected-row.is-active {
@@ -7274,7 +7274,7 @@ textarea,
   min-width: 20px;
   height: 20px;
   border-radius: 10px;
-  background: #e5f2ff;
+  background: var(--accent-bg);
   color: var(--focus);
   font-size: 10.5px;
   font-style: normal;
@@ -7311,8 +7311,8 @@ textarea,
 }
 
 .preview-workbench-unified .preview-selected-remove:hover {
-  background: #fff0f0;
-  color: #d63d3d;
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 .preview-workbench-toolbar.preview-workbench-toolbar-compact {

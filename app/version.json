@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.8.4.1",
-  "version": "2026.8.4.1",
-  "latest_version": "2026.8.4.1",
+  "build_id": "2026.8.5.1",
+  "version": "2026.8.5.1",
+  "latest_version": "2026.8.5.1",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -22,7 +22,7 @@
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
     "web_client/frontend/index.html": "6af79489023d71a908b183b564fa22f5cc294c54b774246ccff8d111b986f1e8",
     "web_client/frontend/assets/app.js": "8eb543bc2d9806204c14f5d6a7151fb541b0ffd7ea9ab4e173c8655c3c81e0c2",
-    "web_client/frontend/assets/styles.css": "22931fe4ee0cb720fa5d8d2128a12c13fbf44af6b19b002b732ed0abf311edcc",
+    "web_client/frontend/assets/styles.css": "7f8528ecce017e636e9ab7cc5f434cf277e46a8c89742bf67b49c6e5c1fae31f",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/native_file_drop_bridge.dll": "c28e38886e9006d471719a01882ccc0717b086f7f248b6cfb2b6604b5b283a35",
     "web_client/tools/local_asr_worker.py": "47b1bf7937efa77c7dc3a17a7f33833ac2df0a23ff175a5672e25b7eef63aca2",
@@ -44,7 +44,7 @@
   ],
   "source_files": {
     "web_client/desktop.py": "6794e60b0e931312e8f946b383af24d2eee9ee053728c71300d9ccc0e5546806",
-    "web_client/server.py": "37a41bc64c07fc094eb6d8ba30ea150247b45d9cb792155365c14f1c961fc332",
+    "web_client/server.py": "7c112f2327b861e64f885832f8aa545ef5e70d748a5e570f7728bad77478989a",
     "web_client/native_file_drop_bridge.cs": "d20c17dd280b1245044a172744bc2594344a28535d97d92936cf011c6cef4df3",
     "web_client/liveclipper_web.spec": "0b080dcba1986fac0d63deaef93d2afc4e2be829184d5761185936d4f524307f",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
@@ -72,8 +72,8 @@
     "app/content_review.py": "9af68a33bbddc5aa70799d128647fa0da6f5081d872fa49de0cc04d17b70b5f8",
     "app/cutter.py": "438d14c8d92c4e9e0806ed0061ebcfe7f1f61b1139210db48e30c08dce2f2d13",
     "app/cutter_logic.py": "f018cad4eff4b6c46ee456eedfa89e59ff0aaa98d5a6b620926c1278bce4bd20",
-    "app/dedup_page.py": "261cc18312541e071a34cddbf8e60824beb9d55dbab0e9925ab85d095d9ba4b2",
-    "app/douyin_stream.py": "d867753099a2455c149ac15ec23aea29a2a07ac7978766b466ed3f83b94a1092",
+    "app/dedup_page.py": "10e00e9dc6173098a8d4fc02b4eff3077ebcdea94644b9e4ddfec47a8ce8d590",
+    "app/douyin_stream.py": "adbb448f54e9eb7cb306ac1be7993c4d2234601be5ddca8fbeba8425ca179968",
     "app/gui.py": "505b6baa33a120178036e96933063b36c73aef082da950ffd781133da348713e",
     "app/keywords.json": "f217ad7733b68b0ab8fde9025ab3f64af42bd66b1c5a2b7ea4a7b88b6aae9744",
     "app/launcher.py": "ebd84023899213bacf77fe80c9607040c8193534e54f563462ada6117605a133",
@@ -91,7 +91,7 @@
     "app/platform_config.py": "3f23b2711984c31f1e650b34948b1a0cc685a71b50024efc3377ce5a50f4adce",
     "app/product_scan_page.py": "55ba8c21962a32b37d1ed9d3c2cd5a042ac7d9b4be1b785df700199b44a72a91",
     "app/product_scan_window.py": "637780daaf2e2939fd5c7f938035f92639e21cfdd2089c73483e18c13d9600b0",
-    "app/product_scanner.py": "96c155473a071751925685ba198fcabe76ddb9b065c869d7d30c0b8a3174b691",
+    "app/product_scanner.py": "e9e48a6590ec7b93da1437d05d2ce0b298e7c76c354cac18f4957cd03d7e0db5",
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
     "app/run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
     "app/schedule_page.py": "be42c9f235a153489792ad86620f916661394ea5c6aff6cc0082f4d247577670",
@@ -110,9 +110,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "V4 4.0.0 RC 冻结：业务包 2026.8.4.1，Core 4.0.0（新生产密钥）。",
-  "update_message": "V4 4.0.0 RC 冻结：业务包 2026.8.4.1，Core 4.0.0（新生产密钥）。",
+  "release_notes": "修复深色模式AI工作台亮色；修复任务中黑色终端弹窗",
+  "update_message": "修复深色模式AI工作台亮色；修复任务中黑色终端弹窗",
   "update_url": "",
   "force_update": true,
-  "updated_at": "2026-08-04 18:27:56"
+  "updated_at": "2026-08-05 09:41:39"
 }

@@ -594,7 +594,8 @@ class DedupApp:
                 [_find_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=width,height",
                  "-of", "csv=p=0", input_path],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             dims = probe.stdout.strip().split(",")
             W, H = int(dims[0]), int(dims[1]) if len(dims) >= 2 else (1080, 1920)
 

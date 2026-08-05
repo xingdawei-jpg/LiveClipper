@@ -1742,6 +1742,7 @@ finally:
             stderr=subprocess.PIPE,
             timeout=300,
             env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0:
             err = proc.stderr.decode("utf-8", errors="replace").strip()
@@ -10661,7 +10662,7 @@ def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
         _set_task(task_id, live_room_url=payload.room_url)
         resolved = _resolve_live_url(payload.room_url, scope)
         _set_task_progress(task_id, 65, "验证直播流")
-        proc = subprocess.run([_ffprobe_cmd(), "-v", "quiet", "-show_streams", "-of", "json", resolved], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        proc = subprocess.run([_ffprobe_cmd(), "-v", "quiet", "-show_streams", "-of", "json", resolved], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if proc.returncode != 0:
             raise RuntimeError("未检测到可用直播流。")
         _set_task(task_id, status="completed", finished_at=time.time(), stream_url=resolved)

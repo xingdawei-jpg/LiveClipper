@@ -106,7 +106,8 @@ def _find_ytdlp():
 
     for cmd in ['where', 'where.exe']:
         try:
-            r = subprocess.run([cmd, 'yt-dlp'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            r = subprocess.run([cmd, 'yt-dlp'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode == 0:
                 for line in (r.stdout or b"").decode('utf-8', errors='ignore').splitlines():
                     if line.strip():
@@ -201,7 +202,8 @@ def _try_chrome(douyin_url, _log):
                 chrome = p
                 break
         if not chrome:
-            result = subprocess.run(['where', 'chrome'], capture_output=True, timeout=5)
+            result = subprocess.run(['where', 'chrome'], capture_output=True, timeout=5,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if result.returncode == 0:
                 chrome = result.stdout.decode('utf-8', errors='ignore').strip().split('\n')[0]
         if not chrome:
@@ -210,7 +212,8 @@ def _try_chrome(douyin_url, _log):
 
         result = subprocess.run(
             [chrome, '--headless=new', '--disable-gpu', '--dump-dom', douyin_url],
-            capture_output=True, timeout=20
+            capture_output=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
         html = result.stdout.decode('utf-8', errors='ignore')
     except subprocess.TimeoutExpired:
@@ -252,7 +255,8 @@ if __name__ == "__main__":
         try:
             r = subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json",
                                 "-show_streams", result],
-                               capture_output=True, text=True, timeout=15)
+                               capture_output=True, text=True, timeout=15,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode == 0:
                 info = json.loads(r.stdout)
                 print("FFprobe OK, streams:", len(info.get("streams", [])))

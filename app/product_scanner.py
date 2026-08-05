@@ -707,7 +707,8 @@ class ProductScanner:
                     try:
                         subprocess.run([ffmpeg, "-y", "-ss", str(st), "-i", video_path, "-to", str(dur),
                             "-c", "copy", tmp],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                         if os.path.exists(tmp) and os.path.getsize(tmp) > 1000:
                             tmp_files.append(tmp)
                     except Exception:
@@ -730,7 +731,8 @@ class ProductScanner:
                     try:
                         cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out]
                         subprocess.run(cmd,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                         if os.path.exists(out) and os.path.getsize(out) > 1000:
                             import shutil
                             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -784,7 +786,8 @@ class ProductScanner:
                 try:
                     subprocess.run([ffmpeg, "-y", "-ss", str(st), "-i", video_path, "-to", str(duration),
                         "-c", "copy", out],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                     if os.path.exists(out) and os.path.getsize(out) > 1000:
                         output_paths.append(out)
                 except Exception:
@@ -803,7 +806,8 @@ class ProductScanner:
                     try:
                         subprocess.run([ffmpeg, "-y", "-ss", str(chunk_start), "-i", video_path, "-to", str(chunk_dur),
                             "-c", "copy", out],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                         if os.path.exists(out) and os.path.getsize(out) > 1000:
                             output_paths.append(out)
                     except Exception:
@@ -856,7 +860,8 @@ class ProductScanner:
                     try:
                         subprocess.run([ffmpeg, "-y", "-ss", str(st), "-i", video,
                             "-to", str(dur), "-c", "copy", tmp],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                         if _os.path.exists(tmp) and _os.path.getsize(tmp) > 1000:
                             tmp_files.append(tmp)
                     except Exception:
@@ -869,7 +874,8 @@ class ProductScanner:
                             f.write("file '%s'\n" % tmpf.replace(chr(92), "/"))
                     subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0",
                         "-i", concat_list, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", out_path],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 elif len(tmp_files) == 1:
                     import shutil
                     shutil.copy2(tmp_files[0], out_path)
