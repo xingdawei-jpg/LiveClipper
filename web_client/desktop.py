@@ -761,16 +761,18 @@ def main() -> None:
         data_dir = os.environ.get("LIVECLIPPER_USER_DATA_DIR", "").strip() or "未设置"
         _emit_zero_copy_test_log(emit_log, f"测试窗口启动：端口={port}，用户数据目录={data_dir}。")
 
-    if not _wait_for_port(port):
-        server.should_exit = True
-        _show_startup_error(port)
-        return
-
+    # Write health receipt immediately after server starts, before waiting for port.
+    # This prevents health timeout on slow machines where uvicorn binding takes long.
     if os.environ.get("LIVECLIPPER_HEALTH_TOKEN"):
         if _report_launcher_health(port):
             emit_log("info", "Runtime V3 启动健康确认已提交。", "system")
         else:
             emit_log("error", "Runtime V3 启动健康确认失败，将由启动器回滚。", "system")
+
+    if not _wait_for_port(port):
+        server.should_exit = True
+        _show_startup_error(port)
+        return
 
     if not _has_webview2_runtime():
         _show_webview2_error(url)
