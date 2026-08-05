@@ -88,6 +88,8 @@ datas += _existing([
     (os.path.join(cv2_data_dir, "haarcascade_fullbody.xml") if cv2_data_dir else "", "."),
     (certifi_pem if certifi_pem else "", "certifi"),
     (funasr_version if funasr_version else "", "funasr"),
+    (os.path.join(WEB_DIR, "__init__.py"), "web_client"),
+    (os.path.join(WEB_DIR, "desktop.py"), "web_client"),
 ])
 
 binaries = [
@@ -97,7 +99,7 @@ binaries = [
 
 a = Analysis(
     [os.path.join(V4_DIR, "desktop_host.py")],
-    pathex=[ROOT_DIR, APP_DIR],
+    pathex=[ROOT_DIR, APP_DIR, WEB_DIR],
     binaries=binaries,
     datas=datas,
     hiddenimports=[
@@ -115,6 +117,7 @@ a = Analysis(
         "starlette.responses",
         "starlette.staticfiles",
         "pydantic",
+        "web_client.desktop",
         "webview",
         "webview.platforms.edgechromium",
         "webview.platforms.winforms",
