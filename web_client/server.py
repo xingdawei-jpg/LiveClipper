@@ -2386,19 +2386,19 @@ def _set_task(task_id: str, **updates: Any) -> None:
             if next_status == "running" and "progress" not in updates:
                 updates["progress"] = max(float(current.get("progress") or 0), 5)
             if next_status == "completed":
-                updates.setdefault("progress", 100)
-                updates.setdefault("overall_percent", 100)
-                updates.setdefault("item_progress", 100)
+                updates["progress"] = 100
+                updates["overall_percent"] = 100
+                updates["item_progress"] = 100
                 updates.setdefault("message", "已完成")
             if next_status == "failed":
-                updates.setdefault("progress", 100)
-                updates.setdefault("overall_percent", 100)
-                updates.setdefault("item_progress", 100)
+                updates["progress"] = 100
+                updates["overall_percent"] = 100
+                updates["item_progress"] = 100
                 updates.setdefault("message", "失败")
             if next_status == "cancelled":
-                updates.setdefault("progress", 100)
-                updates.setdefault("overall_percent", 100)
-                updates.setdefault("item_progress", 100)
+                updates["progress"] = 100
+                updates["overall_percent"] = 100
+                updates["item_progress"] = 100
                 updates.setdefault("message", "已停止")
             if updates.get("message"):
                 parsed = _task_batch_updates_from_message(str(updates.get("message") or ""))
