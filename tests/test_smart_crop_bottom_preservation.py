@@ -71,8 +71,8 @@ class SmartCropBottomPreservationTests(unittest.TestCase):
         with mock.patch.object(smart_crop.random, "uniform", side_effect=lambda _low, high: high):
             crop = smart_crop.compute_smart_crop(None, 1080, 1920, crop_level="heavy")
 
-        self.assertEqual(crop["zoom"], 1.0)
-        self.assertEqual(crop["crop_w"], 1.0)
+        # 无人检测时使用极轻缩放（1.02-1.05x）而非完全静止
+        self.assertAlmostEqual(crop["zoom"], 1.05, places=3)
         self.assertAlmostEqual(crop["crop_y"] + crop["crop_h"], 1.0, places=9)
 
     def test_detector_box_top_is_expanded_above_the_hairline(self) -> None:

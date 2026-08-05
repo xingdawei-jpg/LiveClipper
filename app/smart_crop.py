@@ -165,7 +165,7 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
     hog = _get_hog()
     if hog is not None:
         try:
-            scale = min(1.0, 640.0 / max(w, h))
+            scale = min(1.0, 960.0 / max(w, h))
             if scale < 1.0:
                 small = cv2.resize(frame, (int(w * scale), int(h * scale)))
             else:
@@ -177,8 +177,6 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
             if len(regions) > 0:
                 for idx, (x, y, rw, rh) in enumerate(regions):
                     if idx < len(weights):
-                        # OpenCV returns either ``[[weight], ...]`` or scalar
-                        # weights depending on the build/version.
                         wt = float(np.asarray(weights[idx]).reshape(-1)[0])
                     else:
                         wt = 0.0
@@ -191,32 +189,26 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
         except Exception:
             _warn_once("Smart Crop HOG detection failed; falling back")
 
-    if all_detections:
-        return all_detections
-
-    # Level 2: Haar 上半身检测
+    # Level 2: Haar 上半身检测（并行收集，不短路）
     upper_cascade = _get_cascade('haarcascade_upperbody.xml')
     if upper_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(60, 60))
+            bodies = upper_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(60, 60))
             for x, y, bw, bh in bodies:
                 all_detections.append((x, y, bw, bh, 0.8, 'upper'))
         except Exception:
             _warn_once("Smart Crop upper-body detection failed; falling back")
 
-    if all_detections:
-        return all_detections
-
-    # Level 3: Haar 人脸检测（兜底）-> 扩展为上半身估算
+    # Level 3: Haar 人脸检测 → 扩展为上半身估算（显式运行，不依赖 Levels 1/2 失败）
     face_cascade = _get_cascade('haarcascade_frontalface_default.xml')
     if face_cascade is not None:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(60, 60))
             for x, y, fw, fh in faces:
-                expand_y = int(fh * 0.5)
-                expand_h = int(fh * 3)
+                expand_y = int(fh * 0.8)
+                expand_h = int(fh * 2.5)
                 new_x = max(0, x - int(fw * 0.3))
                 new_y = max(0, y - expand_y)
                 new_w = int(fw * 1.6)
@@ -225,10 +217,20 @@ def _detect_persons(frame, conf_threshold=0.3, _log_fn=None):
         except Exception:
             _warn_once("Smart Crop face detection failed; falling back")
 
+    # 合并后择优：按面积加权排名，人脸检测优先
     if all_detections:
-        return all_detections
+        scored = []
+        for d in all_detections:
+            area = d[2] * d[3]
+            bonus = 1.5 if d[5] == 'face_expanded' else (1.2 if d[5] == 'upper' else 1.0)
+            scored.append((d, area * bonus))
+        scored.sort(key=lambda x: -x[1])
+        best = [d for d, _ in scored[:8] if d[5] in ('body', 'upper', 'face_expanded')]
+        if best:
+            return best
+        return [d for d, _ in scored[:3]]
 
-    # Level 4: 皮肤色检测（无需外部文件，所有OpenCV版本通用）
+# Level 4: 皮肤色检测（无需外部文件，所有OpenCV版本通用）
     try:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask1 = cv2.inRange(hsv, np.array([0, 30, 60], dtype=np.uint8), np.array([25, 150, 255], dtype=np.uint8))
@@ -389,7 +391,57 @@ def batch_detect_clips(video_path, clips, log_fn=None, ffmpeg_cmd=None, frame_w=
             }
             smart_count += 1
         else:
-            results[i] = None
+            # 5 个标准采样帧全空时，用额外 3 帧复检（片段中部附近）
+            retry_times = [start + duration * ratio for ratio in (0.15, 0.65, 0.85)]
+            retry_detections = []
+            for t in retry_times:
+                frame = _extract_frame_ffmpeg(ffmpeg_cmd, video_path, t, log_fn) if use_ffmpeg else None
+                if frame is None:
+                    continue
+                detected_h, detected_w = frame.shape[:2]
+                dets = _detect_persons(frame, _log_fn=log_fn)
+                if dets:
+                    best = max(dets, key=lambda d: d[2] * d[3])
+                    retry_detections.append((best, detected_w, detected_h))
+            if retry_detections:
+                for (best, detw, deth) in retry_detections:
+                    cx = (best[0] + best[2] / 2) / detw
+                    cy = (best[1] + best[3] / 2) / deth
+                    person_xs.append(cx)
+                    person_ys.append(cy)
+                    person_sizes.append(max(best[2], best[3]) / max(detw, deth))
+                    person_ws.append(best[2] / detw)
+                    person_hs.append(best[3] / deth)
+                    person_bottoms.append(min(1.0, (best[1] + best[3]) / deth))
+                    head_tops.append(_estimated_head_top_ratio(best, deth))
+                # 复检成功后按标准流程计算
+            else:
+                results[i] = None
+
+        if person_xs and i not in results:
+            cx = sorted(person_xs)[len(person_xs) // 2]
+            cy = sorted(person_ys)[len(person_ys) // 2]
+            avg_size = sum(person_sizes) / len(person_sizes)
+            avg_w = sum(person_ws) / len(person_ws) if person_ws else 0
+            avg_h = sum(person_hs) / len(person_hs) if person_hs else avg_size
+            protected_bottom = (
+                _supported_extreme(person_bottoms, prefer_low=False)
+                if person_bottoms else min(1.0, cy + avg_h / 2)
+            )
+            min_head_top = _supported_extreme(head_tops, prefer_low=True)
+
+            results[i] = {
+                'person_cx_ratio': cx,
+                'person_cy_ratio': cy,
+                'person_size_ratio': avg_size,
+                'person_w_ratio': avg_w,
+                'person_h_ratio': avg_h,
+                'person_bottom_ratio': protected_bottom,
+                'head_top_ratio': min_head_top,
+                'frame_w': frame_w,
+                'frame_h': frame_h,
+            }
+            smart_count += 1
 
     if cap is not None:
         cap.release()
@@ -500,12 +552,12 @@ def compute_smart_crop(person_info, frame_w, frame_h, crop_level='medium', log_f
 
 
 def _random_crop(max_zoom=1.08):
-    """无人检测时保留完整画面，避免把未识别到的人物头部裁掉。"""
-    zoom = 1.0
-    crop_w = 1.0
-    crop_h = 1.0
-    crop_x = 0.0
-    crop_y = 0.0
+    """无人检测时使用极轻随机缩放，避免完全静止画面，同时保持头顶安全。"""
+    zoom = random.uniform(1.02, min(1.05, max_zoom))
+    crop_w = 1.0 / zoom
+    crop_h = 1.0 / zoom
+    crop_x = (1.0 - crop_w) / 2
+    crop_y = max(0.0, 1.0 - crop_h)
     return {
         'crop_w': crop_w,
         'crop_h': crop_h,
