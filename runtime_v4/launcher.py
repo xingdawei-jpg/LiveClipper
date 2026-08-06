@@ -416,6 +416,12 @@ def run(
 
         if validate_only:
             return 0
+        is_pending = bool(state.get("pending"))
+        if not is_pending:
+            # Already confirmed — no health check needed, just launch directly.
+            process = _launch(install_root, active)
+            process.wait()
+            return 0
         token = uuid.uuid4().hex
         health_file = _data_root() / "launcher_health" / f"{token}.json"
         health_file.parent.mkdir(parents=True, exist_ok=True)
