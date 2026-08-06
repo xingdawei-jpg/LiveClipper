@@ -122,7 +122,7 @@ def _configured_port() -> int:
 
 
 def _pick_port(preferred: int = 8765) -> int:
-    for port in range(preferred, preferred + 20):
+    for port in range(preferred, preferred + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.2)
             if sock.connect_ex(("127.0.0.1", port)) != 0:
@@ -142,12 +142,43 @@ def _start_server(port: int) -> uvicorn.Server:
         access_log=False,
     )
     server = uvicorn.Server(config)
+    # Capture startup errors into a file so affected users can send diagnostics.
+    diag_log = LEGACY_RUNTIME_ROOT / "update_logs" / "uvicorn-startup.log"
+    diag_log.parent.mkdir(parents=True, exist_ok=True)
+    server._startup_errors: list[str] = []
+
+    def _capture_startup_error() -> None:
+        import io
+        try:
+            while not server.started:
+                if server.should_exit:
+                    pass  # daemon thread, cannot log here
+                    break
+                time.sleep(0.1)
+        except Exception as exc:
+            pass
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                with diag_log.open("a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+            except Exception:
+                pass
+
+    handler = _CaptureHandler()
+    handler.setLevel(logging.WARNING)
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    uvicorn_logger.addHandler(handler)
+
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    time.sleep(0.5)
     return server
 
 
-def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
+def _wait_for_port(port: int, timeout: float = 30.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -155,6 +186,7 @@ def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
             if sock.connect_ex(("127.0.0.1", port)) == 0:
                 return True
         time.sleep(0.25)
+    pass
     return False
 
 
