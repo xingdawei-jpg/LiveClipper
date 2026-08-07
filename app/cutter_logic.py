@@ -2931,7 +2931,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
-                allow_partial=_clips_only,
+                allow_partial=True,
             )
             try:
                 analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
@@ -6008,7 +6008,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           ai_controls=ai_controls,
                                           record_history=not _clips_only,
                                           word_timings=_mix_word_timings,
-                                          allow_partial=_clips_only)
+                                          allow_partial=True)
         try:
             analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
             preference_summary = dict(analysis_metadata.get("preference_summary") or {})
