@@ -61,6 +61,18 @@ _IMPLICIT_PERSONAL_SIZE_PATTERNS = (
     re.compile(_HEIGHT_VALUE + r"(?:\s*" + _MEASUREMENT_WEIGHT + r")?\s*" + _SIZE_TOKEN, re.I),
     re.compile(r"(?<!\d)(?:[4-9]\d|1\d{2})\s*(?:斤)?\s*" + _SIZE_TOKEN, re.I),
 )
+# A body-weight range followed by fit language is still try-on sizing content,
+# even when the host omits a pronoun and size code (for example "160斤以内轻松
+# 驾驭"). This is distinct from objective garment measurements such as length
+# or waist circumference, which have no weight unit.
+_WEIGHT_RANGE_FIT_PATTERNS = (
+    re.compile(
+        r"(?:\d{2,3}|[一二三四五六七八九十百]{2,5})斤"
+        r"(?:以内|以下|左右|上下|都能|也能)?"
+        r".{0,10}(?:轻松)?(?:驾驭|能穿|可穿|穿得|穿上|合适|没问题)",
+        re.I,
+    ),
+)
 # ASR can drop both the person marker and the unit, for example
 # "你子身高170，体重105". A paired height/weight label is still a personal
 # try-on reply, while an objective garment measurement never has both labels.
@@ -111,6 +123,18 @@ _LIVE_REPLY_PATTERNS = (
     re.compile(r"(?:谢谢|感谢).{0,8}(?:姐|姐妹|宝宝|家人)"),
     re.compile(r"(?:姐妹|宝宝|姐姐).{0,8}(?:单|现货|收到|看到了)"),
     re.compile(r"(?:^|[,，。！？?])(?:那)?我(?:明天|今天|等会|一会)?(?:穿啥|穿什么|怎么穿|穿哪件)[啊呀呢吗？?]*$"),
+    # ASR often drops the viewer question. A delayed try-on promise is still
+    # live-room interaction, never an independent clip or a Hook.
+    re.compile(
+        r"(?:我)?(?:等会(?:儿)?|一会(?:儿)?|待会(?:儿)?)(?:再|先)?"
+        r"(?:(?:穿(?:上)?|试).{0,8})?(?:给你|给大家).{0,8}(?:看|瞧|试)"
+    ),
+    # Audience verdict prompts are useful in a live room but become empty
+    # interaction when detached from the surrounding chat.
+    re.compile(
+        r"(?:你们|大家|姐妹|宝宝|家人).{0,16}(?:自己)?(?:说|讲|觉得|评价)"
+        r".{0,24}(?:好不好|行不行|对不对|是不是|有没有|可以不|行吗|好吗)"
+    ),
     re.compile(r"(?:姐妹|宝宝|姐姐|家人).{0,16}(?:有|没有|想|要|问|穿|选|拿|看).{0,18}(?:吗|呢|吧|？|\?)"),
     re.compile(r"(?:我们|咱们).{0,12}(?:有|没有|上(?:了)?|做(?:了)?).{0,18}(?:吗|呢|吧|？|\?)"),
 )
@@ -143,6 +167,8 @@ def live_interaction_or_size_response_reason(text: Any) -> str:
         return "个人身高体重组合"
     if any(pattern.search(value) for pattern in _IMPLICIT_PERSONAL_SIZE_PATTERNS):
         return "个人身高体重尺码组合"
+    if any(pattern.search(value) for pattern in _WEIGHT_RANGE_FIT_PATTERNS):
+        return "体重范围试穿"
     if any(pattern.search(value) for pattern in _LIVE_REPLY_PATTERNS):
         return "直播互动回复"
     return ""

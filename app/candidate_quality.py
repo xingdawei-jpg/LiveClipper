@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Iterable
 
+from content_policy import blocks_role, interaction_policy_kind
 from selection_safety import live_interaction_or_size_response_reason
 
 
@@ -30,11 +31,19 @@ _HIGH_CONFIDENCE_GARBLE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("英文残片", re.compile(r"(?i)(?<![a-z])ca的")),
 )
 _HIGH_CONFIDENCE_FRAGMENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # A bare "...的。" at the beginning is the tail of a prior sentence, not a
+    # self-contained product claim. Keep the vocabulary narrow so complete
+    # descriptions such as "显瘦的版型" remain available.
+    ("孤立形容词残句", re.compile(r"^(?:吸引|好看|漂亮|显瘦|高级|舒服|适合)的(?:[。！？!?，,]|$)")),
     ("上下文指代残句", re.compile(r"^(?:在这里|到这里|这边|那边)[，,。\s]*(?:整个|这个|这件|它|你看)")),
     ("跨句硬拼", re.compile(r"(?:在这里|到这里)[。！？!?，,\s]+(?:整个|这个|这件|它|你看)")),
     ("直播问答残句", re.compile(r"^(?:(?:如果|那|这个|这件).{0,14})?(?:这件|这个|那件|那条).{0,8}(?:不行|不对|不搭|不适合)")),
     ("未闭合列举", re.compile(r"^(?:两个|两)个点[，,、\s]*一[，,、\s]")),
     ("悬空收尾", re.compile(r"(?:或者你|这一点|那一点|有点设计的麻|全部经过两道的水洗的那个)[。！？!?，,\s]*$")),
+    # A semantic turn that stops at "风吹过来整" has lost the noun or
+    # consequence that makes the sentence intelligible. Keep this narrowly
+    # tied to the observed ASR residue; "整" elsewhere is a normal word.
+    ("未完成场景残句", re.compile(r"(?:风吹过来整)[。！？!?，,\s]*$")),
     # These are not product claims. They are unedited live-chat/try-on tails
     # from the source transcript, so they cannot become a standalone clip.
     ("直播闲聊残留", re.compile(r"(?:那|就)?拜拜(?:亚麻)?|脑壳痛(?:了)?|我这个面料我不骗你")),
@@ -50,6 +59,17 @@ _PRICE_COST_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("数字成本报价", re.compile(r"(?:成本|价格|单价).{0,8}\d{1,4}")),
     ("每米报价", re.compile(r"\d{2,4}\s*(?:多)?\s*(?:一|1)米")),
     ("价格导向话术", re.compile(r"(?:价位|成本|收费|计价|便宜|越贵|更贵|太贵|很贵|不贵|不便宜|抢着买|秒带|秒拍)")),
+)
+
+# Hook needs a narrower standard than a body candidate.  An address such as
+# "你们" may be fine inside live speech, but it cannot start a short clip unless
+# it immediately forms a complete buyer-facing sentence.  Keep this conservative:
+# it only rejects malformed address-plus-benefit fragments, not ordinary product
+# claims that happen to mention the audience.
+_HOOK_AUDIENCE_FRAGMENT_RE = re.compile(
+    r"^(?:你们|大家|姐妹(?:们)?|宝宝(?:们)?)(?!"
+    r"[，,、：:]|(?:有没有|有没|知道吗|看到了吗|想|要|穿|试|买|如果|要是|"
+    r"这件|这个|这条|这种))"
 )
 
 
@@ -93,7 +113,7 @@ def leading_fragment_trim(tokens: Iterable[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
-def candidate_quality_flags(text: Any) -> list[str]:
+def candidate_quality_flags(text: Any, content_policy: Any = None) -> list[str]:
     """Return only high-confidence defects suitable for a hard candidate gate."""
 
     value = re.sub(r"\[[vV]\d+\]\s*", "", str(text or "")).strip()
@@ -101,16 +121,44 @@ def candidate_quality_flags(text: Any) -> list[str]:
         return ["空文案"]
     flags = [label for label, pattern in _HIGH_CONFIDENCE_GARBLE_RULES if pattern.search(value)]
     flags.extend(label for label, pattern in _HIGH_CONFIDENCE_FRAGMENT_RULES if pattern.search(value))
-    flags.extend(label for label, pattern in _PRICE_COST_RULES if pattern.search(value))
+    if any(pattern.search(value) for _label, pattern in _PRICE_COST_RULES):
+        blocked, _reason = blocks_role(content_policy, "price", value)
+        if blocked:
+            flags.append("价格/成本报价")
     safety_reason = live_interaction_or_size_response_reason(value)
     if safety_reason:
+        blocked, _reason = blocks_role(
+            content_policy,
+            interaction_policy_kind(safety_reason),
+            value,
+        )
+    else:
+        blocked = False
+    if safety_reason and blocked:
         flags.append(safety_reason)
     return list(dict.fromkeys(flags))
+
+
+def hook_candidate_quality_flags(text: Any) -> list[str]:
+    """Return Hook-only defects without deleting usable body material.
+
+    A caller uses this only to deny the Hook role.  The immutable text and its
+    timestamps stay available as Product/evidence material for the director.
+    """
+
+    value = re.sub(r"\[[vV]\d+\]\s*", "", str(text or "")).strip()
+    compact = _compact_text(value)
+    if not compact:
+        return ["Hook空文案"]
+    if _HOOK_AUDIENCE_FRAGMENT_RE.match(compact):
+        return ["Hook人称残句"]
+    return []
 
 
 def filter_candidate_clips(
     clips: Iterable[tuple[Any, ...]],
     log_fn: Callable[[str], None] | None = None,
+    content_policy: Any = None,
 ) -> list[tuple[Any, ...]]:
     """Remove obvious garbled candidates while preserving all kept tuples."""
 
@@ -119,7 +167,7 @@ def filter_candidate_clips(
     removed: list[tuple[tuple[Any, ...], list[str]]] = []
     for clip in original:
         text = clip[1] if len(clip) > 1 else ""
-        flags = candidate_quality_flags(text)
+        flags = candidate_quality_flags(text, content_policy=content_policy)
         if flags:
             removed.append((clip, flags))
         else:

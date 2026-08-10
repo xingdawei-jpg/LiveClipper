@@ -902,6 +902,22 @@ class RuntimeV3UpdateTests(unittest.TestCase):
                     except subprocess.TimeoutExpired:
                         process.terminate()
                         process.wait(timeout=5)
+                # Windows can keep a just-exited image section open briefly,
+                # especially after a long test run or antivirus inspection.
+                # Wait for delete/rename access so TemporaryDirectory cleanup
+                # tests launcher behavior instead of that unrelated OS race.
+                for executable in install_root.glob("versions/*/LiveClipperWeb.exe"):
+                    probe = executable.with_suffix(".unlock-probe")
+                    deadline = time.time() + 5.0
+                    while True:
+                        try:
+                            executable.replace(probe)
+                            probe.replace(executable)
+                            break
+                        except PermissionError:
+                            if time.time() >= deadline:
+                                raise
+                            time.sleep(0.1)
             state = json.loads((install_root / "current.json").read_text(encoding="utf-8"))
             self.assertEqual(result, 2)
             self.assertEqual(state["current_version"], "2026.7.13.10")

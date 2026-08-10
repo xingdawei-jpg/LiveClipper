@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260723-ai-workbench-v11">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260810-ai-workbench-v15">
 </head>
 <body>
   <div class="app-shell">
@@ -360,7 +360,7 @@
                 </select>
               </div>
               <div class="field-row compact">
-                <label for="sc-focus">AI偏好</label>
+                  <label for="sc-focus">本次主方向</label>
                 <select id="sc-focus">
                   <option>自动</option>
                   <option>面料质感</option>
@@ -393,7 +393,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="sc-goal">成片目标</label>
+                  <label for="sc-goal">成片取向</label>
                 <select id="sc-goal">
                   <option>自动</option>
                   <option>爆款种草</option>
@@ -407,7 +407,7 @@
                 </select>
               </div>
               <div class="field-row compact">
-                <label for="sc-hook-style">开头方式</label>
+                  <label for="sc-hook-style">开头偏好</label>
                 <select id="sc-hook-style">
                   <option>自动</option>
                   <option>痛点开头</option>
@@ -422,7 +422,7 @@
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>主卖点优先</label>
+              <label>本次覆盖卖点</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="sc-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="面料质感"> 面料质感</label>
@@ -446,12 +446,12 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="通用卖点"> 通用卖点</label>
               </div>
               <div class="field-row">
-                <label for="sc-selling-custom">自定义词</label>
+                <label for="sc-selling-custom">本次重点词</label>
                 <input id="sc-selling-custom" type="text" data-ai-control="sc-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>不要选这些</label>
+              <label>本次避选</label>
               <div class="chip-grid" data-ai-chip-group="sc-avoid">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="价格"> 价格</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="尺码"> 尺码</label>
@@ -464,7 +464,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="sc-ending-style">结尾方式</label>
+                  <label for="sc-ending-style">收尾偏好</label>
                 <select id="sc-ending-style">
                   <option>自动</option>
                   <option>尺码引导</option>
@@ -856,7 +856,7 @@
                 </select>
               </div>
               <div class="field-row compact">
-                <label for="mix-focus">AI偏好</label>
+                  <label for="mix-focus">本次主方向</label>
                 <select id="mix-focus">
                   <option>自动</option>
                   <option>面料质感</option>
@@ -889,7 +889,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="mix-goal">成片目标</label>
+                  <label for="mix-goal">成片取向</label>
                 <select id="mix-goal">
                   <option>自动</option>
                   <option>爆款种草</option>
@@ -903,7 +903,7 @@
                 </select>
               </div>
               <div class="field-row compact">
-                <label for="mix-hook-style">开头方式</label>
+                  <label for="mix-hook-style">开头偏好</label>
                 <select id="mix-hook-style">
                   <option>自动</option>
                   <option>痛点开头</option>
@@ -918,7 +918,7 @@
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>主卖点优先</label>
+              <label>本次覆盖卖点</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="mix-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="面料质感"> 面料质感</label>
@@ -942,12 +942,12 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="通用卖点"> 通用卖点</label>
               </div>
               <div class="field-row">
-                <label for="mix-selling-custom">自定义词</label>
+                <label for="mix-selling-custom">本次重点词</label>
                 <input id="mix-selling-custom" type="text" data-ai-control="mix-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
               </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>不要选这些</label>
+              <label>本次避选</label>
               <div class="chip-grid" data-ai-chip-group="mix-avoid">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="价格"> 价格</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="尺码"> 尺码</label>
@@ -960,7 +960,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                <label for="mix-ending-style">结尾方式</label>
+                  <label for="mix-ending-style">收尾偏好</label>
                 <select id="mix-ending-style">
                   <option>自动</option>
                   <option>尺码引导</option>
@@ -1619,8 +1619,9 @@
         <div class="settings-layout">
           <div class="settings-tabs" role="tablist">
             <button class="settings-tab is-active" data-settings-tab="ai">AI模型</button>
+            <button class="settings-tab" data-settings-tab="selection">AI选片</button>
             <button class="settings-tab" data-settings-tab="asr">语音识别</button>
-            <button class="settings-tab" data-settings-tab="rules">规则词库</button>
+            <button class="settings-tab" data-settings-tab="rules">识别词库</button>
             <button class="settings-tab" data-settings-tab="system">系统</button>
           </div>
 
@@ -1653,12 +1654,39 @@
                   <input id="s-model" type="text">
                 </div>
               </div>
+            </section>
+
+            <section class="settings-page" id="settings-selection">
+              <div class="panel">
+                <div class="panel-header">
+                  <h2>我的内容政策</h2>
+                </div>
+                <div class="content-policy-grid">
+                  <label class="content-policy-row"><span>价格与报价</span><select id="s-policy-price"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>促销与行动引导</span><select id="s-policy-cta"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>尺码与身材互动</span><select id="s-policy-size-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>直播互动回复</span><select id="s-policy-live-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                </div>
+                <div class="field-row compact">
+                  <label for="s-content-review-mode">内容审稿</label>
+                  <select id="s-content-review-mode">
+                    <option value="off" selected>关闭（稳定链路）</option>
+                    <option value="shadow">影子审稿（只记录，不改片单）</option>
+                    <option value="on">审稿优先（安全候选补足时长）</option>
+                  </select>
+                </div>
+                <p class="panel-note">审稿只读取通过硬安全规则的候选；审稿池不足时会开放安全 reserve 补足时长，不能把短片单当作正常成片。</p>
+                <div class="content-policy-custom-head">
+                  <label>自定义内容规则</label>
+                  <button class="button button-secondary button-small" type="button" data-action="add-content-policy-rule">添加规则</button>
+                </div>
+                <div class="content-policy-custom-rules" id="content-policy-custom-rules"></div>
+              </div>
 
               <div class="panel">
                 <div class="panel-header">
-                  <h2>AI偏好设置</h2>
+                  <h2>长期卖点偏向</h2>
                 </div>
-                <p class="panel-note">设置偏好权重，影响成片叙事方向。</p>
                 <div class="slider-list">
                   <label class="slider-row">
                     <span>版型显瘦</span>
@@ -1705,7 +1733,7 @@
 
               <div class="panel">
                 <div class="panel-header">
-                  <h2>剪辑风格画像</h2>
+                  <h2>学习偏好</h2>
                   <button class="button button-secondary" data-action="refresh-ai-feedback">刷新</button>
                 </div>
                 <p class="panel-note">根据你在 AI 预览里保留、删除、拖到开头或结尾的选择，逐渐形成专属选片风格。</p>
@@ -1746,17 +1774,16 @@
 
               <div class="panel">
                 <div class="panel-header">
-                  <h2>AI选片规则</h2>
+                  <h2>高级编导规则</h2>
                 </div>
-                <p class="panel-note">硬约束，直接控制 AI 选什么不选什么。</p>
                 <div class="field-row textarea-row">
                   <label for="s-rule-narrative">叙事结构</label>
                   <textarea id="s-rule-narrative" rows="3" placeholder="默认: 开场圈人→提高预期→产品介绍→促单收尾"></textarea>
                 </div>
                 <div class="rule-grid">
                   <label class="check-item"><input id="s-rule-category-filter" type="checkbox" checked> 强制同一品类</label>
-                  <label class="check-item"><input id="s-rule-time-coherence" type="checkbox" checked> 时间连贯</label>
                 </div>
+                <input id="s-rule-time-coherence" type="checkbox" checked hidden aria-hidden="true" tabindex="-1">
                 <div class="field-row compact">
                   <label for="s-rule-hook-cap">Hook上限</label>
                   <select id="s-rule-hook-cap">
@@ -1767,7 +1794,7 @@
                   </select>
                 </div>
                 <div class="field-row textarea-row">
-                  <label for="s-rule-custom-text">自定义规则</label>
+                  <label for="s-rule-custom-text">长期编导备注</label>
                   <textarea id="s-rule-custom-text" rows="3" placeholder="例如: 优先选提到裙长、露脚踝的片段"></textarea>
                 </div>
               </div>
@@ -1781,6 +1808,10 @@
                 <label class="switch-row">
                   <span>启用云端识别</span>
                   <input id="s-asr-enabled" type="checkbox">
+                </label>
+                <label class="switch-row">
+                  <span>本地异常片段云端复核</span>
+                  <input id="s-local-asr-quality-retry-enabled" type="checkbox">
                 </label>
                 <input id="s-asr-provider" type="hidden" value="火山引擎">
                 <div class="field-row">
@@ -1840,10 +1871,10 @@
             <section class="settings-page" id="settings-rules">
               <div class="panel">
                 <div class="panel-header">
-                  <h2>规则词库</h2>
+                  <h2>识别词库</h2>
                   <button class="button button-secondary" data-action="load-keywords">刷新</button>
                 </div>
-                <p class="panel-note">规则词库给 AI 和本地过滤器提供“判定词”：卖点词、违禁词、废话词、负面信号、偏好关键词。它不是模型设置，而是决定哪些字幕更容易被选中、哪些片段必须避开的业务词典。</p>
+                <p class="panel-note">卖点、品类、ASR 修正和语义识别用词。</p>
                 <div class="metric-row">
                   <div>
                     <span class="metric-label">当前词条</span>
@@ -1860,11 +1891,11 @@
               </div>
               <div class="panel keyword-editor-panel">
                 <div class="panel-header">
-                  <h2>自定义规则</h2>
+                  <h2>词库编辑</h2>
                   <button class="button button-primary" data-action="open-keyword-editor"><span class="button-icon" aria-hidden="true">✎</span><span>打开编辑器</span></button>
                 </div>
                 <div class="keyword-actions">
-                  <button class="button button-primary" data-action="open-keyword-editor"><span class="button-icon" aria-hidden="true">✎</span><span>编辑关键词 / 违禁词 / 废话词</span></button>
+                  <button class="button button-primary" data-action="open-keyword-editor"><span class="button-icon" aria-hidden="true">✎</span><span>编辑识别词 / 固定禁用词 / 废话词</span></button>
                   <button class="button button-muted" data-action="reset-keywords"><span class="button-icon" aria-hidden="true">↺</span><span>恢复默认</span></button>
                 </div>
               </div>
@@ -1968,7 +1999,7 @@
           <textarea id="kw-clip-keywords" class="keyword-textarea" spellcheck="false" placeholder="hook=显瘦&#10;product=面料舒服&#10;product=版型好"></textarea>
         </div>
         <div class="keyword-editor">
-          <label for="kw-forbidden-phrases">违禁词</label>
+          <label for="kw-forbidden-phrases">固定禁用词</label>
           <textarea id="kw-forbidden-phrases" class="keyword-textarea" spellcheck="false" placeholder="一个词一行"></textarea>
         </div>
         <div class="keyword-editor">
@@ -1984,6 +2015,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260723-ai-workbench-v11" defer></script>
+  <script src="/assets/app.js?v=20260810-ai-workbench-v15" defer></script>
 </body>
 </html>

@@ -100,15 +100,17 @@ has produced a receipt bound to the signed core manifest, normal launch checks:
 - the embedded release public key and detached core signature;
 - the selected core and application versions;
 - all signed manifest paths and metadata structure;
-- the core entrypoint's existence, size, and SHA256;
+- every Core file's path, size, and modification metadata; a metadata change
+  forces a complete SHA256 verification before launch;
 - the complete signed business bundle;
-- a fresh runtime health receipt for every process launch.
+- a fresh runtime health receipt while an update is pending.
 
 Any missing full-verification receipt forces a complete core verification.
-Internal core corruption that prevents startup fails the fresh health check and
-rolls back the selection. Protection against a local administrator deliberately
-modifying internal files while preserving runtime health requires Authenticode
-or an equivalent operating-system trust layer and remains a production gate.
+Internal Core corruption triggers a complete hash verification before launch;
+an invalid current selection rolls back to the previous verified selection.
+Protection against a local administrator deliberately modifying internal files
+while preserving file metadata requires Authenticode or an equivalent
+operating-system trust layer and remains a production gate.
 
 ## First-Launch Health And Rollback
 

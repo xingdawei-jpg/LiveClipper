@@ -29,6 +29,10 @@ const state = {
   videoThumbnailRequestKey: {},
   previewDrafts: {},
   previewDraftSaveTimers: {},
+  previewWordEditHistory: { smart: [], mix: [] },
+  previewWordRangeAnchors: { smart: null, mix: null },
+  previewWordRangeGesture: null,
+  previewWordSkipClick: null,
   previewDetailSelection: { smart: null, mix: null },
   previewInlineVideos: {},
   previewSplitRatios: {},
@@ -709,6 +713,7 @@ const settingFields = {
   model: "s-model",
   enabled: "s-enabled",
   asr_enabled: "s-asr-enabled",
+  local_asr_quality_retry_enabled: "s-local-asr-quality-retry-enabled",
   asr_provider: "s-asr-provider",
   volc_api_key: "s-volc-api-key",
   volc_tos_ak: "s-volc-tos-ak",
@@ -720,6 +725,7 @@ const settingFields = {
   subtitle_font_size: "s-subtitle-font-size",
   ui_font_size: "s-ui-font-size",
   style_profile_strength: "s-style-profile-strength",
+  content_review_mode: "s-content-review-mode",
 };
 
 const keywordFields = {
@@ -1163,6 +1169,7 @@ document.addEventListener("DOMContentLoaded", () => {
   startBackgroundRefreshLoops();
   bindNavigation();
   bindSettingsTabs();
+  bindAiSelectionAutoSave();
   bindLiveRecTabs();
   bindLiveRoomFilters();
   bindActions();
@@ -1414,6 +1421,8 @@ function bindActions() {
       if (action === "reload-settings") await loadSettings(true);
       if (action === "save-settings") await saveSettings();
       if (action === "test-ai") await testAI();
+      if (action === "add-content-policy-rule") addContentPolicyRule();
+      if (action === "remove-content-policy-rule") removeContentPolicyRule(target);
       if (action === "refresh-ai-feedback") await loadAiFeedbackSamples(true);
       if (action === "export-ai-feedback") exportAiFeedback();
       if (action === "import-ai-feedback") await importAiFeedback();
@@ -2988,6 +2997,98 @@ function collectSettings() {
   return data;
 }
 
+let aiSelectionSaveTimer = null;
+let aiSelectionSaveInFlight = false;
+let aiSelectionSaveQueued = false;
+let aiSelectionSavedFingerprint = "";
+
+function collectAiSelectionSettings() {
+  return {
+    preference_weights: collectPreferenceWeights(),
+    style_profile_strength: normalizeStyleProfileStrength($("s-style-profile-strength")?.value),
+    content_review_mode: $("s-content-review-mode")?.value || "off",
+    ai_rules: collectAiRules(),
+  };
+}
+
+function aiSelectionSettingsFingerprint(payload = collectAiSelectionSettings()) {
+  return JSON.stringify(payload);
+}
+
+function queueAiSelectionSave(delay = 0) {
+  if (aiSelectionSaveTimer) window.clearTimeout(aiSelectionSaveTimer);
+  aiSelectionSaveTimer = window.setTimeout(() => {
+    aiSelectionSaveTimer = null;
+    persistAiSelectionSettings();
+  }, Math.max(0, delay));
+}
+
+async function persistAiSelectionSettings() {
+  if (aiSelectionSaveInFlight) {
+    aiSelectionSaveQueued = true;
+    return;
+  }
+  const payload = collectAiSelectionSettings();
+  const fingerprint = aiSelectionSettingsFingerprint(payload);
+  if (fingerprint === aiSelectionSavedFingerprint) return;
+
+  aiSelectionSaveInFlight = true;
+  try {
+    await api("/api/settings/ai-selection", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    aiSelectionSavedFingerprint = fingerprint;
+  } catch (error) {
+    toast("AI选片设置未保存，请检查服务后重试", "error");
+  } finally {
+    aiSelectionSaveInFlight = false;
+    if (aiSelectionSaveQueued) {
+      aiSelectionSaveQueued = false;
+      queueAiSelectionSave(0);
+    }
+  }
+}
+
+function bindAiSelectionAutoSave() {
+  const root = $("settings-selection");
+  if (!root) return;
+  const choiceSelector = [
+    "#s-policy-price",
+    "#s-policy-cta",
+    "#s-policy-size-interaction",
+    "#s-policy-live-interaction",
+    "#s-content-review-mode",
+    "#s-style-profile-strength",
+    "#s-rule-category-filter",
+    "#s-rule-hook-cap",
+    ".content-policy-rule-action",
+  ].join(",");
+  const textSelector = [
+    ".content-policy-rule-text",
+    "#s-rule-narrative",
+    "#s-rule-custom-text",
+  ].join(",");
+
+  root.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target?.matches(choiceSelector) || target?.matches("[data-pref-key]")) {
+      queueAiSelectionSave(0);
+    }
+  });
+  root.addEventListener("input", (event) => {
+    const target = event.target;
+    if (target?.matches("[data-pref-key]")) {
+      queueAiSelectionSave(250);
+    } else if (target?.matches(textSelector)) {
+      queueAiSelectionSave(600);
+    }
+  });
+  root.addEventListener("focusout", (event) => {
+    if (event.target?.matches(textSelector)) queueAiSelectionSave(0);
+  });
+}
+
 async function saveSettings() {
   const data = collectSettings();
   applyTheme(data.ui_theme || "system");
@@ -3677,12 +3778,134 @@ function collectPreferenceWeights() {
   return weights;
 }
 
-function applyAiRules(rules) {
+const contentPolicyDefaults = Object.freeze({
+  price: "block",
+  cta: "block",
+  size_interaction: "block",
+  live_interaction: "block",
+  custom_rules: [],
+});
+
+const contentPolicyActions = new Set(["block", "body_only", "allow", "prefer"]);
+
+function normalizeContentPolicy(policy = {}) {
+  const source = policy && typeof policy === "object" ? policy : {};
+  const normalized = {
+    price: contentPolicyActions.has(source.price) ? source.price : contentPolicyDefaults.price,
+    cta: contentPolicyActions.has(source.cta) ? source.cta : contentPolicyDefaults.cta,
+    size_interaction: contentPolicyActions.has(source.size_interaction) ? source.size_interaction : contentPolicyDefaults.size_interaction,
+    live_interaction: contentPolicyActions.has(source.live_interaction) ? source.live_interaction : contentPolicyDefaults.live_interaction,
+    custom_rules: [],
+  };
+  const seen = new Set();
+  for (const item of Array.isArray(source.custom_rules) ? source.custom_rules : []) {
+    const text = String(item?.text || "").trim().slice(0, 80);
+    const action = contentPolicyActions.has(item?.action) ? item.action : "block";
+    const key = `${text.toLocaleLowerCase()}|${action}`;
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    normalized.custom_rules.push({ text, action });
+    if (normalized.custom_rules.length >= 80) break;
+  }
+  return normalized;
+}
+
+function contentPolicyRuleRow(rule = {}) {
+  const row = document.createElement("div");
+  row.className = "content-policy-custom-row";
+  row.dataset.contentPolicyRule = "true";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "content-policy-rule-text";
+  input.maxLength = 80;
+  input.placeholder = "词语或短语";
+  input.value = String(rule.text || "").slice(0, 80);
+
+  const select = document.createElement("select");
+  select.className = "content-policy-rule-action";
+  [
+    ["block", "禁止"],
+    ["body_only", "仅正文"],
+    ["allow", "可用"],
+    ["prefer", "优先"],
+  ].forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  });
+  select.value = contentPolicyActions.has(rule.action) ? rule.action : "block";
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button button-muted button-small content-policy-rule-remove";
+  remove.dataset.action = "remove-content-policy-rule";
+  remove.title = "删除规则";
+  remove.setAttribute("aria-label", "删除规则");
+  remove.textContent = "×";
+
+  row.append(input, select, remove);
+  return row;
+}
+
+function renderContentPolicyRules(rules = []) {
+  const root = $("content-policy-custom-rules");
+  if (!root) return;
+  root.replaceChildren(...rules.map((rule) => contentPolicyRuleRow(rule)));
+}
+
+function addContentPolicyRule() {
+  const root = $("content-policy-custom-rules");
+  if (!root) return;
+  const row = contentPolicyRuleRow();
+  root.append(row);
+  row.querySelector("input")?.focus();
+}
+
+function removeContentPolicyRule(button) {
+  button.closest("[data-content-policy-rule]")?.remove();
+  queueAiSelectionSave(0);
+}
+
+function applyContentPolicy(policy) {
+  const normalized = normalizeContentPolicy(policy);
+  const controls = {
+    price: "s-policy-price",
+    cta: "s-policy-cta",
+    size_interaction: "s-policy-size-interaction",
+    live_interaction: "s-policy-live-interaction",
+  };
+  Object.entries(controls).forEach(([key, id]) => {
+    const control = $(id);
+    if (control) control.value = normalized[key];
+  });
+  renderContentPolicyRules(normalized.custom_rules);
+}
+
+function collectContentPolicy() {
+  const policy = normalizeContentPolicy({
+    price: $("s-policy-price")?.value,
+    cta: $("s-policy-cta")?.value,
+    size_interaction: $("s-policy-size-interaction")?.value,
+    live_interaction: $("s-policy-live-interaction")?.value,
+  });
+  policy.custom_rules = Array.from(document.querySelectorAll("[data-content-policy-rule]")).flatMap((row) => {
+    const text = row.querySelector(".content-policy-rule-text")?.value.trim().slice(0, 80) || "";
+    const action = row.querySelector(".content-policy-rule-action")?.value || "block";
+    return text ? [{ text, action: contentPolicyActions.has(action) ? action : "block" }] : [];
+  });
+  return normalizeContentPolicy(policy);
+}
+
+function applyAiRules(rules = {}) {
   $("s-rule-narrative").value = rules.narrative || "";
   $("s-rule-category-filter").checked = rules.category_filter !== false;
   $("s-rule-time-coherence").checked = rules.time_coherence !== false;
   $("s-rule-hook-cap").value = rules.hook_cap || "5秒";
   $("s-rule-custom-text").value = rules.custom_text || "";
+  applyContentPolicy(rules.content_policy);
+  aiSelectionSavedFingerprint = aiSelectionSettingsFingerprint();
 }
 
 function collectAiRules() {
@@ -3692,6 +3915,7 @@ function collectAiRules() {
     time_coherence: $("s-rule-time-coherence").checked,
     hook_cap: $("s-rule-hook-cap").value,
     custom_text: $("s-rule-custom-text").value.trim(),
+    content_policy: collectContentPolicy(),
   };
 }
 
@@ -5015,6 +5239,10 @@ function collectAiControls(prefix) {
     hook_style: $(`${prefix}-hook-style`)?.value || "自动",
     ending_style: $(`${prefix}-ending-style`)?.value || "自动",
     strictness: $(`${prefix}-strictness`)?.value || "标准",
+    // Carry the currently visible policy with every run. Saving remains useful
+    // for future runs, but a preview must never silently use stale settings.
+    content_policy: collectContentPolicy(),
+    content_review_mode: $("s-content-review-mode")?.value || "off",
   };
 }
 
@@ -5604,7 +5832,8 @@ function ensurePreviewDraft(scope = "smart") {
   let draft = state.previewDrafts[key] || readStoredPreviewDraft(scope, preview);
   if (draft) {
     applyPreviewDraftToState(scope, draft);
-  } else {
+  }
+  if (normalizePreviewWordIndices(preview) || !draft) {
     draft = buildPreviewDraftFromState(scope);
   }
   state.previewDrafts[key] = draft;
@@ -5836,10 +6065,26 @@ function previewInlineVideoPanel(scope, index, key) {
     .find((node) => Number(node.dataset.previewIndex) === Number(index) && node.dataset.videoKey === key) || null;
 }
 
-function setInlinePreviewStatus(panel, message, type = "info") {
+function setInlinePreviewStatus(panel, message, type = "info", retry = null) {
   const status = panel?.querySelector("[data-preview-inline-status]");
   if (!status) return;
-  status.textContent = message || "";
+  status.replaceChildren();
+  if (message) {
+    const text = document.createElement("span");
+    text.textContent = message;
+    status.append(text);
+  }
+  if (retry && Number.isInteger(Number(retry.index))) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button button-muted button-small preview-inline-retry";
+    button.textContent = "重新生成";
+    button.dataset.action = "preview-inline-retry";
+    button.dataset.previewScope = retry.scope || "smart";
+    button.dataset.previewIndex = String(Number(retry.index));
+    button.dataset.previewInspectOnly = retry.inspectOnly === true ? "true" : "false";
+    status.append(button);
+  }
   status.classList.toggle("is-hidden", !message);
   status.classList.toggle("is-error", type === "error");
 }
@@ -5863,7 +6108,11 @@ function applyInlinePreviewVideoState(scope, index, key) {
   if (entry.status === "loading") {
     setInlinePreviewStatus(panel, "正在生成所选片段小视频...", "info");
   } else if (entry.error) {
-    setInlinePreviewStatus(panel, `小视频生成失败：${entry.error}`, "error");
+    setInlinePreviewStatus(panel, `小视频生成失败：${entry.error}`, "error", {
+      scope,
+      index,
+      inspectOnly: entry.inspectOnly === true,
+    });
   } else {
     setInlinePreviewStatus(panel, "选择片段后显示小视频。", "info");
   }
@@ -7899,6 +8148,7 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const warnings = [];
   const selectionResult = dedupSummary.selection_result || {};
   const planQualityReport = dedupSummary.plan_quality_report || {};
+  const contentReviewSummary = dedupSummary.content_review_summary || {};
   if (selectionResult.status === "partial_insufficient") {
     const projected = Number(selectionResult?.details?.projected_final_duration || total);
     warnings.push(`安全内容不足，本次仅生成${projected.toFixed(1)}s人工预览；确认片段后才能成片。`);
@@ -8026,6 +8276,7 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
     topicCoverage,
     salesChain,
     planQualityReport,
+    contentReviewSummary,
   };
 }
 
@@ -8075,6 +8326,28 @@ function renderPreviewSummary(analysis) {
     : "未计算商品主题覆盖";
   const topicCoverageWarn = Boolean(topicCoverage.undercovered || topicCoverage.overconcentrated);
   const salesChain = analysis.salesChain || { label: "-", ok: false, title: "未计算成交结构" };
+  const contentReview = analysis.contentReviewSummary || {};
+  const contentReviewMode = String(contentReview.mode || "off").toLowerCase();
+  const contentReviewLabel = {
+    off: "关闭",
+    shadow: "影子审稿",
+    on: "审稿优先",
+  }[contentReviewMode] || "未识别";
+  const contentReviewSource = {
+    environment: "环境变量",
+    task: "本次参数",
+    settings: "已保存设置",
+  }[String(contentReview.mode_source || "")] || "未知来源";
+  const contentPolicy = contentReview.content_policy || {};
+  const contentPolicyTitle = [
+    `实际模式：${contentReviewLabel}`,
+    `来源：${contentReviewSource}`,
+    `安全候选：${Number(contentReview.hard_safe_count || 0)} 段 / ${Number(contentReview.hard_safe_duration || 0).toFixed(1)}s`,
+    `价格：${contentPolicy.price || "block"}，CTA：${contentPolicy.cta || "block"}，尺码互动：${contentPolicy.size_interaction || "block"}，直播互动：${contentPolicy.live_interaction || "block"}`,
+    `自定义规则：${Number(contentPolicy.custom_rule_count || 0)} 条`,
+    contentReview.fallback_reason ? `降级原因：${contentReview.fallback_reason}` : "",
+  ].filter(Boolean).join("\n");
+  const contentReviewTone = contentReviewMode === "on" ? "ok" : (contentReviewMode === "shadow" ? "warn" : "muted");
   const preferenceTitleParts = [];
   if (preference.mode) preferenceTitleParts.push(preference.mode);
   if (preference.matched_label && preference.matched_label !== preferenceText) {
@@ -8104,6 +8377,7 @@ function renderPreviewSummary(analysis) {
       <div><span>偏好占比</span><strong class="is-${preferenceHitWarn ? "warn" : "ok"}" title="${escapeHtml(preferenceHitTitle)}">${escapeHtml(preferenceHitText)}</strong></div>
       <div><span>主题覆盖</span><strong class="is-${topicCoverageWarn ? "warn" : "ok"}" title="${escapeHtml(topicCoverageTitle)}">${escapeHtml(topicCoverageText)}</strong></div>
       <div><span>成交结构</span><strong class="is-${salesChain.ok ? "ok" : "warn"}" title="${escapeHtml(salesChain.title)}">${escapeHtml(salesChain.label)}</strong></div>
+      <div><span>内容审稿</span><strong class="is-${contentReviewTone}" title="${escapeHtml(contentPolicyTitle)}">${escapeHtml(contentReviewLabel)}</strong></div>
     </div>
     ${warningText}
   `;
@@ -9248,6 +9522,29 @@ function previewSegmentWords(segment) {
   return Array.isArray(segment?.words) ? segment.words : [];
 }
 
+function normalizePreviewWordIndices(preview) {
+  let normalized = false;
+  const clips = Array.isArray(preview?.clips) ? preview.clips : [];
+  clips.forEach(function (clip) {
+    previewSegments(clip).forEach(function (segment) {
+      const words = previewSegmentWords(segment);
+      const seen = new Set();
+      const needsNormalization = words.some(function (word) {
+        const index = Number(word?.index);
+        if (!Number.isInteger(index) || seen.has(index)) return true;
+        seen.add(index);
+        return false;
+      });
+      if (!needsNormalization) return;
+      words.forEach(function (word, index) {
+        if (word && typeof word === "object") word.index = index;
+      });
+      normalized = true;
+    });
+  });
+  return normalized;
+}
+
 function isPreviewWordLocked(word) {
   return word?.selection_locked === true;
 }
@@ -9544,7 +9841,12 @@ function renderPreviewInlineVideo(scope, preview, clip, { inspectOnly = false, i
   return `<div class="clip-detail-video" data-preview-inline-video="${scope}" data-preview-index="${Number(clip.index)}" data-video-key="${escapeHtml(key)}"><div class="clip-detail-video-stage"><video class="${videoClass}" data-preview-inline-player controls playsinline ${previewInlineAudioMutedAttribute()} autoplay preload="metadata" ${entry.url ? `src="${escapeHtml(entry.url)}"` : ""}></video><div class="clip-detail-video-status ${statusClass} ${entry.error ? "is-error" : ""}" data-preview-inline-status>${escapeHtml(statusText)}</div></div></div>`;
 }
 
-async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspectOnly = false } = {}) {
+function isRetryableInlinePreviewError(error) {
+  const status = Number(error?.status || 0);
+  return !status || status === 408 || status === 409 || status >= 500;
+}
+
+async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspectOnly = false, force = false, retryAttempt = 0 } = {}) {
   const preview = getPreviewState(scope);
   if (!preview?.id || preview.status !== "ready") return;
   const clipIndex = Number(index);
@@ -9557,11 +9859,12 @@ async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspect
   const key = previewInlineVideoKey(scope, preview, clip, draft, { inspectOnly });
   if (!key) return;
   const existing = state.previewInlineVideos[key];
-  if (existing?.url || existing?.status === "loading" || existing?.error) {
+  if (existing?.url || (existing?.status === "loading" && !force) || (existing?.error && !force)) {
     applyInlinePreviewVideoState(scope, clipIndex, key);
     return;
   }
-  state.previewInlineVideos[key] = { status: "loading" };
+  const attempt = Math.max(1, Number(retryAttempt || 0) + 1);
+  state.previewInlineVideos[key] = { status: "loading", attempt, inspectOnly };
   applyInlinePreviewVideoState(scope, clipIndex, key);
   const endpoint = scope === "mix" ? "/api/mix/preview/clip-video" : "/api/smart-cut/preview/clip-video";
   try {
@@ -9582,9 +9885,29 @@ async function ensureInlinePreviewVideo(scope = "smart", index = null, { inspect
         updated_at: draft.updated_at || Date.now(),
       }),
     });
-    state.previewInlineVideos[key] = { status: "ready", url: result.url };
+    state.previewInlineVideos[key] = { status: "ready", url: result.url, attempt, inspectOnly };
   } catch (error) {
-    state.previewInlineVideos[key] = { status: "failed", error: error.message || String(error || "\u672a\u77e5\u9519\u8bef") };
+    const failed = {
+      status: "failed",
+      error: error.message || String(error || "\u672a\u77e5\u9519\u8bef"),
+      attempt,
+      inspectOnly,
+      retryable: isRetryableInlinePreviewError(error),
+    };
+    state.previewInlineVideos[key] = failed;
+    applyInlinePreviewVideoState(scope, clipIndex, key);
+    if (failed.retryable && retryAttempt < 1) {
+      window.setTimeout(() => {
+        const latest = state.previewInlineVideos[key];
+        const latestPreview = getPreviewState(scope);
+        const latestClip = latestPreview?.clips?.find((item) => Number(item.index) === clipIndex);
+        const latestDraft = inspectOnly ? null : buildPreviewDraftFromState(scope);
+        const latestKey = latestClip ? previewInlineVideoKey(scope, latestPreview, latestClip, latestDraft, { inspectOnly }) : "";
+        if (latest?.status !== "failed" || Number(latest.attempt) !== attempt || latestKey !== key) return;
+        ensureInlinePreviewVideo(scope, clipIndex, { inspectOnly, force: true, retryAttempt: retryAttempt + 1 });
+      }, 450);
+    }
+    return;
   }
   applyInlinePreviewVideoState(scope, clipIndex, key);
 }
@@ -9714,9 +10037,8 @@ function renderPreviewWorkbenchVideoStage(scope, preview, current) {
     return '<section class="preview-workbench-video"><div class="preview-sequence-empty"><strong>\u70b9\u51fb\u5de6\u4fa7\u5019\u9009\u7247\u6bb5\u5f00\u59cb\u9009\u7247</strong><span>\u89c6\u9891\u4f1a\u5728\u8fd9\u91cc\u5c55\u793a\u3002</span></div></section>';
   }
   const selected = isPreviewWorkbenchSelected(clip);
-  const text = current.inspectOnly ? String(clip.text || '\u672a\u8bc6\u522b\u53e3\u64ad') : selectedPreviewText(clip);
   const addButton = selected ? '' : '<button class="button button-secondary button-small" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165\u5df2\u9009</button>';
-  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div><p class="preview-current-text">' + escapeHtml(text || '\u672a\u8bc6\u522b\u53e3\u64ad') + '</p>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
+  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
 }
 
 function renderPreviewEditorSentence(scope, clip, segment, position) {
@@ -9799,13 +10121,56 @@ function bindDirectPreviewWorkbenchActions() {
     } else if (action === 'preview-workbench-preview-current') {
       event.preventDefault();
       previewCurrentWorkbenchClip(scope);
+    } else if (action === 'preview-inline-retry') {
+      event.preventDefault();
+      ensureInlinePreviewVideo(scope, Number(target.dataset.previewIndex), {
+        inspectOnly: target.dataset.previewInspectOnly === 'true',
+        force: true,
+      });
+    } else if (action === 'preview-word-audition') {
+      event.preventDefault();
+      auditionPreviewWordEdit(scope).catch(function () {});
+    } else if (action === 'preview-word-undo') {
+      event.preventDefault();
+      undoPreviewWordEdit(scope);
     } else if (action === 'preview-word-toggle') {
       event.preventDefault();
       togglePreviewWordSelection(Number(target.dataset.previewClip), Number(target.dataset.previewSegment), Number(target.dataset.previewWord), scope);
     } else if (action === 'preview-word-group-toggle') {
       event.preventDefault();
+      const info = previewWordButtonInfo(target);
+      if (shouldSkipPreviewWordClick(info)) return;
+      if (event.shiftKey && applyPreviewWordRangeFromAnchor(info)) return;
+      rememberPreviewWordRangeAnchor(info);
       togglePreviewWordGroupSelection(Number(target.dataset.previewClip), Number(target.dataset.previewSegment), target.dataset.previewWordGroup || '', scope);
     }
+  });
+
+  document.body.addEventListener('pointerdown', (event) => {
+    const info = previewWordButtonInfo(event.target);
+    if (info) beginPreviewWordRangeGesture(info, event);
+  });
+
+  document.body.addEventListener('pointermove', (event) => {
+    if (!state.previewWordRangeGesture) return;
+    updatePreviewWordRangeGesture(event);
+    if (state.previewWordRangeGesture?.dragging) event.preventDefault();
+  });
+
+  document.body.addEventListener('pointerup', (event) => {
+    if (finishPreviewWordRangeGesture(event)) event.preventDefault();
+  });
+
+  document.body.addEventListener('pointercancel', () => clearPreviewWordRangeGesture());
+
+  document.body.addEventListener('keydown', (event) => {
+    const insideWorkbench = event.target?.closest?.('[data-preview-workbench]');
+    const isUndo = (event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'z';
+    if (!insideWorkbench || !isUndo || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+    const scope = insideWorkbench.dataset.previewWorkbench || 'smart';
+    if (!previewWordEditHistory(scope).length) return;
+    event.preventDefault();
+    undoPreviewWordEdit(scope);
   });
 }
 
@@ -10327,14 +10692,233 @@ function togglePreviewWordGroupSelection(clipIndex, segmentIndex, rawIndices, sc
   const words = previewSegmentWords(segment).filter(function (word) { return indices.has(Number(word.index)) && !isPreviewWordLocked(word); });
   if (!words.length) return;
   const restoreWords = words.some(function (word) { return word.selected === false; });
-  words.forEach(function (word) { word.selected = restoreWords; });
+  applyPreviewWordSelection(clipIndex, segmentIndex, words.map(function (word) { return Number(word.index); }), restoreWords, scope);
+}
+
+function previewWordGroupIndices(rawIndices) {
+  return String(rawIndices || "").split(",").map(Number).filter(Number.isInteger);
+}
+
+function previewWordButtonInfo(node) {
+  const button = node?.closest?.('[data-action="preview-word-group-toggle"]');
+  if (!button) return null;
+  const clipIndex = Number(button.dataset.previewClip);
+  const segmentIndex = Number(button.dataset.previewSegment);
+  const indices = previewWordGroupIndices(button.dataset.previewWordGroup);
+  if (!Number.isInteger(clipIndex) || !Number.isInteger(segmentIndex) || !indices.length) return null;
+  return { button, scope: button.dataset.previewScope || "smart", clipIndex, segmentIndex, indices };
+}
+
+function previewWordRangeIndices(scope, clipIndex, segmentIndex, leftIndices, rightIndices) {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === Number(clipIndex); });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === Number(segmentIndex); });
+  if (!segment) return [];
+  const words = previewSegmentWords(segment).filter(function (word) { return !isPreviewWordLocked(word); });
+  const leftSet = new Set(leftIndices || []);
+  const rightSet = new Set(rightIndices || []);
+  const left = words.findIndex(function (word) { return leftSet.has(Number(word.index)); });
+  const right = words.findIndex(function (word) { return rightSet.has(Number(word.index)); });
+  if (left < 0 || right < 0) return [];
+  return words.slice(Math.min(left, right), Math.max(left, right) + 1).map(function (word) { return Number(word.index); });
+}
+
+function previewWordEditHistory(scope = "smart") {
+  if (!Array.isArray(state.previewWordEditHistory?.[scope])) state.previewWordEditHistory[scope] = [];
+  return state.previewWordEditHistory[scope];
+}
+
+function recordPreviewWordEdit(scope, clip, segment) {
+  const history = previewWordEditHistory(scope);
+  history.push({
+    clipIndex: Number(clip.index),
+    segmentIndex: Number(segment.index),
+    selected: previewSegmentWords(segment).map(function (word) { return [Number(word.index), word.selected !== false]; }),
+    segmentSelected: segment.selected !== false,
+    wordSelectionExplicit: segment.wordSelectionExplicit === true,
+    clipSelected: clip.selected !== false,
+  });
+  if (history.length > 50) history.shift();
+}
+
+function refreshPreviewWordSelection(clip, segment, scope = "smart") {
   const selectable = previewSegmentWords(segment).filter(function (word) { return !isPreviewWordLocked(word); });
   segment.wordSelectionExplicit = selectedPreviewWords(segment).length !== selectable.length;
   segment.selected = selectedPreviewWords(segment).length > 0;
   clip.selected = previewSegments(clip).some(isPreviewSegmentSelected);
-  setPreviewAssemblyMembership(scope, Number(clipIndex), clip.selected);
+  setPreviewAssemblyMembership(scope, Number(clip.index), clip.selected);
+}
+
+function applyPreviewWordSelection(clipIndex, segmentIndex, indices, selected, scope = "smart") {
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === Number(clipIndex); });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === Number(segmentIndex); });
+  const wanted = new Set((indices || []).map(Number).filter(Number.isInteger));
+  const words = previewSegmentWords(segment).filter(function (word) { return wanted.has(Number(word.index)) && !isPreviewWordLocked(word); });
+  if (!clip || !segment || !words.length || segment.selection_locked === true) return false;
+  const changed = words.some(function (word) { return (word.selected !== false) !== selected; });
+  if (!changed) return false;
+  recordPreviewWordEdit(scope, clip, segment);
+  words.forEach(function (word) { word.selected = selected; });
+  refreshPreviewWordSelection(clip, segment, scope);
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
+  return true;
+}
+
+function rememberPreviewWordRangeAnchor(info) {
+  if (!info) return;
+  state.previewWordRangeAnchors[info.scope] = {
+    clipIndex: info.clipIndex,
+    segmentIndex: info.segmentIndex,
+    indices: [...info.indices],
+  };
+}
+
+function applyPreviewWordRangeFromAnchor(info) {
+  const anchor = state.previewWordRangeAnchors?.[info?.scope];
+  if (!info || !anchor || anchor.clipIndex !== info.clipIndex || anchor.segmentIndex !== info.segmentIndex) return false;
+  const indices = previewWordRangeIndices(info.scope, info.clipIndex, info.segmentIndex, anchor.indices, info.indices);
+  const preview = getPreviewState(info.scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === info.clipIndex; });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === info.segmentIndex; });
+  const words = previewSegmentWords(segment).filter(function (word) { return indices.includes(Number(word.index)); });
+  if (!words.length) return false;
+  const restoreWords = words.some(function (word) { return word.selected === false; });
+  const changed = applyPreviewWordSelection(info.clipIndex, info.segmentIndex, indices, restoreWords, info.scope);
+  rememberPreviewWordRangeAnchor(info);
+  return changed;
+}
+
+function updatePreviewWordRangeGestureUi(gesture) {
+  const selector = '[data-action="preview-word-group-toggle"][data-preview-scope="' + gesture.scope + '"][data-preview-clip="' + gesture.clipIndex + '"][data-preview-segment="' + gesture.segmentIndex + '"]';
+  const active = new Set(gesture.indices || []);
+  const anchor = new Set(gesture.anchorIndices || []);
+  document.querySelectorAll(selector).forEach(function (button) {
+    const indices = previewWordGroupIndices(button.dataset.previewWordGroup);
+    button.classList.toggle("is-range-preview", indices.some(function (index) { return active.has(index); }));
+    button.classList.toggle("is-range-anchor", indices.some(function (index) { return anchor.has(index); }));
+  });
+}
+
+function clearPreviewWordRangeGesture() {
+  const gesture = state.previewWordRangeGesture;
+  if (gesture) {
+    const selector = '[data-action="preview-word-group-toggle"][data-preview-scope="' + gesture.scope + '"][data-preview-clip="' + gesture.clipIndex + '"][data-preview-segment="' + gesture.segmentIndex + '"]';
+    document.querySelectorAll(selector).forEach(function (button) { button.classList.remove("is-range-preview", "is-range-anchor"); });
+  }
+  state.previewWordRangeGesture = null;
+}
+
+function beginPreviewWordRangeGesture(info, event) {
+  if (!info || event.button !== 0) return;
+  state.previewWordRangeGesture = {
+    scope: info.scope,
+    clipIndex: info.clipIndex,
+    segmentIndex: info.segmentIndex,
+    pointerId: event.pointerId,
+    anchorIndices: [...info.indices],
+    activeIndices: [...info.indices],
+    indices: [...info.indices],
+    dragging: false,
+  };
+}
+
+function updatePreviewWordRangeGesture(event) {
+  const gesture = state.previewWordRangeGesture;
+  if (!gesture || (Number.isInteger(gesture.pointerId) && gesture.pointerId !== event.pointerId)) return;
+  const info = previewWordButtonInfo(document.elementFromPoint(event.clientX, event.clientY));
+  if (!info || info.scope !== gesture.scope || info.clipIndex !== gesture.clipIndex || info.segmentIndex !== gesture.segmentIndex) return;
+  const indices = previewWordRangeIndices(gesture.scope, gesture.clipIndex, gesture.segmentIndex, gesture.anchorIndices, info.indices);
+  if (!indices.length) return;
+  const changedTarget = String(indices) !== String(gesture.indices);
+  gesture.activeIndices = [...info.indices];
+  gesture.indices = indices;
+  gesture.dragging = gesture.dragging || changedTarget;
+  if (gesture.dragging) updatePreviewWordRangeGestureUi(gesture);
+}
+
+function finishPreviewWordRangeGesture(event) {
+  const gesture = state.previewWordRangeGesture;
+  if (!gesture || (Number.isInteger(gesture.pointerId) && gesture.pointerId !== event.pointerId)) return false;
+  clearPreviewWordRangeGesture();
+  if (!gesture.dragging) return false;
+  const preview = getPreviewState(gesture.scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === gesture.clipIndex; });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === gesture.segmentIndex; });
+  const words = previewSegmentWords(segment).filter(function (word) { return gesture.indices.includes(Number(word.index)); });
+  const restoreWords = words.some(function (word) { return word.selected === false; });
+  state.previewWordSkipClick = { scope: gesture.scope, clipIndex: gesture.clipIndex, segmentIndex: gesture.segmentIndex, indices: [...gesture.activeIndices], expiresAt: Date.now() + 800 };
+  rememberPreviewWordRangeAnchor({ scope: gesture.scope, clipIndex: gesture.clipIndex, segmentIndex: gesture.segmentIndex, indices: gesture.activeIndices });
+  return applyPreviewWordSelection(gesture.clipIndex, gesture.segmentIndex, gesture.indices, restoreWords, gesture.scope);
+}
+
+function shouldSkipPreviewWordClick(info) {
+  const skip = state.previewWordSkipClick;
+  if (!skip || Date.now() > Number(skip.expiresAt || 0)) {
+    state.previewWordSkipClick = null;
+    return false;
+  }
+  const matches = info && skip.scope === info.scope && skip.clipIndex === info.clipIndex && skip.segmentIndex === info.segmentIndex
+    && info.indices.some(function (index) { return (skip.indices || []).includes(index); });
+  state.previewWordSkipClick = null;
+  return matches;
+}
+
+function undoPreviewWordEdit(scope = "smart") {
+  const history = previewWordEditHistory(scope);
+  const previous = history.pop();
+  if (!previous) return;
+  const preview = getPreviewState(scope);
+  const clip = preview?.clips?.find(function (item) { return Number(item.index) === Number(previous.clipIndex); });
+  const segment = previewSegments(clip).find(function (item) { return Number(item.index) === Number(previous.segmentIndex); });
+  if (!clip || !segment) return;
+  const selectedByIndex = new Map(previous.selected || []);
+  previewSegmentWords(segment).forEach(function (word) {
+    if (!isPreviewWordLocked(word) && selectedByIndex.has(Number(word.index))) word.selected = selectedByIndex.get(Number(word.index));
+  });
+  segment.selected = previous.segmentSelected;
+  segment.wordSelectionExplicit = previous.wordSelectionExplicit;
+  clip.selected = previous.clipSelected;
+  setPreviewAssemblyMembership(scope, Number(clip.index), clip.selected);
+  commitPreviewDraft(scope);
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
+function previewWordEditStats(scope, clip) {
+  const editableSegments = previewSegments(clip).filter(function (segment) { return segment?.selection_locked !== true; });
+  const before = editableSegments.reduce(function (sum, segment) {
+    const start = Number(segment?.start || 0);
+    const end = Number(segment?.end || start);
+    return sum + Math.max(0, Number(segment?.duration || end - start));
+  }, 0);
+  const current = effectiveClipDuration(clip);
+  const selected = previewWorkbenchSelectedClips(scope, getPreviewState(scope));
+  const total = selected.reduce(function (sum, item) { return sum + effectiveClipDuration(item); }, 0);
+  return { removed: Math.max(0, before - current), current, total };
+}
+
+async function auditionPreviewWordEdit(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const current = previewWorkbenchCurrentClip(scope, preview);
+  if (!current?.clip || current.inspectOnly) return;
+  await ensureInlinePreviewVideo(scope, Number(current.clip.index));
+  const video = previewBox(scope)?.querySelector('[data-preview-inline-video="' + scope + '"][data-preview-index="' + Number(current.clip.index) + '"] [data-preview-inline-player]');
+  if (!video || !video.getAttribute("src")) {
+    toast("正在准备剪口试听，请稍后再试", "info");
+    return;
+  }
+  video.currentTime = 0;
+  try { await video.play(); } catch (_) {}
+}
+
+function renderPreviewWordEditToolbar(scope, clip) {
+  const stats = previewWordEditStats(scope, clip);
+  const undoEnabled = previewWordEditHistory(scope).length > 0;
+  const impact = stats.removed > 0.01
+    ? '已裁 ' + stats.removed.toFixed(1) + 's · 当前片段 ' + stats.current.toFixed(1) + 's · 成片预计 ' + stats.total.toFixed(1) + 's'
+    : '当前片段 ' + stats.current.toFixed(1) + 's · 成片预计 ' + stats.total.toFixed(1) + 's';
+  return '<div class="preview-editor-word-toolbar"><span class="preview-editor-impact" role="status" aria-live="polite">' + impact + '</span><div><button type="button" class="button button-muted button-small" data-action="preview-word-audition" data-preview-scope="' + scope + '">试听当前片段</button><button type="button" class="button button-muted button-small" data-action="preview-word-undo" data-preview-scope="' + scope + '" ' + (undoEnabled ? '' : 'disabled') + '>撤销</button></div></div>';
 }
 
 function renderPreviewEditorSentence(scope, clip, segment, position) {
@@ -10358,9 +10942,9 @@ function renderPreviewEditorSentence(scope, clip, segment, position) {
       }
       const deleted = group.words.length > 0 && group.words.every(function (word) { return word?.selected === false; });
       const indices = group.words.map(function (word) { return Number(word.index); }).filter(Number.isInteger).join(",");
-        return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-group-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word-group="' + indices + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd') + '">' + groupText + '</button>';
+        return '<button type="button" class="preview-word ' + (deleted ? 'is-deleted' : '') + '" data-action="preview-word-group-toggle" data-preview-scope="' + scope + '" data-preview-clip="' + Number(clip.index) + '" data-preview-segment="' + Number(segment.index) + '" data-preview-word-group="' + indices + '" aria-pressed="' + (!deleted ? 'true' : 'false') + '" title="' + (deleted ? '\u70b9\u51fb\u6062\u590d\u8fd9\u4e2a\u8bcd\u5757' : '\u70b9\u51fb\u5220\u9664\u8fd9\u4e2a\u8bcd\u5757') + '">' + groupText + '</button>';
     }).join("");
-    wordHint = '<small class="preview-editor-word-hint">\u70b9\u8bcd\u5220\u9664\uff0c\u518d\u70b9\u4e00\u6b21\u5373\u53ef\u6062\u590d</small>';
+    wordHint = '<small class="preview-editor-word-hint">\u70b9\u51fb\u7cbe\u4fee\uff1b\u62d6\u9009\u8fde\u7eed\u5220\u8bcd\uff1bShift + \u70b9\u51fb\u6269\u5c55\u9009\u533a\uff1bCtrl + Z \u64a4\u9500</small>';
   }
   return '<article class="preview-editor-sentence ' + (!selected ? 'is-deleted' : '') + ' ' + (locked ? 'is-locked' : '') + '"><div class="preview-editor-sentence-head"><label><input type="checkbox" data-preview-segment data-preview-scope="' + scope + '" data-preview-segment-parent="' + Number(clip.index) + '" data-preview-segment-index="' + Number(segment.index) + '" ' + (selected ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '><strong>\u7b2c ' + (position + 1) + ' \u53e5</strong></label><span>' + (locked ? '\u98ce\u9669\u53e5\u4e0d\u53ef\u9009' : (selected ? '\u5df2\u4fdd\u7559' : '\u5df2\u5220\u9664')) + '</span></div><div class="preview-editor-words">' + wordRows + '</div>' + wordHint + (reason ? '<small class="preview-editor-lock-reason">' + escapeHtml(reason) + '</small>' : '') + '</article>';
 }
@@ -10371,7 +10955,7 @@ function renderPreviewSentenceEditor(scope, current) {
   if (!isPreviewWorkbenchSelected(clip)) return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u5148\u770b\u89c6\u9891\uff0c\u52a0\u5165\u5df2\u9009\u540e\u518d\u7cbe\u4fee</span></div></div><div class="preview-sequence-empty"><strong>\u786e\u8ba4\u8fd9\u6bb5\u89c6\u9891\u540e\u70b9\u201c\u52a0\u5165\u5df2\u9009\u201d</strong><span>\u5df2\u9009\u7247\u6bb5\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u5168\u90e8\u53e5\u5b50\u548c\u53ef\u5220\u8bcd\u5757\u3002</span></div></section>';
   const segments = previewSegments(clip);
   const body = segments.length ? segments.map(function (segment, position) { return renderPreviewEditorSentence(scope, clip, segment, position); }).join("") : '<article class="preview-editor-sentence"><div class="preview-editor-words"><span class="preview-word is-static">' + escapeHtml(String(clip.text || "\u672a\u8bc6\u522b\u53e3\u64ad")) + '</span></div></article>';
-  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u52fe\u9009\u4fdd\u7559\u6574\u53e5\uff1b\u70b9\u8bcd\u5757\u5220\u9664\u6216\u6062\u590d</span></div><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</small></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
+  return '<section class="preview-sentence-editor"><div class="preview-workbench-column-head preview-editor-column-head"><div><strong>\u9009\u53e5 / \u5220\u8bcd</strong><span>\u62d6\u9009\u8fde\u7eed\u8bcd\u7ec4\uff0c\u677e\u624b\u540e\u4e00\u6b21\u63d0\u4ea4</span></div><div class="preview-editor-head-actions"><small>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</small>' + renderPreviewWordEditToolbar(scope, clip) + '</div></div><div class="preview-editor-sentence-list">' + body + '</div></section>';
 }
 
 function previewOverviewSourceValue(clip) {

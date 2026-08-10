@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
 ai_clipper = importlib.import_module("ai_clipper")
+content_policy = importlib.import_module("content_policy")
 
 
 def _word_timing_segment(text: str, step: float = 0.2) -> list[dict[str, object]]:
@@ -64,6 +65,41 @@ class CandidateQualityIntegrationTests(unittest.TestCase):
         expected = "".join(str(word["text"]) for word in timings[0]["words"][2:])
         self.assertEqual(repaired[0][1], expected)
         self.assertAlmostEqual(repaired[0][2], 0.4)
+
+    def test_price_announcement_asr_variant_is_excluded_from_safe_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory(
+            [
+                (0.0, 4.0, "经开价喽，这套搭个小草帽就是度假风。"),
+                (4.0, 8.0, "肩线往里收，视觉上看起来更利落。"),
+            ],
+            content_policy=content_policy.default_content_policy(),
+        )
+
+        self.assertEqual([item["srt_index"] for item in inventory], [2])
+
+    def test_short_conjunction_fragment_is_excluded_from_safe_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory([
+            (0.0, 4.0, "但它这根线往里一挪，视觉上更清楚。"),
+            (4.0, 8.0, "肩线往里收，视觉上看起来更利落。"),
+        ])
+
+        self.assertEqual([item["srt_index"] for item in inventory], [2])
+
+    def test_purchase_conditioned_gift_is_excluded_from_safe_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory([
+            (0.0, 5.0, "你买这一身还有洗衣袋给你，然后再讲面料。"),
+            (5.0, 9.0, "不起球也可以机洗，日常打理更省心。"),
+        ])
+
+        self.assertEqual([item["srt_index"] for item in inventory], [2])
+
+    def test_direct_gift_promotion_is_excluded_from_safe_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory([
+            (0.0, 5.0, "我们会赠送洗衣袋给你，套洗衣袋去洗就好。"),
+            (5.0, 9.0, "再生纤维素纤维的手感更软，也不容易起球。"),
+        ])
+
+        self.assertEqual([item["srt_index"] for item in inventory], [2])
 
 
 if __name__ == "__main__":

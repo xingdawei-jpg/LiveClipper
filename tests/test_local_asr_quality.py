@@ -76,43 +76,12 @@ class LocalAsrQualityTests(unittest.TestCase):
         self.assertEqual((corrected[0]["words"][0]["start"], corrected[0]["words"][0]["end"]), (0.0, 0.5))
         self.assertEqual((corrected[0]["words"][1]["start"], corrected[0]["words"][1]["end"]), (0.5, 0.6))
 
-    def test_model_loader_enables_punctuation_and_uses_shorter_vad(self) -> None:
+    def test_model_loader_skips_optional_punctuation_and_uses_shorter_vad(self) -> None:
         calls = []
         sentinel = object()
 
         def fake_auto_model(**kwargs):
             calls.append(kwargs)
-            return sentinel
-
-        fake_auto_module = types.ModuleType("funasr.auto.auto_model")
-        fake_auto_module.AutoModel = fake_auto_model
-        fake_auto_package = types.ModuleType("funasr.auto")
-        fake_funasr = types.ModuleType("funasr")
-        with mock.patch.dict(sys.modules, {
-            "funasr": fake_funasr,
-            "funasr.auto": fake_auto_package,
-            "funasr.auto.auto_model": fake_auto_module,
-        }):
-            with mock.patch.object(local_asr, "_register_sensevoice_components"):
-                with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
-                    local_asr._SENSEVOICE_MODEL = None
-                    local_asr._SENSEVOICE_PUNCTUATION = False
-                    loaded = local_asr._load_sensevoice()
-
-        self.assertIs(loaded, sentinel)
-        self.assertTrue(local_asr._SENSEVOICE_PUNCTUATION)
-        self.assertEqual(calls[0]["punc_model"], "ct-punc")
-        self.assertEqual(calls[0]["vad_kwargs"]["max_single_segment_time"], 15000)
-        local_asr._SENSEVOICE_MODEL = None
-
-    def test_model_loader_falls_back_when_punctuation_model_is_unavailable(self) -> None:
-        calls = []
-        sentinel = object()
-
-        def fake_auto_model(**kwargs):
-            calls.append(kwargs)
-            if kwargs.get("punc_model"):
-                raise RuntimeError("punc unavailable")
             return sentinel
 
         fake_auto_module = types.ModuleType("funasr.auto.auto_model")
@@ -132,8 +101,39 @@ class LocalAsrQualityTests(unittest.TestCase):
 
         self.assertIs(loaded, sentinel)
         self.assertFalse(local_asr._SENSEVOICE_PUNCTUATION)
-        self.assertEqual(len(calls), 2)
-        self.assertNotIn("punc_model", calls[1])
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("punc_model", calls[0])
+        self.assertEqual(calls[0]["vad_kwargs"]["max_single_segment_time"], 15000)
+        local_asr._SENSEVOICE_MODEL = None
+
+    def test_model_loader_does_not_retry_through_optional_punctuation_path(self) -> None:
+        calls = []
+
+        def fake_auto_model(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("core model unavailable")
+
+        fake_auto_module = types.ModuleType("funasr.auto.auto_model")
+        fake_auto_module.AutoModel = fake_auto_model
+        fake_auto_package = types.ModuleType("funasr.auto")
+        fake_funasr = types.ModuleType("funasr")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"APPDATA": temp_dir}, clear=False):
+                with mock.patch.dict(sys.modules, {
+                    "funasr": fake_funasr,
+                    "funasr.auto": fake_auto_package,
+                    "funasr.auto.auto_model": fake_auto_module,
+                }):
+                    with mock.patch.object(local_asr, "_register_sensevoice_components"):
+                        with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
+                            local_asr._SENSEVOICE_MODEL = None
+                            local_asr._SENSEVOICE_PUNCTUATION = False
+                            with self.assertRaisesRegex(local_asr.LocalASRUnavailable, "core model unavailable"):
+                                local_asr._load_sensevoice()
+
+        self.assertFalse(local_asr._SENSEVOICE_PUNCTUATION)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("punc_model", calls[0])
         local_asr._SENSEVOICE_MODEL = None
 
     def test_model_dir_reuses_modelscope_snapshot_cache(self) -> None:
@@ -165,7 +165,7 @@ class LocalAsrQualityTests(unittest.TestCase):
             tokenizer_classes={"SentencepiecesTokenizer": object, "CharTokenizer": object},
             frontend_classes={"WavFrontend": object, "WavFrontendOnline": object},
             encoder_classes={"SenseVoiceEncoderSmall": object, "FSMN": object, "SANMEncoder": object},
-            model_classes={"SenseVoiceSmall": object, "FsmnVADStreaming": object, "CTTransformer": object},
+            model_classes={"SenseVoiceSmall": object, "FsmnVADStreaming": object},
             specaug_classes={"SpecAugLFR": object},
         )
         fake_funasr = types.ModuleType("funasr")
@@ -186,6 +186,7 @@ class LocalAsrQualityTests(unittest.TestCase):
                     local_asr._register_sensevoice_components()
 
         self.assertEqual(imported, list(local_asr._SENSEVOICE_REGISTRATION_MODULES))
+        self.assertNotIn("funasr.models.ct_transformer.model", imported)
 
     def test_srt_is_resegmented_but_sidecar_keeps_corrected_ctc_tokens(self) -> None:
         spoken = "这个板型很好小个字也可以穿"
@@ -238,6 +239,11 @@ class LocalAsrQualityTests(unittest.TestCase):
                 json.dumps({"provider": "sensevoice", "segments": [{"words": _timed_characters("测试")}]}),
                 encoding="utf-8",
             )
+            source_quality = root / "generated.asr_quality.json"
+            source_quality.write_text(
+                json.dumps({"schema": "liveclipper.local-asr-quality.v1"}),
+                encoding="utf-8",
+            )
 
             copied_timing = cutter_logic._copy_srt_with_word_timing_sidecar(source_srt, destination_srt)
 
@@ -246,6 +252,10 @@ class LocalAsrQualityTests(unittest.TestCase):
             self.assertEqual(
                 json.loads((root / "video.words.json").read_text(encoding="utf-8")),
                 json.loads(source_sidecar.read_text(encoding="utf-8")),
+            )
+            self.assertEqual(
+                json.loads((root / "video.asr_quality.json").read_text(encoding="utf-8")),
+                json.loads(source_quality.read_text(encoding="utf-8")),
             )
 
     def test_mix_cache_removes_stale_word_timing_when_source_has_none(self) -> None:
@@ -395,6 +405,13 @@ class LocalAsrQualityTests(unittest.TestCase):
             self.assertFalse(recognized)
             self.assertFalse(output_srt.exists())
             self.assertFalse(output_srt.with_suffix(".words.json").exists())
+
+    def test_native_access_violation_has_actionable_worker_diagnostic(self) -> None:
+        message = stt._local_asr_exit_diagnostic(3221225477)
+
+        self.assertIn("0xC0000005", message)
+        self.assertIn("停止重试", message)
+        self.assertIn("云端识别", message)
 
     def test_worker_timeout_terminates_process_and_reports_memory_release(self) -> None:
         class FakeProcess:

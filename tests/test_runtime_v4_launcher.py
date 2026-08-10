@@ -233,10 +233,10 @@ class RuntimeV4LauncherTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             [call.kwargs["hash_mode"] for call in verify_core.call_args_list],
-            ["entrypoint"],
+            ["metadata"],
         )
 
-    def test_changed_internal_core_requires_runtime_health_and_rolls_back(self) -> None:
+    def test_changed_internal_core_forces_full_verification_and_rolls_back(self) -> None:
         state_path = self._write_state(pending=False)
         state = json.loads(state_path.read_text(encoding="utf-8"))
         fully_verified = launcher._validated_selection(self.install, self.current)
@@ -256,14 +256,15 @@ class RuntimeV4LauncherTests(unittest.TestCase):
                 launcher,
                 "_wait_for_health",
                 return_value=(False, "simulated runtime health failure"),
-            ),
+            ) as wait_for_health,
         ):
             result = launcher.run(self.install)
         rolled_back = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(result, 2)
         self.assertEqual(rolled_back["current"], self.previous.as_dict())
-        self.assertEqual(launch_process.call_count, 2)
-        self.assertIn("simulated runtime health failure", rolled_back["rollback_reason"])
+        self.assertEqual(launch_process.call_count, 1)
+        wait_for_health.assert_not_called()
+        self.assertIn("core file digest mismatch", rolled_back["rollback_reason"])
 
     def test_unhealthy_first_launch_rolls_back_the_selection_pair(self) -> None:
         state_path = self._write_state()

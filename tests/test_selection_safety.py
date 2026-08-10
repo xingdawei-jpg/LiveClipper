@@ -21,6 +21,7 @@ class LiveInteractionSafetyTests(unittest.TestCase):
             "158的女孩子是S。但是我跟你说，那个小女人这个女生。",
             "我一。7米，我是大女。我是我1.7哦。",
             "105斤的你直接M码。",
+            "160斤以内轻松驾驭，可以单买上衣。",
             "你子身高170，体重105，上身的东西看一下吧。",
             "姐妹有尺码问题抓紧问。",
             "1.6米98S码。好看吧。",
@@ -113,6 +114,11 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         self.assertEqual([candidate[0] for candidate in candidates], [2])
         self.assertTrue(ai_clipper._is_bad_hook_candidate_text("直接炸了吧，因为这个款式也拖欠你们特别久了。"))
         self.assertFalse(ai_clipper._is_bad_hook_candidate_text("这个豹纹晕染上身显白，整个人气色更亮。"))
+        self.assertTrue(
+            ai_clipper._is_bad_hook_candidate_text(
+                "这件反正我建议大家夏天第一点这衣服你说显瘦吗"
+            )
+        )
         self.assertEqual(
             selection_safety.hook_ineligible_reason("很 duang 的"),
             "空泛口头语不可作Hook",
@@ -123,6 +129,83 @@ class LiveInteractionSafetyTests(unittest.TestCase):
                 "很 duang 的这个裤子它不是纯亚麻，它是天丝亚麻。"
             )
         )
+
+    def test_malformed_audience_benefit_fragment_cannot_be_hook_but_stays_body(self) -> None:
+        malformed = "你们机洗水洗久穿久如新的整件衣服能够做到遮肉显瘦"
+        product = "这件衣服机洗水洗以后依然很挺，久穿也不会变形。"
+        clips = [
+            ("hook", malformed, 0.0, 4.4, 50, 4.4),
+            ("product", malformed, 4.5, 8.9, 50, 4.4),
+            ("hook", product, 9.0, 13.0, 50, 4.0),
+        ]
+
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text(malformed))
+        self.assertFalse(content_review._reviewable_hook_text(malformed))
+        self.assertFalse(ai_clipper._is_bad_hook_candidate_text(product))
+
+        safe = ai_clipper._filter_low_value_hook_clips(clips)
+
+        self.assertEqual([clip[1] for clip in safe], [malformed, product])
+        self.assertEqual([clip[0] for clip in safe], ["product", "hook"])
+        report = ai_clipper._build_plan_quality_report(
+            clips[:2],
+            [(0.0, 4.4, malformed), (4.5, 8.9, malformed)],
+        )
+        self.assertEqual(report["status"], "fail")
+        self.assertTrue(any("Hook不合格" in item for item in report["hard_failures"]))
+
+    def test_delayed_try_on_promise_is_removed_as_live_interaction(self) -> None:
+        text = "4号衬量搭配，你想小只，我等会儿穿给你看可以不？"
+        source = (
+            "1\n00:00:00,000 --> 00:00:03,000\n" + text + "\n\n"
+            "2\n00:00:03,200 --> 00:00:06,200\n"
+            "色织从纱线源头定做，整件颜色更均匀。\n"
+        )
+
+        self.assertEqual(
+            selection_safety.live_interaction_or_size_response_reason(text),
+            "直播互动回复",
+        )
+        self.assertEqual(selection_safety.hook_ineligible_reason(text), "直播互动回复")
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text(text))
+        self.assertNotIn(text, ai_clipper._freeze_director_candidates(source))
+
+        safe, audit = ai_clipper._director_hard_audit(
+            [
+                ("hook", text, 0.0, 3.0, 50, 3.0),
+                ("product", "色织从纱线源头定做，整件颜色更均匀。", 3.2, 6.2, 50, 3.0),
+            ],
+            6,
+            8,
+        )
+        self.assertFalse(any(text in str(clip[1]) for clip in safe))
+        self.assertGreaterEqual(audit["hard_removed"], 1)
+
+    def test_audience_verdict_prompt_is_removed_as_live_interaction(self) -> None:
+        text = "你们自己说吧，本期款好不好？行不行？"
+
+        self.assertEqual(
+            selection_safety.live_interaction_or_size_response_reason(text),
+            "直播互动回复",
+        )
+        self.assertEqual(selection_safety.hook_ineligible_reason(text), "直播互动回复")
+        self.assertTrue(ai_clipper._is_bad_hook_candidate_text(text))
+
+    def test_plan_quality_fails_closed_for_invalid_hook(self) -> None:
+        clips = [
+            ("hook", "4号衬量搭配，你想小只，我等会儿穿给你看可以不？", 0.0, 3.0, 50, 3.0),
+            ("product", "色织从纱线源头定做，整件颜色更均匀。", 3.2, 6.2, 50, 3.0),
+        ]
+        report = ai_clipper._build_plan_quality_report(
+            clips,
+            [
+                (0.0, 3.0, clips[0][1]),
+                (3.2, 6.2, clips[1][1]),
+            ],
+        )
+
+        self.assertEqual(report["status"], "fail")
+        self.assertTrue(report["hard_failures"])
 
         self.assertTrue(
             ai_clipper._is_bad_hook_candidate_text(

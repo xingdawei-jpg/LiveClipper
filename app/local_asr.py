@@ -20,7 +20,7 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from local_asr_chunking import build_pause_aware_audio_chunks, write_audio_chunk
+from local_asr_chunking import AudioChunk, build_pause_aware_audio_chunks, write_audio_chunk
 
 
 _SENSEVOICE_MODEL: Any | None = None
@@ -30,8 +30,10 @@ _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z]+(?:['-][A-Za-z]+)*|\d+(?:[.,:]
 
 # FunASR discovers registered components dynamically in a normal Python
 # installation. PyInstaller does not expose every package file to that scan,
-# so package the exact components used by SenseVoice, VAD, and ct-punc and
-# import them explicitly before AutoModel reads a model configuration.
+# so package the exact components used by SenseVoice and VAD and import them
+# explicitly before AutoModel reads a model configuration.  Do not import the
+# optional ct-punc stack here: it pulls in jieba and additional Torch modules,
+# and a native crash in that optional path cannot be recovered by the worker.
 _SENSEVOICE_REGISTRATION_MODULES = (
     "funasr.tokenizer.sentencepiece_tokenizer",
     "funasr.tokenizer.char_tokenizer",
@@ -42,7 +44,6 @@ _SENSEVOICE_REGISTRATION_MODULES = (
     "funasr.models.fsmn_vad_streaming.encoder",
     "funasr.models.fsmn_vad_streaming.model",
     "funasr.models.sanm.encoder",
-    "funasr.models.ct_transformer.model",
     "funasr.models.specaug.specaug",
 )
 _SENSEVOICE_REQUIRED_COMPONENTS = (
@@ -55,7 +56,6 @@ _SENSEVOICE_REQUIRED_COMPONENTS = (
     ("encoder_classes", "SANMEncoder"),
     ("model_classes", "SenseVoiceSmall"),
     ("model_classes", "FsmnVADStreaming"),
-    ("model_classes", "CTTransformer"),
     ("specaug_classes", "SpecAugLFR"),
 )
 
@@ -251,44 +251,23 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
             "disable_update": True,
         }
         try:
-            _SENSEVOICE_MODEL = _run_modelscope_quietly(
-                lambda: AutoModel(punc_model="ct-punc", **model_kwargs)
-            )
-            _SENSEVOICE_PUNCTUATION = True
+            _SENSEVOICE_MODEL = _run_modelscope_quietly(lambda: AutoModel(**model_kwargs))
+            _SENSEVOICE_PUNCTUATION = False
             if log_fn:
-                log_fn("SenseVoice 标点恢复已启用")
-        except Exception as punctuation_error:
-            # Write full traceback to file for frozen-build debugging
+                log_fn("SenseVoice 已跳过可选标点模型，使用停顿断句")
+        except Exception as exc:
             try:
                 debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
                 os.makedirs(os.path.dirname(debug_log), exist_ok=True)
                 with open(debug_log, "a", encoding="utf-8") as _df:
-                    _df.write(f"\n--- {datetime.now()} ---\n")
-                    _df.write("Error: {}\n".format(punctuation_error))
+                    _df.write(f"--- SenseVoice AutoModel FAILED at {datetime.now()} ---\n")
+                    _df.write("Error: {}\n".format(exc))
                     _df.write("cwd: {}\n".format(os.getcwd()))
                     _df.write("sys.path: {}\n".format(sys.path))
                     traceback.print_exc(file=_df)
             except Exception:
                 pass
-            if log_fn:
-                log_fn(f"标点恢复模型不可用，继续使用停顿断句: {punctuation_error}")
-            try:
-                _SENSEVOICE_MODEL = _run_modelscope_quietly(
-                    lambda: AutoModel(**model_kwargs)
-                )
-                _SENSEVOICE_PUNCTUATION = False
-            except Exception as exc:
-                # Write traceback for fallback failure
-                try:
-                    debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
-                    os.makedirs(os.path.dirname(debug_log), exist_ok=True)
-                    with open(debug_log, "a", encoding="utf-8") as _df:
-                        _df.write(f"--- fallback AutoModel FAILED at {datetime.now()} ---\n")
-                        _df.write("Error: {}\n".format(exc))
-                        traceback.print_exc(file=_df)
-                except Exception:
-                    pass
-                raise LocalASRUnavailable(f"SenseVoice model unavailable: {exc}") from exc
+            raise LocalASRUnavailable(f"SenseVoice model unavailable: {exc}") from exc
     return _SENSEVOICE_MODEL
 
 
@@ -442,11 +421,142 @@ def _sensevoice_pause_aware_segments(
     return segments, len(chunks), hard_boundaries
 
 
+def _local_asr_review_settings() -> dict[str, Any]:
+    """Load existing ASR settings only after local recognition has succeeded."""
+    try:
+        from ai_clipper import load_settings
+
+        settings = load_settings()
+        return dict(settings) if isinstance(settings, dict) else {}
+    except Exception:
+        return {}
+
+
+def _offset_cloud_retry_segments(
+    raw_segments: object,
+    finding: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Translate a retry response back to its original audio window."""
+    offset = float(finding["start"])
+    window_end = float(finding["end"])
+    restored: list[dict[str, Any]] = []
+    for raw_segment in list(raw_segments or []):
+        if not isinstance(raw_segment, dict):
+            continue
+        try:
+            start = offset + float(raw_segment.get("start"))
+            end = offset + float(raw_segment.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        words = []
+        for raw_word in list(raw_segment.get("words") or []):
+            if not isinstance(raw_word, dict):
+                continue
+            try:
+                word_start = offset + float(raw_word.get("start"))
+                word_end = offset + float(raw_word.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if word_end <= word_start:
+                continue
+            words.append({
+                **raw_word,
+                "start": round(max(offset, word_start), 3),
+                "end": round(min(window_end, word_end), 3),
+            })
+        restored.append({
+            **raw_segment,
+            "start": round(max(offset, start), 3),
+            "end": round(min(window_end, end), 3),
+            "words": words,
+        })
+    return restored
+
+
+def _retry_sensevoice_window_with_volcengine(
+    audio_path: str,
+    finding: dict[str, Any],
+    settings: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Retry one exact local-audio window with the configured word-timed cloud ASR."""
+    start = float(finding["start"])
+    end = float(finding["end"])
+    if end - start < 1.0:
+        return None
+    with tempfile.TemporaryDirectory(prefix="liveclipper_asr_review_") as temp_dir:
+        retry_audio = str(Path(temp_dir) / "review.wav")
+        write_audio_chunk(audio_path, retry_audio, AudioChunk(start, end, "quality_retry"))
+        from volcengine_asr import volcengine_asr
+
+        retried = volcengine_asr(
+            retry_audio,
+            str(settings.get("volc_app_id") or ""),
+            str(settings.get("volc_access_token") or ""),
+            str(settings.get("volc_tos_ak") or ""),
+            str(settings.get("volc_tos_sk") or ""),
+            bucket=str(settings.get("volc_bucket") or "livec"),
+            region=str(settings.get("volc_region") or "cn-beijing"),
+            timeout=120,
+            api_key=str(settings.get("volc_api_key") or "") or None,
+        )
+    return _offset_cloud_retry_segments(retried, finding)
+
+
+def _review_sensevoice_segments(
+    segments: list[dict[str, Any]],
+    audio_path: str,
+    srt_output: str,
+    log_fn: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Record ASR quality and safely replace only successful cloud retry windows."""
+    from local_asr_review import cloud_retry_eligibility, review_segments, write_quality_report
+
+    settings = _local_asr_review_settings()
+    retry_enabled, retry_reason = cloud_retry_eligibility(settings)
+    initial_segments, initial_report = review_segments(segments, retry_enabled=False)
+    flagged_count = int((initial_report.get("initial") or {}).get("flagged_count") or 0)
+    flagged_seconds = float((initial_report.get("initial") or {}).get("flagged_seconds") or 0.0)
+    if log_fn and flagged_count:
+        log_fn(f"本地 ASR 质量扫描: 发现 {flagged_count} 段可疑文本（约{flagged_seconds:.1f}s）")
+    if retry_enabled and flagged_count and log_fn:
+        log_fn("本地 ASR 局部复核: 使用已启用的云端词级识别，仅复核可疑时间段")
+
+    retry_callback = None
+    if retry_enabled:
+        retry_callback = lambda finding: _retry_sensevoice_window_with_volcengine(
+            audio_path,
+            finding,
+            settings,
+        )
+    reviewed, report = review_segments(
+        initial_segments,
+        retry_enabled=retry_enabled,
+        retry_callback=retry_callback,
+    )
+    report["retry"]["eligibility"] = retry_reason
+    report_path = write_quality_report(srt_output, report)
+    retry = dict(report.get("retry") or {})
+    if log_fn and int(retry.get("replaced_count") or 0):
+        log_fn(
+            "本地 ASR 局部复核完成: "
+            f"已替换 {int(retry.get('replaced_count') or 0)} 段，"
+            "全局词级时间保持在原音频范围内"
+        )
+    elif log_fn and flagged_count and not retry_enabled:
+        log_fn(f"本地 ASR 局部复核未启用: {retry_reason}，保留原始识别结果")
+    if log_fn and report_path is not None:
+        log_fn(f"本地 ASR 质量报告已保存: {report_path.name}")
+    return reviewed
+
+
 def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], None] | None = None) -> bool:
     """Run SenseVoice CPU ASR and persist SRT plus CTC-aligned word timings."""
     model = _load_sensevoice(log_fn)
     if log_fn:
-        log_fn("启动本地 SenseVoice 高质量识别（标点恢复 + CTC 时间对齐）...")
+        segmentation = "标点恢复" if _SENSEVOICE_PUNCTUATION else "停顿断句"
+        log_fn(f"启动本地 SenseVoice 高质量识别（{segmentation} + CTC 时间对齐）...")
     try:
         segments, input_chunk_count, _hard_boundaries = _sensevoice_pause_aware_segments(
             model,
@@ -457,6 +567,8 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
         raise LocalASRUnavailable(f"SenseVoice inference failed: {exc}") from exc
     if not segments:
         raise LocalASRUnavailable("SenseVoice returned no timestamped speech segments")
+
+    segments = _review_sensevoice_segments(segments, audio_path, srt_output, log_fn=log_fn)
 
     from local_asr_quality import improve_sensevoice_segments
     from volcengine_asr import semantic_segments_to_srt, write_word_timing_sidecar

@@ -31,7 +31,21 @@ from selection_contracts import (
 )
 from selection_context import build_selection_context
 from category_profiles import iter_vertical_profiles, resolve_vertical_profile
-from candidate_quality import candidate_quality_flags, filter_candidate_clips, leading_fragment_trim
+from candidate_quality import (
+    candidate_quality_flags,
+    filter_candidate_clips,
+    hook_candidate_quality_flags,
+    leading_fragment_trim,
+)
+from content_policy import (
+    blocks_role,
+    default_content_policy,
+    interaction_policy_kind,
+    matching_custom_rule,
+    normalize_content_policy,
+    policy_prompt_lines,
+    preferred_kinds,
+)
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
@@ -103,6 +117,7 @@ def _begin_analysis_metadata():
         "selection_result": {},
         "source_contract": {},
         "content_review_summary": {},
+        "marketing_intent_summary": {},
         "candidate_safety_summary": {},
         "selection_context_summary": {},
         "ai_plan_report": {},
@@ -178,6 +193,7 @@ def get_last_analysis_metadata():
         "selection_result": dict(metadata.get("selection_result") or {}),
         "source_contract": dict(metadata.get("source_contract") or {}),
         "content_review_summary": dict(metadata.get("content_review_summary") or {}),
+        "marketing_intent_summary": dict(metadata.get("marketing_intent_summary") or {}),
         "candidate_safety_summary": dict(metadata.get("candidate_safety_summary") or {}),
         "selection_context_summary": dict(metadata.get("selection_context_summary") or {}),
         "ai_plan_report": dict(metadata.get("ai_plan_report") or {}),
@@ -1309,7 +1325,8 @@ _TOPIC_EVIDENCE_KEYWORDS = {
     ),
     "工艺细节": (
         "工艺", "拼接", "包边", "锁边", "加固", "扣子", "纽扣", "亨利扣", "领口", "U领",
-        "圆领", "V领", "口袋", "里衬", "定染", "固色",
+        "圆领", "V领", "口袋", "里衬", "定染", "固色", "色织", "手工", "手工制作",
+        "拉毛", "源头定做", "纱线定做", "定织",
     ),
     "对比优势": (
         "买不到", "外面没有", "不一样", "独特", "独家", "全网无同款", "比外面", "比市面",
@@ -1374,11 +1391,8 @@ def _topic_evidence_scores(value):
 
 
 def _clip_primary_topic(clip):
-    scores = _topic_evidence_scores(clip)
-    if not scores:
-        return "其他"
-    rank = {name: index for index, name in enumerate(_TOPIC_PRIORITY)}
-    return max(scores, key=lambda topic: (scores[topic], -rank.get(topic, 999)))
+    """Use the same canonical classifier for selection and preview reporting."""
+    return _clip_focus_block(clip)
 
 
 def _topic_min_distinct(product_count):
@@ -2708,6 +2722,7 @@ def _load_ai_rules():
         "time_coherence": True,
         "hook_cap": "5秒",
         "custom_text": "",
+        "content_policy": default_content_policy(),
     }
     try:
         rules = load_settings().get("ai_rules", {})
@@ -2715,6 +2730,7 @@ def _load_ai_rules():
             defaults.update(rules)
     except Exception:
         pass
+    defaults["content_policy"] = normalize_content_policy(defaults.get("content_policy"))
     return defaults
 
 
@@ -2740,6 +2756,13 @@ def _normalize_ai_controls(ai_controls=None):
                 result.append(text)
         return result
 
+    raw_content_policy = ai_controls.get("content_policy")
+    raw_review_mode = str(ai_controls.get("content_review_mode") or "").strip().lower()
+    if raw_review_mode in {"false", "0", "disabled"}:
+        raw_review_mode = "off"
+    elif raw_review_mode in {"true", "1", "enabled"}:
+        raw_review_mode = "on"
+
     return {
         "primary_category": _clean_text(ai_controls.get("primary_category")),
         "secondary_category": _clean_text(ai_controls.get("secondary_category")),
@@ -2751,6 +2774,13 @@ def _normalize_ai_controls(ai_controls=None):
         "hook_style": _clean_text(ai_controls.get("hook_style")),
         "ending_style": _clean_text(ai_controls.get("ending_style")),
         "strictness": _clean_text(ai_controls.get("strictness")),
+        # These are task-level overrides. Keep None/empty distinct from the
+        # persisted settings so an older caller never resets user preferences.
+        "content_policy": (
+            normalize_content_policy(raw_content_policy)
+            if isinstance(raw_content_policy, dict) else None
+        ),
+        "content_review_mode": raw_review_mode if raw_review_mode in {"off", "shadow", "on"} else "",
     }
 
 
@@ -2764,6 +2794,9 @@ def _merge_ai_rules(ai_controls=None):
         cap = _hook_cap_seconds(rules)
         if cap is None or cap > 5:
             rules["hook_cap"] = "5秒"
+    if controls.get("content_policy") is not None:
+        rules["content_policy"] = controls["content_policy"]
+    rules["content_policy"] = normalize_content_policy(rules.get("content_policy"))
     return rules
 
 
@@ -2861,6 +2894,7 @@ def _build_ai_rules_prompt(rules=None, ai_controls=None, main_category=None):
     custom_text = str(rules.get("custom_text", "") or "").strip()
     if narrative:
         lines.append(f"叙事结构必须遵循：{narrative}")
+    lines.extend(policy_prompt_lines(rules.get("content_policy")))
     lines.append("成片默认按带货成交链路组织：Hook承诺 → 承接Hook/直接效果 → 核心卖点证明 → 场景或人群代入 → 顾虑解除 → 自然收尾；不要只按直播时间摘片。")
     if rules.get("category_filter", True):
         lines.append("必须围绕同一主推品类选片，避免突然切到无关品类。")
@@ -3243,19 +3277,31 @@ HOST_CHAT_PATTERNS = [
 ]
 
 
-def _filter_live_interaction_or_size_responses(clips, log_fn=None, *, label="选片硬排除"):
-    """Remove viewer-directed chat and personal sizing replies without rewrites."""
+def _filter_live_interaction_or_size_responses(
+    clips,
+    log_fn=None,
+    *,
+    label="选片硬排除",
+    content_policy=None,
+):
+    """Apply the persisted policy to chat and personal sizing replies."""
     def _log(message):
         if log_fn:
             log_fn(message)
 
+    policy = _content_policy_value(content_policy)
     kept = []
     removed = []
     for clip in clips or []:
         text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
         reason = live_interaction_or_size_response_reason(text)
-        if reason:
-            removed.append((clip, reason))
+        blocked, policy_reason = blocks_role(
+            policy,
+            interaction_policy_kind(reason),
+            text,
+        ) if reason else (False, "")
+        if reason and blocked:
+            removed.append((clip, policy_reason or reason))
             continue
         kept.append(clip)
 
@@ -3268,17 +3314,18 @@ def _filter_live_interaction_or_size_responses(clips, log_fn=None, *, label="选
     return kept
 
 
-def _filter_transcript_quality_clips(clips, log_fn=None, *, label="转写质量硬排除"):
+def _filter_transcript_quality_clips(clips, log_fn=None, *, label="转写质量硬排除", content_policy=None):
     """Remove deterministic transcript defects without changing a kept clip."""
     def _log(message):
         if log_fn:
             log_fn(message)
 
+    policy = _content_policy_value(content_policy)
     kept = []
     removed = []
     for clip in clips or []:
         text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
-        flags = candidate_quality_flags(text)
+        flags = candidate_quality_flags(text, content_policy=policy)
         if flags:
             removed.append((clip, flags))
             continue
@@ -3293,7 +3340,7 @@ def _filter_transcript_quality_clips(clips, log_fn=None, *, label="转写质量�
     return kept
 
 
-def _filter_hook_ineligible_clips(clips, log_fn=None, *, label="Hook硬排除"):
+def _filter_hook_ineligible_clips(clips, log_fn=None, *, label="Hook硬排除", content_policy=None):
     """Remove only Hook-role clips that violate the opening contract.
 
     This deliberately leaves objective size facts available as body material,
@@ -3309,6 +3356,14 @@ def _filter_hook_ineligible_clips(clips, log_fn=None, *, label="Hook硬排除"):
         clip_type = str(clip[0] if isinstance(clip, (list, tuple)) and clip else "").lower()
         text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
         reason = hook_ineligible_reason(text) if "hook" in clip_type else ""
+        if reason == "尺码信息不可作Hook" and live_interaction_or_size_response_reason(text):
+            reason = "个人尺码不可作Hook"
+        if not reason and "hook" in clip_type and _is_safety_blocked_text(
+            text,
+            content_policy=content_policy,
+            role="hook",
+        ):
+            reason = "内容政策不可作Hook"
         if reason:
             removed.append((clip, reason))
             continue
@@ -3362,14 +3417,18 @@ def _filter_low_value_hook_clips(clips, log_fn=None, *, label="Hook质量硬排�
     for clip in clips or []:
         clip_type = str(clip[0] if isinstance(clip, (list, tuple)) and clip else "").lower()
         text = clip[1] if isinstance(clip, (list, tuple)) and len(clip) > 1 else ""
-        if "hook" in clip_type and _is_bad_hook_candidate_text(text):
-            removed.append(clip)
+        hook_flags = hook_candidate_quality_flags(text) if "hook" in clip_type else []
+        if "hook" in clip_type and (_is_bad_hook_candidate_text(text) or hook_flags):
+            removed.append((clip, hook_flags))
             continue
         kept.append(clip)
 
     if removed:
-        examples = "；".join(str(clip[1])[:26] for clip in removed[:3])
-        _log(f"{label}: 删除 {len(removed)} 段无具体购买价值的开头（{examples}）")
+        examples = "；".join(
+            f"{','.join(flags) if flags else '无具体购买价值'}:{str(clip[1])[:26]}"
+            for clip, flags in removed[:3]
+        )
+        _log(f"{label}: 删除 {len(removed)} 段不可独立成立的开头（{examples}）")
     return kept
 
 
@@ -4698,7 +4757,13 @@ def _director_safe_patch_candidate(
     return candidate
 
 
-def _director_safe_candidate_inventory(srt_entries, *, record_metrics=False, log_fn=None):
+def _director_safe_candidate_inventory(
+    srt_entries,
+    *,
+    record_metrics=False,
+    log_fn=None,
+    content_policy=None,
+):
     """Return only hard-safe frozen candidates, without changing any boundary.
 
     Content review is allowed to rank these candidates, but it must never be
@@ -4710,6 +4775,7 @@ def _director_safe_candidate_inventory(srt_entries, *, record_metrics=False, log
     except Exception:
         forbidden_words = []
     price_patterns = _safety_price_cta_patterns()
+    active_content_policy = _content_policy_value(content_policy)
     inventory = []
     before_count = 0
     before_duration = 0.0
@@ -4725,11 +4791,19 @@ def _director_safe_candidate_inventory(srt_entries, *, record_metrics=False, log
         duration = max(0.0, float(end) - float(start))
         before_count += 1
         before_duration += duration
-        quality_flags = candidate_quality_flags(text)
+        quality_flags = candidate_quality_flags(
+            text,
+            content_policy=active_content_policy,
+        )
         if quality_flags:
             reject("转写质量:" + "/".join(quality_flags[:3]), duration)
             continue
-        if _is_safety_blocked_text(text, forbidden_words, price_patterns):
+        if _is_safety_blocked_text(
+            text,
+            forbidden_words,
+            price_patterns,
+            content_policy=active_content_policy,
+        ):
             reject("价格/CTA/违禁词", duration)
             continue
         if _is_backstage_instruction(text):
@@ -4784,6 +4858,31 @@ def _director_safe_candidate_inventory(srt_entries, *, record_metrics=False, log
                 f"硬排除{summary['removed_count']}条（{reason_text}）"
             )
     return inventory
+
+
+def _attach_safe_inventory_context(inventory, srt_entries):
+    """Attach frozen structural context for read-only review observations."""
+    try:
+        context_by_id = _selection_context_from_srt_entries(srt_entries).candidate_map()
+    except Exception:
+        return [dict(item) for item in inventory or [] if isinstance(item, dict)]
+    enriched = []
+    for raw in inventory or []:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        try:
+            candidate_id = int(item.get("srt_index") or 0)
+        except (TypeError, ValueError):
+            candidate_id = 0
+        context = context_by_id.get(candidate_id)
+        if context is not None:
+            item["start"] = round(float(context.start), 3)
+            item["end"] = round(float(context.end), 3)
+            item["story_block_id"] = str(context.story_block_id or "")
+            item["continuity_group_id"] = str(context.continuity_group_id or "")
+        enriched.append(item)
+    return enriched
 
 
 def _content_review_candidate_policy(reviewed_ids, reviewed_duration, safe_inventory, duration_contract):
@@ -5194,15 +5293,37 @@ def _fit_director_duration_from_existing_candidates(
         key=_plan_priority,
     ):
         raw_indices = item.get("srt_indices")
-        _add_group(raw_indices if isinstance(raw_indices, list) else [raw_indices], item.get("focus"), 3)
+        _add_group(
+            raw_indices if isinstance(raw_indices, list) else [raw_indices],
+            item.get("focus"),
+            1000 - min(999, _plan_priority(item)),
+        )
 
     cards = list(getattr(review_bundle, "cards", ()) or ())
-    cards.sort(key=lambda card: (0 if getattr(card, "tier", "") == "main" else 1))
+    try:
+        from content_review import content_card_priority
+    except Exception:
+        content_card_priority = None
+
+    def _review_card_quality(card):
+        if content_card_priority is not None:
+            try:
+                return int(content_card_priority(card))
+            except Exception:
+                pass
+        return 2 if getattr(card, "tier", "") == "main" else 1
+
+    cards.sort(key=_review_card_quality, reverse=True)
     for card in cards:
+        card_quality = _review_card_quality(card)
         _add_group(
             [getattr(card, "candidate_id", 0)],
             getattr(card, "topic", ""),
-            2 if getattr(card, "tier", "") == "main" else 1,
+            (
+                100 + card_quality
+                if getattr(card, "tier", "") == "main"
+                else 50 + card_quality
+            ),
         )
 
     for item in safe_inventory or []:
@@ -5439,6 +5560,7 @@ def _director_context_boundary_flags(text):
         r"^[\u4e00-\u9fff]{1,8}的(?:没有没有|没没有|不是不是)",
         compact,
     ))
+    short_conjunction_start = bool(re.match(r"^但(?:它|这|是|你|我|也|又)", compact))
     possessive_nominal_tail = bool(re.search(
         r"(?:我|你|他|她|它|我们|你们|他们|她们|它们|这个人|这个女生|这件|这款|这条|衣服|整个人)的?"
         r"(?:气质|衣品|感觉|效果|状态|风格|颜色|版型|面料|质感)$",
@@ -5455,10 +5577,12 @@ def _director_context_boundary_flags(text):
     starts_for_repair = (
         compact.startswith(repair_prefixes)
         or modifier_fragment_start
+        or short_conjunction_start
     )
     starts_hard = (
         compact.startswith(hard_prefixes)
         or modifier_fragment_start
+        or short_conjunction_start
     )
     ends = (
         value.endswith(("，", "、", "：", ",", ":"))
@@ -5506,7 +5630,7 @@ def _director_srt_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 
-def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
+def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None, content_policy=None):
     """Build one immutable candidate set before the AI sees any indices."""
     def _log(message):
         if log_fn:
@@ -5567,22 +5691,29 @@ def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
         log_fn,
         word_timings=word_timings,
     )
-    candidate_clips = filter_candidate_clips(candidate_clips, log_fn=log_fn)
-    # This is a hard contract, not a fallback quality heuristic. Do not let
-    # live sizing replies reach the director merely because candidates are scarce.
+    candidate_clips = filter_candidate_clips(
+        candidate_clips,
+        log_fn=log_fn,
+        content_policy=content_policy,
+    )
     candidate_clips = _filter_live_interaction_or_size_responses(
         candidate_clips,
         log_fn,
         label="AI候选硬排除",
+        content_policy=content_policy,
     )
     candidate_clips = _trim_dangling_tail_clauses(candidate_clips, word_timings, log_fn)
 
     candidates = []
+    hook_only_rejections = []
     for clip in candidate_clips:
         _clip_type, text, start, end = clip[:4]
         if not text or float(end) <= float(start):
             continue
         _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
+        hook_quality = hook_candidate_quality_flags(text)
+        if hook_quality:
+            hook_only_rejections.append((str(text), hook_quality))
         candidates.append(SelectionCandidate(
             candidate_id=len(candidates) + 1,
             source_id=_director_candidate_source(text),
@@ -5593,8 +5724,25 @@ def _freeze_director_candidates(cleaned_srt, log_fn=None, word_timings=None):
                 not starts_incomplete
                 and not ends_incomplete
                 and not hook_ineligible_reason(text)
+                and not hook_quality
+                and not _is_safety_blocked_text(
+                    text,
+                    content_policy=content_policy,
+                    role="hook",
+                )
             ),
         ))
+
+    if hook_only_rejections:
+        examples = "；".join(
+            f"{','.join(flags)}:{text[:26]}"
+            for text, flags in hook_only_rejections[:3]
+        )
+        _log(
+            "Hook候选资格: "
+            f"{len(candidates)}条冻结候选中 {len(hook_only_rejections)}条仅禁止作Hook，"
+            f"仍保留为正文卖点（{examples}）"
+        )
 
     selection_context = build_selection_context(candidates)
     context_by_id = selection_context.candidate_map()
@@ -5709,7 +5857,8 @@ def _stabilize_director_structure(clips, srt_entries, hook_summary=None, log_fn=
     return items
 
 
-_DIRECTOR_PRODUCT_MAX_DURATION_SECONDS = 12.0
+_DIRECTOR_PRODUCT_TARGET_DURATION_SECONDS = 5.0
+_DIRECTOR_PRODUCT_MAX_DURATION_SECONDS = 8.0
 
 
 def _split_director_overlong_product(
@@ -5717,6 +5866,7 @@ def _split_director_overlong_product(
     srt_entries,
     *,
     max_duration=_DIRECTOR_PRODUCT_MAX_DURATION_SECONDS,
+    target_duration=_DIRECTOR_PRODUCT_TARGET_DURATION_SECONDS,
 ):
     """Split one long Product only at immutable, standalone candidate boundaries.
 
@@ -5735,7 +5885,7 @@ def _split_director_overlong_product(
         clip_end = float(clip[3])
     except (TypeError, ValueError):
         return None
-    if clip_end - clip_start <= float(max_duration) + 0.2:
+    if clip_end - clip_start <= float(target_duration) + 0.2:
         return [tuple(clip)]
 
     source = _director_clip_source_key(clip).strip().upper()
@@ -5785,8 +5935,11 @@ def _split_director_overlong_product(
         return tuple(values)
 
     for entry in entries:
+        if not current:
+            current = [entry]
+            continue
         trial = current + [entry]
-        if trial and float(trial[-1][2]) - float(trial[0][1]) <= float(max_duration) + 0.2:
+        if trial and float(trial[-1][2]) - float(trial[0][1]) <= float(target_duration) + 0.2:
             current = trial
             continue
         chunk = _build_chunk(current)
@@ -5799,7 +5952,10 @@ def _split_director_overlong_product(
     if chunk is None:
         return None
     groups.append(chunk)
-    return groups if len(groups) > 1 else None
+    # One frozen candidate may be a natural 6-8 second sentence. Keep it
+    # intact rather than splitting inside a word; anything over the hard cap
+    # was already rejected by _build_chunk.
+    return groups
 
 
 def _enforce_director_product_duration_contract(clips, srt_entries, log_fn=None):
@@ -5836,7 +5992,7 @@ def _enforce_director_product_duration_contract(clips, srt_entries, log_fn=None)
         if (
             _is_hook_clip(clip)
             or _is_close_clip(clip)
-            or _clip_duration_value(clip) <= _DIRECTOR_PRODUCT_MAX_DURATION_SECONDS + 0.2
+            or _clip_duration_value(clip) <= _DIRECTOR_PRODUCT_TARGET_DURATION_SECONDS + 0.2
         ):
             retained.append(clip)
             continue
@@ -5864,7 +6020,8 @@ def _enforce_director_product_duration_contract(clips, srt_entries, log_fn=None)
     removed_duration = sum(_clip_duration_value(clip) for clip in removed)
     if split_count or removed:
         _log(
-            "AI单段时长合同: Product上限"
+            "AI单段时长合同: Product节奏目标"
+            f"{_DIRECTOR_PRODUCT_TARGET_DURATION_SECONDS:.0f}s，完整句安全上限"
             f"{_DIRECTOR_PRODUCT_MAX_DURATION_SECONDS:.0f}s；"
             f"{len(original)}段/{before_duration:.1f}s -> {len(retained)}段/{after_duration:.1f}s；"
             f"按冻结候选拆分{split_count}段，剔除无法完整拆分{len(removed)}段"
@@ -6209,14 +6366,25 @@ def _build_plan_quality_report(
     if continuity_break_count:
         warnings.append(f"片单包含{continuity_break_count}次连续组切换")
 
+    hard_failures = []
+    hook_clips = [clip for clip in (clips or ()) if _is_hook_clip(clip)]
+    if hook_clips:
+        hook_text = _topic_clip_text(hook_clips[0])
+        hook_reason = hook_ineligible_reason(hook_text)
+        if hook_reason or _is_bad_hook_candidate_text(hook_text):
+            hard_failures.append(
+                "Hook不合格: " + (hook_reason or "缺少独立购买价值或属于直播铺垫")
+            )
+
     passed = bool(
         duration_status["accepted"]
         and not missing_sources
         and duplicate_count == 0
+        and not hard_failures
     )
     return {
         "version": "plan-quality-v1",
-        "status": "pass" if passed else "warning",
+        "status": "fail" if hard_failures else ("pass" if passed else "warning"),
         "selected_clip_count": len(list(clips or ())),
         "selected_candidate_count": len(set(selected_ids)),
         "duplicate_candidate_count": duplicate_count,
@@ -6242,6 +6410,7 @@ def _build_plan_quality_report(
             str(value)[:40] for value in (ai_report.get("missing_roles") or [])
             if str(value).strip()
         ][:8],
+        "hard_failures": hard_failures,
         "warnings": warnings[:10],
     }
 
@@ -6817,11 +6986,29 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     api_key = settings["api_key"]
     base_url = normalize_ai_base_url(settings["base_url"])
     model = settings["model"]
+    _run_ai_controls = _normalize_ai_controls(ai_controls)
     _ai_rules = _merge_ai_rules(ai_controls)
+    _requested_review_mode = _run_ai_controls.get("content_review_mode") or ""
+    _content_review_settings = dict(settings)
+    if _requested_review_mode:
+        _content_review_settings["content_review_mode"] = _requested_review_mode
+    _content_review_mode_source = (
+        "environment"
+        if os.environ.get("LIVECLIPPER_CONTENT_REVIEW_MODE") is not None
+        else ("task" if _requested_review_mode else "settings")
+    )
     _enforce_category_filter = bool(_ai_rules.get("category_filter", True))
     _enforce_time_coherence = bool(_ai_rules.get("time_coherence", True))
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
     _forced_main_cat = _normalize_forced_category(force_category)
+    # 服饰二级品类是用户明确的主商品，必须进入候选硬过滤而非只写进提示词。
+    _selected_secondary_cat = _normalize_forced_category(
+        _normalize_ai_controls(ai_controls).get("secondary_category")
+    )
+    if _forced_main_cat is None and _selected_secondary_cat:
+        force_category = _selected_secondary_cat
+        _forced_main_cat = _selected_secondary_cat
+        _log(f"用户指定二级主品类={_forced_main_cat}，已启用硬候选过滤")
 
     semantic_srt_applied = False
     if word_timings:
@@ -6877,7 +7064,12 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         detected_main_cat = _forced_main_cat
         _log("AI选片规则: 已关闭强制同一品类过滤")
     if not multi_version:
-        cleaned_srt = _freeze_director_candidates(cleaned_srt, log_fn, word_timings=word_timings)
+        cleaned_srt = _freeze_director_candidates(
+            cleaned_srt,
+            log_fn,
+            word_timings=word_timings,
+            content_policy=_ai_rules.get("content_policy"),
+        )
     # 用检测到的品类（或用户指定）作为跨品类过滤的偏好品类
     _cross_cat_preferred = _forced_main_cat or detected_main_cat
     _history_key = _clip_history_key(cleaned_srt)
@@ -6956,6 +7148,10 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         _indexed_srt_entries,
         record_metrics=True,
         log_fn=_log,
+    )
+    _director_safe_inventory = _attach_safe_inventory_context(
+        _director_safe_inventory,
+        _indexed_srt_entries,
     )
     _director_safe_candidate_duration = sum(
         float(item.get("duration_sec") or 0.0)
@@ -7051,9 +7247,11 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
         _content_review_version = CONTENT_REVIEW_VERSION
         _final_sequence_reviewer = audit_final_sequence
 
-        _content_review_mode = resolve_review_mode(settings)
+        _content_review_mode = resolve_review_mode(_content_review_settings)
         _content_review_summary = {
             "mode": _content_review_mode,
+            "requested_mode": _requested_review_mode or str(settings.get("content_review_mode") or "off"),
+            "mode_source": _content_review_mode_source,
             "version": _content_review_version,
             "cache_hit": False,
             "main_count": 0,
@@ -7067,9 +7265,16 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             "duration_contract_source_min": round(_duration_contract.source_min, 3),
             "preview_candidate_count": len(_analysis_metadata["director_candidates"]),
             "pool_policy": "hard_safe_only",
+            "content_policy": _content_policy_summary(_ai_rules.get("content_policy")),
             "fallback_reason": "",
         }
         _analysis_metadata["content_review_summary"] = _content_review_summary
+        _log(
+            "AI内容审稿: "
+            f"实际={_content_review_mode}，来源={_content_review_mode_source}，"
+            f"价格={_content_review_summary['content_policy']['price']}，"
+            f"CTA={_content_review_summary['content_policy']['cta']}"
+        )
         if not _director_mode:
             _content_review_summary["fallback_reason"] = "not_director_mode"
         elif _content_review_mode != "off":
@@ -7102,6 +7307,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     main_product=_review_controls.get("main_product") or "",
                     avoid=_review_controls.get("avoid") or [],
                     required_sources=_director_required_sources,
+                    content_policy=_ai_rules.get("content_policy"),
+                    include_marketing_intent=(_content_review_mode == "shadow"),
                     log_fn=_log,
                 )
                 if _content_review_mode == "on" and not _content_review_bundle.hook_pairs:
@@ -7113,17 +7320,27 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                         bundle=_content_review_bundle,
                         category=_cross_cat_preferred or "",
                         main_product=_review_controls.get("main_product") or "",
+                        content_policy=_ai_rules.get("content_policy"),
                         log_fn=_log,
                     )
                 _analysis_metadata["content_review_summary"] = _content_review_bundle.summary(
                     _content_review_mode
                 )
                 _content_review_summary = _analysis_metadata["content_review_summary"]
+                _marketing_intent = getattr(_content_review_bundle, "marketing_intent", None)
+                _analysis_metadata["marketing_intent_summary"] = {
+                    **(_marketing_intent.summary() if _marketing_intent else {}),
+                    "mode": _content_review_mode,
+                    "shadow_run_key": "",
+                }
                 _content_review_summary.update({
                     "hard_safe_count": len(_hard_safe_candidate_ids),
                     "hard_safe_duration": round(_director_safe_candidate_duration, 3),
                     "duration_contract_source_min": round(_duration_contract.source_min, 3),
                     "preview_candidate_count": len(_analysis_metadata["director_candidates"]),
+                    "requested_mode": _requested_review_mode or str(settings.get("content_review_mode") or "off"),
+                    "mode_source": _content_review_mode_source,
+                    "content_policy": _content_policy_summary(_ai_rules.get("content_policy")),
                 })
                 _log(
                     f"AI\u5185\u5bb9\u5ba1\u7a3f: {_content_review_mode}\u6a21\u5f0f\uff0c\u4fdd\u7559"
@@ -7131,6 +7348,22 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     f"{_content_review_bundle.retained_duration:.1f}s"
                     + ("\uff08\u7f13\u5b58\u547d\u4e2d\uff09" if _content_review_bundle.cache_hit else "")
                 )
+                _log(
+                    "AI\u5185\u5bb9\u5ba1\u7a3f\u4e3b\u4f53: "
+                    f"\u4e3b\u5546\u54c1{_content_review_summary.get('primary_subject_count', 0)}\u5f20, "
+                    f"\u8f85\u52a9\u8bc1\u660e{_content_review_summary.get('supporting_subject_count', 0)}\u5f20, "
+                    f"\u5176\u4ed6\u5546\u54c1reserve{_content_review_summary.get('other_subject_count', 0)}\u5f20, "
+                    f"\u5177\u4f53\u8bc1\u636e{_content_review_summary.get('strong_evidence_count', 0)}\u5f20"
+                )
+                if _content_review_mode == "shadow":
+                    _marketing_summary = _analysis_metadata["marketing_intent_summary"]
+                    _log(
+                        "AI营销意图影子审计: "
+                        f"意图{int(_marketing_summary.get('intent_count') or 0)}条，"
+                        f"叙事弧{int(_marketing_summary.get('arc_count') or 0)}条，"
+                        f"可进入后续灰度{int(_marketing_summary.get('eligible_arc_count') or 0)}条；"
+                        "不参与本次导演选片"
+                    )
                 # Review ranks safe candidates. It may become the sole source
                 # only after its own cards cover the requested duration floor.
                 if _content_review_mode == "on":
@@ -7207,6 +7440,8 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
     except Exception as _review_error:
         _analysis_metadata["content_review_summary"] = {
             "mode": _content_review_mode,
+            "requested_mode": _requested_review_mode or str(settings.get("content_review_mode") or "off"),
+            "mode_source": _content_review_mode_source,
             "version": _content_review_version,
             "cache_hit": False,
             "main_count": 0,
@@ -7215,7 +7450,14 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             "grounded_card_count": 0,
             "hook_pair_count": 0,
             "hook_pair_reviewed": False,
+            "content_policy": _content_policy_summary(_ai_rules.get("content_policy")),
             "fallback_reason": str(_review_error)[:240],
+        }
+        _analysis_metadata["marketing_intent_summary"] = {
+            "version": "marketing-intent-v1",
+            "mode": _content_review_mode,
+            "fallback_reason": str(_review_error)[:240],
+            "shadow_run_key": "",
         }
         _content_review_allowed_ids = set(_hard_safe_candidate_ids) if _director_mode else None
         _content_review_hint = ""
@@ -7957,6 +8199,14 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                 f"连续组切换{_plan_quality_report['continuity_break_count']}次；"
                 f"预计成片{_plan_quality_report['duration']['projected_final']:.1f}s"
             )
+            if _plan_quality_report.get("hard_failures"):
+                _failure_text = "；".join(_plan_quality_report["hard_failures"][:3])
+                _director_last_audit = dict(_director_audit or {})
+                _director_last_audit["issues"] = list(
+                    _director_last_audit.get("issues") or []
+                ) + [_failure_text]
+                _log(f"片单质量报告: {_failure_text}，拒绝将片单标记为成功")
+                break
             _record_history_if_needed(clips)
             _selection_manifest = SelectionManifest.from_clips(
                 clips,
@@ -7965,6 +8215,26 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             )
             _analysis_metadata["selection_manifest"] = _selection_manifest.to_dict()
             _analysis_metadata["selection_result"] = SelectionResult.success(_selection_manifest).to_dict()
+            if _content_review_mode == "shadow" and _content_review_bundle is not None:
+                try:
+                    from marketing_intent import append_shadow_observation
+                    _marketing_bundle = getattr(_content_review_bundle, "marketing_intent", None)
+                    if _marketing_bundle is not None and _marketing_bundle.response_present:
+                        _shadow_run_key = append_shadow_observation(
+                            bundle=_marketing_bundle,
+                            review_cache_key=str(_content_review_bundle.cache_key or ""),
+                            mode=_content_review_mode,
+                            category=_cross_cat_preferred or "",
+                            selection_manifest=_selection_manifest.to_dict(),
+                        )
+                        _analysis_metadata["marketing_intent_summary"]["shadow_run_key"] = _shadow_run_key
+                        _analysis_metadata["marketing_intent_summary"]["shadow_logged"] = bool(_shadow_run_key)
+                        if _shadow_run_key:
+                            _log("AI营销意图影子审计: 已记录本次旧链路最终片单")
+                except Exception as _marketing_shadow_error:
+                    _analysis_metadata["marketing_intent_summary"]["shadow_log_error"] = str(
+                        _marketing_shadow_error
+                    )[:160]
             _log(
                 f"AI叙事编排完成: {len(clips)}段/{sum(_clip_duration_value(c) for c in clips):.1f}s，"
                 f"片单合同 {_selection_manifest.digest[:12]}；"
@@ -8229,6 +8499,9 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
             clips = _cap_clip_duration(clips, log_fn, srt_text=srt_text)
             # 片段边界修复:确保首尾对齐到完整句子
             clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
+            # 正常成功路径也必须遵守短节奏合同。只在冻结候选的完整句边界拆分，
+            # 不在词中间硬切，也不改写 AI 已编排的顺序。
+            clips = _split_long_clips(clips, _indexed_srt_entries, log_fn)
             clips = _trim_product_size_prompt_tails(clips, cleaned_srt, log_fn)
             clips = _filter_focus_near_duplicates(clips, log_fn, target_duration=_AI_TARGET_DURATION)
             clips = _filter_hook_product_repeats(clips, log_fn)
@@ -8293,6 +8566,7 @@ def ai_analyze_clips(srt_text, log_fn=None, force_category=None, multi_version=F
                     clips = _dedup_clip_text_overlap(clips, log_fn, merge_mode=merge_mode)
                     clips = _cap_clip_duration(clips, log_fn, srt_text=srt_text)
                     clips = _fix_clip_boundaries(clips, cleaned_srt, log_fn)
+                    clips = _split_long_clips(clips, _indexed_srt_entries, log_fn)
                     clips = _trim_product_size_prompt_tails(clips, cleaned_srt, log_fn)
                     clips = _filter_focus_near_duplicates(clips, log_fn, target_duration=_AI_TARGET_DURATION)
                     clips = _trim_filler_start(clips, cleaned_srt, log_fn, word_timings=word_timings)
@@ -8741,6 +9015,12 @@ _HOOK_GENERIC_PREAMBLE_PATTERNS = (
     re.compile(r"^(?:很|非常|特别|太)\s*[A-Za-z]{2,16}\s*的?(?:这个|这件|这条|它)"),
     re.compile(r"(?:拖欠|欠你们|等了?(?:很久|好久)|终于(?:来了|到[了啦])|刚到|新品(?:来了|到[了啦])|今天(?:上新|新上))"),
     re.compile(r"^(?:想(?:搭|看).{0,18}|(?:给你|我给你).{0,10}看一眼|(?:这个|这样的).{0,12}就这么搭)"),
+    # A numbered lead-in only promises that an explanation may follow. It is
+    # not a self-contained buyer value and must never consume the Hook slot.
+    re.compile(
+        r"^(?:这件|这个|这套|这条)?.{0,18}(?:我建议|建议大家|我觉得|我喜欢)"
+        r".{0,12}(?:首先|第一点|第一个点|几个点|两点|三个点)"
+    ),
     re.compile(r"(?:^|[，。！？?])(?:那)?我(?:明天|今天|等会|一会)?(?:穿啥|穿什么|怎么穿|穿哪件)[啊呀呢吗？?]*$"),
 )
 def _hook_lacks_independent_buyer_value(text):
@@ -8754,6 +9034,8 @@ def _is_bad_hook_candidate_text(text):
     if _hook_has_mixed_sources(raw):
         return True
     if hook_ineligible_reason(raw):
+        return True
+    if hook_candidate_quality_flags(raw):
         return True
     txt = re.sub(r"\s+", "", _strip_hook_source_markers(raw)).strip("，。！？!?、 ")
     if not txt or len(txt) < 4:
@@ -8795,15 +9077,31 @@ def _hook_pref_score(text, focus_hint=None, ai_controls=None):
 
 def _hook_matches_preference(text, focus_hint=None, ai_controls=None):
     kws = _hook_preference_keywords(focus_hint, ai_controls)
-    if not kws:
-        return True
-    hits = _hook_pref_score(text, focus_hint, ai_controls)
-    if hits <= 0:
-        return False
-    focus = str(focus_hint or "")
     controls = _normalize_ai_controls(ai_controls)
-    return hits >= 1
+    if kws and _hook_pref_score(text, focus_hint, ai_controls) <= 0:
+        return False
+    return _hook_matches_selected_style(text, controls.get("hook_style"))
 
+def _hook_matches_selected_style(text, hook_style=None):
+    """Check that a Hook really carries the selected opening style."""
+    style = str(hook_style or "").strip()
+    if not style or style in {"自动", "不强制Hook"}:
+        return True
+    txt = re.sub(r"\s+", "", _strip_hook_source_markers(text)).strip("，。！？!?、 ")
+    if not txt or _is_bad_hook_candidate_text(txt):
+        return False
+
+    signals = {
+        "痛点开头": ("胯宽", "腿粗", "显胖", "肚子", "腰粗", "肩宽", "显壮", "肉多", "遮肉", "藏肉", "不敢穿", "穿不进去", "卡肉", "勒肉", "副乳"),
+        "上身效果开头": ("上身", "穿上", "显瘦", "显高", "显白", "显腿长", "比例", "直角肩", "腰线", "拉长", "高级", "气质"),
+        "爆点金句开头": ("绝了", "太漂亮", "不敢信", "天花板", "太惊艳", "太显瘦", "巨好看", "美爆", "封神", "神仙", "救命", "好牛"),
+        "主播强推荐开头": ("强烈推荐", "推荐", "我跟你讲", "我跟你说", "听我的", "放心", "必买"),
+        "试吃反应开头": ("好吃", "脆甜", "鲜甜", "爆汁", "多汁", "汁水", "口感", "鲜嫩", "软糯", "酥脆", "Q弹", "弹牙", "拉丝", "咬一口"),
+        "细节近景开头": ("切开", "掰开", "开箱", "开袋", "个头", "果径", "饱满", "一大颗", "一整箱", "拉丝", "爆汁"),
+        "产地品质开头": ("新鲜", "鲜活", "现摘", "现采", "现捕", "现捞", "当天发", "现发", "冷链", "保鲜", "锁鲜", "产地", "果园", "基地"),
+    }
+    words = signals.get(style)
+    return True if not words else any(word in txt for word in words)
 
 def _parse_srt_entries_for_hook(srt_text):
     entries = []
@@ -9010,6 +9308,22 @@ def _refine_hook_by_dynamic_score(clips, srt_text, log_fn=None, focus_hint=None,
 
     if not candidates:
         return clips
+
+    # A selected Hook style is a contract, not merely a score multiplier.
+    if hook_style and hook_style not in {"自动", "不强制Hook"}:
+        style_candidates = [
+            candidate for candidate in candidates
+            if _hook_matches_selected_style(candidate[2], hook_style)
+        ]
+        if style_candidates:
+            candidates = style_candidates
+            _log(f"Hook类型合同: {hook_style} 可用候选 {len(candidates)} 个，仅在其中选择")
+        else:
+            _log(f"Hook类型合同: 素材没有可用的“{hook_style}”候选，改为自然正文开场，不伪造类型")
+            return [
+                _retag_clip_type(clip, "product") if _is_hook_clip(clip) else clip
+                for clip in clips
+            ]
 
     current_score = 0.0
     current_reasons = []
@@ -9438,6 +9752,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         {int(index) for index in allowed_candidate_ids}
         if allowed_candidate_ids is not None else None
     )
+    _content_policy = _merge_ai_rules(ai_controls).get("content_policy")
 
     def _resolve_focus_used_label(label="", detail=""):
         text = str(label or "").strip()
@@ -9529,24 +9844,22 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                 _review_allowed_candidate_ids is None or i in _review_allowed_candidate_ids
             )
             _entry_duration = max(0.0, float(ee) - float(es))
-            # 违禁词预扫描：标记含违禁词的条目
+            # 预扫描只使用和最终安全检查同一套内容政策，避免正文允许、导演却看不到。
             _et_variants = _safety_text_variants(et)
-            _matched_fw = []
-            if _fw_words:
-                for w in _fw_words:
-                    _w = str(w or "").strip()
-                    if _w and _safety_word_matches(_w, _et_variants):
-                        _matched_fw.append(_w)
-            # 价格/CTA预扫描：标记含价格模式的条目（跟_filter_price_and_cta同规则）
-            _matched_price = _safety_pattern_matches(_price_patterns, _et_variants)
-            _matched_content = _content_safety_pattern_matches(et)
+            _matched_fw, _matched_policy = _clip_safety_matches(
+                et,
+                _fw_words,
+                _price_patterns,
+                content_policy=_content_policy,
+            )
+            _matched_content = _content_safety_pattern_matches(et, _content_policy)
             _matched_backstage = _is_backstage_instruction(et)
-            if _matched_fw or _matched_price or _matched_content or _matched_backstage:
+            if _matched_fw or _matched_policy or _matched_content or _matched_backstage:
                 _forbidden_indices.add(i)
                 _forbidden_count += 1
             _blocked_for_focus_score = bool(
                 _matched_fw
-                or _matched_price
+                or _matched_policy
                 or _matched_content
                 or _matched_backstage
                 or _safety_pattern_matches(_focus_score_blocker_patterns, _et_variants)
@@ -9563,9 +9876,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
                     f" | continuity={_candidate_context.continuity_group_id}"
                     f" | source={_candidate_context.source_id}"
                 )
-            if _matched_fw or _matched_price or _matched_content or _matched_backstage:
+            if _matched_fw or _matched_policy or _matched_content or _matched_backstage:
                 if _is_review_allowed:
-                    _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s{_context_tags}] [不可选：含违禁词、价格/CTA或直播操作]")
+                    _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s{_context_tags}] [不可选：含固定禁用词、内容政策禁项或直播操作]")
             elif _is_review_allowed:
                 _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s{_context_tags}] {et}")
         if merge_mode:
@@ -9581,7 +9894,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
             indexed_transcript += "\n" + _detail_kw_prompt
         _log(f"AI: 编号SRT条目 {len(_srt_entry_map)} 条")
         if _forbidden_count:
-            _log(f"AI: 预扫描: {len(_srt_entry_map) - _forbidden_count} 条可选, {_forbidden_count} 条含违禁词/价格已标记")
+            _log(f"AI: 预扫描: {len(_srt_entry_map) - _forbidden_count} 条可选, {_forbidden_count} 条因固定禁用词/内容政策已标记")
         if _focus_score_excluded_count:
             _log(f"AI: 偏好评分: 已排除 {_focus_score_excluded_count} 条价格/CTA/违禁词条目")
 
@@ -11052,6 +11365,13 @@ def ai_analyze_multi_versions(
     _enforce_time_coherence = bool(_ai_rules.get("time_coherence", True))
     _hook_cap_sec = _hook_cap_seconds(_ai_rules)
     _forced_main_cat = _normalize_forced_category(force_category)
+    _selected_secondary_cat = _normalize_forced_category(
+        _run_ai_controls.get("secondary_category")
+    )
+    if _forced_main_cat is None and _selected_secondary_cat:
+        force_category = _selected_secondary_cat
+        _forced_main_cat = _selected_secondary_cat
+        _log(f"用户指定二级主品类={_forced_main_cat}，已启用硬候选过滤")
 
     # [预处理] 与单版本相同的SRT清洗流程
     from srt_splitter import split_long_srt_entries
@@ -11758,16 +12078,17 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
 
     # Pass 1: Time range overlap detection
     # Hook must be preserved - adjust other clips' boundaries instead of removing Hook
-    removed = set()
+    original_count = len(clips)
+    time_removed = set()
     adjusted = {}  # index -> (new_start, new_end)
     for i in range(len(clips)):
-        if i in removed:
+        if i in time_removed:
             continue
         ci_type, ci_text, ci_start, ci_end, ci_score, ci_dur = clips[i][:6]
         ci_s = adjusted.get(i, (ci_start, ci_end))[0]
         ci_e = adjusted.get(i, (ci_start, ci_end))[1]
         for j in range(i + 1, len(clips)):
-            if j in removed:
+            if j in time_removed:
                 continue
             cj_type, cj_text, cj_start, cj_end, cj_score, cj_dur = clips[j][:6]
             cj_s = adjusted.get(j, (cj_start, cj_end))[0]
@@ -11807,7 +12128,7 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
                             adjusted[j] = (new_j_start, cj_e)
                             _log(f"时间重叠: Hook保护，调整片段{j+1} start {cj_s:.1f}→{new_j_start:.1f}s")
                         else:
-                            removed.add(j)
+                            time_removed.add(j)
                             _log(f"时间重叠: 移除片段{j+1}({cj_s:.1f}-{cj_e:.1f}s, 与Hook重叠且调整后过短)")
                     elif j_is_hook and not i_is_hook:
                         # Adjust i's start to after hook ends
@@ -11816,33 +12137,33 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
                             adjusted[i] = (new_i_start, ci_e)
                             _log(f"时间重叠: Hook保护，调整片段{i+1} start {ci_s:.1f}→{new_i_start:.1f}s")
                         else:
-                            removed.add(i)
+                            time_removed.add(i)
                             _log(f"时间重叠: 移除片段{i+1}({ci_s:.1f}-{ci_e:.1f}s, 与Hook重叠且调整后过短)")
                             break
                     elif i_is_hook and j_is_hook:
                         # Two hooks overlapping - remove the shorter one
                         if ci_dur <= cj_dur:
-                            removed.add(i)
+                            time_removed.add(i)
                             _log(f"时间重叠: 移除Hook片段{i+1}(与Hook片段{j+1}重叠)")
                             break
                         else:
-                            removed.add(j)
+                            time_removed.add(j)
                             _log(f"时间重叠: 移除Hook片段{j+1}(与Hook片段{i+1}重叠)")
                     else:
                         # Neither is Hook: remove the shorter one (original logic)
                         if ci_dur <= cj_dur:
-                            removed.add(i)
+                            time_removed.add(i)
                             _log(f"时间重叠: 移除片段{i+1}({ci_s:.1f}-{ci_e:.1f}s, 被片段{j+1}({cj_s:.1f}-{cj_e:.1f}s)包含)")
                             break
                         else:
-                            removed.add(j)
+                            time_removed.add(j)
                             _log(f"时间重叠: 移除片段{j+1}({cj_s:.1f}-{cj_e:.1f}s, 被片段{i+1}({ci_s:.1f}-{ci_e:.1f}s)包含)")
 
     # Apply adjustments
     if adjusted:
         new_clips = []
         for idx, c in enumerate(clips):
-            if idx in removed:
+            if idx in time_removed:
                 continue
             if idx in adjusted:
                 ns, ne = adjusted[idx]
@@ -11852,12 +12173,16 @@ def _dedup_clip_text_overlap(clips, log_fn, merge_mode=False):
             else:
                 new_clips.append(c)
         clips = new_clips
-    elif removed:
-        clips = [c for i, c in enumerate(clips) if i not in removed]
+    elif time_removed:
+        clips = [c for i, c in enumerate(clips) if i not in time_removed]
     else:
         pass  # no changes needed
+    if time_removed:
+        _log(f"时间去重: {original_count} -> {len(clips)} 片段")
 
-    # Pass 2: Text similarity (original logic)
+    # Pass 2: Text similarity. This uses a fresh index set because pass 1 may
+    # have compacted the list; reusing old positions can delete an unrelated clip.
+    removed = set()
     for i in range(len(clips)):
         if i in removed:
             continue
@@ -12026,24 +12351,24 @@ def _dedup_clips(clips, log_fn, multi_version=False, focus_hint=None, srt_text=N
     # === Forbidden phrase filter (from GUI keyword management) ===
     try:
         _fb_list = load_keywords().get("forbidden_phrases", [])
-        if _fb_list:
-            _before = len(clips)
-            _keep = []
-            for _clip in clips:
-                _txt = _clip[1] if len(_clip) > 1 else ""
-                _txt_variants = _safety_text_variants(_txt)
-                _matched = []
-                for w in _fb_list:
-                    _w = str(w or "").strip()
-                    if _w and _safety_word_matches(_w, _txt_variants):
-                        _matched.append(_w)
-                if _matched:
-                    _log(f"  forbid: [{','.join(_matched[:3])}] CT={_clip[0]} [{_clip[2]:.0f}s-{_clip[3]:.0f}s]")
-                else:
-                    _keep.append(_clip)
-            clips = _keep
-            if len(clips) < _before:
-                _log(f"forbidden filter: skipped {_before - len(clips)}/{_before} clips")
+        _before = len(clips)
+        _keep = []
+        for _clip in clips:
+            _txt = _clip[1] if len(_clip) > 1 else ""
+            _matched, _policy_blocked = _clip_safety_matches(_txt, _fb_list)
+            _content_hits = _content_safety_pattern_matches(_txt)
+            if _matched or _policy_blocked or _content_hits:
+                _reason = (
+                    ",".join(_matched[:3])
+                    or ";".join(_policy_block_reasons(_txt))
+                    or ",".join(_content_hits[:2])
+                )
+                _log(f"  forbid: [{_reason}] CT={_clip[0]} [{_clip[2]:.0f}s-{_clip[3]:.0f}s]")
+            else:
+                _keep.append(_clip)
+        clips = _keep
+        if len(clips) < _before:
+            _log(f"forbidden filter: skipped {_before - len(clips)}/{_before} clips")
     except Exception as _fe:
         _log(f"forbidden filter error: {_fe}")
     
@@ -12319,6 +12644,19 @@ def _clip_focus_block(clip):
     text = str(clip[1] if len(clip) > 1 else "")
     focus = str(clip[6] if len(clip) > 6 else "")
     hay = focus + " " + text
+    focus_aliases = {
+        "工艺品质": "工艺细节",
+        "工艺质量": "工艺细节",
+        "色织工艺": "工艺细节",
+    }
+    craft_evidence = (
+        "色织", "定织", "定染", "源头定做", "纱线定做", "手工制作", "手工拉毛",
+        "手工", "拉毛", "水洗工艺", "特殊染色",
+    )
+    material_evidence = (
+        "面料", "材质", "手感", "触感", "垂感", "透气", "亲肤", "柔软", "针织",
+        "冰丝", "真丝", "棉麻", "亚麻", "克重", "成分", "含量", "纱线", "不闷", "不透",
+    )
     food_evidence = any(k in text for k in (
         "好吃", "鲜甜", "脆甜", "爆汁", "口感", "试吃", "吃起来",
         "新鲜", "鲜活", "现摘", "现采", "现捕", "现捞", "果形", "果径", "坏果",
@@ -12327,7 +12665,12 @@ def _clip_focus_block(clip):
         "冷链", "冰袋", "保鲜", "锁鲜", "冷冻", "冷藏",
         "吃法", "早餐", "夜宵", "火锅", "烧烤", "煲汤", "即食",
     ))
-    if not food_evidence and any(block in focus for block in CATEGORY_FOCUS_ORDER.get("食品/生鲜", []) if block != "其他"):
+    incompatible_food_focus = not food_evidence and any(
+        block in focus for block in CATEGORY_FOCUS_ORDER.get("食品/生鲜", []) if block != "其他"
+    )
+    if incompatible_food_focus:
+        # Ignore the stale food label but still let concrete apparel evidence
+        # such as 做工/品质 classify correctly below.
         hay = text
 
     if food_evidence:
@@ -12335,6 +12678,15 @@ def _clip_focus_block(clip):
             if block != "其他" and block in focus:
                 return block
     if not food_evidence:
+        # Construction/process proof takes priority over a generic fabric word
+        # in the same sentence: "色织亚麻" is a craft claim, not merely fabric.
+        if any(k in text for k in craft_evidence):
+            return "工艺细节"
+        for marker, block in focus_aliases.items():
+            if marker in focus:
+                if any(k in text for k in material_evidence):
+                    return "面料质感"
+                return block
         for block in DEFAULT_BLOCK_ORDER:
             if block != "其他" and block in focus:
                 return block
@@ -12353,7 +12705,7 @@ def _clip_focus_block(clip):
         return "场景吃法"
     if any(k in hay for k in ("显瘦", "遮肉", "藏肉", "收腰", "显高", "比例", "修饰", "版型", "廓形", "剪裁", "宽松", "修身", "帽型", "帽子", "翻领", "肩型", "盖臀")):
         return "版型显瘦"
-    if any(k in hay for k in ("面料", "材质", "手感", "触感", "垂感", "透气", "亲肤", "柔软", "针织", "冰丝", "真丝", "棉麻", "不闷", "不透")):
+    if any(k in hay for k in material_evidence):
         return "面料质感"
     if any(k in hay for k in ("做工", "工艺", "细节", "品质", "质感", "高级感", "精致", "走线", "刺绣", "蕾丝", "重工")):
         return "品质细节"
@@ -14162,7 +14514,7 @@ def _finalize_clip_structure(clips, source_clips=None, log_fn=None, target_durat
     return finalized
 
 
-def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=20.0, max_hook_sec=10.0, max_close_sec=15.0):
+def _split_long_clips(clips, srt_entries=None, log_fn=None, max_product_sec=8.0, max_hook_sec=5.0, max_close_sec=8.0):
     """Split oversized clips only at safe SRT semantic boundaries."""
     def _log(msg):
         if log_fn:
@@ -15588,14 +15940,25 @@ _CONTENT_SAFETY_PATTERNS = (
 )
 
 
-def _content_safety_pattern_matches(text):
-    """Return hard content-safety risks that require phrase-level context."""
+def _content_safety_pattern_matches(text, content_policy=None, *, role="body"):
+    """Return phrase-level safety risks, respecting user-managed CTA policy.
+
+    Legal claims and exaggerated guarantees remain absolute. Only CTA patterns
+    are policy-managed because some sellers deliberately retain natural CTA in
+    body copy; role restrictions still decide whether it can become a Hook.
+    """
     variants = _safety_text_variants(text)
-    return [
-        label
-        for label, pattern in _CONTENT_SAFETY_PATTERNS
-        if _safety_pattern_matches((pattern,), variants)
-    ]
+    policy = _content_policy_value(content_policy)
+    matches = []
+    for label, pattern in _CONTENT_SAFETY_PATTERNS:
+        if not _safety_pattern_matches((pattern,), variants):
+            continue
+        if str(label).startswith("CTA"):
+            blocked, _reason = blocks_role(policy, "cta", text, role=role)
+            if not blocked:
+                continue
+        matches.append(label)
+    return matches
 
 
 _BACKSTAGE_INSTRUCTION_PATTERNS = (
@@ -15613,7 +15976,7 @@ def _is_backstage_instruction(text):
     return _safety_pattern_matches(_BACKSTAGE_INSTRUCTION_PATTERNS, variants)
 
 
-def _safety_price_cta_patterns():
+def _safety_price_patterns():
     return [
         re.compile(r'\d{2,4}\s*[元块]'),           # 199元, 300块
         re.compile(r'[到拿]手[价]?\s*\d'),          # 到手价199, 拿到手99
@@ -15625,33 +15988,131 @@ def _safety_price_cta_patterns():
         re.compile(r'半价|对折'),
         re.compile(r'\d+\s*折'),
         re.compile(r'[到拿]手价?\s*[一两三四五六七八九十百千万\d]+'),
+        # "开价" is a live price-announcement cue even when ASR prefixes it
+        # with a wrong syllable (for example "经开价喽").
+        re.compile(r'开\s*(?:个\s*)?价(?:了|喽|啦)?'),
+        re.compile(r'价格'),
+    ]
+
+
+def _safety_cta_patterns():
+    return [
         re.compile(r'满减|领券|优惠券|消费券|凑单'),
-        re.compile(r'321|三二一|价格'),
+        # A purchase-conditioned gift is a transaction/CTA sentence, not a
+        # product claim. Do not reject neutral accessory descriptions; require
+        # an explicit buy/shoot action before the gift wording.
+        re.compile(r'(?:买|拍)(?:这一身|这套|这件|这条).{0,12}(?:送|给)'),
+        re.compile(r'(?:可以|能)?单买(?:上衣|裤子|裙子|外套|套装|这件|这条)?'),
+        re.compile(r'(?:赠送|送).{0,10}给(?:你|大家|姐妹|宝宝)'),
+        re.compile(r'321|三二一'),
         re.compile(r'拍.*链接|链接.*拍|去拍|赶紧拍|刷新拍|往[大小]拍'),
         re.compile(r'上链接|上连结|上連結|连结|連結|链接|号链接|左下角|小黄车|购物车|上车|下单|直接拍'),
     ]
 
 
-def _clip_safety_matches(text, forbidden_words=None, price_patterns=None):
+def _safety_price_cta_patterns():
+    return [*_safety_price_patterns(), *_safety_cta_patterns()]
+
+
+_POLICY_MANAGED_KEYWORD_KINDS = {
+    "价格": "price", "特价": "price", "特惠": "price", "大促": "price",
+    "狂减": "price", "秒杀": "price", "跳楼价": "price", "亏本": "price",
+    "清仓": "price", "底价": "price", "破价": "price", "限时价": "price",
+    "秒杀价": "price", "福利价": "price", "到手价": "price", "优惠": "price",
+    "折扣": "price", "立减": "price", "满减": "cta", "领券": "cta",
+    "优惠券": "cta", "消费券": "cta", "凑单": "cta", "点关注": "cta",
+    "购物车": "cta", "上链接": "cta", "上连结": "cta", "上連結": "cta",
+    "连结": "cta", "連結": "cta", "链接": "cta", "321": "cta",
+    "3 2 1": "cta", "三二一": "cta", "321上车": "cta", "上车了": "cta",
+    "去拍": "cta", "赶紧拍": "cta",
+}
+
+
+def _content_policy_value(content_policy=None):
+    if content_policy is None:
+        content_policy = _load_ai_rules().get("content_policy")
+    return normalize_content_policy(content_policy)
+
+
+def _content_policy_summary(content_policy=None):
+    """Return preview-safe policy metadata without exposing custom rule text."""
+
+    policy = _content_policy_value(content_policy)
+    return {
+        "price": policy.get("price", "block"),
+        "cta": policy.get("cta", "block"),
+        "size_interaction": policy.get("size_interaction", "block"),
+        "live_interaction": policy.get("live_interaction", "block"),
+        "custom_rule_count": len(policy.get("custom_rules") or []),
+    }
+
+
+def _policy_block_reasons(text, content_policy=None, *, role="body"):
+    """Return policy-controlled signals that are blocked for this clip role."""
+
+    policy = _content_policy_value(content_policy)
+    custom_rule = matching_custom_rule(policy, text)
+    if custom_rule:
+        blocked, reason = blocks_role(policy, "custom", text, role=role)
+        return [reason] if blocked else []
+
+    variants = _safety_text_variants(text)
+    signals = []
+    if _safety_pattern_matches(_safety_price_patterns(), variants):
+        signals.append("price")
+    if _safety_pattern_matches(_safety_cta_patterns(), variants):
+        signals.append("cta")
+    interaction_reason = live_interaction_or_size_response_reason(text)
+    if interaction_reason:
+        signals.append(interaction_policy_kind(interaction_reason))
+
+    blocked_reasons = []
+    for kind in dict.fromkeys(signals):
+        blocked, reason = blocks_role(policy, kind, text, role=role)
+        if blocked:
+            if kind in {"size_interaction", "live_interaction"} and interaction_reason:
+                blocked_reasons.append(f"{interaction_reason}:{reason}")
+            else:
+                blocked_reasons.append(reason)
+    return blocked_reasons
+
+
+def _clip_safety_matches(text, forbidden_words=None, price_patterns=None, content_policy=None, role="body"):
     if forbidden_words is None:
         try:
             forbidden_words = load_keywords().get("forbidden_phrases", [])
         except Exception:
             forbidden_words = []
-    price_patterns = price_patterns or _safety_price_cta_patterns()
     text_variants = _safety_text_variants(text)
-    matched_forbidden = [
-        str(w or "").strip()
-        for w in (forbidden_words or [])
-        if str(w or "").strip() and _safety_word_matches(str(w or "").strip(), text_variants)
-    ]
-    has_price = _safety_pattern_matches(price_patterns, text_variants)
-    return matched_forbidden, has_price
+    policy = _content_policy_value(content_policy)
+    matched_forbidden = []
+    for raw_word in forbidden_words or []:
+        word = str(raw_word or "").strip()
+        if not word or not _safety_word_matches(word, text_variants):
+            continue
+        kind = _POLICY_MANAGED_KEYWORD_KINDS.get(word.casefold())
+        if kind:
+            blocked, _reason = blocks_role(policy, kind, text, role=role)
+            if not blocked:
+                continue
+        matched_forbidden.append(word)
+    blocked_policy = _policy_block_reasons(text, policy, role=role)
+    return matched_forbidden, bool(blocked_policy)
 
 
-def _is_safety_blocked_text(text, forbidden_words=None, price_patterns=None):
-    matched_forbidden, has_price = _clip_safety_matches(text, forbidden_words, price_patterns)
-    return bool(matched_forbidden or has_price or _content_safety_pattern_matches(text))
+def _is_safety_blocked_text(text, forbidden_words=None, price_patterns=None, content_policy=None, role="body"):
+    matched_forbidden, has_price = _clip_safety_matches(
+        text,
+        forbidden_words,
+        price_patterns,
+        content_policy=content_policy,
+        role=role,
+    )
+    return bool(
+        matched_forbidden
+        or has_price
+        or _content_safety_pattern_matches(text, content_policy, role=role)
+    )
 
 
 _CONTEXT_DAMAGE_WEAK_FORBIDDEN = {
@@ -15659,8 +16120,13 @@ _CONTEXT_DAMAGE_WEAK_FORBIDDEN = {
 }
 
 
-def _is_context_blocked_text(text, forbidden_words=None, price_patterns=None):
-    matched_forbidden, has_price = _clip_safety_matches(text, forbidden_words, price_patterns)
+def _is_context_blocked_text(text, forbidden_words=None, price_patterns=None, content_policy=None):
+    matched_forbidden, has_price = _clip_safety_matches(
+        text,
+        forbidden_words,
+        price_patterns,
+        content_policy=content_policy,
+    )
     if has_price:
         return True
     strict_forbidden = [
@@ -15788,14 +16254,12 @@ def _filter_context_damaged_clips(clips, cleaned_srt, log_fn=None, min_keep=4):
     return kept
 
 
-def _filter_price_and_cta(clips, log_fn=None):
-    """硬过滤：删除包含价格/报价/购物车/下单/链接的片段，AI Prompt拦不住就用代码拦"""
+def _filter_price_and_cta(clips, log_fn=None, *, content_policy=None):
+    """Apply fixed safety plus the user's price/CTA content policy."""
     def _log(msg):
         if log_fn: log_fn(msg)
 
-    # 价格数字模式：2-4位数字+元/块，或纯数字价格（99/199/299等）
     price_patterns = _safety_price_cta_patterns()
-    # 绝对禁止词：从关键词管理读取（用户可自定义）
     _kw_fw = load_keywords()
     forbidden_words = _kw_fw["forbidden_phrases"]
 
@@ -15804,28 +16268,33 @@ def _filter_price_and_cta(clips, log_fn=None):
     for ct, text, s, e, sc, d, *_ in clips:
         clean = re.sub(r'【|】', '', text)
         # 检查禁止词
-        matched_forbidden, has_price = _clip_safety_matches(clean, forbidden_words, price_patterns)
-        matched_content = _content_safety_pattern_matches(clean)
+        matched_forbidden, has_price = _clip_safety_matches(
+            clean,
+            forbidden_words,
+            price_patterns,
+            content_policy=content_policy,
+        )
+        matched_content = _content_safety_pattern_matches(clean, content_policy)
         has_forbidden = bool(matched_forbidden)
         if has_forbidden or has_price or matched_content:
             reason = []
             if has_forbidden:
                 reason.append(f'违禁词:{",".join(matched_forbidden[:5])}')
             if has_price:
-                reason.append('价格模式')
+                reason.extend(_policy_block_reasons(clean, content_policy) or ['内容政策'])
             if matched_content:
                 reason.append(f'内容安全:{",".join(matched_content[:3])}')
             removed += 1
-            _log(f'  价格过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
+            _log(f'  内容政策过滤: 删除 [{ct}] "{clean[:30]}..." ({";".join(reason)})')
             continue
         else:
             filtered.append((ct, text, s, e, sc, d, *_))
 
     if removed:
-        _log(f"价格硬过滤: 删除 {removed} 段含价格/CTA的片段，剩余 {len(filtered)} 段")
+        _log(f"内容政策过滤: 删除 {removed} 段不符合政策的片段，剩余 {len(filtered)} 段")
     return filtered
 
-def _filter_host_interaction(clips, log_fn=None):
+def _filter_host_interaction(clips, log_fn=None, *, content_policy=None):
     """移除纯主播回弹幕的废话片段"""
     def _log(msg):
         if log_fn: log_fn(msg)
@@ -15833,10 +16302,12 @@ def _filter_host_interaction(clips, log_fn=None):
     if not clips:
         return clips
 
+    policy = _content_policy_value(content_policy)
     clips = _filter_live_interaction_or_size_responses(
         clips,
         log_fn,
         label="主播互动硬排除",
+        content_policy=policy,
     )
     cleaned = []
     removed = 0
@@ -15850,7 +16321,8 @@ def _filter_host_interaction(clips, log_fn=None):
             reason = "现场调度"
         else:
             for pattern in HOST_CHAT_PATTERNS:
-                if pattern.search(clean):  # 用search替代match，匹配任意位置
+                blocked, _policy_reason = blocks_role(policy, "live_interaction", clean)
+                if pattern.search(clean) and blocked:  # 用search替代match，匹配任意位置
                     is_noise = True
                     reason = "主播回弹幕"
                     break

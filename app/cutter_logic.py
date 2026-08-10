@@ -319,6 +319,21 @@ def _copy_srt_with_word_timing_sidecar(
             os.remove(destination_sidecar)
         except FileNotFoundError:
             pass
+    # Local-ASR review evidence belongs to the exact transcript/timing pair.
+    # Copying only the SRT and words sidecar would make a cached transcript
+    # appear unaudited on the next run.
+    try:
+        from local_asr_review import quality_report_path
+
+        source_quality = quality_report_path(source_srt)
+        destination_quality = quality_report_path(destination_srt)
+        if source_quality.is_file():
+            if not same_target:
+                shutil.copy2(source_quality, destination_quality)
+        elif not same_target:
+            destination_quality.unlink(missing_ok=True)
+    except Exception:
+        _LOG.warning("failed to synchronize local ASR quality sidecar", exc_info=True)
     if source_video:
         try:
             from asr_cache import write_metadata
@@ -1212,6 +1227,19 @@ def _selection_shortage_grace_seconds(analysis_metadata):
         return 0.0
 
 
+def _is_preview_only_partial_selection(analysis_metadata, clips_only):
+    """Allow an insufficient AI selection to be reviewed, never exported."""
+    if not clips_only or not isinstance(analysis_metadata, dict):
+        return False
+    selection_result = analysis_metadata.get("selection_result") or {}
+    details = selection_result.get("details") or {}
+    return bool(
+        selection_result.get("status") == "partial_insufficient"
+        and details.get("preview_only")
+        and not details.get("export_allowed")
+    )
+
+
 def _validate_selected_duration_contract(
     clips,
     target_duration,
@@ -1413,7 +1441,7 @@ def _custom_frame_structure_filter(video_options=None, source_fps=30.0):
     return f"fps=fps={target_fps:.3f}:round=near", f"frame_structure({level},stable-{target_fps:.2f}fps)"
 
 
-def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None):
+def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None, speed_factor=None):
     """
     构建去重滤镜链
     - enhanced模式: 镜像 + 随机变速 + 随机微裁剪（pitch已移除）
@@ -1426,12 +1454,26 @@ def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None):
     mirror_enabled = _dedup_mirror_enabled(mirror_enabled)
 
     if strategy == "enhanced":
-        return _build_enhanced_dedup(width, height, clip_index, mirror_enabled=mirror_enabled, preset=preset)
+        return _build_enhanced_dedup(
+            width,
+            height,
+            clip_index,
+            mirror_enabled=mirror_enabled,
+            preset=preset,
+            speed_factor=speed_factor,
+        )
     else:
-        return _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=mirror_enabled)
+        return _build_classic_dedup(
+            width,
+            height,
+            clip_index,
+            methods,
+            mirror_enabled=mirror_enabled,
+            speed_factor=speed_factor,
+        )
 
 
-def _build_enhanced_dedup(width, height, clip_index, mirror_enabled=True, preset="medium"):
+def _build_enhanced_dedup(width, height, clip_index, mirror_enabled=True, preset="medium", speed_factor=None):
     """增强版去重：镜像 + 随机变速 + 随机微裁剪（pitch已移除，修复音画不同步）"""
     cfg = DEDUP_CONFIG
     params = _generate_random_dedup_params(clip_index, preset=preset)
@@ -1464,6 +1506,11 @@ def _build_enhanced_dedup(width, height, clip_index, mirror_enabled=True, preset
     # [v9.1] 变速：setpts和atempo使用同一个speed值，确保音画绝对同步
     # pitch已移除——之前视频用speed变速、音频用speed*pitch变速，速率不一致是音画不同步的根因
     speed = params["speed"]
+    if speed_factor is not None:
+        try:
+            speed = max(0.5, min(2.0, float(speed_factor)))
+        except (TypeError, ValueError):
+            speed = params["speed"]
 
     if speed != 1.0:
         vf_list.append(f"setpts=PTS/{speed}")   # 视频变速
@@ -1520,7 +1567,7 @@ def _build_enhanced_dedup(width, height, clip_index, mirror_enabled=True, preset
     }
 
 
-def _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=True):
+def _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=True, speed_factor=None):
     """经典去重模式（兼容原有逻辑）"""
     enabled_methods = [name for name, c in methods.items() if c.get("enabled")]
     if not mirror_enabled:
@@ -1533,7 +1580,15 @@ def _build_classic_dedup(width, height, clip_index, methods, mirror_enabled=True
     vf_list, af_list = [], []
     rng = random.Random(clip_index * 1000 + random.randint(0, 9999))
 
-    if "speed_change" in chosen:
+    if speed_factor is not None:
+        try:
+            s = max(0.5, min(2.0, float(speed_factor)))
+        except (TypeError, ValueError):
+            s = 1.0
+        if s != 1.0:
+            vf_list.append(f"setpts=PTS/{s}"); af_list.append(f"atempo={s}")
+            chosen = [method for method in chosen if method != "speed_change"] + [f"speed({s}x)"]
+    elif "speed_change" in chosen:
         s = round(rng.uniform(methods["speed_change"]["min_speed"], methods["speed_change"]["max_speed"]), 3)
         vf_list.append(f"setpts=PTS/{s}"); af_list.append(f"atempo={s}")
     if "zoom_crop" in chosen:
@@ -2931,7 +2986,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 ai_controls=ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
-                allow_partial=True,
+                allow_partial=_clips_only,
             )
             try:
                 analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
@@ -2975,7 +3030,7 @@ def process_video(video_path, srt_path=None, output_path=None,
         return False
 
     _duration_shortage_grace = _selection_shortage_grace_seconds(analysis_metadata)
-    if ai_is_enabled():
+    if ai_is_enabled() and not _is_preview_only_partial_selection(analysis_metadata, _clips_only):
         _validate_selected_duration_contract(
             ordered_clips,
             target_duration,
@@ -2985,6 +3040,8 @@ def process_video(video_path, srt_path=None, output_path=None,
             user_confirmed=_user_confirmed_clips,
             duration_tolerance=duration_tolerance,
         )
+    elif _is_preview_only_partial_selection(analysis_metadata, _clips_only):
+        _log("AI 预览内容不足：可先手动调整片单，不能直接作为满足时长的成片导出。")
 
     # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用    # 多版本缓存：保存选片结果和SRT内容，供 process_video_multi 使用
     if not _clips_only:
@@ -3662,7 +3719,13 @@ def process_video(video_path, srt_path=None, output_path=None,
                 dedup["video_filters"] = _append_filter(dedup.get("video_filters"), frame_vf)
                 dedup.setdefault("applied", []).append(frame_applied)
         else:
-            dedup = build_dedup_filters(w, h, 0, mirror_enabled=False)
+            dedup = build_dedup_filters(
+                w,
+                h,
+                0,
+                mirror_enabled=False,
+                speed_factor=_planned_speed_factor,
+            )
         _planned_subtitle_speed = _dedup_speed_factor(dedup)
         # [v9.1] 9:16裁剪+镜像+afade从切割步骤移至去重步骤
         # 字幕在去重后添加，镜像不会影响字幕
@@ -5367,6 +5430,16 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     """
     def _log(msg):
         if log_fn: log_fn(msg)
+
+    def _multi_failure(reason):
+        _log(f"多版本未生成：{reason}")
+        return {
+            "ok": False,
+            "error": reason,
+            "requested_versions": int(num_versions or 1),
+            "produced_versions": 0,
+            "outputs": [],
+        }
     
     if num_versions <= 1:
         return process_video(video_path, srt_path, output_path,
@@ -5380,12 +5453,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     # Step 1: 检查AI模式
     from ai_clipper import is_enabled as ai_is_enabled
     if not ai_is_enabled():
-        _log("多版本需要AI模式，降级为单版本")
-        return process_video(video_path, srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                               pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
+        return _multi_failure("多版本需要启用 AI 选片，未降级为单版本以避免版本数不符")
     
     # Step 2: 只跑ASR，不跑AI选片（AI留给多版本一次调用）
     global _multi_result_cache
@@ -5404,12 +5472,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     # 保存SRT到固定文件，供后续版本复用
     _multi_srt_path = srt_path
     if not _recorded_srt_text:
-        _log("ASR失败（无SRT文本），降级为单版本")
-        return process_video(video_path, srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                               pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
+        return _multi_failure("语音识别未返回可用字幕，未降级为单版本以避免版本数不符")
     if not _multi_srt_path:
         _multi_srt_path = os.path.join(
             os.path.dirname(video_path),
@@ -5429,22 +5492,9 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     versions_data = multi_result.get("versions", [])
     
     if not versions_data:
-        _log("AI多版本选片失败，降级为旧方案（代码拆分）")
-        # Fallback: 输出单版本
-        _log("🎬 多版本: 选片失败，降级为单版本输出")
-        return process_video(video_path, _multi_srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                               pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
-    
-    if len(versions_data) < 1:
-        _log("无有效版本，输出单版本")
-        return process_video(video_path, _multi_srt_path, output_path,
-                           dedup_preset, subtitle_overlay, log_fn,
-                           force_category, cancel_event,
-                               pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled, target_duration=target_duration, mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, ai_controls=ai_controls, dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options, transition_options=transition_options, duration_tolerance=duration_tolerance, local_asr_session=local_asr_session)
+        return _multi_failure("AI 未返回任何可用版本，未降级为单版本以避免版本数不符")
+
+    versions_data = list(versions_data[:int(num_versions)])
     
     _log(f"🎬 多版本: AI输出 {len(versions_data)} 个方案")
     
@@ -5487,7 +5537,12 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         if (result.get("ok", False) if isinstance(result, dict) else bool(result)) and os.path.exists(v_output):
             generated_outputs.append(v_output)
     
-    _log(f"\n✅ 多版本输出完成: {len(results)} 个版本")
+    requested_versions = int(num_versions or 1)
+    produced_versions = len(generated_outputs)
+    if produced_versions < requested_versions:
+        _log(f"多版本部分完成：请求 {requested_versions} 版，实际生成 {produced_versions} 版")
+    else:
+        _log(f"✅ 多版本输出完成：{produced_versions}/{requested_versions} 版")
     
     # 清理临时 SRT 文件
     if _multi_srt_path and _multi_srt_path != srt_path:
@@ -5514,8 +5569,12 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     if _multi_duration_warnings:
         _multi_metadata["duration_soft_warning"] = "；".join(_multi_duration_warnings)
     return {
-        "ok": any(r.get("ok", False) if isinstance(r, dict) else r for r in results),
-        "版本数": len(results),
+        "ok": bool(generated_outputs),
+        "版本数": produced_versions,
+        "requested_versions": requested_versions,
+        "produced_versions": produced_versions,
+        "partial": bool(generated_outputs) and produced_versions < requested_versions,
+        "error": "" if generated_outputs else f"请求 {requested_versions} 个版本，但没有成功输出",
         "outputs": generated_outputs,
         "analysis_metadata": _multi_metadata,
         "duration_soft_warning": _multi_metadata.get("duration_soft_warning", ""),
@@ -5915,10 +5974,6 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     _ai_mod._AI_CLIP_COUNT = _ai_mod.target_clip_count_text(_ai_target_duration)
 
     if num_versions and num_versions > 1 and not _clips_only:
-        _log(f"混剪多版本: 当前长素材多版本仍在优化，暂按单版本输出（请求 {num_versions} 版）")
-        num_versions = 1
-
-    if num_versions and num_versions > 1 and not _clips_only:
         _log(f"混剪多版本: 生成 {num_versions} 个独立方案...")
         try:
             from ai_clipper import ai_analyze_multi_versions
@@ -5936,6 +5991,16 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         except Exception as e:
             _log(f"混剪多版本选片失败: {e}")
             versions_data = []
+
+        if not versions_data:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return {
+                "ok": False,
+                "error": f"AI 未返回 {int(num_versions)} 个可用混剪版本，未降级为单版本以避免版本数不符",
+                "outputs": [],
+                "requested_versions": int(num_versions),
+                "produced_versions": 0,
+            }
 
         if versions_data:
             base, ext = os.path.splitext(final)
@@ -5983,7 +6048,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                         force_category=force_category,
                         **extra_kwargs,
                     )
-                    if ok:
+                    version_ok = bool(ok.get("ok", True)) if isinstance(ok, dict) else bool(ok)
+                    if version_ok and os.path.exists(v_output):
                         results.append(v_output)
                         _log(f"混剪多版本: 版本{vi+1}完成 {v_output}")
                     else:
@@ -5992,10 +6058,27 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _ai_mod.ai_analyze_clips = original_ai_analyze
                 _ai_mod.is_enabled = original_ai_enabled
                 shutil.rmtree(tmp, ignore_errors=True)
+            requested_versions = int(num_versions or 1)
+            produced_versions = len(results)
             if results:
-                _log(f"混剪多版本完成: {len(results)}/{len(versions_data)} 个版本")
-                return True
-            _log("混剪多版本无成功输出，回退到单版本流程")
+                if produced_versions < requested_versions:
+                    _log(f"混剪多版本部分完成：请求 {requested_versions} 版，实际生成 {produced_versions} 版")
+                else:
+                    _log(f"混剪多版本完成：{produced_versions}/{requested_versions} 版")
+                return {
+                    "ok": True,
+                    "outputs": results,
+                    "requested_versions": requested_versions,
+                    "produced_versions": produced_versions,
+                    "partial": produced_versions < requested_versions,
+                }
+            return {
+                "ok": False,
+                "error": f"请求 {requested_versions} 个混剪版本，但没有成功输出",
+                "outputs": [],
+                "requested_versions": requested_versions,
+                "produced_versions": 0,
+            }
 
     try:
         ordered_clips = ai_analyze_clips(merged_srt, log_fn=_log,
@@ -6008,7 +6091,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           ai_controls=ai_controls,
                                           record_history=not _clips_only,
                                           word_timings=_mix_word_timings,
-                                          allow_partial=True)
+                                          allow_partial=_clips_only)
         try:
             analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
             preference_summary = dict(analysis_metadata.get("preference_summary") or {})
@@ -6266,15 +6349,18 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             + suffix
         )
 
-    _validate_selected_duration_contract(
-        all_clips_meta,
-        target_duration,
-        _planned_speed_factor,
-        _log,
-        shortage_grace_seconds=_duration_shortage_grace,
-        user_confirmed=_user_confirmed_clips,
-        duration_tolerance=duration_tolerance,
-    )
+    if not _is_preview_only_partial_selection(analysis_metadata, _clips_only):
+        _validate_selected_duration_contract(
+            all_clips_meta,
+            target_duration,
+            _planned_speed_factor,
+            _log,
+            shortage_grace_seconds=_duration_shortage_grace,
+            user_confirmed=_user_confirmed_clips,
+            duration_tolerance=duration_tolerance,
+        )
+    else:
+        _log("混剪 AI 预览内容不足：可先手动调整片单，不能直接作为满足时长的成片导出。")
 
     _log(f"Mapped: {len(all_clips_meta)} clips from {len(set(c['source'] for c in all_clips_meta))} sources")
 
@@ -6870,7 +6956,13 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 dedup["video_filters"] = _append_filter(dedup.get("video_filters"), frame_vf)
                 dedup.setdefault("applied", []).append(frame_applied)
         else:
-            dedup = build_dedup_filters(w, h, 0, mirror_enabled=False)
+            dedup = build_dedup_filters(
+                w,
+                h,
+                0,
+                mirror_enabled=False,
+                speed_factor=_planned_speed_factor,
+            )
         applied = ",".join(dedup["applied"]) if dedup.get("applied") else "none"
         _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
 

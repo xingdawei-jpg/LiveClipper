@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "web_client"))
 
 
 ai_clipper = importlib.import_module("ai_clipper")
+content_review = importlib.import_module("content_review")
 cutter_logic = importlib.import_module("cutter_logic")
 selection_contracts = importlib.import_module("selection_contracts")
 server = importlib.import_module("server")
@@ -128,6 +129,32 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertGreaterEqual(source.count("allow_partial=_clips_only"), 2)
         self.assertGreaterEqual(source.count("record_history=not _clips_only"), 2)
 
+    def test_partial_selection_bypasses_duration_only_for_preview(self) -> None:
+        metadata = {
+            "selection_result": {
+                "status": "partial_insufficient",
+                "details": {
+                    "preview_only": True,
+                    "export_allowed": False,
+                },
+            }
+        }
+        self.assertTrue(
+            cutter_logic._is_preview_only_partial_selection(metadata, True)
+        )
+        self.assertFalse(
+            cutter_logic._is_preview_only_partial_selection(metadata, False)
+        )
+        metadata["selection_result"]["details"]["export_allowed"] = True
+        self.assertFalse(
+            cutter_logic._is_preview_only_partial_selection(metadata, True)
+        )
+        source = inspect.getsource(cutter_logic)
+        self.assertGreaterEqual(
+            source.count("_is_preview_only_partial_selection(analysis_metadata, _clips_only)"),
+            2,
+        )
+
     def test_custom_duration_tolerance_is_preserved_across_contract_validation(self) -> None:
         contract = selection_contracts.DurationContract.create(60, 1.0, tolerance=15)
         self.assertEqual((contract.final_min, contract.final_max), (45.0, 75.0))
@@ -147,6 +174,100 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             duration_tolerance=15,
         )
         self.assertEqual((accepted["low"], accepted["high"]), (45.0, 75.0))
+
+    def test_standard_dedup_reuses_the_duration_contract_speed(self) -> None:
+        old_preset = cutter_logic.DEDUP_PRESET
+        try:
+            cutter_logic.DEDUP_PRESET = "medium"
+            with mock.patch.object(
+                cutter_logic,
+                "_generate_random_dedup_params",
+                return_value={
+                    "crop_w": 1.0,
+                    "crop_h": 1.0,
+                    "crop_x": 0.0,
+                    "crop_y": 0.0,
+                    "speed": 1.29,
+                    "gamma": 0.0,
+                    "corner_mask": False,
+                    "audio_reverb": False,
+                    "noise_fusion": False,
+                    "frame_interp": False,
+                },
+            ):
+                dedup = cutter_logic.build_dedup_filters(1080, 1920, speed_factor=1.15)
+        finally:
+            cutter_logic.DEDUP_PRESET = old_preset
+
+        self.assertIn("setpts=PTS/1.15", dedup["video_filters"])
+        self.assertIn("atempo=1.15", dedup["audio_filters"])
+        self.assertNotIn("1.29", dedup["video_filters"])
+
+    def test_time_dedup_does_not_delete_the_next_compacted_clip(self) -> None:
+        clips = [
+            ("product", "肩线自然，轮廓很利落。", 0.0, 5.0, 50, 5.0, "版型显瘦"),
+            ("product", "重复的肩线说明。", 0.5, 4.0, 40, 3.5, "版型显瘦"),
+            ("product", "面料轻薄透气，夏天穿不闷。", 10.0, 14.0, 50, 4.0, "面料质感"),
+        ]
+
+        deduped = ai_clipper._dedup_clip_text_overlap(clips, None)
+
+        self.assertEqual(
+            [clip[1] for clip in deduped],
+            [clips[0][1], clips[2][1]],
+        )
+
+    def test_selected_hook_style_replaces_size_reply_with_matching_opening(self) -> None:
+        srt_text = (
+            "1\n00:00:00,000 --> 00:00:02,500\n155斤穿XL码就可以。\n\n"
+            "2\n00:00:02,500 --> 00:00:05,500\n这件上身肩线很利落，整个人看着更显瘦。\n\n"
+            "3\n00:00:05,500 --> 00:00:09,500\n日常通勤穿也很有精神。"
+        )
+        clips = [
+            ("hook", "155斤穿XL码就可以。", 0.0, 2.5, 50, 2.5, "尺寸长度"),
+            ("product", "这件上身肩线很利落，整个人看着更显瘦。", 2.5, 5.5, 50, 3.0, "版型显瘦"),
+            ("product", "日常通勤穿也很有精神。", 5.5, 9.5, 50, 4.0, "场景搭配"),
+        ]
+
+        refined = ai_clipper._refine_hook_by_dynamic_score(
+            clips,
+            srt_text,
+            focus_hint="版型显瘦",
+            ai_controls={"hook_style": "上身效果开头"},
+        )
+
+        self.assertEqual(refined[0][0], "hook")
+        self.assertEqual(refined[0][1], clips[1][1])
+        self.assertTrue(ai_clipper._hook_matches_selected_style(refined[0][1], "上身效果开头"))
+
+    def test_secondary_pants_category_is_a_real_content_filter(self) -> None:
+        self.assertEqual(ai_clipper._normalize_forced_category("裤子"), "裤子")
+        clips = [
+            ("product", "这件上衣肩线很利落。", 0.0, 4.0, 50, 4.0, "版型显瘦"),
+            ("product", "这条裤子高腰直筒，通勤穿很利落。", 4.0, 8.0, 50, 4.0, "版型显瘦"),
+        ]
+        filtered = ai_clipper._post_filter_cross_category(
+            clips,
+            "这件上衣肩线很利落。这条裤子高腰直筒，通勤穿很利落。",
+            None,
+            preferred_cat="裤子",
+        )
+
+        self.assertEqual([clip[1] for clip in filtered], [clips[1][1]])
+
+    def test_director_splits_long_product_at_frozen_short_sentence_boundaries(self) -> None:
+        clip = ("product", "肩线很利落。面料很轻薄。通勤穿很干净。", 0.0, 9.0, 50, 9.0, "品质细节")
+        entries = [
+            (0.0, 3.0, "肩线很利落。"),
+            (3.0, 6.0, "面料很轻薄。"),
+            (6.0, 9.0, "通勤穿很干净。"),
+        ]
+
+        chunks = ai_clipper._split_director_overlong_product(clip, entries)
+
+        self.assertEqual(len(chunks), 3)
+        self.assertTrue(all(chunk[5] <= 5.2 for chunk in chunks))
+        self.assertEqual([(chunk[2], chunk[3]) for chunk in chunks], [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)])
 
     def test_duration_fraction_inside_acceptance_margin_is_warning_not_failure(self) -> None:
         contract = selection_contracts.DurationContract.create(60, 1.0)
@@ -224,6 +345,76 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual(fitted[1][1], selected[1][1])
         self.assertEqual(fitted[-1][1], selected[-1][1])
         self.assertGreaterEqual(sum(float(clip[5]) for clip in fitted), 25.0)
+
+    def test_local_duration_fit_prefers_grounded_primary_subject_but_keeps_ai_anchor_first(self) -> None:
+        entries = [
+            (0.0, 4.0, "这件上衣穿上以后肩线很利落。"),
+            (4.0, 10.0, "肩部编织线把视觉重心往里收。"),
+            (10.0, 22.0, "这件上衣的肩线向内收，所以整个人看起来更利落。"),
+            (22.0, 34.0, "这条裤子的腰头平整，通勤穿不会勒肚子。"),
+            (34.0, 38.0, "整套日常穿很耐看。"),
+        ]
+        selected = [
+            ("hook", entries[0][2], 0.0, 4.0, 50, 4.0, "版型"),
+            ("product", entries[1][2], 4.0, 10.0, 50, 6.0, "工艺"),
+            ("close", entries[4][2], 34.0, 38.0, 50, 4.0, "场景"),
+        ]
+        review_bundle = content_review.ContentReviewBundle(
+            "review-key",
+            "digest",
+            "上衣",
+            "deepseek-v4-flash",
+            (
+                content_review.ContentCard(
+                    3, "版型显瘦", "肩线内收", "说明上衣肩线如何修饰",
+                    "原因解释", "肩线向内收", ("effect", "evidence"),
+                    "independent", ("具体效果", "原因解释"), "main",
+                    "上衣", "primary", "这件上衣",
+                ),
+                content_review.ContentCard(
+                    4, "版型显瘦", "腰头平整", "说明裤子腰头不勒",
+                    "具体效果", "不会勒肚子", ("effect",),
+                    "independent", ("具体效果",), "reserve",
+                    "裤子", "other", "这条裤子",
+                ),
+            ),
+            24.0,
+        )
+        contract = selection_contracts.DurationContract.create(30, 1.0)
+        safe_inventory = [{"srt_index": index} for index in range(1, 6)]
+
+        fitted = ai_clipper._fit_director_duration_from_existing_candidates(
+            selected,
+            entries,
+            30,
+            duration_contract=contract,
+            allowed_candidate_ids={1, 2, 3, 4, 5},
+            review_bundle=review_bundle,
+            safe_inventory=safe_inventory,
+        )
+        self.assertEqual([clip[1] for clip in fitted], [
+            entries[0][2], entries[1][2], entries[2][2], entries[4][2],
+        ])
+
+        anchored = ai_clipper._fit_director_duration_from_existing_candidates(
+            selected,
+            entries,
+            30,
+            duration_contract=contract,
+            expansion_plan=[{
+                "priority": 1,
+                "after_srt_indices": [2],
+                "after_order": 2,
+                "srt_indices": [4],
+                "focus": "腰头说明",
+            }],
+            allowed_candidate_ids={1, 2, 3, 4, 5},
+            review_bundle=review_bundle,
+            safe_inventory=safe_inventory,
+        )
+        self.assertEqual([clip[1] for clip in anchored], [
+            entries[0][2], entries[1][2], entries[3][2], entries[4][2],
+        ])
 
     def test_mix_source_quota_repairs_then_warns_instead_of_failing(self) -> None:
         clips = [
@@ -817,8 +1008,8 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
 
         products = [clip for clip in safe if clip[0] == "product"]
-        self.assertEqual([round(clip[5], 1) for clip in products], [6.0, 12.0])
-        self.assertTrue(all(clip[5] <= 12.2 for clip in products))
+        self.assertEqual([round(clip[5], 1) for clip in products], [6.0, 7.0, 5.0])
+        self.assertTrue(all(clip[5] <= 8.2 for clip in products))
         self.assertEqual(audit["per_clip_duration"]["split_count"], 1)
         self.assertEqual(audit["per_clip_duration"]["removed_count"], 0)
         self.assertEqual(sum(clip[5] for clip in safe), 26.0)
@@ -844,7 +1035,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
 
         self.assertEqual([clip[0] for clip in safe], ["hook", "close"])
-        self.assertTrue(all(clip[5] <= 12.2 for clip in safe if clip[0] == "product"))
+        self.assertTrue(all(clip[5] <= 8.2 for clip in safe if clip[0] == "product"))
         self.assertEqual(audit["per_clip_duration"]["split_count"], 0)
         self.assertEqual(audit["per_clip_duration"]["removed_count"], 1)
         self.assertAlmostEqual(audit["per_clip_duration"]["removed_duration"], 17.0)
@@ -1546,6 +1737,79 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertIn(entries[3][2], [clip[1] for clip in expanded])
 
 class BatchSummaryReliabilityTests(unittest.TestCase):
+    def test_multi_version_never_silently_falls_back_to_one_output(self) -> None:
+        with mock.patch.object(ai_clipper, "is_enabled", return_value=False):
+            result = cutter_logic.process_video_multi("sample.mp4", num_versions=2)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["requested_versions"], 2)
+        self.assertEqual(result["produced_versions"], 0)
+        self.assertEqual(result["outputs"], [])
+        self.assertIn("未降级为单版本", result["error"])
+
+    def test_mix_result_uses_declared_multi_version_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            video = root / "mix.mp4"
+            video.write_bytes(b"video")
+            payload = server.MixPayload(video_paths=[str(video)], output_dir=str(root), versions=2)
+            task_id = server._new_task("mix", "混剪")
+            declared_outputs = [str(root / "mix_v1.mp4"), str(root / "mix_v2.mp4")]
+
+            with (
+                mock.patch(
+                    "cutter_logic.process_video_mix",
+                    return_value={"ok": True, "outputs": declared_outputs, "requested_versions": 2, "produced_versions": 2},
+                ),
+                mock.patch.object(server, "_ensure_feature_access"),
+                mock.patch.object(server, "_pick_pip_asset", return_value=("", None)),
+                mock.patch.object(server, "_archive_used_pip"),
+                mock.patch.object(server, "_consume_trial"),
+                mock.patch.object(server, "_record_output_history"),
+            ):
+                server._run_mix(task_id, payload)
+
+            task = server._TASKS[task_id]
+            self.assertEqual(task["status"], "completed")
+            self.assertEqual(task["outputs"], declared_outputs)
+            self.assertEqual(task["result_count"], 2)
+
+    def test_mix_batch_counts_groups_separately_from_version_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            groups = []
+            for index in range(1, 3):
+                video = root / f"g{index}.mp4"
+                video.write_bytes(b"video")
+                groups.append(server.MixBatchGroup(name=f"第{index}组", video_paths=[str(video)]))
+            payload = server.MixBatchPayload(groups=groups, output_dir=str(root), versions=2)
+            task_id = server._new_task("mix", "批量混剪")
+            calls = {"count": 0}
+
+            def fake_mix(*_args, **_kwargs):
+                calls["count"] += 1
+                return {
+                    "ok": True,
+                    "outputs": [str(root / f"g{calls['count']}_v1.mp4"), str(root / f"g{calls['count']}_v2.mp4")],
+                    "requested_versions": 2,
+                    "produced_versions": 2,
+                }
+
+            with (
+                mock.patch("cutter_logic.process_video_mix", side_effect=fake_mix),
+                mock.patch.object(server, "_ensure_feature_access"),
+                mock.patch.object(server, "_pick_pip_asset", return_value=("", None)),
+                mock.patch.object(server, "_archive_used_pip"),
+                mock.patch.object(server, "_consume_trial"),
+                mock.patch.object(server, "_record_output_history"),
+            ):
+                server._run_mix_batch(task_id, payload)
+
+            task = server._TASKS[task_id]
+            self.assertEqual(task["batch_succeeded"], 2)
+            self.assertEqual(task["result_count"], 4)
+            self.assertEqual(len(task["outputs"]), 4)
+
     def test_payload_models_accept_optional_duration_tolerance(self) -> None:
         self.assertEqual(server.SmartCutPayload(duration_tolerance=15).duration_tolerance, 15)
         self.assertEqual(server.MixPayload(duration_tolerance=20).duration_tolerance, 20)

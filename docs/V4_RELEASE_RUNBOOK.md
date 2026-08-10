@@ -1,6 +1,6 @@
 # LiveClipper V4 发布与更新完整操作手册
 
-> 状态：2026-08-07，基于 V4 4.0.0 RC 实际发布流程编写
+> 状态：2026-08-11，当前全量候选 Core 为 4.0.1；4.0.0 已上线后不得同版本重打
 > 给 Codex 的工程交接文档——按顺序执行即可复现全链路
 
 ---
@@ -13,7 +13,7 @@
 LiveClipperWeb/
 ├── LiveClipperWeb.exe          ← 稳定 launcher（低频变化）
 ├── core/
-│   └── 4.0.0/
+│   └── 4.0.1/
 │       ├── LiveClipperHost.exe  ← 桌面宿主机（含 WebView2/FFmpeg/Python/ML）
 │       ├── _internal/           ← PyInstaller onedir 运行时
 │       │   ├── web_client/
@@ -45,9 +45,9 @@ LiveClipperWeb/
 
 | 层 | 版本号 | 格式 | 举例 |
 |---|---|---|---|
-| Core | `4.0.0` | 语义化 | 低频变化 |
+| Core | `4.0.1` | 语义化 | 低频变化；任何 Core 内容变化必须递增 |
 | 业务包 | `YYYY.M.D.N` | 日期递增 | `2026.8.5.2` |
-| Launcher | `4.0.0` | 语义化 | 嵌入 Core |
+| Launcher | `4.0.1` | 语义化 | 与本次全量 Core 同步 |
 
 **三个版本源必须一致**（同一提交的代码）：
 1. `app/version.json` → UI 显示的版本号
@@ -60,16 +60,16 @@ LiveClipperWeb/
 
 ### 总控脚本
 
-**`tools/build_v4_full_package.py`** 是唯一构建入口。一行命令完成全部 6 步：
+**`tools/build_v4_full_package.py`** 是全量基线包的唯一构建入口。一行命令完成构建、签名、完整校验和压缩；版本升级、更新通道发布和远端上传仍是明确的发布步骤，不能省略。
 
 ```powershell
 $env:LIVECLIPPER_V4_BUILD_ROOT = "C:\lc_v4_build"
 
 # 全量构建（首次或 Core 变化时）
-python tools\build_v4_full_package.py --version 2026.8.5.2 --backup-version 2026.8.5.1 --backup-archive release_build\v4_rc1\LiveClipperBusiness_2026.8.5.1.zip
+python tools\build_v4_full_package.py --version 2026.8.11.1 --core-version 4.0.1 --backup-version 2026.8.11.0 --backup-archive release_build\v4_core_4.0.1_rollback\LiveClipperBusiness_2026.8.11.0.zip
 
 # 快速构建（业务代码修改，跳过 Core/Launcher 重建）
-python tools\build_v4_full_package.py --version 2026.8.5.3 --skip-core --skip-launcher --backup-version 2026.8.5.1 --backup-archive release_build\v4_rc1\LiveClipperBusiness_2026.8.5.1.zip
+python tools\build_v4_full_package.py --version 2026.8.11.2 --core-version 4.0.1 --skip-core --skip-launcher --backup-version 2026.8.11.0 --backup-archive release_build\v4_core_4.0.1_rollback\LiveClipperBusiness_2026.8.11.0.zip
 ```
 
 #### 六步流程
@@ -79,9 +79,11 @@ python tools\build_v4_full_package.py --version 2026.8.5.3 --skip-core --skip-la
 | 1. Build Core | PyInstaller 打包 host（8889 文件/2GB） | ~40 min | `--skip-core` |
 | 2. Build Launcher | PyInstaller 打包 launcher EXE | ~2 min | `--skip-launcher` |
 | 3. Build Business | 构建签名业务包 ZIP | ~30s | 从不跳过 |
-| 4. Sign + Assemble | 签名 Core manifest + 组装目录 | ~2 min | 从不跳过 |
-| 5. Verify | 校验 EXE 大小匹配 manifest | ~5s | 从不跳过 |
-| 6. Zip | 压缩全量包 | ~4 min | 从不跳过 |
+| 4. Sign + Assemble | 签名 Core manifest，安全解压并验证当前与回滚业务包 | ~2 min | 从不跳过 |
+| 5. Verify | 校验 Core 全文件签名/哈希、两套业务包签名、版本三源和回滚选择 | ~1-3 min | 从不跳过 |
+| 6. Zip | 压缩全量包并读取全部 ZIP 条目检查物理完整性 | ~4-8 min | 从不跳过 |
+
+> 全量基线包必须同时提供 `--backup-version` 与 `--backup-archive`，且二者不能等于当前版本。脚本会拒绝无回滚目标、签名不匹配或 `app/version.json` 与 `--version` 不一致的构建。
 
 #### 构建环境要求
 
@@ -137,16 +139,16 @@ python -c "import json; v=json.load(open('app/version.json','r',encoding='utf-8'
 # 验证全量包关键文件
 python -c "
 import zipfile, json
-z = zipfile.ZipFile(r'LiveClipperWeb_v4.0.0_2026.8.x.x_全量包.zip')
+z = zipfile.ZipFile(r'LiveClipperWeb_v4.0.1_2026.8.x.x_全量包.zip')
 # 版本三源一致
 v1 = json.loads(z.read('LiveClipperWeb/current.json'))['current']['application_version']
 v2 = json.loads(z.read('LiveClipperWeb/versions/<ver>/business/app/version.json'))['version']
 v3 = json.loads(z.read('LiveClipperWeb/versions/<ver>/business/bundle_manifest.json'))['application_version']
 print('一致' if v1==v2==v3 else '不一致!!!')
 # EXE manifest 匹配
-m = json.loads(z.read('LiveClipperWeb/core/4.0.0/core_manifest.json'))
+m = json.loads(z.read('LiveClipperWeb/core/4.0.1/core_manifest.json'))
 exe = m['files']['LiveClipperHost.exe']['size']
-zip_size = z.getinfo('LiveClipperWeb/core/4.0.0/LiveClipperHost.exe').file_size
+zip_size = z.getinfo('LiveClipperWeb/core/4.0.1/LiveClipperHost.exe').file_size
 print('EXE匹配' if exe==zip_size else f'EXE不匹配 {exe} vs {zip_size}')
 "
 ```
@@ -167,29 +169,30 @@ OSS (lc-update.oss-cn-beijing.aliyuncs.com)
 ### 生成并发布通道
 
 ```powershell
-# 1. 生成 ready 状态 channel
-python -c "
-from runtime_v4.update_channel import build_signed_update_channel
-build_signed_update_channel(
-    'release/candidates/<ver>/stable.json',
-    r'C:\lc_v4_build\business\LiveClipperBusiness_<ver>.zip',
-    application_version='2026.8.x.x',
-    allowed_source_versions=['<上一版本号>'],
-    compatible_core_versions=['4.0.0'],
-    sources=[{'name':'AliyunOSS','url':'https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/LiveClipperBusiness_<ver>.zip'}],
-    private_key_path=r'C:\Users\周美彤\.liveclipper-keys\release_update_private_key.pem',
-    channel_status='ready',
-    release_notes='<更新说明>',
-)
-"
+# 1. 生成 ready 状态 channel。每个仍支持在线升级的 V4 版本都要重复一次 --from-version。
+python tools\build_v4_update_channel.py ^
+  --bundle C:\lc_v4_build\business\LiveClipperBusiness_<ver>.zip ^
+  --output release\candidates\<ver>\stable.json ^
+  --version 2026.8.x.x ^
+  --from-version <已发布V4版本A> ^
+  --from-version <已发布V4版本B> ^
+  --core-version 4.0.0 ^
+  --source "AliyunOSS=https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/LiveClipperBusiness_<ver>.zip" ^
+  --source "CloudflarePages=https://liveclipper-updates.pages.dev/LiveClipperBusiness_<ver>.zip" ^
+  --private-key C:\Users\周美彤\.liveclipper-keys\release_update_private_key.pem ^
+  --status ready ^
+  --release-notes "<更新说明>"
 
 # 2. 上传到 OSS
 ossutil cp C:\lc_v4_build\business\LiveClipperBusiness_<ver>.zip oss://lc-update/liveclipper/v4/ -f
 ossutil cp release/candidates/<ver>/stable.json oss://lc-update/liveclipper/v4/stable.json -f
 
-# 3. 验证
+# 3. 验证本地签名通道和升级路径
 python tools\verify_v4_update_channel.py release/candidates/<ver>/stable.json --public-key app\release_update_public_key.pem --current-version <上一版本号> --core-version 4.0.0
 # 应输出 "decision.available: true, reason: update_available"
+
+# 4. 发布后巡检所有 stable.json 和业务包镜像。任何一个配置端点失败都视为发布未完成。
+python tools\check_v4_update_endpoints.py
 ```
 
 ### 通道状态说明
@@ -215,7 +218,7 @@ python tools\verify_v4_update_channel.py release/candidates/<ver>/stable.json --
 }
 ```
 
-客户端按顺序回退：主源（OSS）→ jsDelivr 备用 → Cloudflare 兜底。
+客户端按顺序尝试这些 `stable.json` 地址。每个地址必须发布**同一份已签名通道文件**；通道中声明的每个业务包 URL 也必须上传相同 SHA256 的业务包。发布后必须运行巡检，不能把未上传的备用地址写进配置。
 
 ---
 
@@ -232,7 +235,7 @@ plan_business_update(channel, current_version, core_version)
   检查：channel_status==ready, 目标>当前, 源版本允许, Core 兼容
     ↓
 download_business_bundle(channel, download_root)
-  多源回退下载 + SHA256 校验 + 缓存复用 + 断点续传
+  按签名通道中的业务包源顺序下载 + SHA256 校验 + 缓存复用 + 断点续传
     ↓
 install_business_archive(install_root, archive)
   解压到 versions/<ver>/ → 原子切换 current.json → pending=true
@@ -302,6 +305,7 @@ launcher 重启 → 健康检查（host 写回执）
 | `tools/build_v4_full_package.py` | **总控构建脚本** | 工具 |
 | `tools/build_v4_update_channel.py` | 生成签名通道 | 工具 |
 | `tools/verify_v4_update_channel.py` | 验证通道 | 工具 |
+| `tools/check_v4_update_endpoints.py` | 巡检已发布通道和所有业务包镜像 | 工具 |
 | `tools/build_update_manifest.py` | 更新 app/version.json | 工具 |
 | `runtime_v4/liveclipper_host_v4.spec` | Core PyInstaller spec | Core |
 | `runtime_v4/liveclipper_launcher_v4.spec` | Launcher PyInstaller spec | Core |
@@ -341,21 +345,22 @@ git commit -m "release: 2026.8.x.x <说明>"
 
 # 5. 构建全量包
 $env:LIVECLIPPER_V4_BUILD_ROOT="C:\lc_v4_build"
-python tools\build_v4_full_package.py --version 2026.8.x.x --backup-version <上一版本> --backup-archive release_build\v4_rc1\LiveClipperBusiness_<上一版本>.zip
+python tools\build_v4_full_package.py --version 2026.8.x.x --core-version <Core版本> --backup-version <回滚业务版本> --backup-archive <回滚业务包路径>
 
-# 6. 生成并上传通道
-python -c "..."  # 见第四节
-ossutil cp ...   # 上传 bundle + stable.json
+# 6. 生成、上传并巡检通道
+python tools\build_v4_update_channel.py ...  # 每个支持来源版本重复 --from-version，见第四节
+ossutil cp ...   # 向每个已配置镜像上传 bundle + 同一份 stable.json
+python tools\check_v4_update_endpoints.py
 
 # 7. 发布全量包到百度网盘
-# 文件在桌面: LiveClipperWeb_v4.0.0_<业务版本>_全量包.zip + .sha256.txt
+# 文件在桌面: LiveClipperWeb_v<Core版本>_<业务版本>_全量包.zip + .sha256.txt
 ```
 
 ## 九、快速参考
 
 | 操作 | 命令 |
 |---|---|
-| 构建全量包（全量） | `python tools\build_v4_full_package.py --version 2026.8.x.x --backup-version ... --backup-archive ...` |
+| 构建全量包（全量） | `python tools\build_v4_full_package.py --version 2026.8.x.x --core-version <Core版本> --backup-version ... --backup-archive ...` |
 | 构建全量包（跳过 Core） | 加 `--skip-core --skip-launcher` |
 | 更新 version.json | `python tools\build_update_manifest.py --version 2026.8.x.x --force` |
 | 生成 ready channel | 见第四节 |

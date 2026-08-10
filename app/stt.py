@@ -160,6 +160,22 @@ def _decode_worker_message(raw_line: str) -> tuple[str, str | bool] | None:
     return None
 
 
+def _local_asr_exit_diagnostic(return_code: int | None) -> str:
+    """Describe native worker crashes without retrying an unstable process."""
+    if return_code is None:
+        return "SenseVoice 本地识别进程意外退出，未取得退出码。"
+    try:
+        unsigned = int(return_code) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return f"SenseVoice 本地识别进程失败（返回码 {return_code}）。"
+    if unsigned == 0xC0000005:
+        return (
+            "SenseVoice 本地识别进程发生原生访问冲突（0xC0000005）。"
+            "已停止重试并释放模型内存；请改用云端识别或检查本机 Python/Torch/显卡驱动环境。"
+        )
+    return f"SenseVoice 本地识别进程失败（返回码 {return_code} / 0x{unsigned:08X}）。"
+
+
 class LocalASRWorkerSession:
     """A task-scoped SenseVoice worker that keeps its model warm between jobs.
 
@@ -323,14 +339,14 @@ class LocalASRWorkerSession:
                     raw_line = ""
                 if raw_line is None:
                     if log_fn:
-                        log_fn("SenseVoice 批量识别进程意外退出。")
+                        log_fn(_local_asr_exit_diagnostic(proc.poll()))
                     self._terminate()
                     _remove_local_asr_outputs(srt_output)
                     return False
                 if not raw_line:
                     if proc.poll() is not None:
                         if log_fn:
-                            log_fn(f"SenseVoice 批量识别进程失败（返回码 {proc.returncode}）。")
+                            log_fn(_local_asr_exit_diagnostic(proc.returncode))
                         self._terminate()
                         _remove_local_asr_outputs(srt_output)
                         return False
@@ -479,7 +495,7 @@ def _run_local_asr_worker(
         if not succeeded:
             for diagnostic in raw_diagnostics:
                 _log(f"SenseVoice 诊断: {diagnostic[:300]}")
-            _log(f"SenseVoice 独立识别进程失败（返回码 {return_code}）。")
+            _log(_local_asr_exit_diagnostic(return_code))
             _remove_local_asr_outputs(srt_output)
         return succeeded
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -573,6 +589,7 @@ def cleanup_srt(srt_path: str | None) -> None:
         path,
         path.with_suffix(".words.json"),
         path.with_suffix(".asr-cache.json"),
+        path.with_suffix(".asr_quality.json"),
     ):
         try:
             target.unlink(missing_ok=True)

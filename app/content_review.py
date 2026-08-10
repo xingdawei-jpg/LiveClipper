@@ -18,11 +18,22 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
 
 from ai_model_config import ai_chat_completions_url
-from candidate_quality import candidate_quality_flags
+from candidate_quality import candidate_quality_flags, hook_candidate_quality_flags
+from content_policy import (
+    blocks_role,
+    interaction_policy_kind,
+    normalize_content_policy,
+    policy_prompt_lines,
+)
+from marketing_intent import (
+    MarketingIntentBundle,
+    build_marketing_intent_bundle,
+    marketing_intent_prompt_contract,
+)
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
-CONTENT_REVIEW_VERSION = "content-review-v24"
+CONTENT_REVIEW_VERSION = "content-review-v29"
 CONTENT_REVIEW_ENV = "LIVECLIPPER_CONTENT_REVIEW_MODE"
 CONTENT_REVIEW_DEFAULT_MODE = "off"
 CONTENT_REVIEW_MAX_CARDS = 80
@@ -34,6 +45,15 @@ CONTENT_REVIEW_CACHE_MAX_BYTES = 50 * 1024 * 1024
 _VALID_TIERS = {"main", "reserve"}
 _VALID_DEPENDENCIES = {"independent", "needs_previous", "needs_next", "needs_both"}
 _VALID_ROLES = {"effect", "evidence", "scene", "objection", "product"}
+_VALID_TARGET_RELATIONS = {"primary", "supporting", "other", "unknown"}
+_LOW_VALUE_QUALITY_TAGS = (
+    "泛泛夸赞", "直播铺垫", "展示铺垫", "互动", "残句", "重复", "上新预告",
+    "尺码", "身高", "体重",
+)
+_STRONG_EVIDENCE_MARKERS = (
+    "原因", "解释", "细节", "实物", "展示", "对比", "效果", "工艺",
+    "面料", "场景", "证明", "依据", "上身",
+)
 _TOPIC_FAMILY_RULES = (
     ("\u53e3\u611f\u98df\u6b32", ("\u53e3\u611f", "\u5473\u9053", "\u9999\u5473", "\u98df\u6b32", "\u597d\u5403", "\u8106", "\u751c", "\u9c9c")),
     ("\u65b0\u9c9c\u54c1\u8d28", ("\u65b0\u9c9c", "\u73b0\u6458", "\u73b0\u505a", "\u54c1\u8d28", "\u4fdd\u8d28")),
@@ -109,6 +129,25 @@ def _normalize_topic(value: Any) -> str:
     return topic
 
 
+def _normalize_target_relation(value: Any) -> str:
+    relation = _clean_text(value, 24).lower()
+    aliases = {
+        "\u4e3b\u5546\u54c1": "primary",
+        "\u4e3b\u4f53": "primary",
+        "\u4e3b\u8bb2": "primary",
+        "\u76f4\u63a5": "primary",
+        "\u8f85\u52a9": "supporting",
+        "\u642d\u914d": "supporting",
+        "\u4f50\u8bc1": "supporting",
+        "\u5176\u4ed6\u5546\u54c1": "other",
+        "\u5176\u4ed6\u54c1\u7c7b": "other",
+        "\u65e0\u6cd5\u5224\u65ad": "unknown",
+        "\u672a\u77e5": "unknown",
+    }
+    relation = aliases.get(relation, relation)
+    return relation if relation in _VALID_TARGET_RELATIONS else "unknown"
+
+
 @dataclass(frozen=True)
 class ContentCard:
     candidate_id: int
@@ -121,6 +160,9 @@ class ContentCard:
     dependency: str
     quality_tags: tuple[str, ...]
     tier: str
+    primary_subject: str = ""
+    target_relation: str = "unknown"
+    subject_evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -134,7 +176,47 @@ class ContentCard:
             "dependency": self.dependency,
             "quality_tags": list(self.quality_tags),
             "tier": self.tier,
+            "primary_subject": self.primary_subject,
+            "target_relation": self.target_relation,
+            "subject_evidence": self.subject_evidence,
         }
+
+
+def _content_card_priority(card: "ContentCard") -> int:
+    """Return an internal-only ordering value; never expose it as a user score."""
+    relation_rank = {
+        "primary": 36,
+        "supporting": 22,
+        "unknown": 10,
+        "other": -24,
+    }.get(card.target_relation, 0)
+    tier_rank = 24 if card.tier == "main" else 8
+    evidence_text = f"{card.evidence_type} {' '.join(card.quality_tags)}"
+    evidence_rank = 12 if any(marker in evidence_text for marker in _STRONG_EVIDENCE_MARKERS) else 0
+    role_rank = (
+        (6 if "evidence" in card.roles else 0)
+        + (5 if "effect" in card.roles else 0)
+        + (4 if "objection" in card.roles else 0)
+        + (2 if "scene" in card.roles else 0)
+    )
+    context_rank = 4 if card.dependency == "independent" else 0
+    quote_rank = 3 if card.evidence_quote else 0
+    tag_text = " ".join(card.quality_tags)
+    low_value_penalty = 28 if any(tag in tag_text for tag in _LOW_VALUE_QUALITY_TAGS) else 0
+    return relation_rank + tier_rank + evidence_rank + role_rank + context_rank + quote_rank - low_value_penalty
+
+
+def content_card_priority(card: "ContentCard") -> int:
+    """Public read-only priority used by director fallbacks, not the UI."""
+    return _content_card_priority(card)
+
+
+def _card_hook_eligible(card: "ContentCard") -> bool:
+    """A reviewed card may be body material but still be unfit for the opening."""
+    if card.dependency != "independent" or card.target_relation == "other":
+        return False
+    tag_text = " ".join(card.quality_tags)
+    return not any(tag in tag_text for tag in _LOW_VALUE_QUALITY_TAGS)
 
 
 @dataclass(frozen=True)
@@ -162,6 +244,7 @@ class ContentReviewBundle:
     cards: tuple[ContentCard, ...]
     retained_duration: float
     hook_pairs: tuple[HookPair, ...] = ()
+    marketing_intent: MarketingIntentBundle | None = None
     # A focused second pass is only needed when the broad review returned no
     # verified opening pair. Persisting its completed state keeps cache hits
     # free of another model call, including the valid "no pair exists" result.
@@ -191,10 +274,11 @@ class ContentReviewBundle:
             "cards": [card.to_dict() for card in self.cards],
             "hook_pairs": [pair.to_dict() for pair in self.hook_pairs],
             "hook_pair_reviewed": bool(self.hook_pair_reviewed),
+            "marketing_intent": self.marketing_intent.to_dict() if self.marketing_intent else {},
         }
 
     def summary(self, mode: str, fallback_reason: str = "") -> dict[str, Any]:
-        return {
+        summary = {
             "mode": normalize_review_mode(mode),
             "version": self.version,
             "cache_hit": bool(self.cache_hit),
@@ -207,20 +291,50 @@ class ContentReviewBundle:
             "hook_pair_reviewed": bool(self.hook_pair_reviewed),
             "fallback_reason": str(fallback_reason or ""),
         }
+        marketing_summary = (self.marketing_intent or MarketingIntentBundle("")).summary()
+        summary.update({
+            "marketing_intent_version": marketing_summary["version"],
+            "marketing_intent_response_present": marketing_summary["response_present"],
+            "marketing_intent_count": marketing_summary["intent_count"],
+            "marketing_arc_count": marketing_summary["arc_count"],
+            "marketing_eligible_arc_count": marketing_summary["eligible_arc_count"],
+            "marketing_arc_rejection_count": marketing_summary["rejection_count"],
+            "primary_subject_count": sum(
+                1 for card in self.cards if card.target_relation == "primary"
+            ),
+            "supporting_subject_count": sum(
+                1 for card in self.cards if card.target_relation == "supporting"
+            ),
+            "other_subject_count": sum(
+                1 for card in self.cards if card.target_relation == "other"
+            ),
+            "strong_evidence_count": sum(
+                1 for card in self.cards
+                if any(
+                    marker in f"{card.evidence_type} {' '.join(card.quality_tags)}"
+                    for marker in _STRONG_EVIDENCE_MARKERS
+                )
+            ),
+        })
+        return summary
 
     def director_hint(self) -> str:
         lines = [
             "\n\u2605AI\u5185\u5bb9\u5ba1\u7a3f\u5df2\u5b8c\u6210\u2605 \u4e0b\u5217\u7f16\u53f7\u662f\u7ecf\u8fc7\u540c\u4e3b\u9898\u6bd4\u8f83\u540e\u4fdd\u7559\u7684\u4e3b\u9009/\u5907\u7528\u5185\u5bb9\u3002",
             "\u5fc5\u987b\u4fdd\u6301\u539f\u53e5\u548c\u7f16\u53f7\uff1bmain\u4f18\u5148\uff0creserve\u4ec5\u7528\u4e8e\u8865\u8db3\u4e0d\u540c\u5356\u70b9\u6216\u65f6\u957f\u3002",
             "\u5185\u5bb9\u5361\u53ea\u8bf4\u660e\u5356\u70b9\u4ef7\u503c\u548c\u4e0a\u4e0b\u6587\u4f9d\u8d56\uff0c\u4e0d\u6307\u5b9aHook\u6216Close\u3002\u4f60\u5fc5\u987b\u7ed3\u5408\u5168\u7247\u53d9\u4e8b\u72ec\u7acb\u51b3\u5b9a\u5f00\u5934\u548c\u6536\u5c3e\u3002",
+            "\u6709\u4e3b\u5546\u54c1\u65f6\u4f18\u5148\u9009\u201c\u4e0e\u4e3b\u5546\u54c1:primary\u201d\u4e14\u6709\u5177\u4f53\u539f\u6587\u8bc1\u636e\u7684\u5361\uff1b"
+            "supporting\u53ea\u80fd\u7528\u4e8e\u8bc1\u660e\u4e3b\u5546\u54c1\uff1bother\u53ea\u80fd\u4f5c\u65f6\u957f\u6216\u8bed\u5883reserve\uff0c\u7edd\u4e0d\u53ef\u4f5cHook\u6216\u4e3b\u7ebf\u5356\u70b9\u3002",
         ]
-        for card in self.cards:
+        for card in sorted(self.cards, key=_content_card_priority, reverse=True):
             role_text = "/".join(card.roles) or "product"
             tag_text = "/".join(card.quality_tags)
             lines.append(
                 f"- #{card.candidate_id:02d} [{card.tier}] {card.topic}/{card.subtopic}; "
                 f"\u4ef7\u503c:{card.buyer_value}; \u8bc1\u636e:{card.evidence_type or '\u65e0'}; "
                 f"\u539f\u6587\u8bc1\u636e:\"{card.evidence_quote}\"; "
+                f"\u4e3b\u4f53:{card.primary_subject or '\u672a\u5224\u660e'}; \u4e0e\u4e3b\u5546\u54c1:{card.target_relation}; "
+                f"\u4e3b\u4f53\u8bc1\u636e:\"{card.subject_evidence or '\u65e0'}\"; "
                 f"\u89d2\u8272:{role_text}; \u4f9d\u8d56:{card.dependency}"
                 + (f"; \u6807\u7b7e:{tag_text}" if tag_text else "")
             )
@@ -260,6 +374,7 @@ def build_cache_key(
     main_product: str,
     avoid: Iterable[str],
     model: str,
+    include_marketing_intent: bool = False,
 ) -> str:
     payload = {
         "version": CONTENT_REVIEW_VERSION,
@@ -268,6 +383,7 @@ def build_cache_key(
         "main_product": _clean_text(main_product, 100),
         "avoid": sorted(_clean_list(list(avoid or []), limit=30, item_limit=80)),
         "model": _clean_text(model, 120),
+        "marketing_intent": bool(include_marketing_intent),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -369,17 +485,27 @@ def _candidate_map(inventory: Sequence[Mapping[str, Any]]) -> dict[int, dict[str
         result[candidate_id] = {
             "srt_index": candidate_id,
             "source": _clean_text(raw.get("source"), 24),
+            "start": max(0.0, float(raw.get("start") or 0.0)),
+            "end": max(0.0, float(raw.get("end") or 0.0)),
+            "story_block_id": _clean_text(raw.get("story_block_id"), 80),
+            "continuity_group_id": _clean_text(raw.get("continuity_group_id"), 80),
             "duration_sec": max(0.0, float(raw.get("duration_sec") or 0.0)),
             "text": _clean_text(raw.get("text"), 240),
         }
     return result
 
-def _reviewable_candidate_text(text: Any) -> bool:
+def _reviewable_candidate_text(text: Any, content_policy: Any = None) -> bool:
     cleaned = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.I)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if live_interaction_or_size_response_reason(cleaned):
+    interaction_reason = live_interaction_or_size_response_reason(cleaned)
+    interaction_blocked, _reason = blocks_role(
+        content_policy,
+        interaction_policy_kind(interaction_reason),
+        cleaned,
+    ) if interaction_reason else (False, "")
+    if interaction_reason and interaction_blocked:
         return False
-    if candidate_quality_flags(cleaned):
+    if candidate_quality_flags(cleaned, content_policy=content_policy):
         return False
     hook_reason = hook_ineligible_reason(cleaned)
     if hook_reason in {"展示铺垫不可作Hook", "空泛口头语不可作Hook"}:
@@ -399,10 +525,12 @@ def _reviewable_candidate_text(text: Any) -> bool:
         return False
     return True
 
-def _reviewable_hook_text(text: Any) -> bool:
-    if not _reviewable_candidate_text(text):
+def _reviewable_hook_text(text: Any, content_policy: Any = None) -> bool:
+    if not _reviewable_candidate_text(text, content_policy=content_policy):
         return False
     if hook_ineligible_reason(text):
+        return False
+    if hook_candidate_quality_flags(text):
         return False
     cleaned = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.I).strip()
     compact = re.sub(r"\s+", "", cleaned)
@@ -510,7 +638,23 @@ def _normalize_card(
     candidates: Mapping[int, Mapping[str, Any]],
 ) -> ContentCard | None:
     if isinstance(raw, (list, tuple)):
-        if len(raw) >= 10:
+        if len(raw) >= 13:
+            raw = {
+                "candidate_id": raw[0],
+                "topic": raw[1],
+                "subtopic": raw[2],
+                "buyer_value": raw[3],
+                "evidence_type": raw[4],
+                "evidence_quote": raw[5],
+                "roles": raw[6],
+                "dependency": raw[7],
+                "quality_tags": raw[8],
+                "tier": raw[9],
+                "primary_subject": raw[10],
+                "target_relation": raw[11],
+                "subject_evidence": raw[12],
+            }
+        elif len(raw) >= 10:
             raw = {
                 "candidate_id": raw[0],
                 "topic": raw[1],
@@ -570,6 +714,26 @@ def _normalize_card(
     quality_tags = _clean_list(raw.get("quality_tags"), limit=4, item_limit=30)
     if evidence_bound and "\u539f\u6587\u7ed1\u5b9a" not in quality_tags:
         quality_tags = tuple((*quality_tags, "\u539f\u6587\u7ed1\u5b9a")[:4])
+    primary_subject = _clean_text(raw.get("primary_subject"), 50)
+    target_relation = _normalize_target_relation(raw.get("target_relation"))
+    subject_evidence = _grounded_evidence_quote(
+        raw.get("subject_evidence"),
+        candidate_text,
+    )
+    # Product ownership is metadata, never a new hard filter. Do not accept an
+    # ungrounded model claim as a reason to hide a safe candidate.
+    subject_chars = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", primary_subject).lower()
+    candidate_chars = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", candidate_text).lower()
+    if (
+        target_relation != "unknown"
+        and (
+            not subject_evidence
+            or (subject_chars and subject_chars not in candidate_chars)
+        )
+    ):
+        target_relation = "unknown"
+        primary_subject = ""
+        subject_evidence = ""
     return ContentCard(
         candidate_id=candidate_id,
         topic=topic,
@@ -581,6 +745,9 @@ def _normalize_card(
         dependency=dependency,
         quality_tags=quality_tags,
         tier=tier,
+        primary_subject=primary_subject,
+        target_relation=target_relation,
+        subject_evidence=subject_evidence,
     )
 
 def _normalize_hook_pair(
@@ -588,6 +755,8 @@ def _normalize_hook_pair(
     *,
     card_ids: set[int],
     candidates: Mapping[int, Mapping[str, Any]],
+    cards_by_id: Mapping[int, ContentCard] | None = None,
+    content_policy: Any = None,
 ) -> HookPair | None:
     """Keep only grounded, self-contained Hook -> immediate-proof options.
 
@@ -620,7 +789,13 @@ def _normalize_hook_pair(
         return None
     hook_text = str(candidates.get(hook_id, {}).get("text") or "")
     followup_text = str(candidates.get(followup_id, {}).get("text") or "")
-    if not _reviewable_hook_text(hook_text) or not _reviewable_candidate_text(followup_text):
+    if not _reviewable_hook_text(hook_text, content_policy=content_policy) or not _reviewable_candidate_text(
+        followup_text,
+        content_policy=content_policy,
+    ):
+        return None
+    hook_card = (cards_by_id or {}).get(hook_id)
+    if hook_card is not None and not _card_hook_eligible(hook_card):
         return None
     topic = _normalize_topic(raw.get("topic"))
     if not topic or topic == "\u5176\u4ed6":
@@ -650,6 +825,9 @@ def _rebalance_card_tiers(
         if card.tier != "main":
             balanced.append(card)
             continue
+        if card.target_relation == "other":
+            balanced.append(replace(card, tier="reserve"))
+            continue
         source = str(candidates.get(card.candidate_id, {}).get("source") or "").strip().upper()
         topic_key = card.topic or "\u5176\u4ed6"
         source_topic_key = (source, topic_key)
@@ -672,11 +850,13 @@ def _validate_bundle(
     category: str,
     model: str,
     required_sources: Mapping[str, int] | None,
+    main_product: str = "",
+    content_policy: Any = None,
 ) -> ContentReviewBundle:
     candidates = _candidate_map(inventory)
     allowed_ids = {
         candidate_id for candidate_id, item in candidates.items()
-        if _reviewable_candidate_text(item.get("text"))
+        if _reviewable_candidate_text(item.get("text"), content_policy=content_policy)
     }
     if not allowed_ids:
         raise ContentReviewError("\u6ca1\u6709\u5b89\u5168\u5019\u9009")
@@ -736,6 +916,7 @@ def _validate_bundle(
             raise ContentReviewError("\u5ba1\u7a3f\u5019\u9009\u7f3a\u5c11\u6df7\u526a\u6765\u6e90:" + ",".join(missing))
 
     card_ids = {card.candidate_id for card in cards}
+    cards_by_id = {card.candidate_id: card for card in cards}
     hook_pairs: list[HookPair] = []
     seen_pairs: set[tuple[int, int]] = set()
     raw_hook_pairs = data.get("hook_pairs") if isinstance(data.get("hook_pairs"), list) else []
@@ -744,6 +925,8 @@ def _validate_bundle(
             raw_pair,
             card_ids=card_ids,
             candidates=candidates,
+            cards_by_id=cards_by_id,
+            content_policy=content_policy,
         )
         if pair is None:
             continue
@@ -755,6 +938,13 @@ def _validate_bundle(
         if len(hook_pairs) >= 8:
             break
 
+    marketing_intent = build_marketing_intent_bundle(
+        data,
+        cards=cards,
+        inventory=inventory,
+        candidate_digest=candidate_digest,
+        main_product=main_product,
+    )
     return ContentReviewBundle(
         cache_key=cache_key,
         candidate_digest=str(candidate_digest or ""),
@@ -763,6 +953,7 @@ def _validate_bundle(
         cards=tuple(cards),
         retained_duration=retained_duration,
         hook_pairs=tuple(hook_pairs),
+        marketing_intent=marketing_intent,
         hook_pair_reviewed=bool(data.get("hook_pair_reviewed")),
     )
 
@@ -775,16 +966,23 @@ def _review_prompts(
     avoid: Sequence[str],
     required_sources: Mapping[str, int] | None,
     format_retry: bool,
+    content_policy: Any = None,
+    include_marketing_intent: bool = False,
 ) -> tuple[str, str]:
-    compact_inventory = [
-        [
+    compact_inventory = []
+    for item in inventory:
+        row = [
             int(item.get("srt_index") or 0),
             _clean_text(item.get("source"), 24),
             round(max(0.0, float(item.get("duration_sec") or 0.0)), 1),
-            _clean_text(item.get("text"), 240),
         ]
-        for item in inventory
-    ]
+        if include_marketing_intent:
+            row.extend((
+                _clean_text(item.get("story_block_id"), 40),
+                _clean_text(item.get("continuity_group_id"), 40),
+            ))
+        row.append(_clean_text(item.get("text"), 240))
+        compact_inventory.append(row)
     system_prompt = (
         "\u4f60\u662f\u5e26\u8d27\u77ed\u89c6\u9891\u7684\u5185\u5bb9\u5ba1\u7a3f\uff0c\u4e0d\u662f\u6700\u7ec8\u526a\u8f91\u5bfc\u6f14\u3002"
         "\u4f60\u53ea\u8d1f\u8d23\u8bc6\u522b\u503c\u5f97\u4f7f\u7528\u7684\u5177\u4f53\u5185\u5bb9\u3001\u4e3b\u9898\u3001\u8d2d\u4e70\u4ef7\u503c\u3001\u4e0a\u4e0b\u6587\u4f9d\u8d56\u548c\u8f6c\u5199\u98ce\u9669\u3002"
@@ -806,32 +1004,60 @@ def _review_prompts(
             "\u3002\u8d28\u91cf\u76f8\u5f53\u65f6\uff0ccards\u548cmain\u90fd\u8981\u4fdd\u7559\u5404\u6765\u6e90\u7684\u4ee3\u8868\u6027\u5185\u5bb9\uff1b"
             "\u4e0d\u5f97\u8ba9\u5355\u4e00\u6765\u6e90\u5360\u7edd\u5927\u591a\u6570\u3002"
         )
+    content_policy_rule = "\n".join(policy_prompt_lines(content_policy)) or "\u65e0\u989d\u5916\u5185\u5bb9\u653f\u7b56"
+    system_prompt += (
+        "\n\u672c\u6b21\u5185\u5bb9\u4f7f\u7528\u653f\u7b56\u662f\u6700\u7ec8\u89c4\u5219\uff0c\u4f18\u5148\u4e8e\u4e0a\u6587\u5bf9\u4ef7\u683c/CTA/\u5c3a\u7801/\u4e92\u52a8\u7684\u6cdb\u5316\u63cf\u8ff0\u3002\n"
+        + content_policy_rule
+    )
     retry_rule = "\u4e0a\u6b21\u54cd\u5e94\u683c\u5f0f\u65e0\u6548\uff0c\u8fd9\u6b21\u4e25\u683c\u6309schema\u8f93\u51fa\u3002" if format_retry else ""
+    marketing_contract = marketing_intent_prompt_contract() if include_marketing_intent else ""
+    schema_example = {
+        "cards": [[1, "\u7248\u578b\u663e\u7626", "\u80a9\u5bbd\u4fee\u9970", "\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536", "\u539f\u56e0\u89e3\u91ca", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536", ["effect", "evidence"], "independent", ["\u5177\u4f53\u6548\u679c", "\u539f\u56e0\u89e3\u91ca"], "main", "\u8fd9\u4ef6\u4e0a\u8863", "primary", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536"]],
+        "hook_pairs": [[1, 2, "\u7248\u578b\u663e\u7626", "\u4e0b\u4e00\u6bb5\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0"]],
+    }
+    candidate_field_order = "\u5b89\u5168\u5019\u9009\u5b57\u6bb5\u987a\u5e8f:[\u7f16\u53f7,\u6765\u6e90,\u65f6\u957f\u79d2,\u539f\u5b57\u5e55]"
+    marketing_field_order = ""
+    if include_marketing_intent:
+        schema_example.update({
+            "marketing_intents": [[1, "identity_expression", "\u80a9\u7ebf\u6536\u51fa\u66f4\u5229\u843d\u7684\u7a7f\u7740\u5370\u8c61", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536"]],
+            "narrative_arcs": [[1, [2], [3], "identity_expression", "2\u53f7\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0\uff0c3\u53f7\u7ed9\u51fa\u4e0a\u8eab\u573a\u666f"]],
+        })
+        candidate_field_order = "\u5b89\u5168\u5019\u9009\u5b57\u6bb5\u987a\u5e8f:[\u7f16\u53f7,\u6765\u6e90,\u65f6\u957f\u79d2,\u6545\u4e8b\u533a\u95f4,\u8fde\u7eed\u7ec4,\u539f\u5b57\u5e55]"
+        marketing_field_order = (
+            "marketing_intents\u5b57\u6bb5\u987a\u5e8f:[\u5019\u9009\u7f16\u53f7,intent_type,\u53ef\u88ab\u539f\u53e5\u8bc1\u660e\u7684\u4e3b\u5f20,\u539f\u6587\u77ed\u5f15]\n"
+            "narrative_arcs\u5b57\u6bb5\u987a\u5e8f:[\u5f00\u5934\u5019\u9009\u7f16\u53f7,\u76f4\u63a5\u8bc1\u660e\u5019\u9009\u7f16\u53f7\u6570\u7ec4,\u53ef\u9009\u7ed3\u679c\u5019\u9009\u7f16\u53f7\u6570\u7ec4,intent_type,\u5151\u73b0\u8bf4\u660e]"
+        )
+    schema_text = json.dumps(schema_example, ensure_ascii=False, separators=(",", ":"))
     user_prompt = f"""{retry_rule}
 \u54c1\u7c7b:{category or '\u901a\u7528'}
 \u4e3b\u5546\u54c1:{main_product or '\u672a\u6307\u5b9a'}
 \u7528\u6237\u8981\u6c42\u907f\u5f00:{'\u3001'.join(avoid) if avoid else '\u65e0'}
 {source_rule}
+\u5185\u5bb9\u4f7f\u7528\u653f\u7b56:\n{content_policy_rule}
 
 \u8981\u6c42:
 1. \u5ba1\u9605\u5168\u90e8\u5019\u9009\uff0c\u4f46\u53ea\u8f93\u51fa\u503c\u5f97\u4ea4\u7ed9\u5bfc\u6f14\u7684\u5361\u3002cards\u4e0a\u9650{CONTENT_REVIEW_MAX_CARDS}\u4e0d\u662f\u586b\u6ee1\u76ee\u6807\uff0c\u901a\u5e3825-55\u9879\uff1b\u5185\u5bb9\u5145\u8db3\u65f6main+reserve\u539f\u7247\u5408\u8ba1\u5c3d\u91cf\u8fbe\u5230{CONTENT_REVIEW_TARGET_DURATION:.0f}\u79d2\u3002\u8d28\u91cf\u6c38\u8fdc\u9ad8\u4e8e\u65f6\u957f\uff0c\u5b81\u53ef\u5c11\u4e8e\u76ee\u6807\u4e5f\u4e0d\u5f97\u7528\u6b8b\u53e5\u3001\u4e71\u7801\u3001\u95f2\u804a\u3001\u7eaf\u5c55\u793a\u94fa\u57ab\u6216\u91cd\u590d\u5185\u5bb9\u51d1\u79d2\u6570\u3002
 2. \u540c\u4e00\u5177\u4f53\u5b50\u4e3b\u9898\u53ea\u75591\u4e2amain\u548c1-2\u4e2areserve\u3002\u5019\u9009\u8d28\u91cf\u7528\u5c3d\u5c31\u505c\uff0c\u4e0d\u8981\u7528\u91cd\u590d\u6a21\u677f\u51d1\u6570\u3002
 3. topic\u7528\u7a33\u5b9a\u5356\u70b9\u7c7b\u522b\uff0csubtopic\u5199\u5177\u4f53\u95ee\u9898\uff1bbuyer_value\u53ea\u6982\u62ec\u8be5\u539f\u53e5\u5bf9\u8d2d\u4e70\u51b3\u7b56\u7684\u4ef7\u503c\u3002
-4. roles\u53ea\u80fd\u4f7f\u7528effect,evidence,scene,objection,product\u3002\u8fd9\u4e9b\u53ea\u662f\u5185\u5bb9\u529f\u80fd\uff0c\u4e0d\u662f\u6210\u7247\u4f4d\u7f6e\u3002dependency\u53ea\u80fd\u4f7f\u7528independent,needs_previous,needs_next,needs_both\u3002
-5. topic/subtopic/buyer_value\u5fc5\u987b\u53ea\u4f9d\u636e\u8be5\u7f16\u53f7\u539f\u5b57\u5e55\uff0c\u4e0d\u5f97\u628a\u201c\u5c55\u793a\u4e00\u4e0b\u201d\u81c6\u6d4b\u6210\u5ea6\u5047\u3001\u901a\u52e4\u6216\u5176\u4ed6\u672a\u8bf4\u51fa\u7684\u573a\u666f\uff1b\u4e0d\u5f97\u6539\u5199\u5b57\u5e55\uff0c\u7a0b\u5e8f\u4f1a\u6309\u7f16\u53f7\u7ed1\u5b9a\u539f\u6587\u3002
-6. quality_tags\u7528\u7b80\u77ed\u6807\u7b7e\uff0c\u5982\u5177\u4f53\u6548\u679c\u3001\u539f\u56e0\u89e3\u91ca\u3001\u5b9e\u6d4b\u8bc1\u636e\u3001\u4eba\u7fa4\u660e\u786e\u3001\u573a\u666f\u6e05\u6670\u3001ASR\u98ce\u9669\u3002
-7. \u660e\u663e\u4ece\u534a\u53e5\u5f00\u59cb\u6216\u7ed3\u5c3e\u672a\u5b8c\u3001\u6307\u4ee3\u4e0d\u660e\u3001ASR\u4e71\u7801\u3001\u8fde\u7eed\u7ed3\u5df4\u91cd\u590d\u3001\u7eaf\u4e92\u52a8\u6216\u7eaf\u94fa\u57ab\u7684\u5019\u9009\u4e0d\u5f97\u8fdb\u5165main/reserve\u3002\u4e0d\u8981\u628a\u6b8b\u53e5\u4ec5\u6807\u8bb0dependency\u540e\u7ee7\u7eed\u4fdd\u7559\u3002
-8. tier\u5fc5\u987b\u771f\u5b9e\u5206\u5c42\uff1amain\u53ea\u7ed9\u540c\u7c7b\u4e2d\u6700\u5b8c\u6574\u3001\u6700\u5177\u4f53\u3001\u8bc1\u636e\u6700\u5f3a\u7684\u8868\u8fbe\uff0c\u5176\u4f59\u9ad8\u8d28\u91cf\u8868\u8fbe\u6807reserve\u3002\u5185\u5bb9\u5145\u8db3\u65f6main\u7ea6\u536035%-65%\uff0c\u7981\u6b62\u5168\u90e8\u6807main\uff1b\u540c\u4e00\u5927topic\u6700\u591a4\u5f20main\uff0c\u6df7\u526a\u65f6\u540c\u4e00\u6765\u6e90+\u540c\u4e00\u5927topic\u6700\u591a2\u5f20main\u3002
-9. topic\u4f7f\u7528\u7a33\u5b9a\u5927\u7c7b\uff1a\u670d\u9970\u4f18\u5148\u7528\u7248\u578b\u663e\u7626/\u9762\u6599\u8d28\u611f/\u989c\u8272\u6c1b\u56f4/\u573a\u666f\u642d\u914d/\u5de5\u827a\u7ec6\u8282/\u5c3a\u5bf8\u957f\u5ea6/\u7a7f\u7740\u4f53\u9a8c/\u5bf9\u6bd4\u4f18\u52bf/\u6d41\u884c\u8d8b\u52bf\uff1b\u98df\u54c1\u4f18\u5148\u7528\u53e3\u611f\u98df\u6b32/\u65b0\u9c9c\u54c1\u8d28/\u4ea7\u5730\u6eaf\u6e90/\u89c4\u683c\u5206\u91cf/\u53d1\u8d27\u4fdd\u9c9c/\u573a\u666f\u5403\u6cd5\uff1b\u65b0\u54c1\u7c7b\u7528\u5bf9\u5e94\u7a33\u5b9a\u5927\u7c7b\u3002
+4. primary_subject\u662f\u539f\u53e5\u5b9e\u9645\u5728\u8bb2\u7684\u5546\u54c1/\u5bf9\u8c61\uff0c\u4e0d\u80fd\u56e0\u4e3a\u987a\u5e26\u63d0\u5230\u800c\u7b97\u4e3b\u4f53\u3002target_relation\u53ea\u80fd\u662fprimary/supporting/other/unknown\uff1aprimary=\u4e3b\u5546\u54c1\u662f\u672c\u6bb5\u4e3b\u4f53\uff0csupporting=\u4e3b\u8981\u4e3a\u4e3b\u5546\u54c1\u63d0\u4f9b\u642d\u914d\u6216\u8bc1\u660e\uff0cother=\u4e3b\u4f53\u5df2\u8f6c\u4e3a\u53e6\u4e00\u5546\u54c1\uff0cunknown=\u539f\u53e5\u4e0d\u8db3\u4ee5\u5224\u65ad\u3002subject_evidence\u5fc5\u987b\u662f\u539f\u53e5\u91cc\u4e00\u6bb5\u8fde\u7eed\u7684\u77ed\u5f15\uff0c\u6ca1\u6709\u8bc1\u636e\u5c31\u8fd4\u56deunknown\u3002
+5. roles\u53ea\u80fd\u4f7f\u7528effect,evidence,scene,objection,product\u3002\u8fd9\u4e9b\u53ea\u662f\u5185\u5bb9\u529f\u80fd\uff0c\u4e0d\u662f\u6210\u7247\u4f4d\u7f6e\u3002dependency\u53ea\u80fd\u4f7f\u7528independent,needs_previous,needs_next,needs_both\u3002
+6. topic/subtopic/buyer_value\u5fc5\u987b\u53ea\u4f9d\u636e\u8be5\u7f16\u53f7\u539f\u5b57\u5e55\uff0c\u4e0d\u5f97\u628a\u201c\u5c55\u793a\u4e00\u4e0b\u201d\u81c6\u6d4b\u6210\u5ea6\u5047\u3001\u901a\u52e4\u6216\u5176\u4ed6\u672a\u8bf4\u51fa\u7684\u573a\u666f\uff1b\u4e0d\u5f97\u6539\u5199\u5b57\u5e55\uff0c\u7a0b\u5e8f\u4f1a\u6309\u7f16\u53f7\u7ed1\u5b9a\u539f\u6587\u3002
+7. quality_tags\u7528\u7b80\u77ed\u6807\u7b7e\uff0c\u5982\u5177\u4f53\u6548\u679c\u3001\u539f\u56e0\u89e3\u91ca\u3001\u5b9e\u6d4b\u8bc1\u636e\u3001\u4eba\u7fa4\u660e\u786e\u3001\u573a\u666f\u6e05\u6670\u3001ASR\u98ce\u9669\u3002\u53ea\u6709\u539f\u53e5\u786e\u5b9e\u5c5e\u4e8e\u6cdb\u6cdb\u5938\u8d5e\u3001\u5c55\u793a\u94fa\u57ab\u6216\u91cd\u590d\u65f6\u624d\u5982\u5b9e\u6253\u6807\uff0c\u4e0d\u5f97\u628a\u5b83\u4eec\u4f2a\u88c5\u6210\u5177\u4f53\u4ef7\u503c\u3002
+8. \u660e\u663e\u4ece\u534a\u53e5\u5f00\u59cb\u6216\u7ed3\u5c3e\u672a\u5b8c\u3001\u6307\u4ee3\u4e0d\u660e\u3001ASR\u4e71\u7801\u3001\u8fde\u7eed\u7ed3\u5df4\u91cd\u590d\u3001\u7eaf\u4e92\u52a8\u6216\u7eaf\u94fa\u57ab\u7684\u5019\u9009\u4e0d\u5f97\u8fdb\u5165main/reserve\u3002\u4e0d\u8981\u628a\u6b8b\u53e5\u4ec5\u6807\u8bb0dependency\u540e\u7ee7\u7eed\u4fdd\u7559\u3002
+9. tier\u5fc5\u987b\u771f\u5b9e\u5206\u5c42\uff1amain\u53ea\u7ed9\u540c\u7c7b\u4e2d\u6700\u5b8c\u6574\u3001\u6700\u5177\u4f53\u3001\u8bc1\u636e\u6700\u5f3a\u7684\u8868\u8fbe\uff0c\u5176\u4f59\u9ad8\u8d28\u91cf\u8868\u8fbe\u6807reserve\u3002\u6807other\u7684\u5f53\u7136\u53ef\u4f5c\u5b89\u5168reserve\uff0c\u4f46\u4e0d\u5f97\u6807main\u6216\u4f5cHook\u3002\u5185\u5bb9\u5145\u8db3\u65f6main\u7ea6\u536035%-65%\uff0c\u7981\u6b62\u5168\u90e8\u6807main\uff1b\u540c\u4e00\u5927topic\u6700\u591a4\u5f20main\uff0c\u6df7\u526a\u65f6\u540c\u4e00\u6765\u6e90+\u540c\u4e00\u5927topic\u6700\u591a2\u5f20main\u3002
+10. topic\u4f7f\u7528\u7a33\u5b9a\u5927\u7c7b\uff1a\u670d\u9970\u4f18\u5148\u7528\u7248\u578b\u663e\u7626/\u9762\u6599\u8d28\u611f/\u989c\u8272\u6c1b\u56f4/\u573a\u666f\u642d\u914d/\u5de5\u827a\u7ec6\u8282/\u5c3a\u5bf8\u957f\u5ea6/\u7a7f\u7740\u4f53\u9a8c/\u5bf9\u6bd4\u4f18\u52bf/\u6d41\u884c\u8d8b\u52bf\uff1b\u98df\u54c1\u4f18\u5148\u7528\u53e3\u611f\u98df\u6b32/\u65b0\u9c9c\u54c1\u8d28/\u4ea7\u5730\u6eaf\u6e90/\u89c4\u683c\u5206\u91cf/\u53d1\u8d27\u4fdd\u9c9c/\u573a\u666f\u5403\u6cd5\uff1b\u65b0\u54c1\u7c7b\u7528\u5bf9\u5e94\u7a33\u5b9a\u5927\u7c7b\u3002
 
 10. hook_pairs\u7ed9\u51fa0-8\u7ec4\u53ef\u9009\u5f00\u5934\u7ec4\u5408\uff0c\u53ea\u6709\u771f\u7684\u5b58\u5728\u5f3a\u5f00\u5934\u65f6\u624d\u8f93\u51fa\u3002\u6bcf\u9879\u5fc5\u987b\u662f\u201c\u72ec\u7acb\u8bf4\u6e05\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c\u201d\u7684\u5b8c\u6574Hook\uff0c\u4ee5\u53ca\u4e0b\u4e00\u6bb5\u7acb\u523b\u89e3\u91ca\u3001\u8bc1\u660e\u6216\u5151\u73b0\u5b83\u7684\u5b8c\u6574\u5019\u9009\u3002\u76f4\u64ad\u4e92\u52a8\u3001\u5e93\u5b58\u95ee\u7b54\u3001\u4e2a\u4eba\u8eab\u9ad8\u4f53\u91cd\u5c3a\u7801\u3001\u4ef7\u683c/CTA\u3001\u4e0a\u65b0\u9884\u544a\u3001\u7eaf\u5c55\u793a\u94fa\u57ab\u3001\u6cdb\u6cdb\u5938\u8d5e\u3001\u6b8b\u53e5\u90fd\u7edd\u4e0d\u53ef\u8fdb\u5165hook_pairs\u3002\u82e5\u6ca1\u6709\u8db3\u591f\u5f3a\u7684\u7ec4\u5408\uff0c\u8fd4\u56de\u7a7a\u6570\u7ec4\uff0c\u4e0d\u5f97\u51d1\u6570\u3002
 
-\u8f93\u51faschema\uff08\u5fc5\u987b\u7528\u6570\u7ec4\u77ed\u683c\u5f0f\uff09:
-{{"cards":[[1,"\u7248\u578b\u663e\u7626","\u80a9\u5bbd\u4fee\u9970","\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536","\u539f\u56e0\u89e3\u91ca",["effect","evidence"],"independent",["\u5177\u4f53\u6548\u679c"],"main"]],"hook_pairs":[[1,2,"\u7248\u578b\u663e\u7626","\u4e0b\u4e00\u6bb5\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0"]]}}
-cards\u5b57\u6bb5\u987a\u5e8f:[\u5019\u9009\u7f16\u53f7,topic,subtopic,buyer_value,evidence_type,roles,dependency,quality_tags,tier]
-hook_pairs\u5b57\u6bb5\u987a\u5e8f:[Hook\u5019\u9009\u7f16\u53f7,\u627f\u63a5\u5019\u9009\u7f16\u53f7,\u4e3b\u9898,\u627f\u63a5\u7406\u7531]
+{marketing_contract}
 
-\u5b89\u5168\u5019\u9009\u5b57\u6bb5\u987a\u5e8f:[\u7f16\u53f7,\u6765\u6e90,\u65f6\u957f\u79d2,\u539f\u5b57\u5e55]
+\u8f93\u51faschema\uff08\u5fc5\u987b\u7528\u6570\u7ec4\u77ed\u683c\u5f0f\uff09:
+{schema_text}
+cards\u5b57\u6bb5\u987a\u5e8f:[\u5019\u9009\u7f16\u53f7,topic,subtopic,buyer_value,evidence_type,evidence_quote,roles,dependency,quality_tags,tier,primary_subject,target_relation,subject_evidence]
+hook_pairs\u5b57\u6bb5\u987a\u5e8f:[Hook\u5019\u9009\u7f16\u53f7,\u627f\u63a5\u5019\u9009\u7f16\u53f7,\u4e3b\u9898,\u627f\u63a5\u7406\u7531]
+{marketing_field_order}
+
+{candidate_field_order}
 {json.dumps(compact_inventory, ensure_ascii=False, separators=(',', ':'))}"""
     return system_prompt, user_prompt
 
@@ -883,15 +1109,21 @@ def review_candidates(
     main_product: str = "",
     avoid: Sequence[str] = (),
     required_sources: Mapping[str, int] | None = None,
+    content_policy: Any = None,
+    include_marketing_intent: bool = False,
     log_fn=None,
 ) -> ContentReviewBundle:
     def log(message: str) -> None:
         if log_fn:
             log_fn(message)
 
+    content_policy = normalize_content_policy(content_policy)
     review_inventory = tuple(
         item for item in inventory
-        if isinstance(item, Mapping) and _reviewable_candidate_text(item.get("text"))
+        if isinstance(item, Mapping) and _reviewable_candidate_text(
+            item.get("text"),
+            content_policy=content_policy,
+        )
     )
     rejected_count = len(inventory) - len(review_inventory)
     if rejected_count:
@@ -899,7 +1131,14 @@ def review_candidates(
     if not review_inventory:
         raise ContentReviewError("\u6ca1\u6709\u53ef\u5ba1\u7a3f\u7684\u5b8c\u6574\u5019\u9009")
 
-    cache_key = build_cache_key(candidate_digest, category, main_product, avoid, model)
+    cache_key = build_cache_key(
+        candidate_digest,
+        category,
+        main_product,
+        avoid,
+        model,
+        include_marketing_intent=include_marketing_intent,
+    )
     cached = _load_cache(cache_key)
     if cached:
         try:
@@ -911,6 +1150,8 @@ def review_candidates(
                 category=category,
                 model=model,
                 required_sources=required_sources,
+                main_product=main_product,
+                content_policy=content_policy,
             )
             log("AI\u5185\u5bb9\u5ba1\u7a3f: \u547d\u4e2d\u672c\u5730\u7f13\u5b58")
             return replace(bundle, cache_hit=True)
@@ -929,6 +1170,8 @@ def review_candidates(
             avoid=list(avoid or []),
             required_sources=required_sources,
             format_retry=bool(attempt),
+            content_policy=content_policy,
+            include_marketing_intent=include_marketing_intent,
         )
         log("AI\u5185\u5bb9\u5ba1\u7a3f: \u8c03\u7528\u6a21\u578b..." if not attempt else "AI\u5185\u5bb9\u5ba1\u7a3f: \u683c\u5f0f\u91cd\u8bd5...")
         content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
@@ -963,6 +1206,8 @@ def review_candidates(
                 category=category,
                 model=model,
                 required_sources=required_sources,
+                main_product=main_product,
+                content_policy=content_policy,
             )
         except Exception as exc:
             log(
@@ -985,6 +1230,7 @@ def _hook_pair_repair_prompts(
     *,
     category: str,
     main_product: str,
+    content_policy: Any = None,
 ) -> tuple[str, str]:
     """Build a small semantic review request without giving away story order."""
     candidate_map = _candidate_map(inventory)
@@ -1002,6 +1248,10 @@ def _hook_pair_repair_prompts(
             "buyer_value": card.buyer_value,
             "dependency": card.dependency,
             "tier": card.tier,
+            "primary_subject": card.primary_subject,
+            "target_relation": card.target_relation,
+            "subject_evidence": card.subject_evidence,
+            "quality_tags": list(card.quality_tags),
         })
 
     system_prompt = (
@@ -1015,10 +1265,14 @@ def _hook_pair_repair_prompts(
         "任务: 广审已经保留内容卡，但没有返回可验证的开头组合。请只做一次严格复核。\n"
         "Hook必须是一句脱离直播上下文也完整成立的、具体的购买价值陈述，明确说出商品属性、效果、痛点、人群或使用场景中的至少一项。"
         "下一段必须立即解释、证明或兑现同一项购买价值，不能只是换一个卖点。\n"
-        "绝对排除: 报尺码、个人身高体重试穿、问答互动、库存对话、价格/CTA、上新预告、展示铺垫、连接词开头、泛泛夸赞、"
+        "绝对排除: target_relation=other、报尺码、个人身高体重试穿、问答互动、库存对话、上新预告、展示铺垫、连接词开头、泛泛夸赞、"
         "只说气场/高级/女总裁等空泛身份想象、半句、口头重复或没有商品购买信息的聊天。\n"
+        "价格/CTA是否可作Hook必须遵守下方内容政策；仅正文或禁止的内容均不可作Hook。\n"
         "若没有真正合格的组合，必须返回空数组，不得凑数。最多返回3组。\n"
         "输出格式: {\"hook_pairs\":[[Hook编号,承接编号,\"主题\",\"承接如何兑现\"]]}\n"
+        "内容使用政策:\n"
+        + "\n".join(policy_prompt_lines(content_policy))
+        + "\n"
         "已审稿内容卡:\n"
         + json.dumps(approved_cards, ensure_ascii=False, separators=(",", ":"))
     )
@@ -1034,6 +1288,7 @@ def repair_hook_pairs(
     bundle: ContentReviewBundle,
     category: str = "",
     main_product: str = "",
+    content_policy: Any = None,
     log_fn=None,
 ) -> ContentReviewBundle:
     """Run one focused Hook-pair review when the broad review returned none.
@@ -1046,6 +1301,7 @@ def repair_hook_pairs(
         if log_fn:
             log_fn(message)
 
+    content_policy = normalize_content_policy(content_policy)
     if bundle.hook_pairs or bundle.hook_pair_reviewed:
         return bundle
 
@@ -1065,6 +1321,7 @@ def repair_hook_pairs(
         inventory,
         category=category,
         main_product=main_product,
+        content_policy=content_policy,
     )
     last_error = ""
     for attempt in range(2):
@@ -1093,6 +1350,8 @@ def repair_hook_pairs(
                     raw_pair,
                     card_ids=card_ids,
                     candidates=candidates,
+                    cards_by_id=bundle.card_map(),
+                    content_policy=content_policy,
                 )
                 if pair is None:
                     continue
@@ -1341,6 +1600,9 @@ def _final_objective_issues(
             hook_reason = hook_ineligible_reason(text)
             if hook_reason:
                 issues.append(f"第{order}段不可作Hook:{hook_reason}")
+            hook_quality = hook_candidate_quality_flags(text)
+            if hook_quality:
+                issues.append(f"第{order}段不可作Hook:{','.join(hook_quality)}")
         if production_pattern.search(text):
             issues.append(f"\u7b2c{order}\u6bb5\u542b\u5bfc\u64ad/\u6295\u6d41/\u5207\u753b\u9762\u6307\u4ee4")
         if purchase_cta_pattern.search(text):

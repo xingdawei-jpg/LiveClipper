@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "web_client"))
 server = importlib.import_module("server")
 cutter_logic = importlib.import_module("cutter_logic")
+ai_clipper = importlib.import_module("ai_clipper")
 
 
 class PreviewWordEditingTests(unittest.TestCase):
@@ -60,7 +61,36 @@ class PreviewWordEditingTests(unittest.TestCase):
                 "text": "这件新款刚刚上新",
                 "focus": "新鲜品质",
             }),
-            "其他",
+            "流行趋势",
+        )
+
+    def test_preview_and_director_share_craft_topic_classifier(self):
+        clip = {
+            "clip_type": "product",
+            "text": "色织从纱线源头定做，每一件拉毛都要手工完成。",
+            "focus": "工艺品质-色织亚麻",
+            "segments": [{
+                "text": "色织从纱线源头定做，每一件拉毛都要手工完成。",
+                "selected": True,
+            }],
+        }
+        director_clip = (
+            "product", clip["text"], 0.0, 4.0, 50.0, 4.0, clip["focus"],
+        )
+
+        self.assertEqual(ai_clipper._clip_primary_topic(director_clip), "工艺细节")
+        self.assertEqual(server._preview_focus_block(clip), "工艺细节")
+
+        material_text = "克重上来了，整个成分和含量就是不一样的。"
+        material_clip = ("product", material_text, 0.0, 4.0, 50.0, 4.0, "工艺品质-克重补充")
+        self.assertEqual(ai_clipper._clip_primary_topic(material_clip), "面料质感")
+        self.assertEqual(
+            server._preview_focus_block({
+                "clip_type": "product",
+                "text": material_text,
+                "focus": "工艺品质-克重补充",
+            }),
+            "面料质感",
         )
 
     def test_preview_refresh_loops_start_before_optional_page_initialization(self):
@@ -184,6 +214,73 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertIn("previewEditorLexicalRanges", grouping)
         self.assertIn("units[unitIndex].word", grouping)
         self.assertNotIn("current.length + wordLength <= 4", grouping)
+
+    def test_legacy_duplicate_word_indices_are_normalized_after_draft_restore(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        ensure_start = script.index("function ensurePreviewDraft")
+        ensure_end = script.index("function commitPreviewDraft", ensure_start)
+        ensure = script[ensure_start:ensure_end]
+        normalizer_start = script.index("function normalizePreviewWordIndices")
+        normalizer_end = script.index("function isPreviewWordLocked", normalizer_start)
+        normalizer = script[normalizer_start:normalizer_end]
+
+        self.assertIn("applyPreviewDraftToState(scope, draft)", ensure)
+        self.assertIn("normalizePreviewWordIndices(preview)", ensure)
+        self.assertIn("seen.has(index)", normalizer)
+        self.assertIn("word.index = index", normalizer)
+
+    def test_word_editor_batches_range_selection_and_keeps_existing_word_contract(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        start = script.rfind("function previewWordRangeIndices")
+        end = script.find("function renderPreviewEditorSentence", start)
+        range_editing = script[start:end]
+        binding_start = script.rfind("function bindDirectPreviewWorkbenchActions")
+        binding_end = script.find("if (document.readyState", binding_start)
+        binding = script[binding_start:binding_end]
+
+        self.assertIn("previewWordRangeIndices", range_editing)
+        self.assertIn("applyPreviewWordSelection", range_editing)
+        self.assertIn("recordPreviewWordEdit", range_editing)
+        self.assertIn("undoPreviewWordEdit", range_editing)
+        self.assertIn("renderPreviewStateKeepStoryScroll(scope)", range_editing)
+        self.assertIn("pointermove", binding)
+        self.assertIn("finishPreviewWordRangeGesture", binding)
+        self.assertIn("event.shiftKey && applyPreviewWordRangeFromAnchor", binding)
+        self.assertIn("preview-word-audition", binding)
+
+    def test_compact_workbench_uses_the_editor_as_the_only_full_text_surface(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        video_start = script.rfind("function renderPreviewWorkbenchVideoStage")
+        video_end = script.find("function renderPreviewEditorSentence", video_start)
+        video = script[video_start:video_end]
+        editor_start = script.rfind("function renderPreviewSentenceEditor")
+        editor_end = script.find("function previewOverviewSourceValue", editor_start)
+        editor = script[editor_start:editor_end]
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertNotIn("preview-current-text", video)
+        self.assertIn("preview-editor-head-actions", editor)
+        self.assertLess(editor.index("preview-editor-head-actions"), editor.index("preview-editor-sentence-list"))
+        self.assertIn("grid-template-rows: 244px minmax(0, 1fr)", styles)
+        self.assertIn("flex-direction: column", styles)
+        self.assertIn("-webkit-line-clamp: 1", styles)
+
+    def test_inline_preview_failure_retries_once_and_offers_manual_regeneration(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        video_start = script.rfind("function setInlinePreviewStatus")
+        video_end = script.find("// [AI_WORKBENCH_VIDEO_END]", video_start)
+        video = script[video_start:video_end]
+        binding_start = script.rfind("function bindDirectPreviewWorkbenchActions")
+        binding_end = script.find("if (document.readyState", binding_start)
+        binding = script[binding_start:binding_end]
+
+        self.assertIn('button.dataset.action = "preview-inline-retry"', video)
+        self.assertIn("function isRetryableInlinePreviewError", video)
+        self.assertIn("force = false, retryAttempt = 0", video)
+        self.assertIn("(existing?.error && !force)", video)
+        self.assertIn("retryAttempt < 1", video)
+        self.assertIn("retryAttempt: retryAttempt + 1", video)
+        self.assertIn("action === 'preview-inline-retry'", binding)
 
     def test_selected_preview_clips_follow_manual_assembly_order(self):
         ordered = server._ordered_preview_selection_indices([0, 1, 2], [2, 0, 1], 3)
@@ -328,6 +425,57 @@ class PreviewWordEditingTests(unittest.TestCase):
         finally:
             cutter_logic._multi_result_cache = original_cache
 
+    def test_partial_ai_preview_reaches_result_cache_but_final_cut_remains_blocked(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            video = root / "short.mp4"
+            subtitle = root / "short.srt"
+            video.write_bytes(b"")
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:50,000\n完整安全卖点\n",
+                encoding="utf-8",
+            )
+            clips = [("product", "完整安全卖点", 0.0, 50.0, 50, 50.0, "面料")]
+
+            def partial_ai(*_args, **kwargs):
+                contract = kwargs["duration_contract"]
+                ai_clipper._begin_analysis_metadata()
+                ai_clipper._record_partial_insufficient(
+                    clips,
+                    candidate_count=1,
+                    duration_contract=contract,
+                )
+                return list(clips)
+
+            result_cache: dict[str, object] = {}
+            with (
+                mock.patch("ai_clipper.is_enabled", return_value=True),
+                mock.patch("ai_clipper.ai_analyze_clips", side_effect=partial_ai),
+                mock.patch.object(cutter_logic, "_remux_ts_for_editing", side_effect=lambda value, *_args: value),
+            ):
+                preview = cutter_logic.process_video(
+                    str(video),
+                    srt_path=str(subtitle),
+                    output_path=str(root / "preview.mp4"),
+                    _clips_only=True,
+                    target_duration=60,
+                    duration_tolerance=15,
+                    _result_cache=result_cache,
+                )
+                self.assertTrue(preview["ok"])
+                self.assertEqual(
+                    result_cache["analysis_metadata"]["selection_result"]["status"],
+                    "partial_insufficient",
+                )
+                with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
+                    cutter_logic.process_video(
+                        str(video),
+                        srt_path=str(subtitle),
+                        output_path=str(root / "final.mp4"),
+                        target_duration=60,
+                        duration_tolerance=15,
+                    )
+
     def _public_clip(self):
         raw_clip = (
             "product",
@@ -460,6 +608,10 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertEqual(segments[0]["semantic_piece_count"], 2)
         self.assertEqual(segments[0]["start"], 10.0)
         self.assertEqual(segments[0]["end"], 17.0)
+        self.assertEqual(
+            [word["index"] for word in segments[0]["words"]],
+            list(range(len(segments[0]["words"]))),
+        )
 
         orphan = {
             "index": 0,
@@ -469,6 +621,38 @@ class PreviewWordEditingTests(unittest.TestCase):
             "words": [],
         }
         self.assertEqual(server._preview_segment_selection_units(orphan, {}), [])
+
+    def test_legacy_duplicate_word_indices_are_resolved_by_sentence_position(self):
+        segment = {
+            "index": 0,
+            "start": 10.0,
+            "end": 12.0,
+            "text": "甲乙丙丁",
+            # This is the old cached shape produced when two semantic pieces
+            # were merged before their indices were made unique.
+            "words": [
+                {"index": 0, "text": "甲", "start": 10.0, "end": 10.3},
+                {"index": 1, "text": "乙", "start": 10.3, "end": 10.6},
+                {"index": 0, "text": "丙", "start": 10.6, "end": 10.9},
+                {"index": 1, "text": "丁", "start": 10.9, "end": 11.2},
+            ],
+        }
+
+        draft = server._normalize_preview_selection_draft(
+            {"raw_clips": [("product", "甲乙丙丁", 10.0, 12.0)], "clips": [{"index": 0, "segments": [segment]}]},
+            "smart",
+            [0],
+            {"0": [0]},
+            {"0": {"0": [0, 2, 3]}},
+        )
+        self.assertEqual(draft["selected_words"], {"0": {"0": [0, 2, 3]}})
+
+        units = server._preview_segment_selection_units(segment, draft["selected_words"]["0"])
+
+        self.assertEqual(
+            [(unit["text"], unit["selected_word_indices"]) for unit in units],
+            [("甲", [0]), ("丙丁", [2, 3])],
+        )
 
     def test_empty_preview_cache_recovers_word_timing_from_sidecar(self):
         sidecar_segments = [{

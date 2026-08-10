@@ -115,7 +115,7 @@ class RuntimeV4UpdateChannelTests(unittest.TestCase):
         options = {
             "application_version": self.target_version,
             "allowed_source_versions": [self.current_version],
-            "compatible_core_versions": ["4.0.0"],
+            "compatible_core_versions": ["4.0.0", "4.0.1"],
             "sources": [
                 {"name": "Primary", "url": "https://updates.example.test/business.zip"},
                 {"name": "Mirror", "url": "https://mirror.example.test/business.zip"},

@@ -23,6 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.release_signing import sha256_file
+from runtime_v4.business_bundle import (
+    extract_verified_business_archive,
+    verify_business_directory,
+)
+from runtime_v4.core_manifest import verify_core_directory
 
 
 PYTHON = os.environ.get("LIVECLIPPER_PYTHON", sys.executable)
@@ -37,6 +42,8 @@ PRIVATE_KEY = Path(os.environ.get(
 ))
 PUBLIC_KEY = ROOT / "app" / "release_update_public_key.pem"
 BUSINESS_POLICY = ROOT / "release" / "runtime_v4_business_policy.json"
+VERSION_FILE = ROOT / "app" / "version.json"
+DEFAULT_CORE_VERSION = "4.0.0"
 WEBVIEW2_DIR = os.environ.get(
     "LIVECLIPPER_WEBVIEW2_RUNTIME_DIR",
     str(ROOT / "vendor" / "webview2_runtime_x64" / "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64"),
@@ -109,6 +116,16 @@ def build_launcher() -> Path:
 
 def build_business(version: str) -> Path:
     """Build and sign the business bundle ZIP."""
+    try:
+        ui_version = str(json.loads(VERSION_FILE.read_text(encoding="utf-8"))["version"])
+    except Exception as exc:
+        raise RuntimeError(f"Cannot read application version: {VERSION_FILE}") from exc
+    if ui_version != version:
+        raise RuntimeError(
+            "Business package version differs from app/version.json: "
+            f"--version={version}, app/version.json={ui_version}. "
+            "Run tools/build_update_manifest.py before packaging."
+        )
     biz_dir = DIST_ROOT / "business"
     biz_dir.mkdir(parents=True, exist_ok=True)
     archive = biz_dir / f"LiveClipperBusiness_{version}.zip"
@@ -126,13 +143,13 @@ def build_business(version: str) -> Path:
     return archive
 
 
-def sign_core(core_dir: Path) -> dict:
+def sign_core(core_dir: Path, core_version: str = DEFAULT_CORE_VERSION) -> dict:
     """Sign the Core manifest."""
     sys.path.insert(0, str(ROOT))
     from runtime_v4.core_manifest import build_core_manifest
     return build_core_manifest(
         str(core_dir),
-        core_version="4.0.0",
+        core_version=core_version,
         private_key_path=str(PRIVATE_KEY),
         entrypoint="LiveClipperHost.exe",
     )
@@ -146,6 +163,7 @@ def assemble_package(
     *,
     backup_business_version: str | None = None,
     backup_business_archive: Path | None = None,
+    core_version: str = DEFAULT_CORE_VERSION,
 ) -> Path:
     """Assemble the final LiveClipperWeb directory, ready for zipping."""
     root = DIST_ROOT / "pkg" / "LiveClipperWeb"
@@ -153,8 +171,13 @@ def assemble_package(
         shutil.rmtree(root)
     root.mkdir(parents=True)
 
+    if bool(backup_business_version) != bool(backup_business_archive):
+        raise RuntimeError("Backup version and backup archive must be supplied together")
+    if backup_business_version == version:
+        raise RuntimeError("Backup business version must differ from the current version")
+
     # 1. Core
-    core_target = root / "core" / "4.0.0"
+    core_target = root / "core" / core_version
     core_target.mkdir(parents=True)
     shutil.copytree(str(core_dir), str(core_target), dirs_exist_ok=True)
 
@@ -163,16 +186,24 @@ def assemble_package(
 
     # 3. Primary business (current)
     biz_target = root / "versions" / version
-    biz_target.mkdir(parents=True)
-    with zipfile.ZipFile(str(business_archive)) as z:
-        z.extractall(str(biz_target))
+    extract_verified_business_archive(
+        business_archive,
+        biz_target,
+        PUBLIC_KEY,
+        expected_version=version,
+        expected_core_version=core_version,
+    )
 
     # 4. Backup business (rollback target)
     if backup_business_version and backup_business_archive:
         backup_target = root / "versions" / backup_business_version
-        backup_target.mkdir(parents=True)
-        with zipfile.ZipFile(str(backup_business_archive)) as z:
-            z.extractall(str(backup_target))
+        extract_verified_business_archive(
+            backup_business_archive,
+            backup_target,
+            PUBLIC_KEY,
+            expected_version=backup_business_version,
+            expected_core_version=core_version,
+        )
 
     # 5. current.json
     cm = json.loads((core_target / "core_manifest.json").read_text(encoding="utf-8"))
@@ -182,14 +213,14 @@ def assemble_package(
     state = {
         "schema_version": 1,
         "runtime_layout_version": 4,
-        "current": {"application_version": version, "core_version": "4.0.0"},
+        "current": {"application_version": version, "core_version": core_version},
         "previous": (
-            {"application_version": backup_business_version, "core_version": "4.0.0"}
+            {"application_version": backup_business_version, "core_version": core_version}
             if backup_business_version else None
         ),
         "pending": False,
         "verified_cores": {
-            "4.0.0": {
+            core_version: {
                 "verification_mode": "full",
                 "manifest_sha256": mf_hash,
                 "metadata_sha256": "",
@@ -206,35 +237,89 @@ def assemble_package(
     return root
 
 
-def verify_package(package_dir: Path) -> bool:
-    """Quick sanity check: core_manifest matches, key files present."""
-    core = package_dir / "core" / "4.0.0"
-    cm = json.loads((core / "core_manifest.json").read_text(encoding="utf-8"))
-    exe_path = core / "LiveClipperHost.exe"
-    if not exe_path.exists():
-        print("[ERROR] core exe missing")
+def verify_package(
+    package_dir: Path,
+    *,
+    version: str,
+    backup_business_version: str,
+    core_version: str = DEFAULT_CORE_VERSION,
+) -> bool:
+    """Verify every signed runtime layer before a full baseline is distributed."""
+    try:
+        core = package_dir / "core" / core_version
+        for path in (
+            package_dir / f"{LAUNCHER_NAME}.exe",
+            package_dir / "current.json",
+            core / "_internal" / "web_client" / "desktop.py",
+        ):
+            if not path.exists():
+                raise RuntimeError(f"missing package file: {path.relative_to(package_dir)}")
+
+        verified_core = verify_core_directory(
+            core,
+            PUBLIC_KEY,
+            expected_version=core_version,
+            hash_mode="full",
+        )
+        current_business = verify_business_directory(
+            package_dir / "versions" / version / "business",
+            PUBLIC_KEY,
+            expected_version=version,
+            expected_core_version=core_version,
+        )
+        verify_business_directory(
+            package_dir / "versions" / backup_business_version / "business",
+            PUBLIC_KEY,
+            expected_version=backup_business_version,
+            expected_core_version=core_version,
+        )
+
+        app_version = json.loads(
+            (current_business.root / "app" / "version.json").read_text(encoding="utf-8")
+        ).get("version")
+        if app_version != version:
+            raise RuntimeError(
+                "current business bundle app/version.json differs from --version: "
+                f"{app_version!r} != {version!r}"
+            )
+
+        state_path = package_dir / "current.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        expected_current = {"application_version": version, "core_version": core_version}
+        expected_previous = {
+            "application_version": backup_business_version,
+            "core_version": core_version,
+        }
+        if state.get("current") != expected_current or state.get("previous") != expected_previous:
+            raise RuntimeError("current.json selection pair does not match verified bundles")
+
+        # Keep the release receipt coherent with the full verification just run.
+        state["verified_cores"] = {
+            core_version: {
+                "verification_mode": "full",
+                "manifest_sha256": verified_core.manifest_sha256,
+                "metadata_sha256": verified_core.metadata_sha256,
+                "verified_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        }
+        state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[ERROR] package verification failed: {exc}")
         return False
-    expected_size = cm["files"]["LiveClipperHost.exe"]["size"]
-    actual_size = exe_path.stat().st_size
-    if expected_size != actual_size:
-        print(f"[ERROR] exe size mismatch: manifest={expected_size} actual={actual_size}")
-        return False
-    for p in [
-        package_dir / f"{LAUNCHER_NAME}.exe",
-        package_dir / "current.json",
-        core / "core_manifest.sig",
-        core / "_internal" / "web_client" / "desktop.py",
-    ]:
-        if not p.exists():
-            print(f"[ERROR] missing: {p.relative_to(package_dir)}")
-            return False
-    print("[OK] package verified")
+    print("[OK] package signatures, versions, rollback target, and Core files verified")
     return True
 
 
-def zip_package(package_dir: Path, version: str) -> tuple[Path, str]:
+def zip_package(
+    package_dir: Path,
+    version: str,
+    core_version: str = DEFAULT_CORE_VERSION,
+) -> tuple[Path, str]:
     """Create the final distributable ZIP."""
-    zip_path = Path.home() / "Desktop" / f"LiveClipperWeb_v4.0.0_{version}_全量包.zip"
+    zip_path = Path.home() / "Desktop" / f"LiveClipperWeb_v{core_version}_{version}_全量包.zip"
     if zip_path.exists():
         zip_path.unlink()
     count = 0
@@ -246,6 +331,10 @@ def zip_package(package_dir: Path, version: str) -> tuple[Path, str]:
                 z.write(full, rel)
                 count += 1
     sha = sha256_file(str(zip_path))
+    with zipfile.ZipFile(str(zip_path), "r") as archive:
+        corrupt = archive.testzip()
+    if corrupt:
+        raise RuntimeError(f"Final package ZIP is corrupt: {corrupt}")
     (zip_path.parent / f"{zip_path.name}.sha256.txt").write_text(
         f"{sha}  {zip_path.name}\n", encoding="utf-8"
     )
@@ -257,11 +346,23 @@ def zip_package(package_dir: Path, version: str) -> tuple[Path, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, help="Business version, e.g. 2026.8.5.2")
+    parser.add_argument(
+        "--core-version",
+        default=DEFAULT_CORE_VERSION,
+        help=f"Core semantic version (default: {DEFAULT_CORE_VERSION})",
+    )
     parser.add_argument("--skip-core", action="store_true", help="Skip Core rebuild (use existing)")
     parser.add_argument("--skip-launcher", action="store_true", help="Skip Launcher rebuild")
     parser.add_argument("--backup-version", help="Backup business version for rollback, e.g. 2026.8.5.1")
     parser.add_argument("--backup-archive", type=Path, help="Path to backup business ZIP")
     args = parser.parse_args()
+
+    if not args.backup_version or args.backup_archive is None:
+        parser.error("a full V4 baseline requires --backup-version and --backup-archive")
+    if args.backup_version == args.version:
+        parser.error("--backup-version must differ from --version")
+    if not args.backup_archive.is_file():
+        parser.error(f"--backup-archive does not exist: {args.backup_archive}")
 
     if not PRIVATE_KEY.exists():
         print(f"[ERROR] private key not found: {PRIVATE_KEY}")
@@ -274,7 +375,7 @@ def main() -> int:
         print("--- Step 1: Build Core ---")
         core_dir = build_core()
         print("--- Step 1a: Sign Core ---")
-        sign_result = sign_core(core_dir)
+        sign_result = sign_core(core_dir, args.core_version)
         print(f"      manifest={sign_result['manifest_sha256'][:16]} files={sign_result['file_count']}")
     else:
         core_dir = DIST_ROOT / "core_dist" / "LiveClipperHost"
@@ -304,16 +405,22 @@ def main() -> int:
         core_dir, launcher_exe, business_archive, args.version,
         backup_business_version=args.backup_version,
         backup_business_archive=args.backup_archive,
+        core_version=args.core_version,
     )
 
     # Step 5: Verify
     print("--- Step 5: Verify ---")
-    if not verify_package(package_dir):
+    if not verify_package(
+        package_dir,
+        version=args.version,
+        backup_business_version=args.backup_version,
+        core_version=args.core_version,
+    ):
         return 1
 
     # Step 6: Zip
     print("--- Step 6: Zip ---")
-    zip_path, sha = zip_package(package_dir, args.version)
+    zip_path, sha = zip_package(package_dir, args.version, args.core_version)
 
     print("\nDone. Package:", zip_path)
     return 0

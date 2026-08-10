@@ -97,6 +97,25 @@ class CandidateQualityTests(unittest.TestCase):
 
         self.assertFalse(candidate_quality.candidate_quality_flags("高克重粗织亚麻，纹理更立体。"))
 
+    def test_orphaned_adjective_tail_is_not_a_candidate(self) -> None:
+        self.assertTrue(candidate_quality.candidate_quality_flags("吸引的。但这件我特别喜欢。"))
+        self.assertFalse(candidate_quality.candidate_quality_flags("显瘦的版型能把肩线视觉往里收。"))
+
+    def test_unfinished_wind_scene_tail_is_not_a_candidate(self) -> None:
+        self.assertTrue(candidate_quality.candidate_quality_flags("站远看就像在海边风吹过来整。"))
+        self.assertFalse(candidate_quality.candidate_quality_flags("风吹起来以后，罩衫的垂感会更明显。"))
+
+    def test_malformed_audience_opening_is_hook_only_defect(self) -> None:
+        malformed = "你们机洗水洗久穿久如新的整件衣服能够做到遮肉显瘦"
+
+        self.assertFalse(candidate_quality.candidate_quality_flags(malformed))
+        self.assertEqual(candidate_quality.hook_candidate_quality_flags(malformed), ["Hook人称残句"])
+        self.assertFalse(
+            candidate_quality.hook_candidate_quality_flags(
+                "你们穿这件衬衫通勤一整天，肩线还是很利落。"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

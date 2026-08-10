@@ -748,6 +748,13 @@ DEFAULT_AI_RULES = {
     "time_coherence": True,
     "hook_cap": "5秒",
     "custom_text": "",
+    "content_policy": {
+        "price": "block",
+        "cta": "block",
+        "size_interaction": "block",
+        "live_interaction": "block",
+        "custom_rules": [],
+    },
 }
 
 
@@ -931,6 +938,7 @@ def _load_settings() -> dict[str, Any]:
         "model": DEEPSEEK_DEFAULT_MODEL,
         "enabled": False,
         "asr_enabled": False,
+        "local_asr_quality_retry_enabled": False,
         "asr_provider": "火山引擎",
         "asr_api_key": "",
         "asr_base_url": "https://dashscope.aliyuncs.com",
@@ -951,6 +959,7 @@ def _load_settings() -> dict[str, Any]:
         "preference_weights": dict(DEFAULT_PREFERENCE_WEIGHTS),
         "style_profile_enabled": True,
         "style_profile_strength": "auto",
+        "content_review_mode": "off",
         "ai_rules": dict(DEFAULT_AI_RULES),
         "ui_theme": "system",
         "hardware_encoder_enabled": False,
@@ -977,6 +986,12 @@ def _save_settings(settings: dict[str, Any]) -> bool:
     from ai_clipper import save_settings
 
     data = _normalize_ai_model_defaults(settings)
+    review_mode = str(data.get("content_review_mode") or "off").strip().lower()
+    if review_mode in {"false", "0", "disabled"}:
+        review_mode = "off"
+    elif review_mode in {"true", "1", "enabled"}:
+        review_mode = "on"
+    data["content_review_mode"] = review_mode if review_mode in {"off", "shadow", "on"} else "off"
     data["volc_region"] = _normalize_volc_region(data.get("volc_region"))
     try:
         data["subtitle_font_size"] = max(32, min(96, int(float(data.get("subtitle_font_size", 52)))))
@@ -1893,6 +1908,7 @@ class SettingsPayload(BaseModel):
     model: str = ""
     enabled: bool = False
     asr_enabled: bool = False
+    local_asr_quality_retry_enabled: bool = False
     asr_provider: str = "火山引擎"
     asr_api_key: str = ""
     asr_base_url: str = ""
@@ -1913,11 +1929,21 @@ class SettingsPayload(BaseModel):
     preference_weights: dict[str, float] = Field(default_factory=dict)
     style_profile_enabled: bool = True
     style_profile_strength: str = "auto"
+    content_review_mode: str = "off"
     ai_rules: dict[str, Any] = Field(default_factory=dict)
     ui_theme: str = "system"
     hardware_encoder_enabled: bool = False
     subtitle_font_size: int = Field(default=52, ge=32, le=96)
     ui_font_size: int = Field(default=14, ge=12, le=18)
+
+
+class AiSelectionSettingsPayload(BaseModel):
+    """Safe patch payload for settings that affect AI clip selection only."""
+
+    preference_weights: dict[str, float] | None = None
+    style_profile_strength: str | None = None
+    content_review_mode: str | None = None
+    ai_rules: dict[str, Any] | None = None
 
 
 class LicensePayload(BaseModel):
@@ -3283,6 +3309,25 @@ def _collect_smart_cut_outputs(out_dir: Path, video: Path, started_at: float, ex
     return [str(path) for path in unique]
 
 
+def _result_ok(result: Any) -> bool:
+    return bool(result.get("ok", True)) if isinstance(result, dict) else bool(result)
+
+
+def _declared_result_outputs(result: Any, fallback_output: str | Path) -> list[str]:
+    """Use the cutter's exact output list; retain a single-output legacy fallback."""
+    values = list(result.get("outputs") or []) if isinstance(result, dict) else []
+    if not values and fallback_output:
+        values = [fallback_output]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        path = str(value or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
 def _video_split_mode(payload: VideoSplitPayload) -> str:
     return "duration" if str(payload.mode or "").strip().lower() in {"duration", "seconds", "time"} else "count"
 
@@ -4023,6 +4068,18 @@ def _mojibake_score(text: str) -> int:
 def _preview_focus_block(clip: Any) -> str:
     _, raw_text, focus = _clip_text_focus(clip)
     text = _preview_effective_clip_text(clip) or raw_text
+    # The preview used to maintain a second, drifting taxonomy and ignored the
+    # director focus whenever the user selected word-level clauses. Reuse the
+    # selection classifier so labels, quotas and ordering mean the same thing.
+    try:
+        import ai_clipper as ai_mod
+
+        return str(
+            ai_mod._clip_primary_topic(("product", text, 0.0, 0.0, 0.0, 0.0, focus))
+            or "其他"
+        )
+    except Exception:
+        pass
     has_selected_segments = isinstance(clip, dict) and bool(clip.get("segments"))
     food_evidence = any(k in text for k in (
         "好吃", "鲜甜", "脆甜", "爆汁", "口感", "试吃", "吃起来",
@@ -5300,6 +5357,7 @@ def _preview_segment_index(segment: dict[str, Any]) -> int:
 
 
 def _sort_and_reindex_preview_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give each final review sentence its own unique word-index namespace."""
     ordered = sorted(
         segments,
         key=lambda seg: (
@@ -5310,6 +5368,12 @@ def _sort_and_reindex_preview_segments(segments: list[dict[str, Any]]) -> list[d
     )
     for index, segment in enumerate(ordered):
         segment["index"] = index
+        word_index = 0
+        for word in list(segment.get("words") or []):
+            if not isinstance(word, dict):
+                continue
+            word["index"] = word_index
+            word_index += 1
     return ordered
 
 
@@ -5834,15 +5898,17 @@ def _preview_segment_selection_units(
             and not _standalone_fragment_reason(text)
         ) else [])
 
+    # ``selected_words`` is a position list inside the final review sentence.
+    # Older preview caches can still contain duplicated ``word.index`` values
+    # after adjacent semantic pieces were merged.  Never use that legacy field
+    # to resolve an edit: it would make a click on position N also affect a
+    # later word carrying the same stale index.
     runs: list[list[tuple[int, dict[str, Any]]]] = []
     current: list[tuple[int, dict[str, Any]]] = []
     previous_index: int | None = None
     for position, word in enumerate(words):
-        try:
-            word_index = int(word.get("index", position))
-        except (TypeError, ValueError):
-            word_index = position
-        keep = not word.get("selection_locked") and (not explicit or word_index in wanted)
+        word_index = position
+        keep = not word.get("selection_locked") and (not explicit or position in wanted)
         if not keep:
             if current:
                 runs.append(current)
@@ -6369,6 +6435,9 @@ def _build_preview_selection_feedback(
     }
     category = str(preview.get("category") or draft.get("category") or "").strip()
     feedback_scope = str(preview.get("feedback_scope") or _feedback_scope_key(scope, category)).strip()
+    marketing_summary = dict(
+        (preview.get("dedup_summary") or {}).get("marketing_intent_summary") or {}
+    )
 
     return {
         "created_at": time.time(),
@@ -6388,6 +6457,12 @@ def _build_preview_selection_feedback(
         "rejected_segment_texts": rejected_segment_texts[:80],
         "rejected_clip_texts": rejected_clip_texts[:40],
         "role_samples": role_samples,
+        "marketing_intent_run_key": str(marketing_summary.get("shadow_run_key") or ""),
+        "marketing_intent_summary": {
+            key: marketing_summary.get(key)
+            for key in ("version", "intent_count", "arc_count", "eligible_arc_count")
+            if key in marketing_summary
+        },
     }
 
 
@@ -7079,6 +7154,13 @@ def _record_preview_selection_feedback(
         if kept_count <= 0 and rejected_count <= 0:
             return
         _append_preview_selection_feedback(record)
+        shadow_run_key = str(record.get("marketing_intent_run_key") or "")
+        if shadow_run_key:
+            try:
+                from marketing_intent import append_manual_feedback_shadow
+                append_manual_feedback_shadow(shadow_run_key, record)
+            except Exception:
+                _LOG.warning("marketing intent shadow feedback write failed", exc_info=True)
         emit_log(
             "info",
             f"AI偏好反馈: 已记录本次人工选择，保留 {kept_count} 句、删除 {rejected_count} 句；后续自动选片会参考。",
@@ -7169,14 +7251,13 @@ def _normalize_preview_selected_words(
             if not segment or not isinstance(raw_indices, list):
                 continue
             words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+            # The draft is expressed in sentence positions, not in the
+            # serialized ``word.index`` field.  This keeps a restored legacy
+            # preview with duplicate indices aligned with the frontend.
             allowed: set[int] = set()
             for position, word in enumerate(words):
-                try:
-                    word_index = int(word.get("index", position))
-                except (TypeError, ValueError):
-                    word_index = position
                 if not word.get("selection_locked"):
-                    allowed.add(word_index)
+                    allowed.add(position)
             requested = _clean_preview_int_list(raw_indices, len(words))
             # Preserve [] so deleting every word remains an explicit choice.
             clean_by_segment[str(segment_index)] = [index for index in requested if index in allowed]
@@ -7956,16 +8037,24 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             mirror_enabled=payload.mirror_enabled,
             kb_intensity=payload.ken_burns_intensity,
         )
-        if not result:
-            raise RuntimeError("混剪处理失败。")
+        if not _result_ok(result):
+            reason = str(result.get("error") or result.get("message") or "") if isinstance(result, dict) else ""
+            raise RuntimeError(reason or "混剪处理失败。")
+        produced_outputs = _declared_result_outputs(result, output_path)
+        if not produced_outputs:
+            raise RuntimeError("混剪未生成输出文件。")
         _set_task_progress(task_id, 94, "整理输出")
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
         _archive_used_pip(used_pip_file, scope)
-        _consume_trial("混剪成片", scope=scope)
+        _consume_trial("混剪成片", units=len(produced_outputs), scope=scope)
         best_effort_detail = _batch_best_effort_detail(paths[0].name, result)
         completion_message = "混剪成片完成"
+        requested_versions = int(result.get("requested_versions") or payload.versions or 1) if isinstance(result, dict) else int(payload.versions or 1)
+        produced_versions = int(result.get("produced_versions") or len(produced_outputs)) if isinstance(result, dict) else len(produced_outputs)
+        if isinstance(result, dict) and result.get("partial"):
+            completion_message = f"混剪成片部分完成：已生成 {produced_versions}/{requested_versions} 个版本"
         if best_effort_detail:
             completion_message += (
                 f"：{_batch_best_effort_prefix(best_effort_detail)}，"
@@ -7975,16 +8064,16 @@ def _run_mix(task_id: str, payload: MixPayload) -> None:
             task_id,
             status="completed",
             finished_at=time.time(),
-            output=str(output_path),
-            outputs=[str(output_path)],
-            result_count=1,
+            output=produced_outputs[0],
+            outputs=produced_outputs,
+            result_count=len(produced_outputs),
             message=completion_message,
             batch_best_effort=1 if best_effort_detail else 0,
         )
         if best_effort_detail:
             emit_log("warning", completion_message, scope)
         else:
-            emit_log("success", f"混剪成片完成：{output_path}", scope)
+            emit_log("success", f"{completion_message}：{len(produced_outputs)} 个输出", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"混剪成片失败：{exc}", scope)
@@ -8017,6 +8106,8 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         failures: list[str] = []
         failure_details: list[dict[str, Any]] = []
         best_effort_details: list[dict[str, Any]] = []
+        version_shortfalls: list[str] = []
+        succeeded_groups = 0
         _set_task(
             task_id,
             batch_total=total_groups,
@@ -8077,10 +8168,20 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     kb_intensity=payload.ken_burns_intensity,
                     local_asr_session=local_asr_session,
                 )
-                if not result:
-                    raise RuntimeError("混剪处理失败。")
+                if not _result_ok(result):
+                    reason = str(result.get("error") or result.get("message") or "") if isinstance(result, dict) else ""
+                    raise RuntimeError(reason or "混剪处理失败。")
+                group_outputs = _declared_result_outputs(result, output_path)
+                if not group_outputs:
+                    raise RuntimeError("混剪未生成输出文件。")
                 _archive_used_pip(used_pip_file, scope)
-                outputs.append(str(output_path))
+                outputs.extend(group_outputs)
+                succeeded_groups += 1
+                if isinstance(result, dict) and result.get("partial"):
+                    requested = int(result.get("requested_versions") or payload.versions or 1)
+                    produced = int(result.get("produced_versions") or len(group_outputs))
+                    version_shortfalls.append(f"{group_name} {produced}/{requested}版")
+                    emit_log("warning", f"{group_name} 多版本部分完成：已生成 {produced}/{requested} 个版本", scope)
                 best_effort_detail = _batch_best_effort_detail(group_name, result)
                 if best_effort_detail:
                     best_effort_details.append(best_effort_detail)
@@ -8094,7 +8195,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                 _set_task(
                     task_id,
                     batch_done=index,
-                    batch_succeeded=len(outputs),
+                    batch_succeeded=succeeded_groups,
                     batch_current=index + 1 if index < total_groups else 0,
                     batch_failed=len(failure_details),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
@@ -8109,7 +8210,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                 _set_task(
                     task_id,
                     batch_done=index,
-                    batch_succeeded=len(outputs),
+                    batch_succeeded=succeeded_groups,
                     batch_current=index + 1 if index < total_groups else 0,
                     batch_failed=len(failure_details),
                     batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
@@ -8134,12 +8235,14 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         _consume_trial("混剪成片", units=len(outputs), scope=scope)
         summary_message = _batch_summary_message(
             "批量混剪完成",
-            len(outputs),
+            succeeded_groups,
             total_groups,
             failure_details,
             "组",
             best_effort_details,
         )
+        if version_shortfalls:
+            summary_message += "；多版本部分完成 " + "，".join(version_shortfalls)
         _set_task(
             task_id,
             status="completed",
@@ -8150,7 +8253,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
             message=summary_message,
             batch_total=total_groups,
             batch_done=total_groups,
-            batch_succeeded=len(outputs),
+            batch_succeeded=succeeded_groups,
             batch_current=0,
             batch_failed=len(failure_details),
             batch_insufficient=sum(1 for item in failure_details if item.get("code") == "insufficient_content"),
@@ -8161,7 +8264,7 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
         if failures:
             emit_log("warning", summary_message, scope)
         else:
-            emit_log("success", f"批量混剪完成：成功 {len(outputs)} 组。", scope)
+            emit_log("success", f"批量混剪完成：成功 {succeeded_groups} 组，输出 {len(outputs)} 个文件。", scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"批量混剪失败：{exc}", scope)
@@ -8282,6 +8385,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         )
         dedup_summary["content_review_summary"] = dict(
             (result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
+        )
+        dedup_summary["marketing_intent_summary"] = dict(
+            (result_cache.get("analysis_metadata") or {}).get("marketing_intent_summary") or {}
         )
         dedup_summary["candidate_safety_summary"] = dict(
             (result_cache.get("analysis_metadata") or {}).get("candidate_safety_summary") or {}
@@ -11523,6 +11629,9 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         dedup_summary["content_review_summary"] = dict(
             (result_cache.get("analysis_metadata") or {}).get("content_review_summary") or {}
         )
+        dedup_summary["marketing_intent_summary"] = dict(
+            (result_cache.get("analysis_metadata") or {}).get("marketing_intent_summary") or {}
+        )
         dedup_summary["candidate_safety_summary"] = dict(
             (result_cache.get("analysis_metadata") or {}).get("candidate_safety_summary") or {}
         )
@@ -12382,6 +12491,8 @@ def save_settings(payload: SettingsPayload) -> dict[str, Any]:
     provided_fields = set(getattr(payload, "model_fields_set", set()) or set())
     if "style_profile_enabled" not in provided_fields:
         data.pop("style_profile_enabled", None)
+    if "content_review_mode" not in provided_fields:
+        data.pop("content_review_mode", None)
     if _save_settings(data):
         emit_log("success", "设置已保存。", "settings")
         return {"ok": True, "message": "设置已保存"}
@@ -12396,6 +12507,44 @@ def save_settings(payload: SettingsPayload) -> dict[str, Any]:
         detail = f"{detail}：{reason}"
     emit_log("error", detail, "settings")
     raise HTTPException(status_code=500, detail=detail)
+
+
+@app.post("/api/settings/ai-selection")
+def save_ai_selection_settings(payload: AiSelectionSettingsPayload) -> dict[str, Any]:
+    """Persist selection controls without rewriting credentials or ASR fields."""
+
+    data = _load_settings()
+    if payload.preference_weights is not None:
+        data["preference_weights"] = dict(payload.preference_weights)
+    if payload.style_profile_strength is not None:
+        data["style_profile_strength"] = str(payload.style_profile_strength or "auto")
+    if payload.content_review_mode is not None:
+        data["content_review_mode"] = str(payload.content_review_mode or "off")
+
+    if payload.ai_rules is not None:
+        incoming = dict(payload.ai_rules)
+        current_rules = dict(data.get("ai_rules") or {})
+        allowed_rule_keys = {
+            "narrative",
+            "category_filter",
+            "time_coherence",
+            "hook_cap",
+            "custom_text",
+            "content_policy",
+        }
+        for key in allowed_rule_keys:
+            if key in incoming:
+                current_rules[key] = incoming[key]
+        if "content_policy" in incoming:
+            from content_policy import normalize_content_policy
+
+            current_rules["content_policy"] = normalize_content_policy(incoming["content_policy"])
+        data["ai_rules"] = current_rules
+
+    if _save_settings(data):
+        emit_log("info", "AI选片设置已自动保存。", "settings")
+        return {"ok": True}
+    raise HTTPException(status_code=500, detail="AI选片设置自动保存失败")
 
 
 @app.get("/api/preferences")

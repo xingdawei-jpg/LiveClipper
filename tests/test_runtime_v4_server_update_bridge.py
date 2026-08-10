@@ -203,7 +203,8 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertEqual(
             sources,
             (
-                "https://updates.liveclipper.top/stable.json",
+                "https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/stable.json",
+                "https://cdn.jsdelivr.net/gh/xingdawei-jpg/LiveClipper@main/release/channel/v4/stable.json",
                 "https://liveclipper-updates.pages.dev/stable.json",
             ),
         )

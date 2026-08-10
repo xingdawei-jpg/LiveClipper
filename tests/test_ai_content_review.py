@@ -410,6 +410,124 @@ class ContentReviewValidationTests(unittest.TestCase):
         self.assertTrue(all(count <= 4 for count in main_counts.values()))
         self.assertTrue(all(count <= 2 for count in source_topic_counts.values()))
         self.assertEqual(len(bundle.hook_pairs), 4)
+class ContentReviewSubjectPriorityTests(unittest.TestCase):
+    def _validate(self, payload: dict, inventory=None, required_sources=None):
+        return content_review._validate_bundle(
+            payload,
+            inventory=inventory or _inventory(),
+            cache_key="cache-key",
+            candidate_digest="digest",
+            category="\u4e0a\u8863",
+            model="deepseek-v4-flash",
+            required_sources=required_sources,
+        )
+
+    def test_subject_relation_is_grounded_demoted_and_blocks_other_product_hook(self) -> None:
+        inventory = [
+            {
+                "srt_index": 1,
+                "source": "V1",
+                "duration_sec": 5.0,
+                "text": "这件上衣的肩线向内收，穿上整个人更利落。",
+            },
+            {
+                "srt_index": 2,
+                "source": "V1",
+                "duration_sec": 5.0,
+                "text": "这条裤子的腰头很平整，通勤穿不勒肚子。",
+            },
+        ]
+        payload = {
+            "cards": [
+                {
+                    "candidate_id": 1,
+                    "topic": "版型显瘦",
+                    "subtopic": "肩线内收",
+                    "buyer_value": "解释上衣肩线如何收窄视觉",
+                    "evidence_type": "原因解释",
+                    "evidence_quote": "肩线向内收",
+                    "roles": ["effect", "evidence"],
+                    "dependency": "independent",
+                    "quality_tags": ["具体效果", "原因解释"],
+                    "tier": "main",
+                    "primary_subject": "上衣",
+                    "target_relation": "primary",
+                    "subject_evidence": "这件上衣",
+                },
+                {
+                    "candidate_id": 2,
+                    "topic": "版型显瘦",
+                    "subtopic": "腰头平整",
+                    "buyer_value": "说明裤子腰头不勒",
+                    "evidence_type": "具体效果",
+                    "evidence_quote": "不勒肚子",
+                    "roles": ["effect"],
+                    "dependency": "independent",
+                    "quality_tags": ["具体效果"],
+                    "tier": "main",
+                    "primary_subject": "裤子",
+                    "target_relation": "other",
+                    "subject_evidence": "这条裤子",
+                },
+            ],
+            "hook_pairs": [[2, 1, "版型显瘦", "错误地把裤子当上衣Hook"]],
+        }
+
+        bundle = content_review._validate_bundle(
+            payload,
+            inventory=inventory,
+            cache_key="cache-key",
+            candidate_digest="digest",
+            category="上衣",
+            model="deepseek-v4-flash",
+            required_sources=None,
+            main_product="上衣",
+        )
+
+        cards = bundle.card_map()
+        self.assertEqual(cards[1].target_relation, "primary")
+        self.assertEqual(cards[2].target_relation, "other")
+        self.assertEqual(cards[2].tier, "reserve")
+        self.assertEqual(bundle.hook_pairs, ())
+        self.assertLess(
+            bundle.director_hint().index("#01"),
+            bundle.director_hint().index("#02"),
+        )
+        self.assertEqual(bundle.summary("on")["primary_subject_count"], 1)
+        self.assertEqual(bundle.summary("on")["other_subject_count"], 1)
+
+    def test_ungrounded_subject_metadata_is_downgraded_without_dropping_safe_card(self) -> None:
+        payload = _review_payload()
+        payload["cards"] = [payload["cards"][0]]
+        payload["cards"][0].update({
+            "primary_subject": "裙子",
+            "target_relation": "other",
+            "subject_evidence": "肩线会往里收",
+        })
+        bundle = self._validate(payload)
+
+        self.assertEqual(bundle.allowed_candidate_ids, {1})
+        self.assertEqual(bundle.cards[0].target_relation, "unknown")
+        self.assertEqual(bundle.cards[0].primary_subject, "")
+        self.assertEqual(bundle.cards[0].subject_evidence, "")
+
+    def test_compact_card_subject_fields_are_backward_compatible_and_grounded(self) -> None:
+        payload = _review_payload()
+        card = payload["cards"][0]
+        payload["cards"] = [[
+            card["candidate_id"], card["topic"], card["subtopic"],
+            card["buyer_value"], card["evidence_type"], card["evidence_quote"],
+            card["roles"], card["dependency"], card["quality_tags"], card["tier"],
+            "肩线", "primary", "肩线会往里收",
+        ]]
+        payload["hook_pairs"] = []
+        bundle = self._validate(payload)
+
+        self.assertEqual(bundle.cards[0].primary_subject, "肩线")
+        self.assertEqual(bundle.cards[0].target_relation, "primary")
+        self.assertEqual(bundle.cards[0].subject_evidence, "肩线会往里收")
+
+
 class ContentReviewDirectorContractTests(unittest.TestCase):
     def test_review_hook_pair_requires_its_immediate_followup(self) -> None:
         entries = [
@@ -724,6 +842,30 @@ class ContentReviewIntegrationTests(unittest.TestCase):
                 ai_clipper.ai_analyze_clips(srt, target_duration=60)
         reviewer.assert_not_called()
 
+    def test_task_shadow_mode_overrides_saved_off_mode(self) -> None:
+        settings = {
+            "api_key": "key", "base_url": "https://example.com/v1",
+            "model": "deepseek-v4-flash", "content_review_mode": "off",
+        }
+        srt = "1\n00:00:00,000 --> 00:01:05,000\n这件衣服肩线清晰而且完整说明版型效果。\n"
+        safe_inventory = [{"srt_index": 1, "source": "V1", "duration_sec": 65.0, "text": "完整卖点"}]
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
+             mock.patch.object(ai_clipper, "_director_safe_candidate_inventory", return_value=safe_inventory), \
+             mock.patch.object(content_review, "review_candidates", side_effect=RuntimeError("reviewed")), \
+             mock.patch.object(ai_clipper, "_call_ai", side_effect=RuntimeError("director-called")):
+            with self.assertRaisesRegex(RuntimeError, "director-called"):
+                ai_clipper.ai_analyze_clips(
+                    srt,
+                    target_duration=60,
+                    ai_controls={"content_review_mode": "shadow"},
+                )
+
+        metadata = ai_clipper.get_last_analysis_metadata()
+        self.assertEqual(metadata["content_review_summary"]["mode"], "shadow")
+        self.assertEqual(metadata["content_review_summary"]["mode_source"], "task")
+
     def test_on_mode_passes_reviewed_ids_and_review_failure_falls_back(self) -> None:
         settings = {
             "api_key": "key", "base_url": "https://example.com/v1",
@@ -851,7 +993,12 @@ class ContentReviewIntegrationTests(unittest.TestCase):
             (48.0, 56.0, "面料轻薄透气，夏天贴身穿也不会闷。"),
         ]
         ai_clipper._begin_analysis_metadata()
-        safe = ai_clipper._director_safe_candidate_inventory(entries, record_metrics=True)
+        with mock.patch.object(
+            ai_clipper,
+            "_content_policy_value",
+            return_value=ai_clipper.default_content_policy(),
+        ):
+            safe = ai_clipper._director_safe_candidate_inventory(entries, record_metrics=True)
         safety = ai_clipper.get_last_analysis_metadata()["candidate_safety_summary"]
 
         self.assertEqual([item["srt_index"] for item in safe], [1, 7])
@@ -1310,6 +1457,23 @@ class FinalSequenceAuditTests(unittest.TestCase):
         self.assertEqual(result.status, "flag")
         self.assertTrue(result.opening_issue)
         self.assertIn("展示铺垫", " ".join(result.issues))
+
+    def test_audit_forces_flag_for_malformed_audience_hook(self) -> None:
+        selected = self._selected()
+        selected[0]["text"] = "你们机洗水洗久穿久如新的整件衣服能够做到遮肉显瘦"
+        response = json.dumps({"status": "pass", "issues": [], "opening_issue": False}, ensure_ascii=False)
+
+        with mock.patch.object(content_review, "_post_review_request", return_value=response):
+            result = content_review.audit_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=selected,
+            )
+
+        self.assertEqual(result.status, "flag")
+        self.assertTrue(result.opening_issue)
+        self.assertIn("Hook人称残句", " ".join(result.issues))
 
 
 if __name__ == "__main__":
