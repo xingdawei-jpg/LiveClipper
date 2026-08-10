@@ -32,7 +32,7 @@ from runtime_v4.update_service import RuntimeV4UpdateService, load_update_source
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
 DIAGNOSTIC_FLAG = "--liveclipper-v4-diagnostic"
-CORE_VERSION = "4.0.0"
+CORE_VERSION = "4.0.1"
 
 
 @dataclass(frozen=True)

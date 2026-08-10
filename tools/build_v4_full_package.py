@@ -28,6 +28,8 @@ from runtime_v4.business_bundle import (
     verify_business_directory,
 )
 from runtime_v4.core_manifest import verify_core_directory
+from runtime_v4.desktop_host import CORE_VERSION as HOST_CORE_VERSION
+from runtime_v4.launcher import LAUNCHER_VERSION
 
 
 PYTHON = os.environ.get("LIVECLIPPER_PYTHON", sys.executable)
@@ -43,13 +45,29 @@ PRIVATE_KEY = Path(os.environ.get(
 PUBLIC_KEY = ROOT / "app" / "release_update_public_key.pem"
 BUSINESS_POLICY = ROOT / "release" / "runtime_v4_business_policy.json"
 VERSION_FILE = ROOT / "app" / "version.json"
-DEFAULT_CORE_VERSION = "4.0.0"
+DEFAULT_CORE_VERSION = HOST_CORE_VERSION
 WEBVIEW2_DIR = os.environ.get(
     "LIVECLIPPER_WEBVIEW2_RUNTIME_DIR",
     str(ROOT / "vendor" / "webview2_runtime_x64" / "Microsoft.WebView2.FixedVersionRuntime.149.0.4022.98.x64"),
 )
 LAUNCHER_NAME = os.environ.get("LIVECLIPPER_V4_LAUNCHER_NAME", "LiveClipperWeb")
 HEALTH_TIMEOUT = 180
+
+
+def validate_embedded_core_version(core_version: str) -> None:
+    """Reject a full build whose frozen identities do not match its signed Core."""
+
+    target = str(core_version or "").strip()
+    if target != HOST_CORE_VERSION:
+        raise RuntimeError(
+            "target Core version differs from the embedded Host identity: "
+            f"{target!r} != {HOST_CORE_VERSION!r}"
+        )
+    if target != LAUNCHER_VERSION:
+        raise RuntimeError(
+            "target Core version differs from the embedded Launcher identity: "
+            f"{target!r} != {LAUNCHER_VERSION!r}"
+        )
 
 
 def _run(cmd: list[str], label: str) -> int:
@@ -363,6 +381,10 @@ def main() -> int:
         parser.error("--backup-version must differ from --version")
     if not args.backup_archive.is_file():
         parser.error(f"--backup-archive does not exist: {args.backup_archive}")
+    try:
+        validate_embedded_core_version(args.core_version)
+    except RuntimeError as exc:
+        parser.error(str(exc))
 
     if not PRIVATE_KEY.exists():
         print(f"[ERROR] private key not found: {PRIVATE_KEY}")

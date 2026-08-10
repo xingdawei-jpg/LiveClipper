@@ -21,7 +21,7 @@ from runtime_v4.core_manifest import VerifiedCore, verify_core_directory
 
 RUNTIME_LAYOUT_VERSION = 4
 STATE_SCHEMA_VERSION = 1
-LAUNCHER_VERSION = "4.0.0"
+LAUNCHER_VERSION = "4.0.1"
 STATE_FILE = "current.json"
 VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
 RUNTIME_OWNED_ENV = (

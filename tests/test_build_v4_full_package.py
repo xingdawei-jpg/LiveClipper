@@ -57,7 +57,7 @@ class BuildV4FullPackageTests(unittest.TestCase):
         )
         build_core_manifest(
             self.core,
-            core_version="4.0.0",
+            core_version="4.0.1",
             private_key_path=self.private_key,
         )
         self.launcher = self.root / "LiveClipperWeb.exe"
@@ -130,7 +130,7 @@ class BuildV4FullPackageTests(unittest.TestCase):
                 )
             )
         state = json.loads((package / "current.json").read_text(encoding="utf-8"))
-        self.assertTrue(state["verified_cores"]["4.0.0"]["metadata_sha256"])
+        self.assertTrue(state["verified_cores"]["4.0.1"]["metadata_sha256"])
 
     def test_package_rejects_current_ui_version_mismatch(self) -> None:
         package = self._assemble(
@@ -183,6 +183,16 @@ class BuildV4FullPackageTests(unittest.TestCase):
         state = json.loads((package / "current.json").read_text(encoding="utf-8"))
         self.assertEqual(state["current"]["core_version"], "4.0.1")
         self.assertTrue((package / "core" / "4.0.1" / "core_manifest.json").is_file())
+
+    def test_build_rejects_a_target_that_differs_from_frozen_identities(self) -> None:
+        self.assertEqual(package_builder.DEFAULT_CORE_VERSION, "4.0.1")
+        package_builder.validate_embedded_core_version("4.0.1")
+        with patch.object(package_builder, "HOST_CORE_VERSION", "4.0.0"):
+            with self.assertRaisesRegex(RuntimeError, "embedded Host identity"):
+                package_builder.validate_embedded_core_version("4.0.1")
+        with patch.object(package_builder, "LAUNCHER_VERSION", "4.0.0"):
+            with self.assertRaisesRegex(RuntimeError, "embedded Launcher identity"):
+                package_builder.validate_embedded_core_version("4.0.1")
 
 
 if __name__ == "__main__":
