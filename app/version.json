@@ -113,9 +113,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试、批处理结果及V4 Core完整性强化。",
-  "update_message": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试、批处理结果及V4 Core完整性强化。",
+  "release_notes": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试与批处理结果优化。",
+  "update_message": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试与批处理结果优化。",
   "update_url": "",
   "force_update": true,
-  "updated_at": "2026-08-11 07:41:42"
+  "updated_at": "2026-08-11 08:22:10"
 }

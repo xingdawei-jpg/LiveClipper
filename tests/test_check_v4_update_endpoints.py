@@ -81,7 +81,7 @@ class RuntimeV4EndpointCheckTests(unittest.TestCase):
             self.archive,
             application_version="2026.8.9.1",
             allowed_source_versions=["2026.8.7.1"],
-            compatible_core_versions=["4.0.0", "4.0.1"],
+            compatible_core_versions=["4.0.0"],
             sources=[
                 {"name": "primary", "url": "https://updates.example/bundle.zip"},
                 {"name": "backup", "url": "https://mirror.example/bundle.zip"},

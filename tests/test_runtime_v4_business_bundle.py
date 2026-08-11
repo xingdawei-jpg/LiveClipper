@@ -162,7 +162,7 @@ class RuntimeV4BusinessBundleTests(unittest.TestCase):
         self.assertEqual(archive_result.manifest_sha256, directory_result.manifest_sha256)
         self.assertEqual(archive_result.entrypoint_path, "bundle_entry.py")
         self.assertEqual(archive_result.import_roots, ("app",))
-        self.assertEqual(archive_result.compatible_core_versions, ("4.0.0", "4.0.1"))
+        self.assertEqual(archive_result.compatible_core_versions, ("4.0.0",))
 
     def test_loader_executes_only_after_verification(self) -> None:
         bundle = self._extract()

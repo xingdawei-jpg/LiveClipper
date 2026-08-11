@@ -3,10 +3,10 @@
 状态：`hold` 候选，未发布
 
 - 业务版本：`2026.8.11.1`
-- 新全量 Core：`4.0.1`
+- 稳定 Core：`4.0.0`（本轮不替换、不重装）
 - 线上 V4 来源版本：`2026.8.5.2`、`2026.8.7.1`
 - 已暂停候选来源版本：`2026.8.8.1`
-- 全量包回滚业务版本：`2026.8.11.0`（基于已发布 `2026.8.7.1` 业务代码，为 Core 4.0.1 单独签名）
+- 发布类型：签名业务增量，不包含 Launcher、Host、Python、FFmpeg、WebView2、模型或原生依赖
 
 ## 本次维修
 
@@ -39,21 +39,19 @@
 - 智能成片和混剪对时长不足、输出数量不足及部分失败返回明确结构化错误。
 - 批量任务保留已成功输出，不用单个素材失败覆盖整批结果。
 
-### V4 Core 与发布链
+### V4 更新与发布链
 
-- Launcher 的已验证 Core 回执同时绑定 manifest 与 metadata 摘要；日常启动做 metadata 校验，内部 Core 文件变化会触发完整复验或回滚。
-- Core 从 `4.0.0` 升到 `4.0.1`，避免对已上线的 `4.0.0` 重打同版本不同内容。
-- Host 与 Launcher 的内嵌身份同步升级到 `4.0.1`；总控构建会在封装前强制比对目标 Core、Host 和 Launcher 三者版本，阻止版本身份不一致的全量包进入候选。
-- 全量构建总控支持显式 `--core-version`，并强制验证当前/回滚业务签名、Core 全文件、三处版本选择及最终 ZIP 完整性。
+- 本轮业务包只声明兼容稳定 Core `4.0.0`，现有 V4 用户更新时不替换根启动器和 Core 文件。
+- 业务包安装采用签名与哈希校验、新版本目录、首次启动健康确认和失败自动回退。
+- Core `4.0.1` 全量基线从本轮业务发布中拆出，单独保持 `hold`，只面向后续 V3/新用户迁移验收，不进入现有 V4 用户更新通道。
+- 全量构建增加目标 Core、内嵌 Host 与 Launcher 身份一致性门禁；该工具改进不属于本轮业务包内容。
 - 增加 V4 更新端点巡检，要求所有已配置通道与业务包镜像内容一致。
 
 ## 纳入范围
 
 - 业务代码：`app/` 中本次 AI、内容审稿、内容政策、ASR、剪辑及安全规则文件。
 - 业务前端：`web_client/server.py`、`web_client/frontend/`。
-- Core：`runtime_v4/launcher.py`。
-- 发布工具：`tools/build_v4_full_package.py`、`tools/check_v4_update_endpoints.py`。
-- 策略与文档：`release/runtime_v4_business_policy.json`、V4 发布契约和本候选证据。
+- 策略与文档：`release/runtime_v4_business_policy.json` 和本候选证据。
 - 对应自动化测试。
 
 ## 明确排除
@@ -61,10 +59,11 @@
 - `_audit_size.py`：临时体积审计脚本，不纳入提交或包。
 - `app/gui_clean.py`、`app/gui_fresh.py`、`app/gui_tmp.py`：历史临时 GUI 文件，业务包策略已明确排除。
 - 私钥、用户配置、缓存、日志、模型下载目录、旧 `dist`、旧全量包和测试输出。
+- `runtime_v4/`、`web_client/desktop.py`、PyInstaller spec、`vendor/`、WebView2、FFmpeg 与模型/原生运行依赖。
 - V3 `release/stable.json`：保持不变。
 
 ## 验收边界
 
-- 本机源码、签名、ZIP、解压运行、业务更新和回滚证据完成前，候选保持 `hold`。
+- 本机源码、签名、业务 ZIP、从上一正式 V4 版更新、首次启动和回滚证据完成前，候选保持 `hold`。
 - jsDelivr 与 Cloudflare Pages 备用通道当前为 404；未修复并重新巡检前不能发布 `ready`。
-- 另一台干净电脑的安装、真实素材、自动更新和回滚仍为最终人工验收项。
+- 另一台 V4 电脑的真实自动下载、更新、真实素材和回滚仍为最终人工验收项；不要求现有 V4 用户重装全量包。

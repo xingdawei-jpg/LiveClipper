@@ -2,8 +2,7 @@
   "schema_version": 1,
   "policy_id": "liveclipper-business-v1",
   "compatible_core_versions": [
-    "4.0.0",
-    "4.0.1"
+    "4.0.0"
   ],
   "entrypoint": {
     "path": "bundle_entry.py",

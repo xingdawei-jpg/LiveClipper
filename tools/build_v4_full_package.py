@@ -1,7 +1,7 @@
 """Build a complete Runtime V4 full-baseline package ZIP.
 
 Usage:
-    python tools/build_v4_full_package.py --version 2026.8.5.2 [--skip-core] [--skip-launcher]
+    python tools/build_v4_full_package.py --version 2026.8.5.2 --core-version 4.0.0
 """
 
 from __future__ import annotations
@@ -369,8 +369,6 @@ def main() -> int:
         default=DEFAULT_CORE_VERSION,
         help=f"Core semantic version (default: {DEFAULT_CORE_VERSION})",
     )
-    parser.add_argument("--skip-core", action="store_true", help="Skip Core rebuild (use existing)")
-    parser.add_argument("--skip-launcher", action="store_true", help="Skip Launcher rebuild")
     parser.add_argument("--backup-version", help="Backup business version for rollback, e.g. 2026.8.5.1")
     parser.add_argument("--backup-archive", type=Path, help="Path to backup business ZIP")
     args = parser.parse_args()
@@ -392,30 +390,16 @@ def main() -> int:
 
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Core
-    if not args.skip_core:
-        print("--- Step 1: Build Core ---")
-        core_dir = build_core()
-        print("--- Step 1a: Sign Core ---")
-        sign_result = sign_core(core_dir, args.core_version)
-        print(f"      manifest={sign_result['manifest_sha256'][:16]} files={sign_result['file_count']}")
-    else:
-        core_dir = DIST_ROOT / "core_dist" / "LiveClipperHost"
-        if not core_dir.exists():
-            print("[ERROR] --skip-core but no existing core at", core_dir)
-            return 1
-        print(f"--- Step 1: Skip Core (using {core_dir}) ---")
+    # A full-baseline build always rebuilds both frozen layers. Business-only
+    # releases use build_business_bundle.py and never enter this script.
+    print("--- Step 1: Build Core ---")
+    core_dir = build_core()
+    print("--- Step 1a: Sign Core ---")
+    sign_result = sign_core(core_dir, args.core_version)
+    print(f"      manifest={sign_result['manifest_sha256'][:16]} files={sign_result['file_count']}")
 
-    # Step 2: Launcher
-    if not args.skip_launcher:
-        print("--- Step 2: Build Launcher ---")
-        launcher_exe = build_launcher()
-    else:
-        launcher_exe = DIST_ROOT / "launcher_dist" / f"{LAUNCHER_NAME}.exe"
-        if not launcher_exe.exists():
-            print("[ERROR] --skip-launcher but no existing launcher at", launcher_exe)
-            return 1
-        print(f"--- Step 2: Skip Launcher (using {launcher_exe}) ---")
+    print("--- Step 2: Build Launcher ---")
+    launcher_exe = build_launcher()
 
     # Step 3: Business
     print("--- Step 3: Build Business Bundle ---")

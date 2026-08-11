@@ -21,7 +21,7 @@ from runtime_v4.core_manifest import VerifiedCore, verify_core_directory
 
 RUNTIME_LAYOUT_VERSION = 4
 STATE_SCHEMA_VERSION = 1
-LAUNCHER_VERSION = "4.0.1"
+LAUNCHER_VERSION = "4.0.0"
 STATE_FILE = "current.json"
 VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
 RUNTIME_OWNED_ENV = (
@@ -206,7 +206,6 @@ def _core_receipt_matches(state: dict[str, Any], core: VerifiedCore) -> bool:
         isinstance(receipt, dict)
         and receipt.get("verification_mode") == "full"
         and receipt.get("manifest_sha256") == core.manifest_sha256
-        and receipt.get("metadata_sha256") == core.metadata_sha256
     )
 
 
@@ -233,9 +232,7 @@ def _validated_selection_with_receipt(
         full = _validated_selection_with_mode(root, selection, core_hash_mode="full")
         _remember_verified_core(state, full.core)
         return full, True
-    # A metadata pass is fast enough for normal launches and catches a changed
-    # internal Core file before trusting a previously recorded full hash pass.
-    quick = _validated_selection_with_mode(root, selection, core_hash_mode="metadata")
+    quick = _validated_selection_with_mode(root, selection, core_hash_mode="entrypoint")
     if _core_receipt_matches(state, quick.core):
         return quick, False
     full = _validated_selection_with_mode(root, selection, core_hash_mode="full")
