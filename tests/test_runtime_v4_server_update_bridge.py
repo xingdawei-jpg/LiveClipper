@@ -222,6 +222,54 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertIn('[data-action="apply-update"]', frontend)
         self.assertIn('data-action="apply-update" disabled>安装更新</button>', index)
 
+    def test_product_scan_results_expose_file_relative_ranges(self) -> None:
+        groups = [
+            {
+                "name": "针织衫",
+                "segments": [(12.5, 36.0), (90, 128.25), ("bad", None)],
+                "total_duration": 61.75,
+            }
+        ]
+        with self.server._SCAN_LOCK:
+            previous = list(self.server._SCAN_RESULTS.get("schedule_groups") or [])
+            self.server._SCAN_RESULTS["schedule_groups"] = groups
+        try:
+            result = self.server.scan_results()
+        finally:
+            with self.server._SCAN_LOCK:
+                self.server._SCAN_RESULTS["schedule_groups"] = previous
+
+        self.assertEqual(
+            result["schedule_groups"],
+            [
+                {
+                    "name": "针织衫",
+                    "segments": 3,
+                    "total_duration": 61.75,
+                    "ranges": [
+                        {"start": 12.5, "end": 36.0},
+                        {"start": 90.0, "end": 128.25},
+                    ],
+                }
+            ],
+        )
+
+    def test_product_scan_frontend_requires_validation_before_split(self) -> None:
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        index = (ROOT / "web_client" / "frontend" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function productScanIsReady()", frontend)
+        self.assertIn('data-action="product-scan-read"', index)
+        self.assertIn('data-action="product-scan-start"', index)
+        self.assertIn('id="ps-start-scan" disabled', index)
+        self.assertIn(
+            'if (!productScanIsReady()) throw new Error("请先读取并校验时间表，再开始分割。")',
+            frontend,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13017,10 +13017,17 @@ def scan_results() -> dict[str, Any]:
         }
 
     def _group(item: dict[str, Any]) -> dict[str, Any]:
+        ranges = []
+        for start, end in list(item.get("segments") or [])[:12]:
+            try:
+                ranges.append({"start": float(start), "end": float(end)})
+            except (TypeError, ValueError):
+                continue
         return {
             "name": item.get("name", ""),
             "segments": len(item.get("segments") or []),
             "total_duration": item.get("total_duration", 0),
+            "ranges": ranges,
         }
 
     return {

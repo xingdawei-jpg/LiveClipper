@@ -66,6 +66,11 @@ const state = {
   liveRoomActivity: {},
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
+  productScan: {
+    status: "idle",
+    validationKey: "",
+    groups: [],
+  },
   logs: {
     "smart-cut": 0,
     settings: 0,
@@ -1173,6 +1178,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindLiveRecTabs();
   bindLiveRoomFilters();
   bindActions();
+  bindProductScanFlow();
   syncVideoSplitMode();
   setupCollapsiblePanels();
   setupAdvancedParamToggles();
@@ -1209,6 +1215,199 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function $(id) {
   return document.getElementById(id);
+}
+
+function bindProductScanFlow() {
+  document.querySelectorAll('input[name="ps-align-mode"]').forEach((input) => {
+    input.addEventListener("change", syncProductScanFlow);
+  });
+  document.querySelectorAll("#page-product-scan input, #page-product-scan textarea").forEach((input) => {
+    input.addEventListener("input", syncProductScanFlow);
+    input.addEventListener("change", syncProductScanFlow);
+  });
+  syncProductScanFlow();
+}
+
+function productScanAlignmentMode() {
+  return document.querySelector('input[name="ps-align-mode"]:checked')?.value === "auto" ? "auto" : "manual";
+}
+
+function parseProductScanOffset(value) {
+  const text = String(value || "").trim().replace(/：/g, ":");
+  if (!text) return null;
+  if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+  const parts = text.split(":");
+  if (![2, 3].includes(parts.length)) return null;
+  const values = parts.map((part) => Number(part.trim()));
+  if (values.some((part) => !Number.isInteger(part) || part < 0)) return null;
+  const [hours, minutes, seconds] = parts.length === 3 ? values : [0, values[0], values[1]];
+  if (minutes > 59 || seconds > 59) return null;
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function formatProductScanTime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "--";
+  if (seconds < 0) return "片段开始前";
+  const whole = Math.round(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function productScanFormKey() {
+  const mode = productScanAlignmentMode();
+  return JSON.stringify({
+    excel: $("ps-excel-path")?.value.trim() || "",
+    videos: getLines("ps-video-paths"),
+    mode,
+    videoStart: mode === "manual" ? $("ps-video-start-offset")?.value.trim() || "" : "",
+    liveStart: mode === "auto" ? $("ps-live-start-time")?.value.trim() || "" : "",
+  });
+}
+
+function productScanHasSource() {
+  return Boolean($("ps-excel-path")?.value.trim()) && getLines("ps-video-paths").length > 0;
+}
+
+function productScanCanValidate() {
+  if (!productScanHasSource()) return false;
+  if (productScanAlignmentMode() === "auto") return Boolean($("ps-live-start-time")?.value.trim());
+  return parseProductScanOffset($("ps-video-start-offset")?.value) !== null;
+}
+
+function productScanIsReady() {
+  return state.productScan.status === "ready"
+    && Boolean(state.productScan.validationKey)
+    && state.productScan.validationKey === productScanFormKey();
+}
+
+function productScanStatusMessage() {
+  const mode = productScanAlignmentMode();
+  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
+  if (state.productScan.status === "working") return { text: "正在读取时间表并校验可分割范围…", tone: "working" };
+  if (productScanIsReady()) return { text: "时间已校验，可以开始分割。", tone: "ready" };
+  if (!productScanHasSource()) return { text: "先选择排品表和至少一个直播视频。", tone: "invalid" };
+  if (mode === "manual" && offset === null) return { text: "填写片段在整场直播中的开始位置，再读取并校验。", tone: "invalid" };
+  if (mode === "auto" && !$("ps-live-start-time")?.value.trim()) return { text: "填写直播开播时间；视频文件名需含完整日期时间。", tone: "invalid" };
+  return { text: "素材已就绪，读取并校验后会显示文件内切分时间。", tone: "" };
+}
+
+function syncProductScanFlow() {
+  const mode = productScanAlignmentMode();
+  document.querySelectorAll("[data-ps-align-choice]").forEach((choice) => {
+    choice.classList.toggle("is-active", choice.dataset.psAlignChoice === mode);
+  });
+  document.querySelectorAll("[data-ps-align-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.psAlignPanel !== mode;
+  });
+
+  if (state.productScan.status === "ready" && state.productScan.validationKey !== productScanFormKey()) {
+    state.productScan.status = "idle";
+    state.productScan.groups = [];
+  }
+
+  const status = productScanStatusMessage();
+  const statusBox = $("ps-validation-state");
+  if (statusBox) {
+    statusBox.textContent = status.text;
+    statusBox.classList.toggle("is-ready", status.tone === "ready");
+    statusBox.classList.toggle("is-working", status.tone === "working");
+    statusBox.classList.toggle("is-invalid", status.tone === "invalid");
+  }
+
+  const running = state.runningScopes instanceof Set && state.runningScopes.has("product-scan");
+  setButtonsEnabled("#ps-read-schedule", productScanCanValidate() && !running && state.productScan.status !== "working", "请补充素材与时间对齐方式");
+  setButtonsEnabled("#ps-start-scan", productScanIsReady() && !running, "请先读取并校验时间表");
+  const stopButton = $("ps-stop-scan");
+  if (stopButton) stopButton.hidden = !running;
+  renderProductScanInspector(state.productScan.groups || []);
+}
+
+function renderProductScanInspector(groups) {
+  const summary = $("ps-alignment-summary");
+  if (!summary) return;
+  const mode = productScanAlignmentMode();
+  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
+  const ready = productScanIsReady();
+  if (!ready || !groups.length) {
+    summary.classList.add("is-empty");
+    summary.innerHTML = mode === "manual" && offset !== null
+      ? `<strong>将按片段起点 ${formatProductScanTime(offset)} 对齐</strong><p>读取时间表后，会把排品表中的直播时间换算为当前文件内的切分时间。</p>`
+      : mode === "auto"
+        ? "<strong>等待文件名自动对齐</strong><p>填写直播开播时间后，系统会从视频文件名识别片段开始时刻并进行换算。</p>"
+        : "<strong>尚未校验时间表</strong><p>选择视频后，填写片段在整场直播中的开始位置；结果会显示在这里。</p>";
+    return;
+  }
+  const segmentCount = groups.reduce((total, group) => total + Number(group.segments || 0), 0);
+  const duration = groups.reduce((total, group) => total + Number(group.total_duration || 0), 0);
+  summary.classList.remove("is-empty");
+  summary.innerHTML = `
+    <strong>时间表已完成对齐</strong>
+    <p>${mode === "manual" ? `当前片段从直播第 ${formatProductScanTime(offset || 0)} 开始；` : "已按直播开播时间与文件名时间对齐；"} 分割时只会导出落在所选视频范围内的时段。</p>
+    <div class="alignment-summary-metrics"><span>${groups.length} 个商品</span><span>${segmentCount} 个讲解时段</span><span>合计 ${formatProductScanTime(duration)}</span></div>
+  `;
+}
+
+function renderProductScanRanges(group) {
+  const ranges = Array.isArray(group.ranges) ? group.ranges.slice(0, 2) : [];
+  const mode = productScanAlignmentMode();
+  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
+  if (!ranges.length) return "<small>已读取时段</small>";
+  return ranges.map((range) => {
+    const fileRange = `${formatProductScanTime(range.start)}–${formatProductScanTime(range.end)}`;
+    if (mode === "manual" && offset !== null && Number(range.start) >= 0) {
+      return `<small>直播 ${formatProductScanTime(Number(range.start) + offset)}–${formatProductScanTime(Number(range.end) + offset)} → 文件 ${fileRange}</small>`;
+    }
+    return `<small>文件内 ${fileRange}</small>`;
+  }).join("");
+}
+
+async function submitProductScanRead() {
+  const payload = collectFeaturePayload("product-scan-read");
+  const validationKey = productScanFormKey();
+  await saveFeaturePreferences();
+  await runPreflight("product-scan-read", payload, "product-scan");
+  state.productScan.status = "working";
+  state.productScan.validationKey = validationKey;
+  state.productScan.groups = [];
+  syncProductScanFlow();
+  try {
+    const result = await api("/api/product-scan-read/start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    toast(result.message || "正在读取并校验时间表", "success");
+    await refreshTasks();
+    const task = await waitForTaskComplete(result.task_id, "product-scan");
+    if (task.status !== "completed") {
+      throw new Error(task.error || task.message || "时间表校验未完成，请查看运行详情。");
+    }
+    if (validationKey !== productScanFormKey()) {
+      state.productScan.status = "idle";
+      state.productScan.groups = [];
+      syncProductScanFlow();
+      toast("素材或时间设置已经改变，请重新读取并校验。", "warning");
+      return;
+    }
+    state.productScan.status = "ready";
+    await loadScanResults();
+    syncProductScanFlow();
+    toast("时间已校验，可确认文件内时间后开始分割。", "success");
+  } catch (error) {
+    state.productScan.status = "idle";
+    state.productScan.groups = [];
+    syncProductScanFlow();
+    throw error;
+  }
+}
+
+async function submitProductScan() {
+  if (!productScanIsReady()) throw new Error("请先读取并校验时间表，再开始分割。");
+  await submitFeature("product-scan");
 }
 
 async function api(path, options = {}) {
@@ -1441,6 +1640,8 @@ function bindActions() {
       if (action === "feature-start") await startFeature(target.dataset.feature);
       if (action === "preview-video-split") await previewVideoSplit();
       if (action === "feature-submit") await submitFeature(target.dataset.feature);
+      if (action === "product-scan-read") await submitProductScanRead();
+      if (action === "product-scan-start") await submitProductScan();
       if (action === "reset-dedup") resetDedupDefaults();
       if (action === "toggle-dedup-detail") toggleDedupDetail(target.dataset.prefix);
       if (action === "add-live-room") addLiveRoom();
@@ -4968,6 +5169,7 @@ function syncFlowActionState() {
   setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview, "mix") && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "当前编排没有可用片段");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="smart-cut"]', runningScopes.has("smart-cut"), "当前没有智能成片任务");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="mix"]', runningScopes.has("mix"), "当前没有混剪任务");
+  syncProductScanFlow();
 }
 
 function bindVideoRowDrag(box, targetId) {
@@ -8459,11 +8661,20 @@ function renderScanResults(products, merged) {
 function renderProductPreview(groups) {
   const box = $("product-preview");
   if (!box) return;
-  const rows = groups.slice(0, 60).map((item) => {
-    return `<div class="result-row"><strong>${escapeHtml(item.name)}</strong><span>${item.segments || 0} 段</span><span>${formatSeconds(item.total_duration)}</span></div>`;
+  if (!["working", "ready"].includes(state.productScan.status)) {
+    state.productScan.groups = [];
+    box.classList.add("empty");
+    box.innerHTML = "<p>读取并校验后，这里会列出可导出的商品与对应的文件内时间。</p>";
+    renderProductScanInspector([]);
+    return;
+  }
+  state.productScan.groups = Array.isArray(groups) ? groups : [];
+  const rows = state.productScan.groups.slice(0, 60).map((item) => {
+    return `<div class="result-row"><strong>${escapeHtml(item.name)}</strong><div><span>${Number(item.segments || 0)} 个时段 · ${formatProductScanTime(item.total_duration)}</span>${renderProductScanRanges(item)}</div></div>`;
   });
   box.classList.toggle("empty", rows.length === 0);
-  box.innerHTML = rows.length ? rows.join("") : "<p>读取 Excel 后显示单品时间段、标题和导出状态。</p>";
+  box.innerHTML = rows.length ? rows.join("") : "<p>时间表中没有可用的商品时段，请检查 Excel 格式。</p>";
+  renderProductScanInspector(state.productScan.groups);
 }
 
 function formatSeconds(value) {
@@ -8509,13 +8720,14 @@ function collectFeaturePayload(feature) {
   }
 
   if (feature.startsWith("product-scan")) {
+    const alignmentMode = productScanAlignmentMode();
     return {
       excel_path: $("ps-excel-path").value.trim(),
       video_paths: getLines("ps-video-paths"),
       output_dir: $("ps-output-dir").value.trim(),
       advance_seconds: Number($("ps-advance").value || 0),
-      video_start_offset: $("ps-video-start-offset")?.value.trim() || "",
-      live_start_time: $("ps-live-start-time")?.value.trim() || "",
+      video_start_offset: alignmentMode === "manual" ? $("ps-video-start-offset")?.value.trim() || "" : "",
+      live_start_time: alignmentMode === "auto" ? $("ps-live-start-time")?.value.trim() || "" : "",
     };
   }
 

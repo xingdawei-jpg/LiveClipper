@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.8.11.1",
-  "version": "2026.8.11.1",
-  "latest_version": "2026.8.11.1",
+  "build_id": "2026.8.11.2",
+  "version": "2026.8.11.2",
+  "latest_version": "2026.8.11.2",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -20,9 +20,9 @@
     "app/keywords.json": "f217ad7733b68b0ab8fde9025ab3f64af42bd66b1c5a2b7ea4a7b88b6aae9744",
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
-    "web_client/frontend/index.html": "be196a90384432e3366032b15f6db91c355b79392133b3c8afc87253fed9d1e6",
-    "web_client/frontend/assets/app.js": "1bfd9e4f66534d35965bc937e449ffa40ebae80268131f2c817ce84f239a2502",
-    "web_client/frontend/assets/styles.css": "ddcdad7f515f83284bbe284eca483ede46c0b88ea2fb874240659f84048ef8eb",
+    "web_client/frontend/index.html": "bca049276b21a4dacfd114be0a57c106d0fbbb256954ca9cf38c05328e762501",
+    "web_client/frontend/assets/app.js": "681b8d135ddf60a716fbb108ccb7d623a0938285ec56f1b844cbd25186b9619a",
+    "web_client/frontend/assets/styles.css": "2db6dcf1ab42038cda68d155b2d6da0d4d1068c515447095ae8801e424b42112",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/native_file_drop_bridge.dll": "c28e38886e9006d471719a01882ccc0717b086f7f248b6cfb2b6604b5b283a35",
     "web_client/tools/local_asr_worker.py": "47b1bf7937efa77c7dc3a17a7f33833ac2df0a23ff175a5672e25b7eef63aca2",
@@ -44,7 +44,7 @@
   ],
   "source_files": {
     "web_client/desktop.py": "2d36ddfd821199a058cfbdd2d98d6bcec0e5d8be9979714a50f7431755e64bad",
-    "web_client/server.py": "6211071c925d80ba71ac5bc70043081582fb9ae0aa97686bc143559f2eeea886",
+    "web_client/server.py": "8cc68b13229c0f4baa2adbf126a76ffd97113d582ee265b67417f31f84fb7014",
     "web_client/native_file_drop_bridge.cs": "d20c17dd280b1245044a172744bc2594344a28535d97d92936cf011c6cef4df3",
     "web_client/liveclipper_web.spec": "0b080dcba1986fac0d63deaef93d2afc4e2be829184d5761185936d4f524307f",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
@@ -113,9 +113,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试与批处理结果优化。",
-  "update_message": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性、词级时间与异常片段复核；预览重试与批处理结果优化。",
+  "release_notes": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性与词级时间修复；单品扫描新增显式时间对齐、校验预览和失败复位；预览重试与批处理结果优化。",
+  "update_message": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性与词级时间修复；单品扫描新增显式时间对齐、校验预览和失败复位；预览重试与批处理结果优化。",
   "update_url": "",
   "force_update": true,
-  "updated_at": "2026-08-11 08:22:10"
+  "updated_at": "2026-08-11 21:14:42"
 }

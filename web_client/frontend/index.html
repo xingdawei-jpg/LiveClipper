@@ -1088,68 +1088,139 @@
       </section>
 
       <section class="page" id="page-product-scan">
-        <header class="page-header">
+        <header class="page-header product-scan-header">
           <div>
             <h1>单品扫描</h1>
-            <p class="page-subtitle">按单品时间段切分素材。</p>
+            <p class="page-subtitle">把排品表中的直播时间，准确换算成当前视频片段内的切分时间。</p>
           </div>
         </header>
 
-        <div class="content-grid two-column-grid">
-          <section class="panel panel-large">
+        <ol class="product-scan-steps" aria-label="单品扫描步骤">
+          <li class="is-current"><span>1</span><div><strong>导入素材</strong><small>时间表、视频与导出目录</small></div></li>
+          <li><span>2</span><div><strong>对齐时间</strong><small>确认片段从直播第几秒开始</small></div></li>
+          <li><span>3</span><div><strong>校验并分割</strong><small>先核对可切内容，再导出</small></div></li>
+        </ol>
+
+        <div class="content-grid two-column-grid product-scan-grid">
+          <section class="panel panel-large product-scan-config">
             <div class="panel-header">
-              <h2>时间表与视频</h2>
-            </div>
-            <div class="field-row">
-              <label for="ps-excel-path">Excel</label>
-              <div class="input-with-button" data-file-drop-target="ps-excel-path" data-file-kind="excel">
-                <input id="ps-excel-path" type="text" placeholder="飞书导出的 Excel 路径">
-                <button class="button button-secondary" data-action="pick-file" data-target="ps-excel-path" data-kind="excel">浏览</button>
+              <div>
+                <h2>1. 导入素材</h2>
+                <p class="panel-subtitle">排品表始终以直播开播时刻为 00:00:00。</p>
               </div>
             </div>
-            <div class="path-entry">
-              <input id="ps-video-input" type="text" data-path-target="ps-video-paths" placeholder="粘贴直播视频路径后按 Enter">
-              <button class="button button-secondary" data-action="pick-videos" data-target="ps-video-paths">选择视频</button>
-              <button class="button button-muted" data-action="clear-video-list" data-target="ps-video-paths">清空</button>
-            </div>
-            <textarea id="ps-video-paths" class="path-box" spellcheck="false" placeholder="每行一个直播视频路径"></textarea>
-            <div class="video-dropzone" data-drop-target="ps-video-paths">点击“选择视频”，或把视频拖到这里</div>
-            <div class="video-list" data-list-for="ps-video-paths"></div>
-            <div class="field-row">
-              <label for="ps-output-dir">导出目录</label>
-              <div class="input-with-button">
-                <input id="ps-output-dir" type="text" placeholder="输出到指定目录">
-                <button class="button button-secondary" data-action="pick-directory" data-target="ps-output-dir">浏览</button>
-                <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
+            <div class="product-scan-form">
+              <section class="product-scan-section" aria-labelledby="ps-material-title">
+                <h3 id="ps-material-title">素材与输出</h3>
+                <div class="field-row">
+                  <label for="ps-excel-path">排品表</label>
+                  <div class="input-with-button" data-file-drop-target="ps-excel-path" data-file-kind="excel">
+                    <input id="ps-excel-path" type="text" placeholder="选择飞书导出的 Excel 时间表">
+                    <button class="button button-secondary" data-action="pick-file" data-target="ps-excel-path" data-kind="excel">浏览</button>
+                  </div>
+                </div>
+                <div class="field-row field-row-stack">
+                  <label for="ps-video-input">直播片段</label>
+                  <div>
+                    <div class="path-entry">
+                      <input id="ps-video-input" type="text" data-path-target="ps-video-paths" placeholder="粘贴视频路径后按 Enter">
+                      <button class="button button-secondary" data-action="pick-videos" data-target="ps-video-paths">选择视频</button>
+                      <button class="button button-muted" data-action="clear-video-list" data-target="ps-video-paths">清空</button>
+                    </div>
+                    <textarea id="ps-video-paths" class="path-box" spellcheck="false" placeholder="每行一个直播视频路径"></textarea>
+                    <div class="video-dropzone" data-drop-target="ps-video-paths">点击“选择视频”，或把连续的直播视频片段拖到这里</div>
+                    <div class="video-list" data-list-for="ps-video-paths"></div>
+                  </div>
+                </div>
+                <div class="field-row">
+                  <label for="ps-output-dir">导出目录</label>
+                  <div class="input-with-button">
+                    <input id="ps-output-dir" type="text" placeholder="选择导出目录">
+                    <button class="button button-secondary" data-action="pick-directory" data-target="ps-output-dir">浏览</button>
+                    <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="product-scan-section product-scan-alignment" aria-labelledby="ps-alignment-title">
+                <div class="product-scan-section-heading">
+                  <div>
+                    <h3 id="ps-alignment-title">2. 对齐时间</h3>
+                    <p>请选择一种方式。手动起点和自动对齐不需要同时填写。</p>
+                  </div>
+                  <span class="recommendation-badge">推荐手动</span>
+                </div>
+                <div class="alignment-choice-grid" role="radiogroup" aria-label="时间对齐方式">
+                  <label class="alignment-choice is-active" data-ps-align-choice="manual">
+                    <input id="ps-align-manual" type="radio" name="ps-align-mode" value="manual" checked>
+                    <span><strong>填写片段起点</strong><small>视频不是从直播开头录制时使用</small></span>
+                  </label>
+                  <label class="alignment-choice" data-ps-align-choice="auto">
+                    <input id="ps-align-auto" type="radio" name="ps-align-mode" value="auto">
+                    <span><strong>按文件名自动对齐</strong><small>文件名含完整日期时间时使用</small></span>
+                  </label>
+                </div>
+
+                <div class="alignment-mode-panel" data-ps-align-panel="manual">
+                  <div class="field-row field-row-stack">
+                    <label for="ps-video-start-offset">片段开始位置</label>
+                    <div>
+                      <input id="ps-video-start-offset" type="text" placeholder="例如 01:28:13">
+                      <p class="field-help">相对直播 00:00:00。例：17:08 开播、片段 18:36:13 开始，填写 <strong>01:28:13</strong>。</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="alignment-mode-panel" data-ps-align-panel="auto" hidden>
+                  <div class="field-row field-row-stack">
+                    <label for="ps-live-start-time">直播开播时间</label>
+                    <div>
+                      <input id="ps-live-start-time" type="text" placeholder="例如 2026-03-13 17:08">
+                      <p class="field-help">系统会从文件名识别类似 <strong>20260313183613</strong> 的片段开始时间，再自动换算。仅有视频内部时间戳时，请改用手动方式。</p>
+                    </div>
+                  </div>
+                </div>
+
+                <details class="product-scan-advanced">
+                  <summary>高级设置</summary>
+                  <div class="field-row compact">
+                    <label for="ps-advance">提前秒数</label>
+                    <div>
+                      <input id="ps-advance" type="number" value="0" min="0" max="120">
+                      <p class="field-help">在每段讲解前额外保留的内容；默认不提前。</p>
+                    </div>
+                  </div>
+                </details>
+              </section>
+
+              <div class="panel-actions product-scan-actions">
+                <div class="product-scan-action-copy" id="ps-validation-state" aria-live="polite">导入时间表和视频后，可先读取并校验对齐结果。</div>
+                <div class="product-scan-action-buttons">
+                  <button class="button button-danger" data-action="stop-scope" data-scope="product-scan" id="ps-stop-scan" hidden>停止</button>
+                  <button class="button button-primary" data-action="product-scan-read" id="ps-read-schedule">读取并校验</button>
+                  <button class="button button-secondary" data-action="product-scan-start" id="ps-start-scan" disabled>开始分割</button>
+                </div>
               </div>
-            </div>
-            <div class="field-row compact">
-              <label for="ps-advance">提前秒数</label>
-              <input id="ps-advance" type="number" value="0" min="0" max="120">
-            </div>
-            <div class="field-row compact">
-              <label for="ps-video-start-offset">所选视频起点</label>
-              <input id="ps-video-start-offset" type="text" placeholder="如 26:49 或 1:28:13，留空自动">
-            </div>
-            <div class="field-row compact">
-              <label for="ps-live-start-time">直播开始时间</label>
-              <input id="ps-live-start-time" type="text" placeholder="如 17:08 或 2026-03-13 17:08">
-            </div>
-            <div class="panel-actions">
-              <button class="button button-secondary" data-action="feature-submit" data-feature="product-scan-read">读取时间表</button>
-              <button class="button button-danger" data-action="stop-scope" data-scope="product-scan">停止</button>
-              <button class="button button-primary" data-action="feature-submit" data-feature="product-scan">开始分割</button>
             </div>
           </section>
 
-          <section class="panel">
+          <aside class="panel product-scan-inspector" aria-labelledby="ps-preview-title">
             <div class="panel-header">
-              <h2>预览</h2>
+              <div>
+                <h2 id="ps-preview-title">对齐结果</h2>
+                <p class="panel-subtitle">先确认排品表时间会落在文件内的哪里。</p>
+              </div>
             </div>
-            <div class="result-list empty" id="product-preview">
-              <p>读取 Excel 后显示单品时间段、标题和导出状态。</p>
+            <div class="product-scan-inspector-body">
+              <div class="alignment-summary is-empty" id="ps-alignment-summary" aria-live="polite">
+                <strong>尚未校验时间表</strong>
+                <p>选择视频后，填写“片段开始位置”；系统会在这里展示排品表时间对应的文件内时间。</p>
+              </div>
+              <div class="result-list empty product-scan-result-list" id="product-preview">
+                <p>读取并校验后，这里会列出可导出的商品与对应的文件内时间。</p>
+              </div>
             </div>
-          </section>
+          </aside>
 
           <section class="panel log-panel">
             <div class="panel-header">
