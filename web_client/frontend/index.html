@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260812-product-scan-fast-v1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260812-product-scan-layout-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -1096,7 +1096,7 @@
         </header>
 
         <ol class="product-scan-steps" aria-label="单品扫描步骤">
-          <li class="is-current"><span>1</span><div><strong>导入素材</strong><small>时间表、视频与导出目录</small></div></li>
+          <li class="is-current"><span>1</span><div><strong>素材与输出</strong><small>时间表、视频与导出位置</small></div></li>
           <li><span>2</span><div><strong>对齐时间</strong><small>确认片段从直播第几秒开始</small></div></li>
           <li><span>3</span><div><strong>校验并分割</strong><small>先核对可切内容，再导出</small></div></li>
         </ol>
@@ -1110,34 +1110,40 @@
               </div>
             </div>
             <div class="product-scan-form">
-              <section class="product-scan-section" aria-labelledby="ps-material-title">
-                <h3 id="ps-material-title">素材与输出</h3>
-                <div class="field-row">
-                  <label for="ps-excel-path">排品表</label>
+              <section class="product-scan-section product-scan-material" aria-labelledby="ps-material-title">
+                <div class="product-scan-section-heading product-scan-material-heading">
+                  <div>
+                    <h3 id="ps-material-title">素材与输出</h3>
+                    <p>先放入时间表和直播片段，再选一个导出位置。</p>
+                  </div>
+                  <span class="recommendation-badge">第 1 步</span>
+                </div>
+                <div class="product-scan-material-grid">
+                  <div class="product-scan-material-field">
+                    <label for="ps-excel-path">排品表</label>
                   <div class="input-with-button" data-file-drop-target="ps-excel-path" data-file-kind="excel">
                     <input id="ps-excel-path" type="text" placeholder="选择飞书导出的 Excel 时间表">
                     <button class="button button-secondary" data-action="pick-file" data-target="ps-excel-path" data-kind="excel">浏览</button>
                   </div>
-                </div>
-                <div class="field-row field-row-stack">
-                  <label for="ps-video-input">直播片段</label>
-                  <div>
+                  </div>
+                  <div class="product-scan-material-field">
+                    <label for="ps-output-dir">导出目录</label>
+                    <div class="input-with-button">
+                      <input id="ps-output-dir" type="text" placeholder="选择导出目录">
+                      <button class="button button-secondary" data-action="pick-directory" data-target="ps-output-dir">浏览</button>
+                      <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
+                    </div>
+                  </div>
+                  <div class="product-scan-video-field">
+                    <label for="ps-video-input">直播片段 <span class="product-scan-video-count" data-video-count-for="ps-video-paths">0个</span></label>
                     <div class="path-entry">
                       <input id="ps-video-input" type="text" data-path-target="ps-video-paths" placeholder="粘贴视频路径后按 Enter">
                       <button class="button button-secondary" data-action="pick-videos" data-target="ps-video-paths">选择视频</button>
                       <button class="button button-muted" data-action="clear-video-list" data-target="ps-video-paths">清空</button>
                     </div>
                     <textarea id="ps-video-paths" class="path-box" spellcheck="false" placeholder="每行一个直播视频路径"></textarea>
-                    <div class="video-dropzone" data-drop-target="ps-video-paths">点击“选择视频”，或把连续的直播视频片段拖到这里</div>
-                    <div class="video-list" data-list-for="ps-video-paths"></div>
-                  </div>
-                </div>
-                <div class="field-row">
-                  <label for="ps-output-dir">导出目录</label>
-                  <div class="input-with-button">
-                    <input id="ps-output-dir" type="text" placeholder="选择导出目录">
-                    <button class="button button-secondary" data-action="pick-directory" data-target="ps-output-dir">浏览</button>
-                    <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
+                    <div class="video-dropzone" data-drop-target="ps-video-paths">也可以把连续直播片段拖到这里</div>
+                  <div class="video-list" data-list-for="ps-video-paths"></div>
                   </div>
                 </div>
               </section>
@@ -1240,7 +1246,7 @@
             <div class="panel-header">
               <div>
                 <h2 id="ps-preview-title">对齐结果</h2>
-                <p class="panel-subtitle">先确认排品表时间会落在文件内的哪里。</p>
+                <p class="panel-subtitle">勾选要切割的商品或时段；列表只在这张卡片内滚动。</p>
               </div>
             </div>
             <div class="product-scan-inspector-body">
@@ -2118,6 +2124,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260812-product-scan-fast-v1" defer></script>
+  <script src="/assets/app.js?v=20260812-product-scan-layout-v1" defer></script>
 </body>
 </html>

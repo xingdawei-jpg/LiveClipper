@@ -69,6 +69,8 @@ const state = {
   productScan: {
     status: "idle",
     validationKey: "",
+    selectionKey: "",
+    selectedRangeKeys: new Set(),
     groups: [],
     timeline: [],
     feedback: [],
@@ -748,7 +750,7 @@ const themeStorageKey = "lc:ui-theme";
 const uiFontSizeStorageKey = "lc:ui-font-size";
 const previewDraftStoragePrefix = "lc:preview-draft:";
 const validThemes = new Set(["system", "light", "dark"]);
-const compactVideoListTargetIds = new Set(["video-paths", "mix-video-paths"]);
+const compactVideoListTargetIds = new Set(["video-paths", "mix-video-paths", "ps-video-paths"]);
 
 const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "video-split", "dedup", "live-rec", "settings"];
 
@@ -1233,6 +1235,30 @@ function bindProductScanFlow() {
     input.addEventListener("input", syncProductScanFlow);
     input.addEventListener("change", syncProductScanFlow);
   });
+  document.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const rangeKey = input.dataset.productScanSelectRange;
+    const groupIndex = input.dataset.productScanSelectGroup;
+    if (!rangeKey && groupIndex === undefined) return;
+    ensureProductScanRangeSelection(state.productScan.groups || []);
+    if (rangeKey) {
+      if (input.checked) state.productScan.selectedRangeKeys.add(rangeKey);
+      else state.productScan.selectedRangeKeys.delete(rangeKey);
+    } else {
+      const keys = productScanSelectableRangeKeysForGroup(Number(groupIndex));
+      keys.forEach((key) => {
+        if (input.checked) state.productScan.selectedRangeKeys.add(key);
+        else state.productScan.selectedRangeKeys.delete(key);
+      });
+    }
+    renderProductPreview(
+      state.productScan.groups,
+      state.productScan.timeline,
+      state.productScan.feedback,
+    );
+    syncProductScanFlow();
+  });
   syncProductScanFlow();
 }
 
@@ -1309,12 +1335,63 @@ function productScanIsReady() {
     && state.productScan.validationKey === productScanFormKey();
 }
 
+function productScanRangeKey(groupIndex, rangeIndex) {
+  return `${Number(groupIndex)}:${Number(rangeIndex)}`;
+}
+
+function productScanRangeIsSelectable(range) {
+  return Array.isArray(range?.parts) && range.parts.length > 0;
+}
+
+function productScanSelectableRangeKeys(groups = state.productScan.groups || []) {
+  const keys = [];
+  groups.forEach((group, groupIndex) => {
+    (Array.isArray(group?.ranges) ? group.ranges : []).forEach((range, rangeIndex) => {
+      if (productScanRangeIsSelectable(range)) keys.push(productScanRangeKey(groupIndex, rangeIndex));
+    });
+  });
+  return keys;
+}
+
+function productScanSelectableRangeKeysForGroup(groupIndex) {
+  const group = state.productScan.groups?.[groupIndex];
+  return (Array.isArray(group?.ranges) ? group.ranges : [])
+    .map((range, rangeIndex) => productScanRangeIsSelectable(range)
+      ? productScanRangeKey(groupIndex, rangeIndex)
+      : "")
+    .filter(Boolean);
+}
+
+function ensureProductScanRangeSelection(groups = state.productScan.groups || []) {
+  const availableKeys = productScanSelectableRangeKeys(groups);
+  const available = new Set(availableKeys);
+  if (state.productScan.selectionKey !== state.productScan.validationKey) {
+    state.productScan.selectedRangeKeys = new Set(availableKeys);
+    state.productScan.selectionKey = state.productScan.validationKey;
+    return availableKeys;
+  }
+  const retained = [...(state.productScan.selectedRangeKeys || [])]
+    .filter((key) => available.has(key));
+  state.productScan.selectedRangeKeys = new Set(retained);
+  return availableKeys;
+}
+
+function productScanSelectedRangeKeys(groups = state.productScan.groups || []) {
+  ensureProductScanRangeSelection(groups);
+  return [...state.productScan.selectedRangeKeys];
+}
+
+function productScanHasSelectedRanges() {
+  return productScanSelectedRangeKeys().length > 0;
+}
+
 function productScanStatusMessage() {
   const mode = productScanAlignmentMode();
   const timeBasis = productScanTimeBasis();
   const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
   if (state.productScan.status === "working") return { text: "正在读取时间表并校验可分割范围…", tone: "working" };
-  if (productScanIsReady()) return { text: "时间已校验，可以开始分割。", tone: "ready" };
+  if (productScanIsReady() && !productScanHasSelectedRanges()) return { text: "请在右侧勾选至少一个可切割的商品或时段。", tone: "invalid" };
+  if (productScanIsReady()) return { text: `时间已校验，已选 ${productScanSelectedRangeKeys().length} 个时段，可以开始分割。`, tone: "ready" };
   if (!productScanHasSource()) return { text: "先选择排品表和至少一个直播视频。", tone: "invalid" };
   if (timeBasis === "clock" && !productScanLiveStartValue()) return { text: "表格已选“时钟时间”，请填写整场直播开播时间作为换算基准。", tone: "invalid" };
   if (mode === "manual" && offset === null) return { text: "填写本段视频从直播第几秒开始，再读取并校验。", tone: "invalid" };
@@ -1350,6 +1427,8 @@ function syncProductScanFlow() {
 
   if (state.productScan.status === "ready" && state.productScan.validationKey !== productScanFormKey()) {
     state.productScan.status = "idle";
+    state.productScan.selectionKey = "";
+    state.productScan.selectedRangeKeys = new Set();
     state.productScan.groups = [];
     state.productScan.timeline = [];
     state.productScan.feedback = [];
@@ -1366,7 +1445,7 @@ function syncProductScanFlow() {
 
   const running = state.runningScopes instanceof Set && state.runningScopes.has("product-scan");
   setButtonsEnabled("#ps-read-schedule", productScanCanValidate() && !running && state.productScan.status !== "working", "请补充素材与时间对齐方式");
-  setButtonsEnabled("#ps-start-scan", productScanIsReady() && !running, "请先读取并校验时间表");
+  setButtonsEnabled("#ps-start-scan", productScanIsReady() && productScanHasSelectedRanges() && !running, "请先读取并校验时间表并保留至少一个时段");
   const stopButton = $("ps-stop-scan");
   if (stopButton) stopButton.hidden = !running;
   renderProductScanInspector(state.productScan.groups || [], state.productScan.timeline || [], state.productScan.feedback || []);
@@ -1418,24 +1497,29 @@ function renderProductScanInspector(groups, timeline = [], feedback = []) {
   const partial = records.filter((record) => record.status === "partial").length;
   const missing = records.filter((record) => record.status === "missing").length;
   const exportGroups = groups.filter((group) => group.status !== "missing").length;
+  const selectableRangeCount = productScanSelectableRangeKeys(groups).length;
+  const selectedRangeCount = productScanSelectedRangeKeys(groups).length;
   const sourceSummary = timeline.length
     ? timeline.map((item) => `<span title="${escapeHtml(String(item.name || ""))}">${escapeHtml(productScanSourceLabel(item.name))} · ${escapeHtml(formatProductScanTime(item.start))}–${escapeHtml(formatProductScanTime(item.end))}</span>`).join("")
     : "<span>正在读取视频时长</span>";
   summary.classList.remove("is-empty");
   summary.innerHTML = `
-    <strong>已按真实文件范围对齐</strong>
-    <p>${timeBasis === "clock" ? "表格按时钟时间识别，并已按直播开播时间换算；" : "表格按开播后时长识别；"} ${mode === "manual" ? `当前批次从直播第 ${formatProductScanTime(offset || 0)} 开始；` : "已按直播开播时间与文件名时间对齐；"} 仅导出有覆盖的时段。</p>
-    <div class="alignment-summary-metrics"><span>${exportGroups} 个可导出商品</span><span class="is-covered">完整 ${covered}</span><span class="is-partial">部分 ${partial}</span><span class="is-missing">未覆盖 ${missing}</span></div>
-    <div class="product-scan-source-summary" aria-label="已导入视频范围">${sourceSummary}</div>
+    <strong>已确认文件范围</strong>
+    <p>${timeBasis === "clock" ? "时钟时间已换算为直播进度" : "表格按开播后时长识别"} · ${mode === "manual" ? `本批从直播第 ${formatProductScanTime(offset || 0)} 开始` : "已按文件名时间戳自动对齐"} · 仅切割已勾选的时段。</p>
+    <div class="alignment-summary-metrics"><span>${exportGroups} 个可导出商品</span><span class="is-selected">已选 ${selectedRangeCount}/${selectableRangeCount} 时段</span><span class="is-covered">完整 ${covered}</span><span class="is-partial">部分 ${partial}</span><span class="is-missing">未覆盖 ${missing}</span></div>
+    <details class="product-scan-source-details"><summary>已导入 ${timeline.length} 段视频，查看文件范围</summary><div class="product-scan-source-summary" aria-label="已导入视频范围">${sourceSummary}</div></details>
   `;
 }
 
-function renderProductScanRanges(group) {
-  const ranges = Array.isArray(group.ranges) ? group.ranges.slice(0, 4) : [];
+function renderProductScanRanges(group, groupIndex) {
+  const ranges = Array.isArray(group.ranges) ? group.ranges : [];
   if (!ranges.length) return "<div class=\"product-scan-range\"><span>暂未读取到可校验的时段</span></div>";
-  return ranges.map((range) => {
+  return ranges.map((range, rangeIndex) => {
     const status = String(range.status || "missing");
     const parts = Array.isArray(range.parts) ? range.parts : [];
+    const selectable = productScanRangeIsSelectable(range);
+    const rangeKey = productScanRangeKey(groupIndex, rangeIndex);
+    const selected = selectable && state.productScan.selectedRangeKeys.has(rangeKey);
     const target = productScanScheduleRange(range);
     const actual = parts.length
       ? parts.map((part) => `${productScanSourceLabel(part.video)} 文件 ${formatProductScanTime(part.file_start)}–${formatProductScanTime(part.file_end)}`).join(" · ")
@@ -1446,7 +1530,10 @@ function renderProductScanRanges(group) {
         ? `可切 ${formatProductScanTime(range.covered_duration)} / 需 ${formatProductScanTime(range.expected_duration)}`
         : `预计 ${formatProductScanTime(range.expected_duration)}`;
     const route = `排表 ${target} → ${actual}`;
-    return `<div class="product-scan-range is-${escapeHtml(status)}"><b>${escapeHtml(productScanCoverageLabel(status))}</b><span class="product-scan-range-route" title="${escapeHtml(route)}">${escapeHtml(route)}</span><span class="product-scan-range-duration">${escapeHtml(duration)}</span></div>`;
+    const selection = selectable
+      ? `<label class="product-scan-selection product-scan-range-selection" title="${selected ? "取消后此时段不会切割" : "勾选后切割此时段"}"><input type="checkbox" data-product-scan-select-range="${rangeKey}" ${selected ? "checked" : ""}><span>切割</span></label>`
+      : `<span class="product-scan-selection is-disabled">不导出</span>`;
+    return `<div class="product-scan-range is-${escapeHtml(status)}">${selection}<b>${escapeHtml(productScanCoverageLabel(status))}</b><span class="product-scan-range-route" title="${escapeHtml(route)}">${escapeHtml(route)}</span><span class="product-scan-range-duration">${escapeHtml(duration)}</span></div>`;
   }).join("");
 }
 
@@ -1457,6 +1544,8 @@ async function submitProductScanRead() {
   await runPreflight("product-scan-read", payload, "product-scan");
   state.productScan.status = "working";
   state.productScan.validationKey = validationKey;
+  state.productScan.selectionKey = "";
+  state.productScan.selectedRangeKeys = new Set();
   state.productScan.groups = [];
   state.productScan.timeline = [];
   state.productScan.feedback = [];
@@ -1474,6 +1563,8 @@ async function submitProductScanRead() {
     }
     if (validationKey !== productScanFormKey()) {
       state.productScan.status = "idle";
+      state.productScan.selectionKey = "";
+      state.productScan.selectedRangeKeys = new Set();
       state.productScan.groups = [];
       state.productScan.timeline = [];
       state.productScan.feedback = [];
@@ -1487,6 +1578,8 @@ async function submitProductScanRead() {
     toast("时间已校验，可确认文件内时间后开始分割。", "success");
   } catch (error) {
     state.productScan.status = "idle";
+    state.productScan.selectionKey = "";
+    state.productScan.selectedRangeKeys = new Set();
     state.productScan.groups = [];
     state.productScan.timeline = [];
     state.productScan.feedback = [];
@@ -1497,6 +1590,7 @@ async function submitProductScanRead() {
 
 async function submitProductScan() {
   if (!productScanIsReady()) throw new Error("请先读取并校验时间表，再开始分割。");
+  if (!productScanHasSelectedRanges()) throw new Error("请在右侧勾选至少一个可切割的商品或时段。");
   await submitFeature("product-scan");
 }
 
@@ -8765,6 +8859,8 @@ function renderProductPreview(groups, timeline = [], feedback = []) {
   const box = $("product-preview");
   if (!box) return;
   if (!["working", "ready"].includes(state.productScan.status)) {
+    state.productScan.selectionKey = "";
+    state.productScan.selectedRangeKeys = new Set();
     state.productScan.groups = [];
     state.productScan.timeline = [];
     state.productScan.feedback = [];
@@ -8776,17 +8872,27 @@ function renderProductPreview(groups, timeline = [], feedback = []) {
   state.productScan.groups = Array.isArray(groups) ? groups : [];
   state.productScan.timeline = Array.isArray(timeline) ? timeline : [];
   state.productScan.feedback = Array.isArray(feedback) ? feedback : [];
+  ensureProductScanRangeSelection(state.productScan.groups);
   const feedbackByName = new Map(state.productScan.feedback.map((item) => [productScanFeedbackKey(item?.name), item]));
-  const rows = state.productScan.groups.slice(0, 60).map((item) => {
+  const rows = state.productScan.groups.map((item, groupIndex) => {
     const status = String(item.status || "missing");
     const coverText = status === "missing"
       ? "不导出"
       : `可导出 ${formatProductScanTime(item.covered_duration)}`;
     const itemFeedback = feedbackByName.get(productScanFeedbackKey(item.name));
-    return `<article class="result-row product-scan-result-row is-${escapeHtml(status)}"><div class="product-scan-card-heading"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><span class="product-scan-status is-${escapeHtml(status)}">${escapeHtml(productScanCoverageLabel(status))}</span></div><div class="product-scan-card-meta"><span>${Number(item.segments || 0)} 个排表时段</span><span>${escapeHtml(coverText)}</span>${renderProductScanCutFeedback(item, itemFeedback)}</div><div class="product-scan-ranges">${renderProductScanRanges(item)}</div></article>`;
+    const selectableKeys = productScanSelectableRangeKeysForGroup(groupIndex);
+    const selectedCount = selectableKeys.filter((key) => state.productScan.selectedRangeKeys.has(key)).length;
+    const allSelected = selectableKeys.length > 0 && selectedCount === selectableKeys.length;
+    const selection = selectableKeys.length
+      ? `<label class="product-scan-selection product-scan-product-selection" title="勾选或取消整个商品"><input type="checkbox" data-product-scan-select-group="${groupIndex}" ${allSelected ? "checked" : ""} ${!allSelected && selectedCount ? 'data-product-scan-indeterminate="true"' : ""}><span>导出 ${selectedCount}/${selectableKeys.length}</span></label>`
+      : `<span class="product-scan-selection is-disabled">不导出</span>`;
+    return `<article class="result-row product-scan-result-row is-${escapeHtml(status)}"><div class="product-scan-card-heading"><div class="product-scan-card-title"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong><span class="product-scan-status is-${escapeHtml(status)}">${escapeHtml(productScanCoverageLabel(status))}</span></div>${selection}</div><div class="product-scan-card-meta"><span>${Number(item.segments || 0)} 个排表时段</span><span>${escapeHtml(coverText)}</span>${renderProductScanCutFeedback(item, itemFeedback)}</div><div class="product-scan-ranges">${renderProductScanRanges(item, groupIndex)}</div></article>`;
   });
   box.classList.toggle("empty", rows.length === 0);
   box.innerHTML = rows.length ? rows.join("") : "<p>时间表中没有可用的商品时段，请检查 Excel 格式。</p>";
+  box.querySelectorAll('input[data-product-scan-indeterminate="true"]').forEach((input) => {
+    input.indeterminate = true;
+  });
   renderProductScanInspector(state.productScan.groups, state.productScan.timeline, state.productScan.feedback);
 }
 
@@ -8840,6 +8946,7 @@ function collectFeaturePayload(feature) {
       output_dir: $("ps-output-dir").value.trim(),
       advance_seconds: Number($("ps-advance").value || 0),
       fast_cut: $("ps-fast-cut")?.checked !== false,
+      selected_ranges: feature === "product-scan" ? productScanSelectedRangeKeys() : [],
       video_start_offset: alignmentMode === "manual" ? $("ps-video-start-offset")?.value.trim() || "" : "",
       live_start_time: productScanNeedsLiveStart() ? productScanLiveStartValue() : "",
       schedule_time_basis: productScanTimeBasis(),

@@ -254,6 +254,30 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
             ],
         )
 
+    def test_product_scan_results_do_not_hide_later_ranges_from_selection(self) -> None:
+        ranges = [
+            {
+                "schedule_start": float(index * 10),
+                "schedule_end": float(index * 10 + 8),
+                "expected_duration": 8.0,
+                "covered_duration": 8.0,
+                "missing_duration": 0.0,
+                "status": "covered",
+                "parts": [{"video": "live.mp4", "file_start": 0.0, "file_end": 8.0}],
+            }
+            for index in range(14)
+        ]
+        with self.server._SCAN_LOCK:
+            previous = list(self.server._SCAN_RESULTS.get("schedule_groups") or [])
+            self.server._SCAN_RESULTS["schedule_groups"] = [{"name": "针织衫", "ranges": ranges}]
+        try:
+            result = self.server.scan_results()
+        finally:
+            with self.server._SCAN_LOCK:
+                self.server._SCAN_RESULTS["schedule_groups"] = previous
+
+        self.assertEqual(len(result["schedule_groups"][0]["ranges"]), 14)
+
     def test_product_scan_results_expose_per_product_cut_feedback(self) -> None:
         feedback = [
             {
@@ -327,6 +351,56 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertIn("极速预计", feedback[0]["message"])
         self.assertIn("允许关键帧偏差", feedback[0]["message"])
 
+    def test_product_scan_keeps_only_user_checked_ranges_and_marks_cancelled_products(self) -> None:
+        groups = [
+            {
+                "name": "针织衫",
+                "ranges": [
+                    {
+                        "schedule_start": 0.0,
+                        "schedule_end": 30.0,
+                        "expected_duration": 30.0,
+                        "covered_duration": 30.0,
+                        "missing_duration": 0.0,
+                        "status": "covered",
+                        "parts": [{"video": "one.mp4"}],
+                    },
+                    {
+                        "schedule_start": 60.0,
+                        "schedule_end": 100.0,
+                        "expected_duration": 40.0,
+                        "covered_duration": 20.0,
+                        "missing_duration": 20.0,
+                        "status": "partial",
+                        "parts": [{"video": "two.mp4"}],
+                    },
+                ],
+            },
+            {
+                "name": "已取消商品",
+                "ranges": [
+                    {
+                        "schedule_start": 0.0,
+                        "schedule_end": 20.0,
+                        "expected_duration": 20.0,
+                        "covered_duration": 20.0,
+                        "missing_duration": 0.0,
+                        "status": "covered",
+                        "parts": [{"video": "three.mp4"}],
+                    }
+                ],
+            },
+        ]
+        selected = ["0:1"]
+        filtered = self.server._filter_product_scan_coverage_groups(groups, selected)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["segments"], 1)
+        self.assertEqual(filtered[0]["ranges"][0]["schedule_start"], 60.0)
+        self.assertEqual(filtered[0]["status"], "partial")
+        feedback = self.server._product_scan_cut_feedback(groups, [], selected)
+        self.assertEqual(feedback[1]["label"], "已取消")
+        self.assertIn("手动取消", feedback[1]["message"])
+
     def test_compact_live_start_uses_the_exact_12_digit_format(self) -> None:
         parsed = self.server._parse_live_start_datetime(
             "202608051219",
@@ -379,6 +453,18 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertIn('fast_cut: $("ps-fast-cut")?.checked !== false', frontend)
         self.assertIn('id="ps-fast-cut" type="checkbox" checked', index)
 
+    def test_product_scan_allows_product_and_range_level_export_selection(self) -> None:
+        source = (ROOT / "web_client" / "server.py").read_text(encoding="utf-8")
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("selected_ranges: list[str]", source)
+        self.assertIn("_filter_product_scan_coverage_groups", source)
+        self.assertIn('data-product-scan-select-group=', frontend)
+        self.assertIn('data-product-scan-select-range=', frontend)
+        self.assertIn('selected_ranges: feature === "product-scan"', frontend)
+        self.assertNotIn("state.productScan.groups.slice(0, 60)", frontend)
+
     def test_product_scan_uses_one_live_start_input_and_hides_inactive_panels(self) -> None:
         frontend = (
             ROOT / "web_client" / "frontend" / "assets" / "app.js"
@@ -396,7 +482,7 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertIn('.alignment-mode-panel[hidden]', styles)
         self.assertIn('max-height: none;', styles)
 
-    def test_product_scan_result_list_stays_in_its_grid_row_and_uses_short_timestamp_labels(self) -> None:
+    def test_product_scan_result_list_has_its_own_bounded_scroll_area(self) -> None:
         frontend = (
             ROOT / "web_client" / "frontend" / "assets" / "app.js"
         ).read_text(encoding="utf-8")
@@ -405,9 +491,29 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         )
         self.assertIn(r"/20\d{6}(\d{2})(\d{2})(?:\d{2})?/", frontend)
         self.assertIn('const route = `排表 ${target} → ${actual}`;', frontend)
-        self.assertIn('align-items: stretch;', styles)
-        self.assertIn('contain: size;', styles)
+        self.assertIn('align-items: start;', styles)
+        self.assertIn('height: min(720px, calc(100vh - 180px));', styles)
+        self.assertIn('overflow: hidden;', styles)
+        self.assertIn('overscroll-behavior: contain;', styles)
+        self.assertNotIn('contain: size;', styles)
         self.assertIn('.product-scan-range-route', styles)
+
+    def test_product_scan_materials_are_grouped_into_a_compact_import_flow(self) -> None:
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        index = (ROOT / "web_client" / "frontend" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('class="product-scan-material-grid"', index)
+        self.assertIn('data-video-count-for="ps-video-paths"', index)
+        self.assertIn("product-scan-source-details", frontend)
+        self.assertIn('"ps-video-paths"', frontend)
+        self.assertIn('.product-scan-material-grid', styles)
+        self.assertIn('.product-scan-source-details', styles)
 
 
 if __name__ == "__main__":

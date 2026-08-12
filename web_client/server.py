@@ -2134,6 +2134,7 @@ class ProductScanPayload(BaseModel):
     live_start_time: str = ""
     schedule_time_basis: str = "relative"
     fast_cut: bool = True
+    selected_ranges: list[str] = Field(default_factory=list)
 
 
 class VideoSplitPayload(BaseModel):
@@ -3746,9 +3747,52 @@ def _product_scan_feedback_key(name: Any) -> str:
     return re.sub(r"\s+", " ", safe_name.strip()).casefold()
 
 
+def _filter_product_scan_coverage_groups(
+    coverage_groups: list[dict[str, Any]],
+    selected_range_keys: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Keep only user-selected schedule ranges while preserving file coverage parts."""
+    if not selected_range_keys:
+        return list(coverage_groups)
+    selected = {str(key).strip() for key in selected_range_keys if str(key).strip()}
+    filtered: list[dict[str, Any]] = []
+    for group_index, group in enumerate(coverage_groups):
+        selected_records = [
+            dict(record)
+            for range_index, record in enumerate(list(group.get("ranges") or []))
+            if "%d:%d" % (group_index, range_index) in selected
+            and list(record.get("parts") or [])
+        ]
+        if not selected_records:
+            continue
+        item = dict(group)
+        item["ranges"] = selected_records
+        item["segments"] = len(selected_records)
+        item["total_duration"] = sum(
+            max(0.0, float(record.get("expected_duration") or 0.0))
+            for record in selected_records
+        )
+        item["covered_duration"] = sum(
+            max(0.0, float(record.get("covered_duration") or 0.0))
+            for record in selected_records
+        )
+        item["missing_duration"] = sum(
+            max(0.0, float(record.get("missing_duration") or 0.0))
+            for record in selected_records
+        )
+        item["status"] = (
+            "covered"
+            if all(str(record.get("status") or "") == "covered" for record in selected_records)
+            else "partial"
+        )
+        filtered.append(item)
+    return filtered
+
+
 def _product_scan_cut_feedback(
     coverage_groups: list[dict[str, Any]],
     exported_results: list[dict[str, Any]] | None = None,
+    selected_range_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return one human-readable cut outcome per schedule group for the inspector."""
     exported_by_name: dict[str, list[dict[str, Any]]] = {}
@@ -3759,10 +3803,45 @@ def _product_scan_cut_feedback(
 
     feedback: list[dict[str, Any]] = []
     has_exports = exported_results is not None
-    for group in coverage_groups:
+    selected = (
+        {str(key).strip() for key in selected_range_keys if str(key).strip()}
+        if selected_range_keys is not None
+        else None
+    )
+    for group_index, group in enumerate(coverage_groups):
         name = str(group.get("name") or "")
         exports = exported_by_name.get(_product_scan_feedback_key(name), [])
         covered_duration = max(0.0, float(group.get("covered_duration") or 0.0))
+        selectable_ranges = [
+            range_index
+            for range_index, record in enumerate(list(group.get("ranges") or []))
+            if list(record.get("parts") or [])
+        ]
+        selected_count = (
+            sum(
+                1
+                for range_index in selectable_ranges
+                if "%d:%d" % (group_index, range_index) in selected
+            )
+            if selected is not None
+            else len(selectable_ranges)
+        )
+        selection_suffix = (
+            "（已选 %d/%d 个时段）" % (selected_count, len(selectable_ranges))
+            if selected is not None and selected_count != len(selectable_ranges)
+            else ""
+        )
+        if selected is not None and selectable_ranges and not selected_count:
+            feedback.append({
+                "name": name,
+                "status": "skipped",
+                "label": "已取消",
+                "message": "已手动取消，本次未切割",
+                "output_count": 0,
+                "duration": 0.0,
+                "output_paths": [],
+            })
+            continue
         if exports:
             duration = sum(max(0.0, float(item.get("duration_seconds") or 0.0)) for item in exports)
             fast_copy = any(str(item.get("cut_mode") or "") == "fast-copy" for item in exports)
@@ -3776,7 +3855,7 @@ def _product_scan_cut_feedback(
                     if fast_copy
                     else "已生成 %d 段，共 %s" % (len(exports), _hms(duration)
                     )
-                ),
+                ) + selection_suffix,
                 "output_count": len(exports),
                 "duration": duration,
                 "output_paths": [str(item.get("output_path") or "") for item in exports if item.get("output_path")],
@@ -8923,8 +9002,19 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             log_fn=_task_log_fn(task_id, scope, base=58, span=8),
         )
         stats = _product_scan_coverage_stats(coverage_groups)
-        groups = groups_with_coverage(coverage_groups)
+        selected_range_keys = [
+            str(key).strip()
+            for key in payload.selected_ranges
+            if str(key).strip()
+        ]
+        selected_coverage_groups = _filter_product_scan_coverage_groups(
+            coverage_groups,
+            selected_range_keys or None,
+        )
+        groups = groups_with_coverage(selected_coverage_groups)
         if not groups:
+            if selected_range_keys:
+                raise ValueError("没有勾选可导出的讲解时段，请在右侧结果中至少保留一个已覆盖片段。")
             raise ValueError("本批视频没有可导出的讲解时段；未覆盖时段已跳过。")
         for group in groups:
             group["name"] = _clean_forbidden_title_text(group.get("name") or "未命名商品", fallback="未命名商品")
@@ -8934,6 +9024,9 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             % (stats["covered_ranges"], stats["partial_ranges"], stats["missing_ranges"]),
             scope,
         )
+        if selected_range_keys:
+            selected_count = sum(len(group.get("ranges") or []) for group in selected_coverage_groups)
+            emit_log("info", "已按右侧勾选，仅切割 %d 个讲解时段。" % selected_count, scope)
         _set_task_progress(task_id, 68, f"导出 {len(groups)} 个有覆盖的商品")
         if payload.fast_cut:
             emit_log("info", "极速切割已开启：按关键帧直接分段，允许少量时间偏差；跨文件分别输出。", scope)
@@ -8953,7 +9046,11 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
         ok_count = len(exported_results)
         with _SCAN_LOCK:
             _SCAN_RESULTS["schedule_groups"] = coverage_groups
-            _SCAN_RESULTS["schedule_feedback"] = _product_scan_cut_feedback(coverage_groups, exported_results)
+            _SCAN_RESULTS["schedule_feedback"] = _product_scan_cut_feedback(
+                coverage_groups,
+                exported_results,
+                selected_range_keys or None,
+            )
         _set_task_progress(task_id, 95, "校验导出结果")
         if not exported_results:
             raise RuntimeError("没有导出任何视频。请检查 Excel 时间段是否落在所选视频范围内，并确认源视频可读、输出目录可写。")
@@ -13268,7 +13365,7 @@ def scan_results() -> dict[str, Any]:
         raw_records = item.get("ranges")
         if not isinstance(raw_records, list):
             legacy_ranges = []
-            for start, end in list(item.get("segments") or [])[:12]:
+            for start, end in list(item.get("segments") or []):
                 try:
                     legacy_ranges.append({"start": float(start), "end": float(end)})
                 except (TypeError, ValueError):
@@ -13280,7 +13377,7 @@ def scan_results() -> dict[str, Any]:
                 "ranges": legacy_ranges,
             }
         ranges = []
-        for record in raw_records[:12]:
+        for record in raw_records:
             try:
                 parts = []
                 for part in list(record.get("parts") or [])[:4]:

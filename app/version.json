@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.8.12.1",
-  "version": "2026.8.12.1",
-  "latest_version": "2026.8.12.1",
+  "build_id": "2026.8.12.2",
+  "version": "2026.8.12.2",
+  "latest_version": "2026.8.12.2",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -20,9 +20,9 @@
     "app/keywords.json": "f217ad7733b68b0ab8fde9025ab3f64af42bd66b1c5a2b7ea4a7b88b6aae9744",
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
-    "web_client/frontend/index.html": "2e213cfe44a2909a28778f9033b1f1aaff57ed5f3d482848c305faa4655e2658",
-    "web_client/frontend/assets/app.js": "ad255b369ed5b127d7f0ad8c2ae98fae39e1b77e4354f5dfc6dc0a35d3b35bf2",
-    "web_client/frontend/assets/styles.css": "6475c6765855d55c498cb4721fed14a1b4c7bf2a307dafa44b1e0bee1725cd87",
+    "web_client/frontend/index.html": "4e5c027f1069d07cb7d9692d00b211cba2126791fec7112da1b716a04e32303a",
+    "web_client/frontend/assets/app.js": "e8a108a81b9ea4408a25103df7a0e5d4982fe64c1d2d027beda9fd16a025d852",
+    "web_client/frontend/assets/styles.css": "cd5a2ab130d84b48b54b1bcc693fa3a25f0c5e0c713e07b2a5026223a0bc02e6",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/native_file_drop_bridge.dll": "c28e38886e9006d471719a01882ccc0717b086f7f248b6cfb2b6604b5b283a35",
     "web_client/tools/local_asr_worker.py": "47b1bf7937efa77c7dc3a17a7f33833ac2df0a23ff175a5672e25b7eef63aca2",
@@ -44,7 +44,7 @@
   ],
   "source_files": {
     "web_client/desktop.py": "2d36ddfd821199a058cfbdd2d98d6bcec0e5d8be9979714a50f7431755e64bad",
-    "web_client/server.py": "978a04e946c1984dbe3c12c372fc0f90caac239dd18504e9aa8a42b4dd4608e9",
+    "web_client/server.py": "4da7a3dbfee7382c62d14c5446d1e987dae1b2c7707ddb1b61bedea400f55d86",
     "web_client/native_file_drop_bridge.cs": "d20c17dd280b1245044a172744bc2594344a28535d97d92936cf011c6cef4df3",
     "web_client/liveclipper_web.spec": "0b080dcba1986fac0d63deaef93d2afc4e2be829184d5761185936d4f524307f",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
@@ -113,9 +113,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "单品扫描支持开播后时长与实际钟表时间；按真实视频范围校验覆盖和断档；新增极速关键帧切割、跨文件输出及逐商品结果反馈。",
-  "update_message": "单品扫描支持开播后时长与实际钟表时间；按真实视频范围校验覆盖和断档；新增极速关键帧切割、跨文件输出及逐商品结果反馈。",
+  "release_notes": "单品扫描支持按商品或单个时段勾选导出；取消项目不再切割；优化素材导入、输出设置和结果列表滚动布局。",
+  "update_message": "单品扫描支持按商品或单个时段勾选导出；取消项目不再切割；优化素材导入、输出设置和结果列表滚动布局。",
   "update_url": "",
   "force_update": true,
-  "updated_at": "2026-08-12 09:09:01"
+  "updated_at": "2026-08-12 11:02:10"
 }
