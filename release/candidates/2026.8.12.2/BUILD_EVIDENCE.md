@@ -58,6 +58,11 @@
 - Public HTTPS download size: `1,028,823` bytes
 - Public HTTPS download SHA256: `c2cd1dcad5fdf44ab3810505708cfea7ca1ef5fc9441dec217ca943ffaf9289e`
 - The public update channel was not changed before the package passed remote hash verification.
+- Published `stable.json` as `ready` at `2026-08-12T11:15:32+08:00`.
+- Ready channel document SHA256: `fae455ce5b970cd4c873b122d2c17939ad9e34f052eebd2704a33cf007160261`.
+- Cache-busted and direct public `stable.json` downloads matched the local ready document byte-for-byte.
+- Both public documents passed signature verification with key id `1905329f73f719d3`.
+- A `2026.8.12.1` / Core `4.0.0` client received the public decision `update_available` for `2026.8.12.2`.
 
 ## Remaining external confirmation
 
