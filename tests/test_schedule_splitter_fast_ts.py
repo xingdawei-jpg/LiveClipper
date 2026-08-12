@@ -4,6 +4,7 @@ import importlib
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +17,26 @@ schedule_splitter = importlib.import_module("schedule_splitter")
 
 
 class ScheduleSplitterFastTsTests(unittest.TestCase):
+    def test_clock_time_basis_keeps_two_part_clock_values_and_crosses_midnight(self) -> None:
+        self.assertEqual(
+            schedule_splitter._parse_schedule_time_value("12:20", time_basis="relative"),
+            12 * 60 + 20,
+        )
+        self.assertEqual(
+            schedule_splitter._parse_schedule_time_value("12:20", time_basis="clock"),
+            12 * 3600 + 20 * 60,
+        )
+        schedule = [
+            {"name": "daytime", "start_offset": 12 * 3600 + 20 * 60 + 4, "end_offset": 12 * 3600 + 45 * 60 + 15},
+            {"name": "overnight", "start_offset": 23 * 3600 + 55 * 60, "end_offset": 15 * 60},
+        ]
+        schedule_splitter.normalize_clock_schedule_to_live_offsets(
+            schedule,
+            datetime(2026, 8, 5, 12, 19, 0),
+        )
+        self.assertEqual((schedule[0]["start_offset"], schedule[0]["end_offset"]), (64, 1575))
+        self.assertEqual((schedule[1]["start_offset"], schedule[1]["end_offset"]), (41760, 42960))
+
     def test_ts_extensions_require_normalization(self) -> None:
         for suffix in (".ts", ".TS", ".mts", ".m2ts"):
             self.assertTrue(schedule_splitter._needs_ts_normalization("source" + suffix))
@@ -167,6 +188,58 @@ class ScheduleSplitterFastTsTests(unittest.TestCase):
         self.assertEqual(command[command.index("-c") + 1], "copy")
         self.assertNotIn("-vf", command)
         self.assertNotIn("-af", command)
+
+    def test_product_fast_mode_skips_ts_normalization_validation_and_reencode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = root / "first.ts"
+            second = root / "second.ts"
+            first.write_bytes(b"source")
+            second.write_bytes(b"source")
+            output = root / "output"
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                target = Path(command[-1])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x" * 2048)
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            with (
+                mock.patch.object(schedule_splitter, "_probe_durations", return_value=[30.0, 30.0]),
+                mock.patch.object(
+                    schedule_splitter,
+                    "_prepare_ts_source",
+                    side_effect=AssertionError("fast mode must not normalize TS"),
+                ),
+                mock.patch.object(
+                    schedule_splitter,
+                    "_probe_av_start_offset_seconds",
+                    side_effect=AssertionError("fast mode must not inspect output timing"),
+                ),
+                mock.patch.object(
+                    schedule_splitter,
+                    "_sync_reencode_segment",
+                    side_effect=AssertionError("fast mode must not reencode"),
+                ),
+                mock.patch.object(schedule_splitter.subprocess, "run", side_effect=fake_run),
+            ):
+                results = schedule_splitter.extract_by_schedule(
+                    [{"name": "product", "segments": [(5.0, 55.0)]}],
+                    [str(first), str(second)],
+                    str(output),
+                    ffmpeg="ffmpeg",
+                    fast_copy=True,
+                )
+
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(item["cut_mode"] == "fast-copy" for item in results))
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertLess(command.index("-ss"), command.index("-i"))
+                self.assertEqual(command[command.index("-c") + 1], "copy")
+                self.assertNotIn("libx264", command)
 
     def test_fast_copy_validation_rejects_duration_or_output_av_gap(self) -> None:
         with mock.patch.object(

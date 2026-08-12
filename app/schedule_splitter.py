@@ -258,6 +258,23 @@ def _probe_media_duration_seconds(path, ffmpeg):
         return None
 
 
+def _validate_segment_duration(path, ffmpeg, expected_duration):
+    """Reject a generated file when it is materially shorter/longer than requested."""
+    output_duration = _probe_media_duration_seconds(path, ffmpeg)
+    if output_duration is None:
+        return False, "无法读取切片时长", None
+    duration_tolerance = max(3.0, min(8.0, float(expected_duration) * 0.01))
+    duration_error = abs(float(output_duration) - float(expected_duration))
+    if duration_error > duration_tolerance:
+        return (
+            False,
+            "切片时长偏差 %.2fs：实际 %.2fs，应为 %.2fs"
+            % (duration_error, output_duration, expected_duration),
+            output_duration,
+        )
+    return True, "切片时长 %.2fs" % output_duration, output_duration
+
+
 def _validate_fast_copy_segment(path, ffmpeg, expected_duration, _expected_av_offset):
     output_offset = _probe_av_start_offset_seconds(path, ffmpeg)
     if output_offset is None:
@@ -271,16 +288,9 @@ def _validate_fast_copy_segment(path, ffmpeg, expected_duration, _expected_av_of
     if output_gap > 0.08:
         return False, "切片音画起点相差 %.3fs" % output_gap
 
-    output_duration = _probe_media_duration_seconds(path, ffmpeg)
-    if output_duration is None:
-        return False, "无法读取切片时长"
-    # Stream copy can retain the preceding GOP.  A few seconds of boundary
-    # padding is acceptable for long product ranges and avoids hours of
-    # re-encoding; larger deviations still take the synchronized fallback.
-    duration_tolerance = max(3.0, min(8.0, float(expected_duration) * 0.01))
-    duration_error = abs(float(output_duration) - float(expected_duration))
-    if duration_error > duration_tolerance:
-        return False, "切片时长偏差 %.2fs" % duration_error
+    duration_ok, duration_detail, _ = _validate_segment_duration(path, ffmpeg, expected_duration)
+    if not duration_ok:
+        return False, duration_detail
 
     return True, "音画起点差 %.3fs" % output_gap
 
@@ -308,8 +318,76 @@ def sort_videos_by_start(video_list):
 
 
 
-def read_excel(filepath: str, log_fn=None):
-    """读取时间表Excel，支持旧格式和新格式自动检测"""
+def _parse_schedule_time_value(value, time_basis="relative"):
+    """Parse one new-format schedule endpoint without guessing its meaning.
+
+    ``relative`` treats ``01:04`` as one minute and four seconds.  ``clock``
+    treats it as 01:04 on the clock.  The caller explicitly selects the basis
+    because the two forms are otherwise ambiguous.
+    """
+    text = str(value or "").strip().replace("：", ":")
+    parts = text.split(":")
+    if len(parts) not in {2, 3}:
+        return None
+    try:
+        values = [int(part.strip()) for part in parts]
+    except (TypeError, ValueError):
+        return None
+    if any(number < 0 for number in values):
+        return None
+    if len(values) == 3:
+        hours, minutes, seconds = values
+    elif time_basis == "clock":
+        hours, minutes = values
+        seconds = 0
+    else:
+        hours = 0
+        minutes, seconds = values
+    if minutes >= 60 or seconds >= 60:
+        return None
+    if time_basis == "clock" and hours >= 24:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def normalize_clock_schedule_to_live_offsets(schedule, live_start, log_fn=None):
+    """Convert clock-of-day schedule values into offsets from live start.
+
+    A negative difference greater than twelve hours is treated as the next
+    day, which keeps an overnight live continuous while leaving genuinely
+    earlier same-day rows outside the selected live range.
+    """
+    if live_start is None:
+        raise ValueError("时钟时间需要直播开播时间作为换算基准")
+    live_clock_seconds = (
+        live_start.hour * 3600 + live_start.minute * 60 + live_start.second
+    )
+    day_seconds = 24 * 3600
+    for item in schedule:
+        start_clock = float(item.get("start_offset", 0) or 0)
+        end_clock = float(item.get("end_offset", 0) or 0)
+        start_offset = start_clock - live_clock_seconds
+        end_offset = end_clock - live_clock_seconds
+        if start_offset < -(day_seconds / 2):
+            start_offset += day_seconds
+        if end_offset < -(day_seconds / 2):
+            end_offset += day_seconds
+        while end_offset <= start_offset:
+            end_offset += day_seconds
+        item["start_offset"] = start_offset
+        item["end_offset"] = end_offset
+    schedule.sort(key=lambda item: float(item.get("start_offset", 0) or 0))
+    if log_fn:
+        log_fn(
+            "已按直播开播 %s 将表格时钟时间换算为直播时间。"
+            % live_start.strftime("%H:%M:%S")
+        )
+    return schedule
+
+
+def read_excel(filepath: str, log_fn=None, time_basis="relative"):
+    """读取时间表Excel，支持旧格式和新格式自动检测。"""
+    time_basis = "clock" if str(time_basis or "").strip().lower() == "clock" else "relative"
     try:
         import openpyxl
     except ImportError:
@@ -366,19 +444,13 @@ def read_excel(filepath: str, log_fn=None):
                     continue
                 parts = ts.split(sep, 1)
                 p1, p2 = parts[0].strip(), parts[1].strip()
-                def _to_seconds(t):
-                    parts = t.split(":")
-                    if len(parts) == 3:
-                        return int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])
-                    elif len(parts) == 2:
-                        return int(parts[0])*60 + int(parts[1])
-                    return 0
-                if ":" in p1:
-                    start = _to_seconds(p1)
-                    end = _to_seconds(p2)
-                else:
+                if ":" not in p1:
                     continue
-                if end <= start:
+                start = _parse_schedule_time_value(p1, time_basis=time_basis)
+                end = _parse_schedule_time_value(p2, time_basis=time_basis)
+                if start is None or end is None:
+                    continue
+                if end <= start and time_basis != "clock":
                     continue
                 item = {"name": name, "start_offset": start, "end_offset": end}
                 if pid:
@@ -414,7 +486,7 @@ def read_excel(filepath: str, log_fn=None):
                     continue
                 start_offset = clock_start
                 end_offset = clock_end if clock_end is not None else clock_start + 30
-                if live_start:
+                if live_start and time_basis != "clock":
                     ls = live_start.hour * 3600 + live_start.minute * 60 + live_start.second
                     start_offset -= ls
                     end_offset -= ls
@@ -422,7 +494,9 @@ def read_excel(filepath: str, log_fn=None):
                 dt = _parse_datetime(time_str)
                 if dt is None:
                     continue
-                if live_start:
+                if time_basis == "clock":
+                    start_offset = dt.hour * 3600 + dt.minute * 60 + dt.second
+                elif live_start:
                     start_offset = (dt - live_start).total_seconds()
                 else:
                     start_offset = dt.hour * 3600 + dt.minute * 60 + dt.second
@@ -565,6 +639,13 @@ def _get_video_timeline(video_list, durations):
 
     """计算每个视频在时间线上的起始偏移（相对于 live_start）"""
 
+    # Keep the complete date while normalising.  Seconds-from-midnight breaks
+    # at midnight and can turn a real gap into a false continuous range.
+    named_times = [_parse_datetime_from_name(video) for video in video_list]
+    if named_times and all(value is not None for value in named_times):
+        base = named_times[0]
+        return [(value - base).total_seconds() for value in named_times]
+
     import re as _re
 
     from datetime import datetime as _dt
@@ -681,6 +762,129 @@ def _probe_durations(video_list, log_fn=None, ffmpeg_cmd=None):
 
 
 
+def build_video_timeline(video_list, ffmpeg_cmd=None, log_fn=None):
+    """Return the real selected-file timeline without filling timestamp gaps."""
+    ordered_videos = sort_videos_by_start(video_list)
+    durations = _probe_durations(ordered_videos, log_fn=log_fn, ffmpeg_cmd=ffmpeg_cmd)
+    starts = _get_video_timeline(ordered_videos, durations)
+    timestamped = [_parse_datetime_from_name(video) for video in ordered_videos]
+    has_precise_timestamps = bool(timestamped) and all(value is not None for value in timestamped)
+    timeline = []
+    for index, video in enumerate(ordered_videos):
+        duration = max(0.0, float(durations[index] if index < len(durations) else 0.0))
+        start = float(starts[index] if index < len(starts) else 0.0)
+        timeline.append({
+            "video": video,
+            "name": os.path.basename(video),
+            "start": start,
+            "end": start + duration,
+            "duration": duration,
+            "timestamp": timestamped[index].isoformat() if timestamped[index] else "",
+            "estimated": not has_precise_timestamps,
+        })
+    return timeline
+
+
+def _coverage_gaps(start, end, parts):
+    """Return non-covered intervals after merging overlapping source pieces."""
+    cursor = float(start)
+    gaps = []
+    for part in sorted(parts, key=lambda item: (item["timeline_start"], item["timeline_end"])):
+        part_start = max(float(start), float(part["timeline_start"]))
+        part_end = min(float(end), float(part["timeline_end"]))
+        if part_end <= part_start:
+            continue
+        if part_start > cursor + 0.5:
+            gaps.append({"start": cursor, "end": part_start, "duration": part_start - cursor})
+        cursor = max(cursor, part_end)
+    if float(end) > cursor + 0.5:
+        gaps.append({"start": cursor, "end": float(end), "duration": float(end) - cursor})
+    return gaps
+
+
+def build_schedule_coverage(groups, video_list, ffmpeg_cmd=None, log_fn=None):
+    """Map schedule ranges to real selected-file coverage for preview and export."""
+    timeline = build_video_timeline(video_list, ffmpeg_cmd=ffmpeg_cmd, log_fn=log_fn)
+    coverage_groups = []
+    for group in groups:
+        records = []
+        covered_duration = 0.0
+        missing_duration = 0.0
+        for start, end in list(group.get("segments") or []):
+            start = float(start)
+            end = float(end)
+            expected_duration = max(0.0, end - start)
+            parts = []
+            for source in timeline:
+                clip_start = max(start, float(source["start"]))
+                clip_end = min(end, float(source["end"]))
+                if clip_end - clip_start < 0.5:
+                    continue
+                parts.append({
+                    "video": source["name"],
+                    "video_path": source["video"],
+                    "timeline_start": clip_start,
+                    "timeline_end": clip_end,
+                    "file_start": clip_start - float(source["start"]),
+                    "file_end": clip_end - float(source["start"]),
+                    "duration": clip_end - clip_start,
+                })
+            gaps = _coverage_gaps(start, end, parts)
+            missing = sum(float(item["duration"]) for item in gaps)
+            covered = max(0.0, expected_duration - missing)
+            status = "missing" if not parts else ("partial" if missing >= 0.5 else "covered")
+            records.append({
+                "schedule_start": start,
+                "schedule_end": end,
+                "expected_duration": expected_duration,
+                "covered_duration": covered,
+                "missing_duration": missing,
+                "status": status,
+                "parts": parts,
+                "missing_ranges": gaps,
+            })
+            covered_duration += covered
+            missing_duration += missing
+        status = "missing"
+        if records and all(item["status"] == "covered" for item in records):
+            status = "covered"
+        elif any(item["parts"] for item in records):
+            status = "partial"
+        coverage_groups.append({
+            "name": group.get("name", ""),
+            "product_id": group.get("product_id", ""),
+            "segments": len(records),
+            "total_duration": sum(float(record["expected_duration"]) for record in records),
+            "covered_duration": covered_duration,
+            "missing_duration": missing_duration,
+            "status": status,
+            "ranges": records,
+        })
+    return coverage_groups, timeline
+
+
+def groups_with_coverage(coverage_groups):
+    """Keep only groups with at least one real source intersection."""
+    export_groups = []
+    for group in coverage_groups:
+        segments = [
+            (float(record["schedule_start"]), float(record["schedule_end"]))
+            for record in group.get("ranges") or []
+            if record.get("parts")
+        ]
+        if not segments:
+            continue
+        item = {
+            "name": group.get("name", ""),
+            "segments": segments,
+            "total_duration": sum(end - start for start, end in segments),
+        }
+        if group.get("product_id"):
+            item["product_id"] = group["product_id"]
+        export_groups.append(item)
+    return export_groups
+
+
 def _find_video_for_time(video_list, offset_sec, durations=None):
 
     """找到视频，返回 (video_path, relative_offset)"""
@@ -711,8 +915,128 @@ def _find_video_for_time(video_list, offset_sec, durations=None):
 
 
 
-def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None):
+def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None):
+    """Export independent source-file pieces with input-side stream-copy seeking.
+
+    This intentionally trades a small keyframe-boundary time deviation for speed.
+    It does not normalise TS files, probe each output, or retry with re-encoding.
+    """
+    results = []
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    video_list = sort_videos_by_start(video_list)
+    durations = _probe_durations(video_list, log_fn=log_fn, ffmpeg_cmd=ffmpeg)
+    if not durations or len(durations) != len(video_list):
+        durations = [99999] * len(video_list)
+    starts = _get_video_timeline(video_list, durations)
+    timeline = [
+        (video, starts[index], starts[index] + (durations[index] if index < len(durations) else 0))
+        for index, video in enumerate(video_list)
+    ]
+
+    def _split_across_videos(start, end):
+        parts = []
+        for video, video_start, video_end in timeline:
+            cut_start = max(start, video_start)
+            cut_end = min(end, video_end)
+            if cut_end - cut_start >= 0.5:
+                parts.append((video, cut_start - video_start, cut_end - cut_start))
+        return parts
+
+    def _error_tail(process):
+        raw = getattr(process, "stderr", b"") or b""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        lines = str(raw).strip().splitlines()
+        return lines[-1] if lines else ""
+
+    if log_fn:
+        log_fn("  极速切割：按关键帧直接分段，不标准化、不校验、不重编码；跨文件分别输出。")
+
+    for group in groups:
+        name = sanitize_forbidden_title(group.get("name", ""), fallback="未命名商品")
+        segments = group.get("segments", [])
+        if not segments:
+            continue
+        flat_output = bool(group.get("flat_output"))
+        exact_name = bool(group.get("exact_name"))
+        safe_name = _safe_output_stem(name, max_chars=140 if exact_name else 80)
+        safe_dir_name = _safe_output_stem(name, max_chars=80)
+        out_dir = output_dir if flat_output else os.path.join(output_dir, safe_name)
+        os.makedirs(out_dir, exist_ok=True)
+        exported = 0
+        for segment_index, (start, end) in enumerate(segments):
+            if end - start < 10:
+                continue
+            parts = _split_across_videos(start, end)
+            if not parts:
+                if log_fn:
+                    log_fn("  未找到覆盖时段 %.0fs-%.0fs 的视频" % (start, end))
+                continue
+            for part_index, (video, relative_start, part_duration) in enumerate(parts):
+                suffix = (
+                    "%d" % (segment_index + 1)
+                    if len(parts) == 1
+                    else "%d_%d" % (segment_index + 1, part_index + 1)
+                )
+                if exact_name and len(segments) == 1 and len(parts) == 1:
+                    out_path = os.path.join(out_dir, "%s.mp4" % safe_name)
+                else:
+                    out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_dir_name[:40], suffix))
+                try:
+                    process = _fast_copy_segment(
+                        ffmpeg,
+                        relative_start,
+                        part_duration,
+                        video,
+                        out_path,
+                    )
+                    exported_ok = (
+                        process.returncode == 0
+                        and os.path.isfile(out_path)
+                        and os.path.getsize(out_path) > 1000
+                    )
+                    if exported_ok:
+                        results.append({
+                            "name": name,
+                            "output_path": out_path,
+                            "size_mb": round(os.path.getsize(out_path) / 1024 / 1024, 1),
+                            "expected_duration": round(float(part_duration), 3),
+                            "duration_seconds": round(float(part_duration), 3),
+                            "source_video": os.path.basename(video),
+                            "cut_mode": "fast-copy",
+                        })
+                        exported += 1
+                    else:
+                        try:
+                            if os.path.exists(out_path):
+                                os.remove(out_path)
+                        except OSError:
+                            pass
+                        if log_fn:
+                            detail = _error_tail(process)
+                            log_fn("  极速切割失败: %s%s" % (
+                                os.path.basename(out_path),
+                                (" " + detail[:160]) if detail else "",
+                            ))
+                except Exception as exc:
+                    if log_fn:
+                        log_fn("  极速切割失败: " + str(exc)[:100])
+        if exported and log_fn:
+            log_fn("  %s: %d 个独立片段" % (name, exported))
+    return results
+
+
+def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None, fast_copy=False):
     """按分组切割导出每段独立文件，不拼接"""
+    if fast_copy:
+        return _extract_by_schedule_fast_copy(
+            groups,
+            video_list,
+            output_dir,
+            ffmpeg=ffmpeg,
+            log_fn=log_fn,
+        )
     results = []
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -805,6 +1129,7 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                         cut_source, normalized, av_start_offset = _source_for_cut(video)
                         ts_source = _needs_ts_normalization(video)
                         reencode_attempted = False
+                        actual_duration = None
                         if ts_source and normalized:
                             if log_fn:
                                 log_fn(
@@ -924,8 +1249,41 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                                 and os.path.isfile(out_path)
                                 and os.path.getsize(out_path) > 1000
                             )
+                            reencode_attempted = True
+                        if final_ok and not ts_source:
+                            duration_ok, duration_detail, actual_duration = _validate_segment_duration(
+                                out_path, ffmpeg, part_duration
+                            )
+                            if not duration_ok:
+                                last_error = duration_detail
+                                if not reencode_attempted:
+                                    if log_fn:
+                                        log_fn("  %s，改用同步安全重编码" % duration_detail)
+                                    process = _sync_reencode_segment(
+                                        ffmpeg,
+                                        relative_start,
+                                        part_duration,
+                                        cut_source,
+                                        out_path,
+                                        av_start_offset=av_start_offset,
+                                    )
+                                    reencode_attempted = True
+                                    final_ok = (
+                                        process.returncode == 0
+                                        and os.path.isfile(out_path)
+                                        and os.path.getsize(out_path) > 1000
+                                    )
+                                    if final_ok:
+                                        duration_ok, duration_detail, actual_duration = _validate_segment_duration(
+                                            out_path, ffmpeg, part_duration
+                                        )
+                                        if not duration_ok:
+                                            final_ok = False
+                                            last_error = duration_detail
+                                else:
+                                    final_ok = False
                         if not final_ok:
-                            last_error = _error_tail(process) or last_error
+                            last_error = last_error or _error_tail(process)
 
                         if final_ok:
                             mb = os.path.getsize(out_path) / 1024 / 1024
@@ -933,6 +1291,9 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                                 "name": name,
                                 "output_path": out_path,
                                 "size_mb": round(mb, 1),
+                                "expected_duration": round(float(part_duration), 3),
+                                "duration_seconds": round(float(actual_duration or part_duration), 3),
+                                "source_video": os.path.basename(video),
                             })
                             exported += 1
                         else:

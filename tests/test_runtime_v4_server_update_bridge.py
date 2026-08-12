@@ -254,6 +254,102 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
             ],
         )
 
+    def test_product_scan_results_expose_per_product_cut_feedback(self) -> None:
+        feedback = [
+            {
+                "name": "针织衫",
+                "status": "success",
+                "label": "已切割",
+                "message": "已生成 1 段，共 00:25:11",
+                "output_count": 1,
+                "duration": 1511.0,
+                "output_paths": [r"C:\exports\针织衫.mp4"],
+            }
+        ]
+        with self.server._SCAN_LOCK:
+            previous = list(self.server._SCAN_RESULTS.get("schedule_feedback") or [])
+            self.server._SCAN_RESULTS["schedule_feedback"] = feedback
+        try:
+            result = self.server.scan_results()
+        finally:
+            with self.server._SCAN_LOCK:
+                self.server._SCAN_RESULTS["schedule_feedback"] = previous
+
+        self.assertEqual(
+            result["schedule_feedback"],
+            [
+                {
+                    "name": "针织衫",
+                    "status": "success",
+                    "label": "已切割",
+                    "message": "已生成 1 段，共 00:25:11",
+                    "output_count": 1,
+                    "duration": 1511.0,
+                    "output_paths": [r"C:\exports\针织衫.mp4"],
+                }
+            ],
+        )
+
+    def test_product_scan_cut_feedback_sums_real_export_duration(self) -> None:
+        feedback = self.server._product_scan_cut_feedback(
+            [
+                {
+                    "name": "针织衫",
+                    "status": "covered",
+                    "covered_duration": 1511.0,
+                }
+            ],
+            [
+                {
+                    "name": "针织衫",
+                    "output_path": r"C:\exports\针织衫.mp4",
+                    "duration_seconds": 1511.0,
+                }
+            ],
+        )
+        self.assertEqual(feedback[0]["status"], "success")
+        self.assertEqual(feedback[0]["output_count"], 1)
+        self.assertEqual(feedback[0]["duration"], 1511.0)
+        self.assertIn("25:11", feedback[0]["message"])
+
+    def test_product_scan_fast_cut_feedback_marks_duration_as_an_estimate(self) -> None:
+        feedback = self.server._product_scan_cut_feedback(
+            [{"name": "针织衫", "status": "covered", "covered_duration": 60.0}],
+            [
+                {
+                    "name": "针织衫",
+                    "output_path": r"C:\\exports\\针织衫.mp4",
+                    "duration_seconds": 60.0,
+                    "cut_mode": "fast-copy",
+                }
+            ],
+        )
+        self.assertIn("极速预计", feedback[0]["message"])
+        self.assertIn("允许关键帧偏差", feedback[0]["message"])
+
+    def test_compact_live_start_uses_the_exact_12_digit_format(self) -> None:
+        parsed = self.server._parse_live_start_datetime(
+            "202608051219",
+            [r"C:\\recordings\\live_202608051219.mp4"],
+        )
+        self.assertEqual(parsed.strftime("%Y-%m-%d %H:%M:%S"), "2026-08-05 12:19:00")
+
+    def test_clock_time_schedule_requires_an_explicit_live_start(self) -> None:
+        warnings: list[str] = []
+        errors: list[str] = []
+        self.server._preflight_product_schedule(
+            {
+                "excel_path": "table.xlsx",
+                "video_paths": ["live_202608051219.mp4"],
+                "schedule_time_basis": "clock",
+                "live_start_time": "",
+            },
+            warnings,
+            errors,
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(errors, ["表格已选择“时钟时间”，请填写直播开播时间后再校验。"])
+
     def test_product_scan_frontend_requires_validation_before_split(self) -> None:
         frontend = (
             ROOT / "web_client" / "frontend" / "assets" / "app.js"
@@ -269,6 +365,49 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
             'if (!productScanIsReady()) throw new Error("请先读取并校验时间表，再开始分割。")',
             frontend,
         )
+
+    def test_product_scan_defaults_to_fast_keyframe_cutting(self) -> None:
+        source = (ROOT / "web_client" / "server.py").read_text(encoding="utf-8")
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        index = (ROOT / "web_client" / "frontend" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("fast_cut: bool = True", source)
+        self.assertIn("fast_copy=bool(payload.fast_cut)", source)
+        self.assertIn('fast_cut: $("ps-fast-cut")?.checked !== false', frontend)
+        self.assertIn('id="ps-fast-cut" type="checkbox" checked', index)
+
+    def test_product_scan_uses_one_live_start_input_and_hides_inactive_panels(self) -> None:
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        index = (ROOT / "web_client" / "frontend" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(index.count('id="ps-live-start-time"'), 1)
+        self.assertNotIn("ps-clock-live-start-time", index)
+        self.assertIn('data-ps-live-start hidden', index)
+        self.assertIn('panel.hidden = !productScanNeedsLiveStart();', frontend)
+        self.assertIn('.alignment-mode-panel[hidden]', styles)
+        self.assertIn('max-height: none;', styles)
+
+    def test_product_scan_result_list_stays_in_its_grid_row_and_uses_short_timestamp_labels(self) -> None:
+        frontend = (
+            ROOT / "web_client" / "frontend" / "assets" / "app.js"
+        ).read_text(encoding="utf-8")
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(r"/20\d{6}(\d{2})(\d{2})(?:\d{2})?/", frontend)
+        self.assertIn('const route = `排表 ${target} → ${actual}`;', frontend)
+        self.assertIn('align-items: stretch;', styles)
+        self.assertIn('contain: size;', styles)
+        self.assertIn('.product-scan-range-route', styles)
 
 
 if __name__ == "__main__":

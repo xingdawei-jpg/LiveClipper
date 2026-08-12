@@ -2132,6 +2132,8 @@ class ProductScanPayload(BaseModel):
     advance_seconds: int = Field(default=0, ge=0, le=600)
     video_start_offset: str = ""
     live_start_time: str = ""
+    schedule_time_basis: str = "relative"
+    fast_cut: bool = True
 
 
 class VideoSplitPayload(BaseModel):
@@ -3605,6 +3607,17 @@ def _parse_live_start_datetime(value: Any, video_values: list[str] | None = None
     text = str(value or "").strip().replace("：", ":").replace("T", " ")
     if not text:
         return None
+    # ``strptime`` accepts one-digit minute/second fields.  Therefore a
+    # 12-digit compact value such as ``202608051219`` can be incorrectly
+    # consumed by ``%Y%m%d%H%M%S`` as 12:01:09.  Select the compact format by
+    # its exact length before attempting the more permissive date formats.
+    compact_match = re.fullmatch(r"\d{12}|\d{14}", text)
+    if compact_match:
+        compact_format = "%Y%m%d%H%M%S" if len(text) == 14 else "%Y%m%d%H%M"
+        try:
+            return datetime.strptime(text, compact_format)
+        except ValueError:
+            raise ValueError("直播开始时间格式不正确")
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y%m%d%H%M%S", "%Y%m%d%H%M"):
         try:
             return datetime.strptime(text, fmt)
@@ -3627,6 +3640,30 @@ def _parse_live_start_datetime(value: Any, video_values: list[str] | None = None
     if base_date is None:
         base_date = datetime.now().date()
     return datetime.combine(base_date, datetime.min.time()).replace(hour=hour, minute=minute, second=second)
+
+
+def _parse_product_scan_time_basis(value: Any) -> str:
+    basis = str(value or "relative").strip().lower()
+    if basis in {"", "relative"}:
+        return "relative"
+    if basis == "clock":
+        return "clock"
+    raise ValueError("表格时间类型只能是“开播后时长”或“时钟时间”")
+
+
+def _normalize_product_scan_clock_schedule(
+    schedule: list[dict[str, Any]],
+    time_basis: str,
+    live_start: datetime | None,
+    log_fn=None,
+) -> None:
+    if time_basis != "clock":
+        return
+    if live_start is None:
+        raise ValueError("表格已选择“时钟时间”，请填写直播开播时间后再校验。")
+    from schedule_splitter import normalize_clock_schedule_to_live_offsets
+
+    normalize_clock_schedule_to_live_offsets(schedule, live_start, log_fn=log_fn)
 
 
 def _shift_schedule_offsets(schedule: list[dict[str, Any]], offset_seconds: float) -> None:
@@ -3652,10 +3689,140 @@ def _schedule_overlap_count(schedule: list[dict[str, Any]], total_seconds: float
     return count
 
 
+def _apply_product_scan_advance(groups: list[dict[str, Any]], advance_seconds: int | float) -> list[dict[str, Any]]:
+    """Keep the requested range and extend only its leading edge when needed."""
+    try:
+        advance = max(0.0, float(advance_seconds or 0))
+    except (TypeError, ValueError):
+        advance = 0.0
+    adjusted: list[dict[str, Any]] = []
+    for group in groups:
+        item = dict(group)
+        segments = []
+        for start, end in list(group.get("segments") or []):
+            start = max(0.0, float(start) - advance)
+            end = float(end)
+            if end - start >= 10:
+                segments.append((start, end))
+        if not segments:
+            continue
+        item["segments"] = segments
+        item["total_duration"] = sum(end - start for start, end in segments)
+        adjusted.append(item)
+    return adjusted
+
+
+def _product_scan_coverage_stats(coverage_groups: list[dict[str, Any]]) -> dict[str, int | float]:
+    stats: dict[str, int | float] = {
+        "groups": len(coverage_groups),
+        "export_groups": 0,
+        "ranges": 0,
+        "covered_ranges": 0,
+        "partial_ranges": 0,
+        "missing_ranges": 0,
+        "covered_duration": 0.0,
+        "missing_duration": 0.0,
+    }
+    for group in coverage_groups:
+        if str(group.get("status") or "") != "missing":
+            stats["export_groups"] += 1
+        for record in list(group.get("ranges") or []):
+            stats["ranges"] += 1
+            status = str(record.get("status") or "missing")
+            if status == "covered":
+                stats["covered_ranges"] += 1
+            elif status == "partial":
+                stats["partial_ranges"] += 1
+            else:
+                stats["missing_ranges"] += 1
+            stats["covered_duration"] += float(record.get("covered_duration") or 0.0)
+            stats["missing_duration"] += float(record.get("missing_duration") or 0.0)
+    return stats
+
+
+def _product_scan_feedback_key(name: Any) -> str:
+    raw_name = str(name or "").strip()
+    safe_name = _clean_forbidden_title_text(raw_name, fallback=raw_name or "output")
+    return re.sub(r"\s+", " ", safe_name.strip()).casefold()
+
+
+def _product_scan_cut_feedback(
+    coverage_groups: list[dict[str, Any]],
+    exported_results: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return one human-readable cut outcome per schedule group for the inspector."""
+    exported_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in exported_results or []:
+        key = _product_scan_feedback_key(item.get("name"))
+        if key:
+            exported_by_name.setdefault(key, []).append(item)
+
+    feedback: list[dict[str, Any]] = []
+    has_exports = exported_results is not None
+    for group in coverage_groups:
+        name = str(group.get("name") or "")
+        exports = exported_by_name.get(_product_scan_feedback_key(name), [])
+        covered_duration = max(0.0, float(group.get("covered_duration") or 0.0))
+        if exports:
+            duration = sum(max(0.0, float(item.get("duration_seconds") or 0.0)) for item in exports)
+            fast_copy = any(str(item.get("cut_mode") or "") == "fast-copy" for item in exports)
+            feedback.append({
+                "name": name,
+                "status": "success",
+                "label": "已切割",
+                "message": (
+                    "已生成 %d 段，极速预计 %s（允许关键帧偏差）"
+                    % (len(exports), _hms(duration))
+                    if fast_copy
+                    else "已生成 %d 段，共 %s" % (len(exports), _hms(duration)
+                    )
+                ),
+                "output_count": len(exports),
+                "duration": duration,
+                "output_paths": [str(item.get("output_path") or "") for item in exports if item.get("output_path")],
+            })
+        elif str(group.get("status") or "missing") == "missing":
+            feedback.append({
+                "name": name,
+                "status": "skipped",
+                "label": "未切割",
+                "message": "本批素材未覆盖，未生成文件",
+                "output_count": 0,
+                "duration": 0.0,
+                "output_paths": [],
+            })
+        elif has_exports:
+            feedback.append({
+                "name": name,
+                "status": "failed",
+                "label": "未生成",
+                "message": "已校验可切，但本次未生成文件",
+                "output_count": 0,
+                "duration": 0.0,
+                "output_paths": [],
+            })
+        else:
+            feedback.append({
+                "name": name,
+                "status": "ready",
+                "label": "待切割",
+                "message": "已校验，预计切割 %s" % _hms(covered_duration),
+                "output_count": 0,
+                "duration": covered_duration,
+                "output_paths": [],
+            })
+    return feedback
+
+
 def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], errors: list[str]) -> None:
     excel = str(data.get("excel_path") or "").strip()
     video_values = [str(v or "").strip() for v in (data.get("video_paths") or []) if str(v or "").strip()]
     if not excel or not video_values:
+        return
+    try:
+        schedule_time_basis = _parse_product_scan_time_basis(data.get("schedule_time_basis"))
+    except ValueError as exc:
+        errors.append(str(exc))
         return
     try:
         requested_video_start = _parse_offset_seconds(data.get("video_start_offset"))
@@ -3667,76 +3834,76 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
     except ValueError as exc:
         errors.append(f"直播开始时间格式不正确：{exc}")
         return
+    if schedule_time_basis == "clock" and requested_live_start is None:
+        errors.append("表格已选择“时钟时间”，请填写直播开播时间后再校验。")
+        return
     try:
-        from copy import deepcopy
-        from schedule_splitter import _parse_video_time, _probe_durations, align_schedule_to_video, read_excel
+        from schedule_splitter import (
+            _parse_datetime_from_name,
+            align_schedule_to_video,
+            build_schedule_coverage,
+            group_by_product,
+            read_excel,
+        )
 
-        schedule, live_start = read_excel(excel)
+        schedule, live_start = read_excel(excel, time_basis=schedule_time_basis)
         if not schedule:
             errors.append("排品表未读取到有效商品时间段，请确认 Excel 格式是否正确。")
             return
-        durations = _probe_durations(video_values, ffmpeg_cmd=_ffmpeg_cmd())
-        total = sum(float(item or 0) for item in durations)
-        if total <= 0:
-            warnings.append("未能读取视频总时长，无法提前校验排品表时间范围。")
-            return
+        _normalize_product_scan_clock_schedule(
+            schedule,
+            schedule_time_basis,
+            requested_live_start,
+        )
 
         if requested_video_start is not None:
             _shift_schedule_offsets(schedule, requested_video_start)
-            min_start, max_end = _schedule_range(schedule)
-            overlap_count = _schedule_overlap_count(schedule, total)
-            if overlap_count:
-                skipped = max(0, len(schedule) - overlap_count)
-                note = f"，会跳过 {skipped} 条不在所选视频范围内的时段" if skipped else ""
-                warnings.append(
-                    f"已按所选视频起点 {_hms(requested_video_start)} 定位：可切 {overlap_count} 条时段{note}。"
-                )
+            alignment_label = f"所选视频起点 {_hms(requested_video_start)}"
+        else:
+            if requested_live_start is None:
+                errors.append("按文件名自动对齐需要填写直播开播时间。")
                 return
-            errors.append(
-                "按所选视频起点定位后，排品表时间仍不在视频范围内："
-                f"对齐后 {_hms(min_start)}~{_hms(max_end)}，所选视频总时长 {_hms(total)}。"
+            has_all_video_timestamps = bool(video_values) and all(
+                _parse_datetime_from_name(path) is not None for path in video_values
             )
-            return
+            if requested_live_start is not None and not has_all_video_timestamps:
+                errors.append("自动对齐要求每个所选视频文件名都含完整日期时间；否则请改用手动起点。")
+                return
+            live_start_for_align = requested_live_start or live_start
+            align_schedule_to_video(
+                schedule,
+                video_values,
+                live_start_for_align,
+                ffmpeg_cmd=_ffmpeg_cmd(),
+            )
+            alignment_label = "直播开始时间" if requested_live_start is not None else "排品表时间"
 
-        min_start, max_end = _schedule_range(schedule)
-        has_video_timestamps = any(_parse_video_time(path) is not None for path in video_values)
-        live_start_for_align = requested_live_start or live_start
-        if requested_live_start is not None and not has_video_timestamps:
-            errors.append("已填写直播开始时间，但所选视频文件名没有可识别时间戳，无法自动定位。")
-            return
-        if min_start >= -5 and max_end <= total + 5 and not (live_start_for_align and has_video_timestamps):
-            return
-
-        aligned = deepcopy(schedule)
-        align_schedule_to_video(aligned, video_values, live_start_for_align, ffmpeg_cmd=_ffmpeg_cmd())
-        aligned_min, aligned_max = _schedule_range(aligned)
-        overlap_count = _schedule_overlap_count(aligned, total)
-        if overlap_count:
-            skipped = max(0, len(aligned) - overlap_count)
-            label = "直播开始时间" if requested_live_start is not None else "视频文件名"
-            if skipped:
-                warnings.append(
-                    f"排品表已按{label}对齐：可切 {overlap_count} 条时段，会跳过 {skipped} 条不在所选视频范围内的时段；"
-                    f"对齐后范围 {_hms(aligned_min)}~{_hms(aligned_max)}，视频总时长 {_hms(total)}。"
-                )
-            elif aligned_min < -5 or aligned_max > total + 5:
-                warnings.append(
-                    f"排品表已按{label}对齐，边界时段将按视频范围截取："
-                    f"对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}，视频总时长 {_hms(total)}。"
-                )
-            elif aligned_min != min_start or aligned_max != max_end:
-                warnings.append(
-                    f"排品表时间已按{label}自动对齐：表格范围 {_hms(min_start)}~{_hms(max_end)}，"
-                    f"对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}。"
-                )
-            return
-
-        errors.append(
-            "排品表时间不在视频范围内："
-            f"表格范围 {_hms(min_start)}~{_hms(max_end)}，"
-            f"对齐后 {_hms(aligned_min)}~{_hms(aligned_max)}，"
-            f"所选视频总时长 {_hms(total)}。请确认视频是否选全、顺序是否正确，或排品表直播开始时间是否匹配。"
+        groups = _apply_product_scan_advance(
+            group_by_product(schedule),
+            data.get("advance_seconds") or 0,
         )
+        coverage_groups, timeline = build_schedule_coverage(
+            groups,
+            video_values,
+            ffmpeg_cmd=_ffmpeg_cmd(),
+        )
+        if not timeline or not any(float(item.get("duration") or 0.0) >= 0.5 for item in timeline):
+            warnings.append("未能读取所选视频时长，暂时无法核对逐文件覆盖范围。")
+            return
+        if any(bool(item.get("estimated")) for item in timeline):
+            warnings.append("部分文件名缺少完整日期时间，当前按所选顺序估算，不能识别中间断档。")
+
+        stats = _product_scan_coverage_stats(coverage_groups)
+        usable = int(stats["covered_ranges"]) + int(stats["partial_ranges"])
+        if not usable:
+            errors.append("排品表没有任何时段落在本批导入视频的真实范围内。请检查视频起点或直播开始时间。")
+            return
+        note = (
+            f"完整覆盖 {stats['covered_ranges']} 条"
+            f"，部分覆盖 {stats['partial_ranges']} 条"
+            f"，未覆盖 {stats['missing_ranges']} 条"
+        )
+        warnings.append(f"已按{alignment_label}逐文件对齐：{note}；未覆盖时段不会导出。")
     except Exception as exc:
         warnings.append(f"排品表时间范围预棢失败：{exc}")
 
@@ -3757,6 +3924,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         "ai-scan",
         "ai-scan-export",
         "ai-scan-export-merge",
+        "product-scan-read",
         "product-scan",
         "video-split",
         "dedup",
@@ -3826,12 +3994,11 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_ai_settings(feature, warnings)
-    elif feature == "product-scan-read":
-        _preflight_single_file(data.get("excel_path"), "Excel 时间表", errors, required=True)
-    elif feature == "product-scan":
+    elif feature in {"product-scan-read", "product-scan"}:
         _preflight_single_file(data.get("excel_path"), "Excel 时间表", errors, required=True)
         _preflight_file_list(data.get("video_paths"), "直播视频", errors, min_count=1)
-        _preflight_output_dir(data.get("output_dir"), warnings, errors)
+        if feature == "product-scan":
+            _preflight_output_dir(data.get("output_dir"), warnings, errors)
         if not errors:
             _preflight_product_schedule(data, warnings, errors)
     elif feature == "video-split":
@@ -8639,33 +8806,63 @@ def _run_product_scan_read(task_id: str, payload: ProductScanPayload) -> None:
     scope = "product-scan"
     _set_task(task_id, status="running", started_at=time.time(), progress=8, message="读取时间表")
     try:
-        from schedule_splitter import align_schedule_to_video, group_by_product, read_excel
+        from schedule_splitter import align_schedule_to_video, build_schedule_coverage, group_by_product, read_excel
 
         excel = _clean_path(payload.excel_path)
         if not excel.exists():
             raise FileNotFoundError("Excel 文件不存在。")
-        schedule, live_start = read_excel(str(excel), log_fn=_task_log_fn(task_id, scope, base=10, span=18))
-        _set_task_progress(task_id, 35, "对齐时间表")
+        videos = _existing_paths(payload.video_paths, "直播视频")
+        time_basis = _parse_product_scan_time_basis(payload.schedule_time_basis)
         video_start_offset = _parse_offset_seconds(payload.video_start_offset)
+        live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+        schedule, live_start = read_excel(
+            str(excel),
+            log_fn=_task_log_fn(task_id, scope, base=10, span=18),
+            time_basis=time_basis,
+        )
+        _normalize_product_scan_clock_schedule(
+            schedule,
+            time_basis,
+            live_start_override,
+            log_fn=lambda message: emit_log("info", message, scope),
+        )
+        _set_task_progress(task_id, 35, "对齐时间表")
         if video_start_offset is not None:
             _shift_schedule_offsets(schedule, video_start_offset)
             emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
         else:
-            live_start_override = _parse_live_start_datetime(payload.live_start_time, payload.video_paths)
-            if live_start_override is not None and payload.video_paths:
-                align_schedule_to_video(schedule, [str(v) for v in payload.video_paths], live_start_override, log_fn=lambda msg: emit_log("info", msg, scope), ffmpeg_cmd=_ffmpeg_cmd())
-                emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
+            if live_start_override is None:
+                raise ValueError("按文件名自动对齐需要填写直播开播时间。")
+            align_schedule_to_video(schedule, [str(v) for v in videos], live_start_override or live_start, log_fn=lambda msg: emit_log("info", msg, scope), ffmpeg_cmd=_ffmpeg_cmd())
+            emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
         _set_task_progress(task_id, 78, "分组商品")
-        groups = group_by_product(schedule)
+        groups = _apply_product_scan_advance(group_by_product(schedule), payload.advance_seconds)
+        coverage_groups, timeline = build_schedule_coverage(
+            groups,
+            [str(v) for v in videos],
+            ffmpeg_cmd=_ffmpeg_cmd(),
+            log_fn=_task_log_fn(task_id, scope, base=78, span=12),
+        )
+        stats = _product_scan_coverage_stats(coverage_groups)
+        usable = int(stats["covered_ranges"]) + int(stats["partial_ranges"])
+        if not usable:
+            raise ValueError("没有时段落在本批导入视频的真实范围内。请检查视频起点或直播开始时间。")
         with _SCAN_LOCK:
             _SCAN_RESULTS["schedule"] = schedule
             _SCAN_RESULTS["live_start"] = live_start
-            _SCAN_RESULTS["schedule_groups"] = groups
+            _SCAN_RESULTS["schedule_groups"] = coverage_groups
+            _SCAN_RESULTS["schedule_timeline"] = timeline
+            _SCAN_RESULTS["schedule_feedback"] = _product_scan_cut_feedback(coverage_groups)
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
             return
-        emit_log("success", f"时间表读取完成：{len(schedule)} 条记录，{len(groups)} 个商品。", scope)
-        _set_task(task_id, status="completed", finished_at=time.time(), result_count=len(groups))
+        emit_log(
+            "success",
+            "时间表读取完成：%d 条记录，完整覆盖 %d 条，部分覆盖 %d 条，未覆盖 %d 条。"
+            % (len(schedule), stats["covered_ranges"], stats["partial_ranges"], stats["missing_ranges"]),
+            scope,
+        )
+        _set_task(task_id, status="completed", finished_at=time.time(), result_count=int(stats["export_groups"]))
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"读取时间表失败：{exc}", scope)
@@ -8676,7 +8873,14 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="准备单品分割")
     try:
         _ensure_feature_access("单品扫描")
-        from schedule_splitter import align_schedule_to_video, extract_by_schedule, group_by_product, read_excel
+        from schedule_splitter import (
+            align_schedule_to_video,
+            build_schedule_coverage,
+            extract_by_schedule,
+            group_by_product,
+            groups_with_coverage,
+            read_excel,
+        )
 
         excel = _clean_path(payload.excel_path)
         videos = _existing_paths(payload.video_paths, "直播视频")
@@ -8687,41 +8891,83 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             raise FileNotFoundError("Excel 文件不存在。")
         out_dir.mkdir(parents=True, exist_ok=True)
         _set_task_progress(task_id, 12, "读取时间表")
-        schedule, live_start = read_excel(str(excel), log_fn=_task_log_fn(task_id, scope, base=12, span=14))
-        _set_task_progress(task_id, 30, "对齐视频时间")
+        time_basis = _parse_product_scan_time_basis(payload.schedule_time_basis)
         video_start_offset = _parse_offset_seconds(payload.video_start_offset)
+        live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+        schedule, live_start = read_excel(
+            str(excel),
+            log_fn=_task_log_fn(task_id, scope, base=12, span=14),
+            time_basis=time_basis,
+        )
+        _normalize_product_scan_clock_schedule(
+            schedule,
+            time_basis,
+            live_start_override,
+            log_fn=lambda message: emit_log("info", message, scope),
+        )
+        _set_task_progress(task_id, 30, "对齐视频时间")
         if video_start_offset is not None:
             _shift_schedule_offsets(schedule, video_start_offset)
             emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
         else:
-            live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+            if live_start_override is None:
+                raise ValueError("按文件名自动对齐需要填写直播开播时间。")
             align_schedule_to_video(schedule, [str(v) for v in videos], live_start_override or live_start, log_fn=_task_log_fn(task_id, scope, base=30, span=20), ffmpeg_cmd=_ffmpeg_cmd())
-            if live_start_override is not None:
-                emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
-        groups = group_by_product(schedule)
+            emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
+        groups = _apply_product_scan_advance(group_by_product(schedule), payload.advance_seconds)
         _set_task_progress(task_id, 58, "整理商品片段")
-        if payload.advance_seconds > 0:
-            for group in groups:
-                segments = [(max(0, s - payload.advance_seconds), max(0, e - payload.advance_seconds)) for s, e in group.get("segments", [])]
-                group["segments"] = [(s, e) for s, e in segments if e - s >= 10]
-                group["total_duration"] = sum(e - s for s, e in group["segments"])
-        groups = [g for g in groups if g.get("segments")]
+        coverage_groups, _timeline = build_schedule_coverage(
+            groups,
+            [str(v) for v in videos],
+            ffmpeg_cmd=_ffmpeg_cmd(),
+            log_fn=_task_log_fn(task_id, scope, base=58, span=8),
+        )
+        stats = _product_scan_coverage_stats(coverage_groups)
+        groups = groups_with_coverage(coverage_groups)
+        if not groups:
+            raise ValueError("本批视频没有可导出的讲解时段；未覆盖时段已跳过。")
         for group in groups:
             group["name"] = _clean_forbidden_title_text(group.get("name") or "未命名商品", fallback="未命名商品")
-        _set_task_progress(task_id, 68, f"导出 {len(groups)} 个商品")
-        results = extract_by_schedule(groups, [str(v) for v in videos], str(out_dir), ffmpeg=_ffmpeg_cmd(), log_fn=_task_log_fn(task_id, scope, base=68, span=24))
+        emit_log(
+            "info",
+            "逐文件覆盖：完整 %d 条，部分 %d 条，跳过未覆盖 %d 条。"
+            % (stats["covered_ranges"], stats["partial_ranges"], stats["missing_ranges"]),
+            scope,
+        )
+        _set_task_progress(task_id, 68, f"导出 {len(groups)} 个有覆盖的商品")
+        if payload.fast_cut:
+            emit_log("info", "极速切割已开启：按关键帧直接分段，允许少量时间偏差；跨文件分别输出。", scope)
+        results = extract_by_schedule(
+            groups,
+            [str(v) for v in videos],
+            str(out_dir),
+            ffmpeg=_ffmpeg_cmd(),
+            log_fn=_task_log_fn(task_id, scope, base=68, span=24),
+            fast_copy=bool(payload.fast_cut),
+        )
         exported_results = []
         for item in results:
             output_path = Path(str(item.get("output_path") or ""))
             if output_path.is_file() and output_path.stat().st_size > 1000:
                 exported_results.append({**item, "output_path": str(output_path)})
         ok_count = len(exported_results)
+        with _SCAN_LOCK:
+            _SCAN_RESULTS["schedule_groups"] = coverage_groups
+            _SCAN_RESULTS["schedule_feedback"] = _product_scan_cut_feedback(coverage_groups, exported_results)
         _set_task_progress(task_id, 95, "校验导出结果")
         if not exported_results:
             raise RuntimeError("没有导出任何视频。请检查 Excel 时间段是否落在所选视频范围内，并确认源视频可读、输出目录可写。")
         for item in exported_results[:10]:
             output_path = Path(str(item.get("output_path") or ""))
-            emit_log("success", f"已导出：{output_path.parent.name}\\{output_path.name}（{item.get('size_mb', 0)} MB）", scope)
+            duration_label = (
+                "极速预计 " if str(item.get("cut_mode") or "") == "fast-copy" else ""
+            )
+            emit_log(
+                "success",
+                f"已导出：{output_path.parent.name}\\{output_path.name}"
+                f"（{duration_label}{_hms(float(item.get('duration_seconds') or 0))}）",
+                scope,
+            )
         if len(exported_results) > 10:
             emit_log("success", f"另有 {len(exported_results) - 10} 个视频已导出到：{out_dir}", scope)
         if ok_count:
@@ -12999,6 +13245,8 @@ def scan_results() -> dict[str, Any]:
         flat = list(_SCAN_RESULTS.get("flat") or [])
         merged = list(_SCAN_RESULTS.get("merged") or [])
         groups = list(_SCAN_RESULTS.get("schedule_groups") or [])
+        timeline = list(_SCAN_RESULTS.get("schedule_timeline") or [])
+        feedback = list(_SCAN_RESULTS.get("schedule_feedback") or [])
 
     def _product(item: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -13017,17 +13265,70 @@ def scan_results() -> dict[str, Any]:
         }
 
     def _group(item: dict[str, Any]) -> dict[str, Any]:
+        raw_records = item.get("ranges")
+        if not isinstance(raw_records, list):
+            legacy_ranges = []
+            for start, end in list(item.get("segments") or [])[:12]:
+                try:
+                    legacy_ranges.append({"start": float(start), "end": float(end)})
+                except (TypeError, ValueError):
+                    continue
+            return {
+                "name": item.get("name", ""),
+                "segments": len(item.get("segments") or []),
+                "total_duration": item.get("total_duration", 0),
+                "ranges": legacy_ranges,
+            }
         ranges = []
-        for start, end in list(item.get("segments") or [])[:12]:
+        for record in raw_records[:12]:
             try:
-                ranges.append({"start": float(start), "end": float(end)})
+                parts = []
+                for part in list(record.get("parts") or [])[:4]:
+                    parts.append({
+                        "video": os.path.basename(str(part.get("video") or "")),
+                        "file_start": float(part.get("file_start") or 0.0),
+                        "file_end": float(part.get("file_end") or 0.0),
+                        "duration": float(part.get("duration") or 0.0),
+                    })
+                ranges.append({
+                    "start": float(record.get("schedule_start") or 0.0),
+                    "end": float(record.get("schedule_end") or 0.0),
+                    "expected_duration": float(record.get("expected_duration") or 0.0),
+                    "covered_duration": float(record.get("covered_duration") or 0.0),
+                    "missing_duration": float(record.get("missing_duration") or 0.0),
+                    "status": str(record.get("status") or "missing"),
+                    "parts": parts,
+                })
             except (TypeError, ValueError):
                 continue
         return {
             "name": item.get("name", ""),
-            "segments": len(item.get("segments") or []),
+            "segments": int(item.get("segments") or 0),
             "total_duration": item.get("total_duration", 0),
+            "covered_duration": item.get("covered_duration", 0),
+            "missing_duration": item.get("missing_duration", 0),
+            "status": str(item.get("status") or "missing"),
             "ranges": ranges,
+        }
+
+    def _timeline(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": os.path.basename(str(item.get("name") or item.get("video") or "")),
+            "start": float(item.get("start") or 0.0),
+            "end": float(item.get("end") or 0.0),
+            "duration": float(item.get("duration") or 0.0),
+            "estimated": bool(item.get("estimated")),
+        }
+
+    def _feedback(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": str(item.get("name") or ""),
+            "status": str(item.get("status") or "ready"),
+            "label": str(item.get("label") or ""),
+            "message": str(item.get("message") or ""),
+            "output_count": max(0, int(item.get("output_count") or 0)),
+            "duration": max(0.0, float(item.get("duration") or 0.0)),
+            "output_paths": [str(path) for path in list(item.get("output_paths") or [])[:8] if str(path)],
         }
 
     return {
@@ -13035,6 +13336,8 @@ def scan_results() -> dict[str, Any]:
         "products": [_product(item) for item in flat[:200]],
         "merged": [_merged(item) for item in merged[:200]],
         "schedule_groups": [_group(item) for item in groups[:200]],
+        "schedule_timeline": [_timeline(item) for item in timeline[:50]],
+        "schedule_feedback": [_feedback(item) for item in feedback[:200]],
     }
 
 

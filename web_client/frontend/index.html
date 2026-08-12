@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260810-ai-workbench-v15">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260812-product-scan-fast-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -1145,44 +1145,76 @@
               <section class="product-scan-section product-scan-alignment" aria-labelledby="ps-alignment-title">
                 <div class="product-scan-section-heading">
                   <div>
-                    <h3 id="ps-alignment-title">2. 对齐时间</h3>
-                    <p>请选择一种方式。手动起点和自动对齐不需要同时填写。</p>
+                    <h3 id="ps-alignment-title">2. 识别表格时间并对齐</h3>
+                    <p>先明确表格里的时间含义，再选择视频的对齐方式；不会自动猜测。</p>
                   </div>
-                  <span class="recommendation-badge">推荐手动</span>
+                  <span class="recommendation-badge">先选表格时间</span>
                 </div>
-                <div class="alignment-choice-grid" role="radiogroup" aria-label="时间对齐方式">
-                  <label class="alignment-choice is-active" data-ps-align-choice="manual">
-                    <input id="ps-align-manual" type="radio" name="ps-align-mode" value="manual" checked>
-                    <span><strong>填写片段起点</strong><small>视频不是从直播开头录制时使用</small></span>
-                  </label>
-                  <label class="alignment-choice" data-ps-align-choice="auto">
-                    <input id="ps-align-auto" type="radio" name="ps-align-mode" value="auto">
-                    <span><strong>按文件名自动对齐</strong><small>文件名含完整日期时间时使用</small></span>
-                  </label>
-                </div>
-
-                <div class="alignment-mode-panel" data-ps-align-panel="manual">
-                  <div class="field-row field-row-stack">
-                    <label for="ps-video-start-offset">片段开始位置</label>
-                    <div>
-                      <input id="ps-video-start-offset" type="text" placeholder="例如 01:28:13">
-                      <p class="field-help">相对直播 00:00:00。例：17:08 开播、片段 18:36:13 开始，填写 <strong>01:28:13</strong>。</p>
+                <div class="product-scan-decision-stack">
+                  <section class="product-scan-decision" aria-labelledby="ps-time-basis-title">
+                    <div class="product-scan-decision-heading">
+                      <span>第一步</span>
+                      <div>
+                        <strong id="ps-time-basis-title">表格里的时间代表什么？</strong>
+                        <small>按排品表实际写法选择，系统不会自动猜测。</small>
+                      </div>
                     </div>
-                  </div>
-                </div>
-
-                <div class="alignment-mode-panel" data-ps-align-panel="auto" hidden>
-                  <div class="field-row field-row-stack">
-                    <label for="ps-live-start-time">直播开播时间</label>
-                    <div>
-                      <input id="ps-live-start-time" type="text" placeholder="例如 2026-03-13 17:08">
-                      <p class="field-help">系统会从文件名识别类似 <strong>20260313183613</strong> 的片段开始时间，再自动换算。仅有视频内部时间戳时，请改用手动方式。</p>
+                    <div class="alignment-choice-grid" role="radiogroup" aria-label="表格讲解时间类型">
+                      <label class="alignment-choice is-active" data-ps-time-basis-choice="relative">
+                        <input id="ps-time-basis-relative" type="radio" name="ps-time-basis" value="relative" checked>
+                        <span><strong>开播后时长</strong><small><code>01:04–26:15</code> 表示开播后的第 1 分 04 秒至第 26 分 15 秒</small></span>
+                      </label>
+                      <label class="alignment-choice" data-ps-time-basis-choice="clock">
+                        <input id="ps-time-basis-clock" type="radio" name="ps-time-basis" value="clock">
+                        <span><strong>时钟时间</strong><small><code>12:20:04–12:45:15</code> 表示当天实际的钟表时间</small></span>
+                      </label>
                     </div>
-                  </div>
+                    <p class="field-help">只有表格写的是实际钟表时间时，才需要填写整场直播开播时间。</p>
+                  </section>
+
+                  <section class="product-scan-decision" aria-labelledby="ps-align-mode-title">
+                    <div class="product-scan-decision-heading">
+                      <span>第二步</span>
+                      <div>
+                        <strong id="ps-align-mode-title">视频从直播的哪里开始？</strong>
+                        <small>选择一种可复核的对齐依据。</small>
+                      </div>
+                    </div>
+                    <div class="alignment-choice-grid" role="radiogroup" aria-label="时间对齐方式">
+                      <label class="alignment-choice is-active" data-ps-align-choice="manual">
+                        <input id="ps-align-manual" type="radio" name="ps-align-mode" value="manual" checked>
+                        <span><strong>手动填写片段起点</strong><small>文件名没有可靠时间戳时使用</small></span>
+                      </label>
+                      <label class="alignment-choice" data-ps-align-choice="auto">
+                        <input id="ps-align-auto" type="radio" name="ps-align-mode" value="auto">
+                        <span><strong>文件名有时间戳，自动识别</strong><small>自动读取如 202608051219 的片段起点</small></span>
+                      </label>
+                    </div>
+
+                    <div class="alignment-mode-panel" data-ps-align-panel="manual">
+                      <label for="ps-video-start-offset">本段视频从直播第几秒开始</label>
+                      <div>
+                        <input id="ps-video-start-offset" type="text" placeholder="例如 01:28:13">
+                        <p class="field-help">例如直播 17:08 开始、这段视频 18:36:13 开始，填写 <strong>01:28:13</strong>。</p>
+                      </div>
+                    </div>
+
+                    <div class="alignment-mode-panel" data-ps-live-start hidden>
+                      <label for="ps-live-start-time" data-ps-live-start-label>整场直播开播时间</label>
+                      <div>
+                        <input id="ps-live-start-time" type="text" placeholder="例如 2026-03-13 17:08">
+                        <p class="field-help" data-ps-live-start-help>这不是视频起点；系统会自动读取文件名时间戳。可填 <strong>202608051219</strong> 或 <strong>2026-08-05 12:19</strong>。</p>
+                      </div>
+                    </div>
+                  </section>
                 </div>
 
                 <details class="product-scan-advanced">
                   <summary>高级设置</summary>
+                  <label class="product-scan-fast-cut" for="ps-fast-cut">
+                    <input id="ps-fast-cut" type="checkbox" checked>
+                    <span><strong>极速切割（推荐）</strong><small>按关键帧直接分段，允许少量时间偏差；不标准化、不重编码，跨文件分别输出。</small></span>
+                  </label>
                   <div class="field-row compact">
                     <label for="ps-advance">提前秒数</label>
                     <div>
@@ -2086,6 +2118,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260810-ai-workbench-v15" defer></script>
+  <script src="/assets/app.js?v=20260812-product-scan-fast-v1" defer></script>
 </body>
 </html>

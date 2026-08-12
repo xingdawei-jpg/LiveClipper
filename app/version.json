@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "runtime_layout_version": 3,
-  "build_id": "2026.8.11.2",
-  "version": "2026.8.11.2",
-  "latest_version": "2026.8.11.2",
+  "build_id": "2026.8.12.1",
+  "version": "2026.8.12.1",
+  "latest_version": "2026.8.12.1",
   "update_strategy": "verified-version-delta-with-full-fallback",
   "update_engine_version": 3,
   "supports_incremental_updates": true,
@@ -20,9 +20,9 @@
     "app/keywords.json": "f217ad7733b68b0ab8fde9025ab3f64af42bd66b1c5a2b7ea4a7b88b6aae9744",
     "app/license_public_key.txt": "453baada246ccee4cf3a7036e9e9762edf39424d6bc94a7be2ed6dc46d32ebf2",
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
-    "web_client/frontend/index.html": "bca049276b21a4dacfd114be0a57c106d0fbbb256954ca9cf38c05328e762501",
-    "web_client/frontend/assets/app.js": "681b8d135ddf60a716fbb108ccb7d623a0938285ec56f1b844cbd25186b9619a",
-    "web_client/frontend/assets/styles.css": "2db6dcf1ab42038cda68d155b2d6da0d4d1068c515447095ae8801e424b42112",
+    "web_client/frontend/index.html": "2e213cfe44a2909a28778f9033b1f1aaff57ed5f3d482848c305faa4655e2658",
+    "web_client/frontend/assets/app.js": "ad255b369ed5b127d7f0ad8c2ae98fae39e1b77e4354f5dfc6dc0a35d3b35bf2",
+    "web_client/frontend/assets/styles.css": "6475c6765855d55c498cb4721fed14a1b4c7bf2a307dafa44b1e0bee1725cd87",
     "web_client/frontend/assets/liveclipper.ico": "84edefc5911005367e27a63cdb784e7b53aca1bf3a0de0a1510e5409b63f9baa",
     "web_client/native_file_drop_bridge.dll": "c28e38886e9006d471719a01882ccc0717b086f7f248b6cfb2b6604b5b283a35",
     "web_client/tools/local_asr_worker.py": "47b1bf7937efa77c7dc3a17a7f33833ac2df0a23ff175a5672e25b7eef63aca2",
@@ -44,7 +44,7 @@
   ],
   "source_files": {
     "web_client/desktop.py": "2d36ddfd821199a058cfbdd2d98d6bcec0e5d8be9979714a50f7431755e64bad",
-    "web_client/server.py": "8cc68b13229c0f4baa2adbf126a76ffd97113d582ee265b67417f31f84fb7014",
+    "web_client/server.py": "978a04e946c1984dbe3c12c372fc0f90caac239dd18504e9aa8a42b4dd4608e9",
     "web_client/native_file_drop_bridge.cs": "d20c17dd280b1245044a172744bc2594344a28535d97d92936cf011c6cef4df3",
     "web_client/liveclipper_web.spec": "0b080dcba1986fac0d63deaef93d2afc4e2be829184d5761185936d4f524307f",
     "app/release_signing.py": "b5532222dd0945668ea3aa0e30157226f69546010cf460ff6ef3cbc9fe60d4c3",
@@ -98,7 +98,7 @@
     "app/release_update_public_key.pem": "e20f1e7f2fbbe04db467989fe58487d25406b556ad574b9d660056737d97a6da",
     "app/run_pipeline.py": "7416d4918558bfc3f0bd23b5215f14fcf91dbe4090bcdfa65eef2e5400db5313",
     "app/schedule_page.py": "be42c9f235a153489792ad86620f916661394ea5c6aff6cc0082f4d247577670",
-    "app/schedule_splitter.py": "a9aa50f8e973895bf99c85c50500ea4f037ae8cee3035726dc5f25a8ae6e8471",
+    "app/schedule_splitter.py": "ca6af12425dee25fbe3b6733486e9aab5ead70327ec06ed7276f587d127369b8",
     "app/selection_context.py": "53441cddc2d3bbc88a000837600adb5f896ee20b47b269a41280de02c9e8417a",
     "app/selection_continuity.py": "601279bd410415a134d302d64c901e77e5d164d897d5c656626b4628d1021327",
     "app/selection_contracts.py": "4039237f7ed823471a58aabf8b9e8b51d8382aa3d173cdf480a3caeb31156b3f",
@@ -113,9 +113,9 @@
     "app/updater.py": "5806b7653c0aed5c4655250244d971d1459b62b8cfd9e3f26ffba80ce6d1132e",
     "app/volcengine_asr.py": "d1586d6c996739c236eb7c119bddd6cf1fb02a5ef8c8f7b27d9ae7a4f23b7b3f"
   },
-  "release_notes": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性与词级时间修复；单品扫描新增显式时间对齐、校验预览和失败复位；预览重试与批处理结果优化。",
-  "update_message": "AI选片内容审稿、营销意图与内容政策优化；SenseVoice稳定性与词级时间修复；单品扫描新增显式时间对齐、校验预览和失败复位；预览重试与批处理结果优化。",
+  "release_notes": "单品扫描支持开播后时长与实际钟表时间；按真实视频范围校验覆盖和断档；新增极速关键帧切割、跨文件输出及逐商品结果反馈。",
+  "update_message": "单品扫描支持开播后时长与实际钟表时间；按真实视频范围校验覆盖和断档；新增极速关键帧切割、跨文件输出及逐商品结果反馈。",
   "update_url": "",
   "force_update": true,
-  "updated_at": "2026-08-11 21:14:42"
+  "updated_at": "2026-08-12 09:09:01"
 }
