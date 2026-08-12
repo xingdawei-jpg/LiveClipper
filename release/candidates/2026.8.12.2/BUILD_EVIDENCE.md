@@ -63,8 +63,12 @@
 - Cache-busted and direct public `stable.json` downloads matched the local ready document byte-for-byte.
 - Both public documents passed signature verification with key id `1905329f73f719d3`.
 - A `2026.8.12.1` / Core `4.0.0` client received the public decision `update_available` for `2026.8.12.2`.
+- Post-publish endpoint smoke check confirmed the OSS channel and OSS archive, including exact document/archive hashes.
+- The two configured fallback channel URLs were not synchronized: the jsDelivr `release/channel/v4/stable.json` URL and `liveclipper-updates.pages.dev/stable.json` both returned HTTP 404.
+- Cloudflare Wrangler and GitHub CLI have no authenticated account in this environment, so the fallback endpoints could not be repaired or published in this run.
 
 ## Remaining external confirmation
 
 - This run completed automated source, signed-package, isolated first-launch, update, health, and rollback validation on the packaging machine.
 - A second physical computer receiving the public channel remains the final external-machine confirmation; do not treat that observation as a substitute for the evidence above.
+- The OSS-first client path is live and offers `2026.8.12.2`; full multi-endpoint publication remains incomplete until both configured fallback channel URLs serve the same signed ready document.
