@@ -48,6 +48,13 @@ _PERSONAL_SIZE_REPLY_PATTERNS = (
         + _SIZE_TOKEN,
         re.I,
     ),
+    # ASR occasionally reverses a personal-size reply into wording such as
+    # "L码你本来高度...".  The pronoun plus body cue keeps this separate from
+    # objective garment facts such as "L码衣长72厘米".
+    re.compile(
+        _SIZE_TOKEN + r".{0,10}(?:我|你|她|他).{0,8}(?:身高|高度|个子|体重|\d{2,3}斤)",
+        re.I,
+    ),
 )
 _PERSONAL_MEASUREMENT_PATTERNS = (
     re.compile(_PERSON + r".{0,10}" + _HEIGHT_VALUE, re.I),
@@ -70,6 +77,23 @@ _WEIGHT_RANGE_FIT_PATTERNS = (
         r"(?:\d{2,3}|[一二三四五六七八九十百]{2,5})斤"
         r"(?:以内|以下|左右|上下|都能|也能)?"
         r".{0,10}(?:轻松)?(?:驾驭|能穿|可穿|穿得|穿上|合适|没问题)",
+        re.I,
+    ),
+    # "80到160斤以内，随便穿" is still a weight-range try-on claim even
+    # when the host omits an explicit size code or "轻松驾驭".
+    re.compile(
+        r"(?:\d{2,3}|[一二三四五六七八九十百]{2,5})斤"
+        r"(?:以内|以下|左右|上下|都能|也能)?"
+        r".{0,10}(?:随便|都能|谁都).{0,4}穿",
+        re.I,
+    ),
+    # A paired "不挑身高，不挑体重" is audience sizing guidance rather
+    # than an objective garment fact, even if the ASR omitted the range.
+    re.compile(
+        r"(?:不挑|不限).{0,5}(?:身高|个子).{0,16}"
+        r"(?:不挑|不限).{0,5}体重"
+        r"|(?:不挑|不限).{0,5}体重.{0,16}"
+        r"(?:不挑|不限).{0,5}(?:身高|个子)",
         re.I,
     ),
 )
@@ -137,6 +161,8 @@ _LIVE_REPLY_PATTERNS = (
     ),
     re.compile(r"(?:姐妹|宝宝|姐姐|家人).{0,16}(?:有|没有|想|要|问|穿|选|拿|看).{0,18}(?:吗|呢|吧|？|\?)"),
     re.compile(r"(?:我们|咱们).{0,12}(?:有|没有|上(?:了)?|做(?:了)?).{0,18}(?:吗|呢|吧|？|\?)"),
+    # Staff coordination is a live-room instruction, not a product claim.
+    re.compile(r"(?:你|帮我|谁).{0,8}(?:把|拿|递|给).{0,14}(?:给我|一下|过来|拿来)"),
 )
 
 

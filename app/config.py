@@ -435,6 +435,50 @@ SUBTITLE_OVERLAY = {
     "keyword_bold": True,
 }
 
+# 成片字幕样式。字体仅引用用户系统中已安装的字体；不随应用分发，避免把
+# 字体授权问题带进安装包。渲染时找不到所选字体会自动回退到平台默认粗体。
+SUBTITLE_FONT_OPTIONS = (
+    "思源粗宋",
+    "细体",
+    "金陵体",
+    "凌丝体",
+    "阳熙体",
+    "苍耳丰黑",
+    "雅乐体",
+)
+
+SUBTITLE_COLOR_OPTIONS = {
+    "white": "白色",
+    "yellow": "黄色",
+    "orange": "橙色",
+    "red": "红色",
+    "pink": "粉色",
+    "purple": "紫色",
+    "blue": "蓝色",
+    "green": "绿色",
+    "black": "黑色",
+}
+
+SUBTITLE_COLOR_HEX = {
+    "white": "FFFFFF",
+    "yellow": "FFD400",
+    "orange": "FF8A00",
+    "red": "FF3B30",
+    "pink": "FF4FA3",
+    "purple": "A855F7",
+    "blue": "3B82F6",
+    "green": "22C55E",
+    "black": "111111",
+}
+
+SUBTITLE_STYLE_DEFAULTS = {
+    "subtitle_font_family": SUBTITLE_FONT_OPTIONS[0],
+    "subtitle_font_color": "white",
+    "subtitle_text_effect": "shadow",
+    "subtitle_opacity": 70,
+    "subtitle_blur": 10,
+}
+
 SUBTITLE_KEYWORDS = [
     "99", "199", "299", "229", "159", "399", "49", "69", "129", "189", "259",
     "元", "块", "到手", "价格", "领券", "优惠", "省",

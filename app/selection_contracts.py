@@ -226,6 +226,10 @@ class SelectionCandidate:
     hook_eligible: bool
     story_block_id: str = ""
     continuity_group_id: str = ""
+    # Subject identity is immutable metadata about the original candidate.  It
+    # governs eligible story positions without rewriting the spoken text.
+    subject_relation: str = "unscoped"
+    role_permissions: tuple[str, ...] = ("hook", "product", "close")
 
     @property
     def duration(self) -> float:
@@ -241,6 +245,8 @@ class SelectionCandidate:
             "hook_eligible": self.hook_eligible,
             "story_block_id": self.story_block_id,
             "continuity_group_id": self.continuity_group_id,
+            "subject_relation": self.subject_relation,
+            "role_permissions": list(self.role_permissions),
         }
 
 

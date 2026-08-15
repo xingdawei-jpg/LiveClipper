@@ -33,7 +33,7 @@ from marketing_intent import (
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
-CONTENT_REVIEW_VERSION = "content-review-v29"
+CONTENT_REVIEW_VERSION = "content-review-v37"
 CONTENT_REVIEW_ENV = "LIVECLIPPER_CONTENT_REVIEW_MODE"
 CONTENT_REVIEW_DEFAULT_MODE = "off"
 CONTENT_REVIEW_MAX_CARDS = 80
@@ -46,6 +46,43 @@ _VALID_TIERS = {"main", "reserve"}
 _VALID_DEPENDENCIES = {"independent", "needs_previous", "needs_next", "needs_both"}
 _VALID_ROLES = {"effect", "evidence", "scene", "objection", "product"}
 _VALID_TARGET_RELATIONS = {"primary", "supporting", "other", "unknown"}
+_VALID_HOOK_PACKAGE_TIERS = {"A", "B", "C"}
+_DIRECTOR_HOOK_PACKAGE_TIERS = {"A", "B"}
+# Hook packages are passed to the same final segment contract as every
+# Product proof.  A longer proof would be deleted later and leave a broken
+# opening, so it is not an executable package at review time.
+_DIRECTOR_OPENING_SEGMENT_MAX_SECONDS = 8.0
+_VALID_HOOK_PROOF_RELATIONS = {
+    "visual_result",
+    "design_reason",
+    "material_evidence",
+    "wearing_experience",
+    "scene_projection",
+    "identity_projection",
+    "social_proof",
+    "source_value",
+    "price_value",
+    "after_sale_confidence",
+    "other_grounded",
+}
+_VALID_HOOK_SEMANTIC_SIGNALS = {
+    "emotion",
+    "strong_judgment",
+    "identity",
+    "style_projection",
+    "pain_hit",
+    "result",
+    "contrast",
+    "curiosity",
+    "scene",
+    "social_proof",
+    "source",
+    "price_value",
+    "after_sale",
+    "cta",
+    "concrete_value",
+}
+_VALID_DELIVERY_SIGNALS = {"unknown", "textual_low", "textual_medium", "textual_high"}
 _LOW_VALUE_QUALITY_TAGS = (
     "泛泛夸赞", "直播铺垫", "展示铺垫", "互动", "残句", "重复", "上新预告",
     "尺码", "身高", "体重",
@@ -63,13 +100,15 @@ _TOPIC_FAMILY_RULES = (
     ("\u573a\u666f\u5403\u6cd5", ("\u5403\u6cd5", "\u65e9\u9910", "\u4e0b\u5348\u8336", "\u96f6\u98df", "\u70f9\u996a")),
     ("\u989c\u8272\u6c1b\u56f4", ("\u989c\u8272", "\u663e\u767d", "\u80a4\u8272", "\u8272\u5f69", "\u4eae\u8272", "\u9971\u548c", "\u8272\u8c03")),
     ("\u7248\u578b\u663e\u7626", ("\u7248\u578b", "\u663e\u7626", "\u906e\u8089", "\u4fee\u9970", "\u6536\u8170", "\u817f\u578b", "\u80a9\u578b")),
+    ("\u4e0a\u8eab\u6548\u679c", ("\u4e0a\u8eab\u6548\u679c", "\u4e0a\u8eab\u53cd\u5dee", "\u8bd5\u7a7f\u6548\u679c", "\u4e0a\u8eab", "\u7a7f\u4e0a", "\u4e00\u7a7f", "\u8bd5\u7a7f", "\u6302\u7740", "\u6302\u8d77\u6765", "\u955c\u5b50\u91cc", "\u7a7f\u8d77\u6765")),
     ("\u9762\u6599\u8d28\u611f", ("\u9762\u6599", "\u6750\u8d28", "\u6210\u5206", "\u83b1\u8d5b\u5c14", "\u4e9a\u9ebb", "\u5168\u68c9", "\u624b\u611f", "\u4eb2\u80a4", "\u900f\u6c14", "\u5782\u5760", "\u6297\u76b1", "\u6c34\u6d17")),
-    ("\u5c3a\u5bf8\u957f\u5ea6", ("\u5c3a\u7801", "\u5c3a\u5bf8", "\u957f\u5ea6", "\u8eab\u9ad8", "\u4f53\u91cd")),
+    ("\u6d41\u884c\u8d8b\u52bf", ("\u6d41\u884c\u8d8b\u52bf", "\u6d41\u884c", "\u8d8b\u52bf", "\u5f53\u5b63", "\u4eca\u5e74", "\u672c\u5b63", "\u70ed\u95e8", "\u79c0\u573a", "\u65f6\u88c5\u5468")),
+    ("\u98ce\u683c\u5b9a\u4f4d", ("\u98ce\u683c\u5b9a\u4f4d", "\u6b3e\u5f0f\u98ce\u683c", "\u98ce\u683c\u6c14\u8d28", "\u5b66\u9662", "\u7f8e\u5f0f", "\u97e9\u7cfb", "\u6cd5\u5f0f", "\u65e5\u7cfb", "\u8fa3\u59b9", "\u751c\u9177", "\u5c0f\u9999\u98ce", "\u8001\u94b1\u98ce", "\u5343\u91d1\u98ce", "\u8f7b\u5962", "\u8857\u5934", "\u677e\u5f1b", "\u4fcf\u76ae", "\u51cf\u9f84", "\u4f18\u96c5", "\u5f97\u4f53", "\u6c14\u8d28", "\u6e05\u7eaf", "\u5e05\u6c14", "\u5c0f\u4f17", "\u4e0d\u70c2\u5927\u8857", "\u590d\u53e4\u98ce")),
+    ("\u5c3a\u5bf8\u957f\u5ea6", ("\u5c3a\u7801", "\u5c3a\u5bf8", "\u957f\u5ea6", "\u88d9\u957f", "\u8863\u957f", "\u8896\u957f", "\u8eab\u9ad8", "\u4f53\u91cd")),
     ("\u7a7f\u7740\u4f53\u9a8c", ("\u7a7f\u7740", "\u8212\u9002", "\u51c9\u5feb", "\u4e0d\u624e", "\u4e0d\u95f7", "\u5f39\u529b")),
     ("\u5de5\u827a\u7ec6\u8282", ("\u5de5\u827a", "\u505a\u5de5", "\u8d70\u7ebf", "\u7ebd\u6263", "\u62fc\u63a5", "\u7ec6\u8282", "\u8bbe\u8ba1")),
-    ("\u573a\u666f\u642d\u914d", ("\u573a\u666f", "\u642d\u914d", "\u901a\u52e4", "\u7ea6\u4f1a", "\u51fa\u95e8", "\u804c\u573a", "\u5ea6\u5047", "\u4eba\u7fa4")),
+    ("\u573a\u666f\u642d\u914d", ("\u573a\u666f", "\u642d\u914d", "\u901a\u52e4", "\u7ea6\u4f1a", "\u51fa\u95e8", "\u804c\u573a", "\u5ea6\u5047", "\u4eba\u7fa4", "\u590f\u5929", "\u590f\u5b63", "\u65e9\u79cb", "\u521d\u79cb", "\u79cb\u5929", "\u6362\u5b63")),
     ("\u5bf9\u6bd4\u4f18\u52bf", ("\u5bf9\u6bd4", "\u4f18\u52bf", "\u4e0d\u540c", "\u72ec\u5bb6", "\u666e\u901a\u6b3e")),
-    ("\u6d41\u884c\u8d8b\u52bf", ("\u6d41\u884c", "\u8d8b\u52bf", "\u65f6\u9ae6", "\u590d\u53e4", "\u98ce\u683c")),
     ("\u6027\u4ef7\u6bd4", ("\u6027\u4ef7\u6bd4", "\u5212\u7b97", "\u503c\u5f97")),
     ("\u60c5\u7eea\u611f\u67d3", ("\u60ca\u8273", "\u559c\u6b22", "\u597d\u770b", "\u6f02\u4eae", "\u5e05", "\u60c5\u7eea")),
     ("\u7d27\u8feb\u7a00\u7f3a", ("\u7a00\u7f3a", "\u9650\u91cf", "\u65ad\u7801", "\u5e93\u5b58")),
@@ -126,6 +165,83 @@ def _normalize_topic(value: Any) -> str:
     for family, keywords in _TOPIC_FAMILY_RULES:
         if topic == family or any(keyword in topic for keyword in keywords):
             return family
+    return topic
+
+
+def _reconcile_apparel_topic(
+    reported_topic: Any,
+    candidate_text: Any,
+    subtopic: Any = "",
+) -> str:
+    """Correct only decisive apparel taxonomy conflicts against source text.
+
+    The review model owns the detailed selling-point interpretation.  This
+    guardrail only prevents four repeatedly observed family-level errors from
+    leaking to the director and preview: try-on contrast becoming comfort,
+    style identity becoming trend, seasonal availability becoming comfort, and
+    an actual declared trend being downgraded to generic style.
+    """
+    topic = _normalize_topic(reported_topic)
+    text = re.sub(r"\s+", "", f"{candidate_text or ''} {subtopic or ''}")
+    if not text:
+        return topic
+
+    has_true_trend = any(
+        marker in text
+        for marker in (
+            "\u6d41\u884c", "\u8d8b\u52bf", "\u5f53\u5b63", "\u4eca\u5e74",
+            "\u672c\u5b63", "\u70ed\u95e8", "\u79c0\u573a", "\u65f6\u88c5\u5468",
+        )
+    )
+    has_style_identity = any(
+        marker in text
+        for marker in (
+            "\u5b66\u9662", "\u7f8e\u5f0f", "\u97e9\u7cfb", "\u6cd5\u5f0f", "\u65e5\u7cfb",
+            "\u8fa3\u59b9", "\u751c\u9177", "\u5c0f\u9999\u98ce", "\u8001\u94b1\u98ce",
+            "\u5343\u91d1\u98ce", "\u8f7b\u5962", "\u8857\u5934", "\u677e\u5f1b\u611f",
+            "\u4fcf\u76ae", "\u51cf\u9f84", "\u4f18\u96c5", "\u5f97\u4f53", "\u6c14\u8d28",
+            "\u6e05\u7eaf", "\u5e05\u6c14", "\u5c0f\u4f17", "\u4e0d\u70c2\u5927\u8857",
+            "\u590d\u53e4\u98ce", "\u98ce\u683c", "\u9ad8\u667a\u611f", "\u9ad8\u667a\u5546",
+            "\u9ad8\u5b66\u5386", "\u767d\u5bcc\u7f8e",
+        )
+    )
+    has_try_on_contrast = (
+        any(marker in text for marker in ("\u6302\u7740", "\u6302\u8d77\u6765", "\u8bd5\u7a7f", "\u8bd5\u4e00\u4e0b"))
+        or any(marker in text for marker in ("\u4e0a\u8eab\u6548\u679c", "\u4e0a\u8eab\u4e4b\u540e", "\u4e0a\u8eab\u4ee5\u540e", "\u7a7f\u4e0a\u8eab", "\u4e00\u7a7f", "\u4e0d\u4e0a\u8eab"))
+        or (
+            any(marker in text for marker in ("\u4e0a\u8eab", "\u7a7f\u4e0a", "\u7a7f\u8d77\u6765"))
+            and any(marker in text for marker in ("\u60ca\u8273", "\u7cbe\u81f4", "\u4e0d\u4e00\u6837", "\u597d\u770b", "\u6548\u679c", "\u770b\u8d77\u6765", "\u666e\u901a"))
+        )
+        or "\u4e00\u5b9a\u8981\u4e0a\u8eab" in text
+    )
+    has_seasonal_availability = any(
+        marker in text
+        for marker in ("\u590f\u5929", "\u590f\u5b63", "\u65e9\u79cb", "\u521d\u79cb", "\u79cb\u5929", "\u6362\u5b63")
+    )
+    has_comfort_claim = any(
+        marker in text
+        for marker in ("\u8212\u670d", "\u8212\u9002", "\u4eb2\u80a4", "\u4e0d\u95f7", "\u4e0d\u70ed", "\u4e0d\u52d2", "\u4e0d\u7d27\u7ef7", "\u6d3b\u52a8\u65b9\u4fbf")
+    )
+
+    # A verified specific family (for example shoulder shaping or a concrete
+    # commute outfit) must not be overwritten merely because the speaker says
+    # "上身" while demonstrating it.  Reconcile only the broad families that
+    # caused the observed label drift.
+    reconcilable_topics = {
+        "\u7a7f\u7740\u4f53\u9a8c",
+        "\u6d41\u884c\u8d8b\u52bf",
+        "\u98ce\u683c\u5b9a\u4f4d",
+        "\u5176\u4ed6",
+        "\u901a\u7528\u5356\u70b9",
+    }
+    if has_try_on_contrast and topic in reconcilable_topics:
+        return "\u4e0a\u8eab\u6548\u679c"
+    if has_true_trend and topic in reconcilable_topics:
+        return "\u6d41\u884c\u8d8b\u52bf"
+    if has_style_identity and topic in reconcilable_topics:
+        return "\u98ce\u683c\u5b9a\u4f4d"
+    if has_seasonal_availability and not has_comfort_claim and topic in reconcilable_topics:
+        return "\u573a\u666f\u642d\u914d"
     return topic
 
 
@@ -219,8 +335,173 @@ def _card_hook_eligible(card: "ContentCard") -> bool:
     return not any(tag in tag_text for tag in _LOW_VALUE_QUALITY_TAGS)
 
 
+def _textual_delivery_signal(text: Any) -> str:
+    """Return a conservative text-only proxy until audio delivery is available.
+
+    This deliberately does not claim to measure loudness, pitch, or speaking
+    rate. It only captures visible delivery cues such as a natural reaction,
+    intensifiers, and rhythmic repetition, so it can rank otherwise valid
+    openings without overriding the safety and semantic gates.
+    """
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if len(compact) < 6:
+        return "unknown"
+    score = 0
+    if re.search(r"(?:哇|天哪|我的天|真的|太|巨|超级|绝了|无语|牛掰|好帅|好看)", compact):
+        score += 1
+    if re.search(r"[！!]{1,}|(?:真的很|太.+?了|超级.+?的)", compact):
+        score += 1
+    if re.search(r"(?:我的菜|很久没出|全公司|我自己留|我买了|巨好)", compact):
+        score += 1
+    if re.search(r"(.{2,6})\1", compact):
+        score += 1
+    if score >= 3:
+        return "textual_high"
+    if score == 2:
+        return "textual_medium"
+    return "textual_low" if score else "unknown"
+
+
+def _inferred_hook_semantic_signals(text: Any, topic: Any = "") -> tuple[str, ...]:
+    """Derive opening signals only from the spoken Hook, never its topic tag."""
+    # Keep ``topic`` for compatibility with existing callers, but do not let a
+    # broad label such as "版型显瘦" manufacture a pain/result signal for a
+    # sentence that merely lists a collar function.
+    del topic
+    compact = re.sub(r"\s+", "", f"{text or ''}")
+    signals: list[str] = []
+    rules = (
+        # These are attraction mechanisms, not generic selling-point tags.
+        # A neutral phrase such as "material is not stiff" remains useful body
+        # evidence, but it has no reason to occupy the first three seconds.
+        ("emotion", r"(?:哇|天哪|我的天|无语|牛掰|好帅|太好看|巨好看)"),
+        ("strong_judgment", r"(?:真的(?:很|太|好|帅|喜欢)|巨(?:好|.?穿)|超级(?:推荐|好|显|舒服|喜欢)|太(?:好看|帅|显|绝|适合|对味)|一定要|必须|很久没出|闭眼)"),
+        ("identity", r"(?:有眼光|有审美|自己就是大佬|上一个level|高级感)"),
+        ("style_projection", r"(?:明星机场|穿出.{0,6}(?:气场|风格|调性)|(?:风格|气场|调性).{0,6}(?:拉满|拿捏|对味|绝|帅)|女总裁)"),
+        ("pain_hit", r"(?:梨形|胯宽|腿粗|小肚子|显瘦|遮肉|修饰)"),
+        ("result", r"(?:显白|显瘦|显高|显腿长|显腿直|显比例|往(?:里|内|前|上)收|收住|拉长|修饰|不(?:会)?显(?:胖|壮|矮|腿粗|胯宽|大臂))"),
+        ("contrast", r"(?:不是|反而|区别|不一样|最怕|其实不是)"),
+        ("curiosity", r"(?:最厉害|值钱|重点|就在这里|你看这里)"),
+        ("scene", r"(?:穿出去|朋友问(?:链接)?|回头率|参加活动|出街)"),
+        ("social_proof", r"(?:人手一件|全公司|我自己留|我买了|回购)"),
+        ("source", r"(?:原厂|买手店|原版|源头|专柜)"),
+        ("price_value", r"(?:一万|零头|值这个价|性价比)"),
+        ("after_sale", r"(?:不满意.*退|包退|退换|售后)"),
+        ("cta", r"(?:闭眼买|直接拍|冲它|给我买)"),
+    )
+    for signal, pattern in rules:
+        if re.search(pattern, compact):
+            signals.append(signal)
+    return tuple(signals[:4]) or ("concrete_value",)
+
+
+def _hook_promise_family(text: Any) -> str:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    families = (
+        ("source", r"(?:原厂|原版|买手店|源头|专柜|代工)"),
+        ("social", r"(?:人手一件|全公司|我自己留|我买了|回购|大家都买)"),
+        ("price", r"(?:一万|零头|值这个价|性价比|价格)"),
+        ("after_sale", r"(?:不满意.*退|包退|退换|售后)"),
+        ("material", r"(?:面料|材质|手感|羊毛|亚麻|莱赛尔|全棉|透气|不扎)"),
+        ("comfort", r"(?:舒服|好穿|不闷|轻薄|亲肤|弹力)"),
+        ("color", r"(?:颜色|色|显白|黄皮|粉色|藏青|灰调)"),
+        ("fit", r"(?:显瘦|胯|腿|腰|肩宽|小肚子|梨形|遮肉|修饰)"),
+        ("style", r"(?:好帅|很帅|好看|风格|机场|气质|高级|利落|调性)"),
+        ("scene", r"(?:通勤|约会|出门|活动|度假|上班)"),
+    )
+    for family, pattern in families:
+        if re.search(pattern, compact):
+            return family
+    return ""
+
+
+def _proof_relation_is_grounded(hook_text: Any, proof_text: Any, relation: str) -> bool:
+    """Reject an obviously unrelated proof without demanding word-for-word continuity."""
+    compact_proof = re.sub(r"\s+", "", str(proof_text or ""))
+    if not compact_proof:
+        return False
+    relation_markers = {
+        "visual_result": r"(?:你看|上身|显|肩|腰|腿|胯|脸|白|型|廓形|比例|视觉|利落)",
+        "design_reason": r"(?:因为|设计|肩线|版型|剪裁|缝|线|收|廓形|领口|腰头)",
+        "material_evidence": r"(?:面料|材质|手感|羊毛|亚麻|莱赛尔|全棉|纱|垂感)",
+        "wearing_experience": r"(?:舒服|好穿|不闷|不扎|轻薄|亲肤|弹力|透气)",
+        "scene_projection": r"(?:通勤|约会|出门|活动|度假|上班|搭配)",
+        "identity_projection": r"(?:气质|风格|高级|利落|调性|帅|好看)",
+        "social_proof": r"(?:人手一件|全公司|我自己留|我买了|回购|大家都买)",
+        "source_value": r"(?:原厂|原版|买手店|源头|专柜|代工)",
+        "price_value": r"(?:一万|零头|值这个价|性价比|价格)",
+        "after_sale_confidence": r"(?:不满意.*退|包退|退换|售后)",
+    }
+    if relation == "other_grounded":
+        hook_chars = set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", str(hook_text or "")))
+        proof_chars = set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", compact_proof))
+        return len(hook_chars.intersection(proof_chars)) >= 2
+    marker = relation_markers.get(relation)
+    if not marker or not re.search(marker, compact_proof):
+        return False
+    allowed_relations = {
+        "source": {"source_value"},
+        "social": {"social_proof"},
+        "price": {"price_value"},
+        "after_sale": {"after_sale_confidence"},
+        "material": {"material_evidence", "wearing_experience"},
+        "comfort": {"material_evidence", "wearing_experience"},
+        "color": {"visual_result", "scene_projection"},
+        "fit": {"visual_result", "design_reason", "wearing_experience"},
+        "style": {"visual_result", "design_reason", "scene_projection", "identity_projection"},
+        "scene": {"scene_projection", "visual_result", "identity_projection"},
+    }
+    family = _hook_promise_family(hook_text)
+    return not family or relation in allowed_relations.get(family, set())
+
+
+def _has_director_grade_hook_mechanism(semantic_signals: Sequence[str]) -> bool:
+    """Keep ordinary feature lists from becoming opening contracts."""
+    mechanisms = {
+        "emotion",
+        "strong_judgment",
+        "identity",
+        "style_projection",
+        "pain_hit",
+        "result",
+        "contrast",
+        "curiosity",
+        "scene",
+        "social_proof",
+        "source",
+        "price_value",
+        "after_sale",
+        "cta",
+    }
+    return bool(mechanisms.intersection(semantic_signals))
+
+
+def _normalize_hook_package_tier(value: Any, *, semantic_signals: Sequence[str], delivery_signal: str) -> str:
+    """Accept A/B only when the original Hook itself carries opening pull."""
+    requested = _clean_text(value, 8).upper()
+    grounded = _has_director_grade_hook_mechanism(semantic_signals)
+    high_value = {
+        "emotion", "strong_judgment", "identity", "style_projection",
+        "pain_hit", "result", "contrast", "curiosity",
+    }
+    high_value_count = len(high_value.intersection(semantic_signals))
+
+    if requested == "A":
+        if grounded and (delivery_signal == "textual_high" or high_value_count >= 2):
+            return "A"
+        return "B" if grounded else "C"
+    if requested == "B":
+        return "B" if grounded else "C"
+    if requested == "C":
+        return "C"
+    if grounded and (delivery_signal == "textual_high" or high_value_count >= 2):
+        return "A"
+    return "B" if grounded else "C"
+
+
 @dataclass(frozen=True)
 class HookPair:
+    """Compatibility contract used by the current live director path."""
     hook_id: int
     followup_id: int
     topic: str
@@ -236,6 +517,36 @@ class HookPair:
 
 
 @dataclass(frozen=True)
+class HookPackage:
+    hook_id: int
+    followup_id: int
+    topic: str
+    reason: str
+    # These fields make the opening a verifiable promise/proof contract rather
+    # than two individually good sentences placed next to one another.
+    hook_promise: str = ""
+    proof_relation: str = ""
+    package_complete: bool = False
+    semantic_signals: tuple[str, ...] = ()
+    delivery_signal: str = "unknown"
+    opening_tier: str = "C"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hook_id": self.hook_id,
+            "followup_id": self.followup_id,
+            "topic": self.topic,
+            "reason": self.reason,
+            "hook_promise": self.hook_promise,
+            "proof_relation": self.proof_relation,
+            "package_complete": bool(self.package_complete),
+            "semantic_signals": list(self.semantic_signals),
+            "delivery_signal": self.delivery_signal,
+            "opening_tier": self.opening_tier,
+        }
+
+
+@dataclass(frozen=True)
 class ContentReviewBundle:
     cache_key: str
     candidate_digest: str
@@ -244,6 +555,9 @@ class ContentReviewBundle:
     cards: tuple[ContentCard, ...]
     retained_duration: float
     hook_pairs: tuple[HookPair, ...] = ()
+    # A complete A/B HookPackage is the preferred live-opening contract. A
+    # HookPair remains the safe fallback when the review did not find one.
+    hook_packages: tuple[HookPackage, ...] = ()
     marketing_intent: MarketingIntentBundle | None = None
     # A focused second pass is only needed when the broad review returned no
     # verified opening pair. Persisting its completed state keeps cache hits
@@ -258,10 +572,128 @@ class ContentReviewBundle:
 
     @property
     def hook_candidate_ids(self) -> set[int]:
+        active_packages = self.director_hook_packages
+        if active_packages:
+            return {package.hook_id for package in active_packages}
         return {pair.hook_id for pair in self.hook_pairs}
+
+    @property
+    def director_hook_packages(self) -> tuple[HookPackage, ...]:
+        """Return only complete opening packages strong enough to constrain AI."""
+        return tuple(
+            package for package in self.hook_packages
+            if package.package_complete
+            and package.opening_tier in _DIRECTOR_HOOK_PACKAGE_TIERS
+        )
 
     def card_map(self) -> dict[int, ContentCard]:
         return {card.candidate_id: card for card in self.cards}
+
+    def _hook_thread_contract(
+        self,
+        records: Sequence[HookPair | HookPackage],
+    ) -> dict[int, dict[str, Any]]:
+        """Derive flexible, reviewed Hook continuation threads.
+
+        The recorded follow-up is the strongest proven fulfilment. The
+        director may use another clean candidate from the same reviewed topic
+        when it makes the spoken handoff clearer, but it may not switch the
+        product or promise family.
+        """
+        cards_by_id = self.card_map()
+        mutable: dict[int, dict[str, Any]] = {}
+        for record in records:
+            hook_card = cards_by_id.get(record.hook_id)
+            followup_card = cards_by_id.get(record.followup_id)
+            if (
+                hook_card is None
+                or followup_card is None
+                or not _card_hook_eligible(hook_card)
+                or followup_card.dependency != "independent"
+                or followup_card.target_relation == "other"
+            ):
+                continue
+            # The card topic is normalized against the shared taxonomy. The
+            # pair's free-form topic is explanatory only and must not split a
+            # valid color/fabric thread because the reviewer named it loosely.
+            topic = _normalize_topic(hook_card.topic) or _normalize_topic(record.topic)
+            if not topic or topic == "其他":
+                continue
+            thread = mutable.setdefault(
+                hook_card.candidate_id,
+                {
+                    "hook_id": hook_card.candidate_id,
+                    "topic": topic,
+                    "primary_subject": hook_card.primary_subject,
+                    "seed_followup_ids": set(),
+                    "allowed_followup_ids": set(),
+                    "reasons": [],
+                },
+            )
+            thread["seed_followup_ids"].add(followup_card.candidate_id)
+            thread["allowed_followup_ids"].add(followup_card.candidate_id)
+            if record.reason:
+                thread["reasons"].append(record.reason)
+
+        for thread in mutable.values():
+            topic = str(thread["topic"])
+            hook_id = int(thread["hook_id"])
+            for card in self.cards:
+                if (
+                    card.candidate_id == hook_id
+                    or card.dependency != "independent"
+                    or card.target_relation == "other"
+                    or _normalize_topic(card.topic) != topic
+                ):
+                    continue
+                thread["allowed_followup_ids"].add(card.candidate_id)
+
+        result: dict[int, dict[str, Any]] = {}
+        for hook_id, thread in mutable.items():
+            allowed_ids = sorted(
+                int(value) for value in thread["allowed_followup_ids"]
+                if int(value) != hook_id
+            )
+            if not allowed_ids:
+                continue
+            result[hook_id] = {
+                "hook_id": hook_id,
+                "topic": str(thread["topic"]),
+                "primary_subject": str(thread["primary_subject"] or ""),
+                "seed_followup_ids": sorted(int(value) for value in thread["seed_followup_ids"]),
+                "allowed_followup_ids": allowed_ids,
+                "reasons": list(dict.fromkeys(thread["reasons"]))[:3],
+            }
+        return result
+
+    def hook_thread_contract(self) -> dict[int, dict[str, Any]]:
+        """Fallback thread contract derived from ordinary reviewed HookPairs."""
+        return self._hook_thread_contract(self.hook_pairs)
+
+    def hook_package_thread_contract(self) -> dict[int, dict[str, Any]]:
+        """Thread contract for complete A/B promise-and-proof opening packages."""
+        return self._hook_thread_contract(self.director_hook_packages)
+
+    def director_hook_contract(
+        self,
+    ) -> tuple[tuple[dict[str, Any], ...], dict[int, dict[str, Any]], str]:
+        """Return the sole Hook source for one director task.
+
+        A strong package wins over ordinary pairs. This deliberately avoids a
+        later generic HookPair replacing an already proven Hook -> proof setup.
+        """
+        packages = self.director_hook_packages
+        if packages:
+            return (
+                tuple(package.to_dict() for package in packages),
+                self.hook_package_thread_contract(),
+                "hook_package",
+            )
+        return (
+            tuple(pair.to_dict() for pair in self.hook_pairs),
+            self.hook_thread_contract(),
+            "hook_pair" if self.hook_pairs else "none",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -273,6 +705,7 @@ class ContentReviewBundle:
             "retained_duration": round(self.retained_duration, 3),
             "cards": [card.to_dict() for card in self.cards],
             "hook_pairs": [pair.to_dict() for pair in self.hook_pairs],
+            "hook_packages": [package.to_dict() for package in self.hook_packages],
             "hook_pair_reviewed": bool(self.hook_pair_reviewed),
             "marketing_intent": self.marketing_intent.to_dict() if self.marketing_intent else {},
         }
@@ -288,6 +721,22 @@ class ContentReviewBundle:
             "retained_duration": round(self.retained_duration, 1),
             "grounded_card_count": len(self.cards),
             "hook_pair_count": len(self.hook_pairs),
+            "hook_package_count": len(self.hook_packages),
+            "hook_package_complete_count": sum(
+                1 for package in self.hook_packages if package.package_complete
+            ),
+            "hook_package_a_count": sum(
+                1 for package in self.hook_packages if package.opening_tier == "A"
+            ),
+            "hook_package_b_count": sum(
+                1 for package in self.hook_packages if package.opening_tier == "B"
+            ),
+            "hook_package_c_count": sum(
+                1 for package in self.hook_packages if package.opening_tier == "C"
+            ),
+            "hook_thread_count": len(self.director_hook_contract()[1]),
+            "director_hook_contract": self.director_hook_contract()[2],
+            "director_hook_package_count": len(self.director_hook_packages),
             "hook_pair_reviewed": bool(self.hook_pair_reviewed),
             "fallback_reason": str(fallback_reason or ""),
         }
@@ -339,6 +788,31 @@ class ContentReviewBundle:
                 + (f"; \u6807\u7b7e:{tag_text}" if tag_text else "")
             )
 
+        active_packages = self.director_hook_packages
+        if active_packages:
+            lines.append(
+                "★已验证A/B HookPackage：首段必须从以下组合的Hook编号中选择；"
+                "第二段延续同主题即可，不要求死接示例编号。"
+            )
+            for package in active_packages:
+                lines.append(
+                    f"- HookPackage[{package.opening_tier}] #{package.hook_id:02d} → "
+                    f"#{package.followup_id:02d}; 承诺:\"{package.hook_promise}\"; "
+                    f"兑现:{package.proof_relation}; 依据:{package.reason}"
+                )
+
+        thread_contract = (
+            self.hook_package_thread_contract()
+            if active_packages else self.hook_thread_contract()
+        )
+        for thread in thread_contract.values():
+            seed_ids = "/".join(f"#{value:02d}" for value in thread["seed_followup_ids"])
+            allowed_ids = "/".join(f"#{value:02d}" for value in thread["allowed_followup_ids"])
+            lines.append(
+                f"- Hook主题线程: #{thread['hook_id']:02d} [{thread['topic']}]；"
+                f"已验证承接:{seed_ids}；第二段可从同主题安全候选中选择:{allowed_ids}。"
+                "允许跨原始时间，但必须延续同一商品/主题的解释、证明或展开。"
+            )
         return "\n".join(lines) + "\n"
 
     def topic_support(self, inventory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
@@ -374,6 +848,7 @@ def build_cache_key(
     main_product: str,
     avoid: Iterable[str],
     model: str,
+    content_policy: Any = None,
     include_marketing_intent: bool = False,
 ) -> str:
     payload = {
@@ -383,6 +858,9 @@ def build_cache_key(
         "main_product": _clean_text(main_product, 100),
         "avoid": sorted(_clean_list(list(avoid or []), limit=30, item_limit=80)),
         "model": _clean_text(model, 120),
+        # Candidate review may be reused across duration/preference changes,
+        # but never across a different content eligibility policy.
+        "content_policy": normalize_content_policy(content_policy),
         "marketing_intent": bool(include_marketing_intent),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -487,6 +965,7 @@ def _candidate_map(inventory: Sequence[Mapping[str, Any]]) -> dict[int, dict[str
             "source": _clean_text(raw.get("source"), 24),
             "start": max(0.0, float(raw.get("start") or 0.0)),
             "end": max(0.0, float(raw.get("end") or 0.0)),
+            "has_exact_timeline": "start" in raw or "end" in raw,
             "story_block_id": _clean_text(raw.get("story_block_id"), 80),
             "continuity_group_id": _clean_text(raw.get("continuity_group_id"), 80),
             "duration_sec": max(0.0, float(raw.get("duration_sec") or 0.0)),
@@ -525,6 +1004,45 @@ def _reviewable_candidate_text(text: Any, content_policy: Any = None) -> bool:
         return False
     return True
 
+def _strong_emotional_hook_text(text: Any) -> bool:
+    """Allow a grounded live-reaction Hook without treating empty hype as value."""
+
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if len(compact) < 6:
+        return False
+    has_reaction = bool(re.search(
+        r"(?:\u54c7|\u592a\u597d\u770b|\u5f88\u597d\u770b|\u5f88\u5e05|\u597d\u5e05|\u6211\u7684\u83dc|\u771f\u7684\u5f88|\u8d85\u7ea7\u63a8\u8350|\u5de8\u597d\u7a7f)",
+        compact,
+    ))
+    has_grounding = bool(re.search(
+        r"(?:\u8fd9\u4ef6|\u8fd9\u6761|\u8fd9\u5957|\u897f\u88c5|\u88e4|\u88d9|\u4e0a\u8863|\u989c\u8272|\u8272|\u7248\u578b|\u578b|\u7a7f\u642d|\u98ce\u683c|\u663e\u767d|\u663e\u7626|\u6c14\u8d28|\u660e\u661f\u673a\u573a)",
+        compact,
+    ))
+    return has_reaction and has_grounding
+
+
+def _package_emotional_hook_text(text: Any, content_policy: Any = None) -> bool:
+    """Permit real live-reaction wording only inside a proven HookPackage.
+
+    A phrase such as "很帅，真的很帅，我的菜" can be valuable in the
+    first second even though it is weak as a standalone text claim. It never
+    becomes a normal Hook candidate here: the package validator still requires
+    an immediate, relation-specific proof before accepting it diagnostically.
+    """
+    if not _reviewable_candidate_text(text, content_policy=content_policy):
+        return False
+    if hook_ineligible_reason(text) or hook_candidate_quality_flags(text):
+        return False
+    compact = re.sub(r"\s+", "", str(text or "")).strip("，。！？!?、 ")
+    if not compact or compact.startswith(("然后", "而且", "但是", "因为", "就是", "你们看")):
+        return False
+    return bool(re.search(
+        r"(?:哇|我的天|好帅|很帅|好看|很久没出|我的菜|巨好穿|超级推荐)"
+        r".*(?:真的|太|我的菜|很久没出|超级|巨|！|!)",
+        compact,
+    ))
+
+
 def _reviewable_hook_text(text: Any, content_policy: Any = None) -> bool:
     if not _reviewable_candidate_text(text, content_policy=content_policy):
         return False
@@ -545,7 +1063,7 @@ def _reviewable_hook_text(text: Any, content_policy: Any = None) -> bool:
         compact,
     ):
         return False
-    if re.match(
+    if not _strong_emotional_hook_text(cleaned) and re.match(
         r"^(?:(?:\u975e\u5e38)|(?:\u7279\u522b)|\u592a|\u5f88){1,3}(?:\u72e0|\u7edd|\u70b8|\u65e0\u654c|\u597d\u770b|\u597d\u6f02\u4eae|\u725b|\u9876)(?:[\uff0c,\u3002.!\uff01?\uff1f]|$)",
         compact,
     ):
@@ -703,8 +1221,9 @@ def _normalize_card(
     evidence_bound = not bool(evidence_quote)
     if evidence_bound:
         evidence_quote = _clean_text(candidate_text, 120)
-    topic = _normalize_topic(raw.get("topic"))
-    subtopic = _clean_text(raw.get("subtopic"), 60) or topic
+    subtopic = _clean_text(raw.get("subtopic"), 60)
+    topic = _reconcile_apparel_topic(raw.get("topic"), candidate_text, subtopic)
+    subtopic = subtopic or topic
     buyer_value = _clean_text(raw.get("buyer_value"), 100) or "\u8865\u5145\u5546\u54c1\u4fe1\u606f"
     evidence_type = _clean_text(raw.get("evidence_type"), 40) or "\u539f\u6587\u7ed1\u5b9a"
     roles = tuple(
@@ -750,6 +1269,131 @@ def _normalize_card(
         subject_evidence=subject_evidence,
     )
 
+def _opening_segment_is_executable(candidate: Mapping[str, Any]) -> bool:
+    """Reject a Hook unit only when its real timeline proves it cannot render."""
+    if not isinstance(candidate, Mapping):
+        return False
+    try:
+        duration = float(candidate.get("duration_sec") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if duration <= 0.0:
+        return False
+    # Older cache fixtures and compatibility callers can describe content
+    # without exact bounds. Production review inventory always has start/end;
+    # only those timeline-backed candidates receive the final render limit.
+    if not bool(candidate.get("has_exact_timeline")):
+        return True
+    return duration <= _DIRECTOR_OPENING_SEGMENT_MAX_SECONDS
+
+
+def _normalize_hook_package(
+    raw: Any,
+    *,
+    card_ids: set[int],
+    candidates: Mapping[int, Mapping[str, Any]],
+    cards_by_id: Mapping[int, ContentCard] | None = None,
+    content_policy: Any = None,
+) -> HookPackage | None:
+    """Keep only grounded, self-contained Hook -> immediate-proof options.
+
+    The review model may recommend a pair, but it never owns the final order.
+    The director later chooses one of these verified openings for its own story.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        hook_id = int(raw.get("hook_id") or 0)
+        followup_id = int(raw.get("followup_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if (
+        hook_id <= 0
+        or followup_id <= 0
+        or hook_id == followup_id
+        or hook_id not in card_ids
+        or followup_id not in card_ids
+    ):
+        return None
+    hook_text = str(candidates.get(hook_id, {}).get("text") or "")
+    followup_text = str(candidates.get(followup_id, {}).get("text") or "")
+    if not (
+        _opening_segment_is_executable(candidates.get(hook_id, {}))
+        and _opening_segment_is_executable(candidates.get(followup_id, {}))
+    ):
+        return None
+    if not (
+        _reviewable_hook_text(hook_text, content_policy=content_policy)
+        or _package_emotional_hook_text(hook_text, content_policy=content_policy)
+    ) or not _reviewable_candidate_text(
+        followup_text,
+        content_policy=content_policy,
+    ):
+        return None
+    hook_card = (cards_by_id or {}).get(hook_id)
+    if hook_card is not None and not _card_hook_eligible(hook_card):
+        return None
+    followup_card = (cards_by_id or {}).get(followup_id)
+    if (
+        followup_card is not None
+        and (
+            followup_card.dependency != "independent"
+            or followup_card.target_relation == "other"
+        )
+    ):
+        return None
+    topic = _normalize_topic(raw.get("topic"))
+    if not topic or topic == "\u5176\u4ed6":
+        topic = _topic_from_candidate_text(hook_text)
+    reason = _clean_text(raw.get("reason"), 100) or "\u627f\u63a5\u5f00\u5934\u7684\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c"
+    # A promise must be a literal, grounded part of the Hook. This avoids
+    # accepting a prettier model paraphrase that the original delivery never
+    # actually made.
+    hook_promise = _grounded_evidence_quote(raw.get("hook_promise"), hook_text)
+    proof_relation = _clean_text(raw.get("proof_relation"), 40).lower()
+    package_complete = bool(raw.get("package_complete") is True)
+    raw_signals = raw.get("semantic_signals") if isinstance(
+        raw.get("semantic_signals"), (list, tuple, set)
+    ) else ()
+    if (
+        not hook_promise
+        or proof_relation not in _VALID_HOOK_PROOF_RELATIONS
+        or not package_complete
+        or not _proof_relation_is_grounded(hook_text, followup_text, proof_relation)
+    ):
+        return None
+
+    # A model may accurately describe the card topic while overstating the
+    # opening pull of this particular sentence.  Only retain claimed signals
+    # that are also visible in the spoken Hook itself.
+    inferred_signals = _inferred_hook_semantic_signals(hook_text, topic)
+    model_signals = tuple(
+        signal for signal in _clean_list(raw_signals, limit=4, item_limit=32)
+        if signal in _VALID_HOOK_SEMANTIC_SIGNALS and signal in inferred_signals
+    )
+    semantic_signals = tuple(dict.fromkeys((*model_signals, *inferred_signals)))[:4]
+    if not semantic_signals:
+        return None
+    delivery_signal = _textual_delivery_signal(hook_text)
+    opening_tier = _normalize_hook_package_tier(
+        raw.get("opening_tier"),
+        semantic_signals=semantic_signals,
+        delivery_signal=delivery_signal,
+    )
+    return HookPackage(
+        hook_id=hook_id,
+        followup_id=followup_id,
+        topic=topic,
+        reason=reason,
+        hook_promise=hook_promise,
+        proof_relation=proof_relation,
+        package_complete=package_complete,
+        semantic_signals=semantic_signals,
+        delivery_signal=delivery_signal,
+        opening_tier=opening_tier,
+    )
+
+
 def _normalize_hook_pair(
     raw: Any,
     *,
@@ -758,11 +1402,7 @@ def _normalize_hook_pair(
     cards_by_id: Mapping[int, ContentCard] | None = None,
     content_policy: Any = None,
 ) -> HookPair | None:
-    """Keep only grounded, self-contained Hook -> immediate-proof options.
-
-    The review model may recommend a pair, but it never owns the final order.
-    The director later chooses one of these verified openings for its own story.
-    """
+    """Validate the stable HookPair contract used by the current director."""
     if isinstance(raw, (list, tuple)):
         if len(raw) < 2:
             return None
@@ -789,23 +1429,40 @@ def _normalize_hook_pair(
         return None
     hook_text = str(candidates.get(hook_id, {}).get("text") or "")
     followup_text = str(candidates.get(followup_id, {}).get("text") or "")
+    if not (
+        _opening_segment_is_executable(candidates.get(hook_id, {}))
+        and _opening_segment_is_executable(candidates.get(followup_id, {}))
+    ):
+        return None
     if not _reviewable_hook_text(hook_text, content_policy=content_policy) or not _reviewable_candidate_text(
         followup_text,
         content_policy=content_policy,
     ):
         return None
+    if not _has_director_grade_hook_mechanism(
+        _inferred_hook_semantic_signals(hook_text)
+    ):
+        # An ordinary feature list remains eligible as body material, but it
+        # must not reopen a weak Hook path after no A/B package survived.
+        return None
     hook_card = (cards_by_id or {}).get(hook_id)
-    if hook_card is not None and not _card_hook_eligible(hook_card):
+    followup_card = (cards_by_id or {}).get(followup_id)
+    if (
+        (hook_card is not None and not _card_hook_eligible(hook_card))
+        or (followup_card is not None and (
+            followup_card.dependency != "independent"
+            or followup_card.target_relation == "other"
+        ))
+    ):
         return None
     topic = _normalize_topic(raw.get("topic"))
-    if not topic or topic == "\u5176\u4ed6":
+    if not topic or topic == "其他":
         topic = _topic_from_candidate_text(hook_text)
-    reason = _clean_text(raw.get("reason"), 100) or "\u627f\u63a5\u5f00\u5934\u7684\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c"
     return HookPair(
         hook_id=hook_id,
         followup_id=followup_id,
         topic=topic,
-        reason=reason,
+        reason=_clean_text(raw.get("reason"), 100) or "承接开头的具体购买价值",
     )
 
 
@@ -938,6 +1595,27 @@ def _validate_bundle(
         if len(hook_pairs) >= 8:
             break
 
+    hook_packages: list[HookPackage] = []
+    seen_packages: set[tuple[int, int]] = set()
+    raw_hook_packages = data.get("hook_packages") if isinstance(data.get("hook_packages"), list) else []
+    for raw_package in raw_hook_packages:
+        package = _normalize_hook_package(
+            raw_package,
+            card_ids=card_ids,
+            candidates=candidates,
+            cards_by_id=cards_by_id,
+            content_policy=content_policy,
+        )
+        if package is None:
+            continue
+        signature = (package.hook_id, package.followup_id)
+        if signature in seen_packages:
+            continue
+        seen_packages.add(signature)
+        hook_packages.append(package)
+        if len(hook_packages) >= 8:
+            break
+
     marketing_intent = build_marketing_intent_bundle(
         data,
         cards=cards,
@@ -953,6 +1631,7 @@ def _validate_bundle(
         cards=tuple(cards),
         retained_duration=retained_duration,
         hook_pairs=tuple(hook_pairs),
+        hook_packages=tuple(hook_packages),
         marketing_intent=marketing_intent,
         hook_pair_reviewed=bool(data.get("hook_pair_reviewed")),
     )
@@ -1013,7 +1692,18 @@ def _review_prompts(
     marketing_contract = marketing_intent_prompt_contract() if include_marketing_intent else ""
     schema_example = {
         "cards": [[1, "\u7248\u578b\u663e\u7626", "\u80a9\u5bbd\u4fee\u9970", "\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536", "\u539f\u56e0\u89e3\u91ca", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536", ["effect", "evidence"], "independent", ["\u5177\u4f53\u6548\u679c", "\u539f\u56e0\u89e3\u91ca"], "main", "\u8fd9\u4ef6\u4e0a\u8863", "primary", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536"]],
-        "hook_pairs": [[1, 2, "\u7248\u578b\u663e\u7626", "\u4e0b\u4e00\u6bb5\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0"]],
+        "hook_packages": [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "\u7248\u578b\u663e\u7626",
+            "reason": "\u4e0b\u4e00\u6bb5\u89e3\u91ca\u80a9\u7ebf\u5185\u6536\u7684\u8bbe\u8ba1\u539f\u56e0",
+            "hook_promise": "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }],
+        "hook_pairs": [[1, 2, "版型显瘦", "下一段解释肩线内收的设计原因"]],
     }
     candidate_field_order = "\u5b89\u5168\u5019\u9009\u5b57\u6bb5\u987a\u5e8f:[\u7f16\u53f7,\u6765\u6e90,\u65f6\u957f\u79d2,\u539f\u5b57\u5e55]"
     marketing_field_order = ""
@@ -1045,20 +1735,49 @@ def _review_prompts(
 7. quality_tags\u7528\u7b80\u77ed\u6807\u7b7e\uff0c\u5982\u5177\u4f53\u6548\u679c\u3001\u539f\u56e0\u89e3\u91ca\u3001\u5b9e\u6d4b\u8bc1\u636e\u3001\u4eba\u7fa4\u660e\u786e\u3001\u573a\u666f\u6e05\u6670\u3001ASR\u98ce\u9669\u3002\u53ea\u6709\u539f\u53e5\u786e\u5b9e\u5c5e\u4e8e\u6cdb\u6cdb\u5938\u8d5e\u3001\u5c55\u793a\u94fa\u57ab\u6216\u91cd\u590d\u65f6\u624d\u5982\u5b9e\u6253\u6807\uff0c\u4e0d\u5f97\u628a\u5b83\u4eec\u4f2a\u88c5\u6210\u5177\u4f53\u4ef7\u503c\u3002
 8. \u660e\u663e\u4ece\u534a\u53e5\u5f00\u59cb\u6216\u7ed3\u5c3e\u672a\u5b8c\u3001\u6307\u4ee3\u4e0d\u660e\u3001ASR\u4e71\u7801\u3001\u8fde\u7eed\u7ed3\u5df4\u91cd\u590d\u3001\u7eaf\u4e92\u52a8\u6216\u7eaf\u94fa\u57ab\u7684\u5019\u9009\u4e0d\u5f97\u8fdb\u5165main/reserve\u3002\u4e0d\u8981\u628a\u6b8b\u53e5\u4ec5\u6807\u8bb0dependency\u540e\u7ee7\u7eed\u4fdd\u7559\u3002
 9. tier\u5fc5\u987b\u771f\u5b9e\u5206\u5c42\uff1amain\u53ea\u7ed9\u540c\u7c7b\u4e2d\u6700\u5b8c\u6574\u3001\u6700\u5177\u4f53\u3001\u8bc1\u636e\u6700\u5f3a\u7684\u8868\u8fbe\uff0c\u5176\u4f59\u9ad8\u8d28\u91cf\u8868\u8fbe\u6807reserve\u3002\u6807other\u7684\u5f53\u7136\u53ef\u4f5c\u5b89\u5168reserve\uff0c\u4f46\u4e0d\u5f97\u6807main\u6216\u4f5cHook\u3002\u5185\u5bb9\u5145\u8db3\u65f6main\u7ea6\u536035%-65%\uff0c\u7981\u6b62\u5168\u90e8\u6807main\uff1b\u540c\u4e00\u5927topic\u6700\u591a4\u5f20main\uff0c\u6df7\u526a\u65f6\u540c\u4e00\u6765\u6e90+\u540c\u4e00\u5927topic\u6700\u591a2\u5f20main\u3002
-10. topic\u4f7f\u7528\u7a33\u5b9a\u5927\u7c7b\uff1a\u670d\u9970\u4f18\u5148\u7528\u7248\u578b\u663e\u7626/\u9762\u6599\u8d28\u611f/\u989c\u8272\u6c1b\u56f4/\u573a\u666f\u642d\u914d/\u5de5\u827a\u7ec6\u8282/\u5c3a\u5bf8\u957f\u5ea6/\u7a7f\u7740\u4f53\u9a8c/\u5bf9\u6bd4\u4f18\u52bf/\u6d41\u884c\u8d8b\u52bf\uff1b\u98df\u54c1\u4f18\u5148\u7528\u53e3\u611f\u98df\u6b32/\u65b0\u9c9c\u54c1\u8d28/\u4ea7\u5730\u6eaf\u6e90/\u89c4\u683c\u5206\u91cf/\u53d1\u8d27\u4fdd\u9c9c/\u573a\u666f\u5403\u6cd5\uff1b\u65b0\u54c1\u7c7b\u7528\u5bf9\u5e94\u7a33\u5b9a\u5927\u7c7b\u3002
+10. topic\u4f7f\u7528\u7a33\u5b9a\u5927\u7c7b\uff1a\u670d\u9970\u4f18\u5148\u7528\u7248\u578b\u663e\u7626/\u4e0a\u8eab\u6548\u679c/\u9762\u6599\u8d28\u611f/\u989c\u8272\u6c1b\u56f4/\u98ce\u683c\u5b9a\u4f4d/\u573a\u666f\u642d\u914d/\u5de5\u827a\u7ec6\u8282/\u5c3a\u5bf8\u957f\u5ea6/\u7a7f\u7740\u4f53\u9a8c/\u5bf9\u6bd4\u4f18\u52bf/\u6d41\u884c\u8d8b\u52bf\uff1b\u98df\u54c1\u4f18\u5148\u7528\u53e3\u611f\u98df\u6b32/\u65b0\u9c9c\u54c1\u8d28/\u4ea7\u5730\u6eaf\u6e90/\u89c4\u683c\u5206\u91cf/\u53d1\u8d27\u4fdd\u9c9c/\u573a\u666f\u5403\u6cd5\uff1b\u65b0\u54c1\u7c7b\u7528\u5bf9\u5e94\u7a33\u5b9a\u5927\u7c7b\u3002\u5206\u7c7b\u8fb9\u754c\u5fc5\u987b\u4e25\u683c\uff1a\u4e0a\u8eab\u6548\u679c\u53ea\u6307\u6302\u7740\u3001\u5e73\u94fa\u6216\u8bd5\u7a7f\u524d\u540e\u4e0e\u7a7f\u4e0a\u540e\u7684\u89c6\u89c9\u53cd\u5dee\u3001\u6574\u4f53\u6548\u679c\uff0c\u4e0d\u80fd\u62ff\u8212\u670d/\u900f\u6c14\u5192\u5145\uff1b\u7a7f\u7740\u4f53\u9a8c\u53ea\u6307\u89e6\u611f\u3001\u6e29\u5ea6\u3001\u675f\u7f1a\u548c\u6d3b\u52a8\u611f\u53d7\uff1b\u98ce\u683c\u5b9a\u4f4d\u6307\u5b66\u9662\u3001\u7f8e\u5f0f\u3001\u97e9\u7cfb\u3001\u4fcf\u76ae\u3001\u51cf\u9f84\u3001\u4f18\u96c5\u3001\u6c14\u8d28\u7b49\u6b3e\u5f0f\u8eab\u4efd\uff0c\u4e0d\u7b49\u4e8e\u6d41\u884c\u8d8b\u52bf\uff1b\u6d41\u884c\u8d8b\u52bf\u53ea\u5728\u539f\u53e5\u660e\u786e\u8bf4\u5f53\u5b63\u3001\u4eca\u5e74\u3001\u6d41\u884c\u3001\u8d8b\u52bf\u3001\u70ed\u95e8\u6216\u79c0\u573a\u65f6\u4f7f\u7528\uff1b\u590f\u5929\u3001\u65e9\u79cb\u3001\u6362\u5b63\u7b49\u7a7f\u7740\u65f6\u95f4\u548c\u6e29\u5ea6\u5f52\u573a\u666f\u642d\u914d\uff1b\u5c3a\u5bf8\u957f\u5ea6\u53ea\u5199\u771f\u5b9e\u88d9\u957f\u3001\u8863\u957f\u3001\u8986\u76d6\u4f4d\u7f6e\u6216\u5c3a\u5bf8\u4e8b\u5b9e\uff0c\u5355\u7eaf\u201c\u77ed\u767e\u8936\u88d9\u7684\u98ce\u683c\u201d\u5f52\u98ce\u683c\u5b9a\u4f4d\u3002
 
 10. hook_pairs\u7ed9\u51fa0-8\u7ec4\u53ef\u9009\u5f00\u5934\u7ec4\u5408\uff0c\u53ea\u6709\u771f\u7684\u5b58\u5728\u5f3a\u5f00\u5934\u65f6\u624d\u8f93\u51fa\u3002\u6bcf\u9879\u5fc5\u987b\u662f\u201c\u72ec\u7acb\u8bf4\u6e05\u5177\u4f53\u8d2d\u4e70\u4ef7\u503c\u201d\u7684\u5b8c\u6574Hook\uff0c\u4ee5\u53ca\u4e0b\u4e00\u6bb5\u7acb\u523b\u89e3\u91ca\u3001\u8bc1\u660e\u6216\u5151\u73b0\u5b83\u7684\u5b8c\u6574\u5019\u9009\u3002\u76f4\u64ad\u4e92\u52a8\u3001\u5e93\u5b58\u95ee\u7b54\u3001\u4e2a\u4eba\u8eab\u9ad8\u4f53\u91cd\u5c3a\u7801\u3001\u4ef7\u683c/CTA\u3001\u4e0a\u65b0\u9884\u544a\u3001\u7eaf\u5c55\u793a\u94fa\u57ab\u3001\u6cdb\u6cdb\u5938\u8d5e\u3001\u6b8b\u53e5\u90fd\u7edd\u4e0d\u53ef\u8fdb\u5165hook_pairs\u3002\u82e5\u6ca1\u6709\u8db3\u591f\u5f3a\u7684\u7ec4\u5408\uff0c\u8fd4\u56de\u7a7a\u6570\u7ec4\uff0c\u4e0d\u5f97\u51d1\u6570\u3002
+
+HookPackage rule: output hook_pairs and hook_packages together. A complete A/B HookPackage becomes the live director's only Hook source; hook_pairs are used only when no A/B package survives validation. A package must state Hook promise, proof relation, completion, semantic signals, and A/B/C tier. Never output a package when the second sentence is merely a different good selling point rather than proof of the promise.
+
+Hook thread rule: every hook_pairs item records one verified seed proof, not an exclusive second-subtitle ID. The director may use another reviewed, independent candidate from the same topic thread as the second segment when it explains, proves, or extends the Hook more clearly. Never use this flexibility to change product, topic, or safety policy.
 
 {marketing_contract}
 
 \u8f93\u51faschema\uff08\u5fc5\u987b\u7528\u6570\u7ec4\u77ed\u683c\u5f0f\uff09:
 {schema_text}
 cards\u5b57\u6bb5\u987a\u5e8f:[\u5019\u9009\u7f16\u53f7,topic,subtopic,buyer_value,evidence_type,evidence_quote,roles,dependency,quality_tags,tier,primary_subject,target_relation,subject_evidence]
-hook_pairs\u5b57\u6bb5\u987a\u5e8f:[Hook\u5019\u9009\u7f16\u53f7,\u627f\u63a5\u5019\u9009\u7f16\u53f7,\u4e3b\u9898,\u627f\u63a5\u7406\u7531]
+hook_pairs\u5b57\u6bb5\u987a\u5e8f:[Hook\u5019\u9009\u7f16\u53f7,\u627f\u63a5\u793a\u4f8b\u7f16\u53f7,\u4e3b\u9898\u7ebf\u7a0b,\u627f\u63a5\u7406\u7531]
 {marketing_field_order}
 
 {candidate_field_order}
 {json.dumps(compact_inventory, ensure_ascii=False, separators=(',', ':'))}"""
+    user_prompt += (
+        "\nHookPackage contract: output both hook_pairs and hook_packages. A complete A/B package is the "
+        "director's preferred Hook contract; ordinary hook_pairs only provide fallback when no A/B package exists. Each package item must be an object with "
+        "hook_id, followup_id, topic, reason, hook_promise, proof_relation, package_complete, "
+        "semantic_signals, and opening_tier. hook_promise must be a continuous short quote from the Hook itself, "
+        "not a rewritten marketing claim. proof_relation must be one of visual_result, design_reason, "
+        "material_evidence, wearing_experience, scene_projection, identity_projection, social_proof, "
+        "source_value, price_value, after_sale_confidence, other_grounded. package_complete=true only when "
+        "the followup directly proves that exact promise. A good Hook plus an unrelated good selling point is "
+        "not a complete package. semantic_signals may only use emotion, strong_judgment, identity, "
+        "style_projection, pain_hit, result, contrast, curiosity, scene, social_proof, source, price_value, "
+        "after_sale, cta. opening_tier is A, B, or C: A is a real attention spike, B is a strong visual or "
+        "purchase-value opening, C is only a complete natural introduction. A short emotional reaction is allowed "
+        "when it has a product/style/result anchor and the followup proves it.\n"
+        "A/B must be evidenced by the spoken Hook itself: strong emotion or judgement, a visible result, a clear "
+        "pain/persona, contrast, curiosity, identity/style projection, scene, social proof, source, allowed price, "
+        "after-sale confidence, or allowed CTA. Do not borrow a signal from the topic label. A plain feature list "
+        "such as a collar that can stand or turn is a body card, not an A/B Hook, unless the original sentence itself "
+        "also carries one of those attention mechanisms.\n"
+        "\nHook policy override: the task content policy is authoritative. "
+        "Price, CTA, origin/source claims, social proof, and after-sale commitments are "
+        "only forbidden when the policy says block or body_only. When allowed, they still "
+        "need a complete, credible Hook plus immediate proof. A short emotional reaction may "
+        "be a Hook when it has a real product, style, or result anchor and the next card proves it."
+    )
     return system_prompt, user_prompt
 
 def _post_review_request(
@@ -1137,6 +1856,7 @@ def review_candidates(
         main_product,
         avoid,
         model,
+        content_policy=content_policy,
         include_marketing_intent=include_marketing_intent,
     )
     cached = _load_cache(cache_key)
@@ -1256,7 +1976,7 @@ def _hook_pair_repair_prompts(
 
     system_prompt = (
         "你是带货短视频的开头语义复核员，不是最终剪辑导演。"
-        "只从已经审稿通过的原字幕中找少量真实的Hook+紧接承接组合，绝不重写字幕、编造编号或安排全片顺序。"
+        "只从已经审稿通过的原字幕中找少量真实的Hook+承接示例，绝不重写字幕、编造编号或安排全片顺序。"
         "只输出一个紧凑JSON对象，不要Markdown或解释。"
     )
     user_prompt = (
@@ -1264,17 +1984,34 @@ def _hook_pair_repair_prompts(
         f"主商品:{main_product or '未指定'}\n"
         "任务: 广审已经保留内容卡，但没有返回可验证的开头组合。请只做一次严格复核。\n"
         "Hook必须是一句脱离直播上下文也完整成立的、具体的购买价值陈述，明确说出商品属性、效果、痛点、人群或使用场景中的至少一项。"
-        "下一段必须立即解释、证明或兑现同一项购买价值，不能只是换一个卖点。\n"
+        "强情绪评价也允许作为Hook，但它必须有真实商品、风格或结果指向，且下一段立刻证明它。"
+        "承接示例必须解释、证明或兑现同一项购买价值，不能只是换一个卖点；它用于建立主题线程，不会锁死导演的第二句编号。\n"
         "绝对排除: target_relation=other、报尺码、个人身高体重试穿、问答互动、库存对话、上新预告、展示铺垫、连接词开头、泛泛夸赞、"
         "只说气场/高级/女总裁等空泛身份想象、半句、口头重复或没有商品购买信息的聊天。\n"
         "价格/CTA是否可作Hook必须遵守下方内容政策；仅正文或禁止的内容均不可作Hook。\n"
         "若没有真正合格的组合，必须返回空数组，不得凑数。最多返回3组。\n"
-        "输出格式: {\"hook_pairs\":[[Hook编号,承接编号,\"主题\",\"承接如何兑现\"]]}\n"
+        "输出格式: {\"hook_pairs\":[[Hook编号,承接编号,\"主题\",\"承接如何兑现\"]],\"hook_packages\":[{\"hook_id\":Hook编号,\"followup_id\":承接编号,\"topic\":\"主题\",\"reason\":\"承接如何兑现\",\"hook_promise\":\"Hook中连续原话\",\"proof_relation\":\"design_reason\",\"package_complete\":true,\"semantic_signals\":[\"result\"],\"opening_tier\":\"B\"}]}\n"
         "内容使用政策:\n"
         + "\n".join(policy_prompt_lines(content_policy))
         + "\n"
         "已审稿内容卡:\n"
         + json.dumps(approved_cards, ensure_ascii=False, separators=(",", ":"))
+    )
+    user_prompt += (
+        "\nHookPackage contract: hook_promise must be a continuous short quote from the Hook, not a new claim. "
+        "proof_relation must be visual_result, design_reason, material_evidence, wearing_experience, "
+        "scene_projection, identity_projection, social_proof, source_value, price_value, "
+        "after_sale_confidence, or other_grounded. package_complete is true only when the exact Hook promise "
+        "is proved by the followup. semantic_signals use only emotion, strong_judgment, identity, "
+        "style_projection, pain_hit, result, contrast, curiosity, scene, social_proof, source, price_value, "
+        "after_sale, cta. opening_tier is A, B, or C.\n"
+        "Policy override: price, CTA, origin/source claims, social proof, and after-sale "
+        "commitments follow the task policy. They are only excluded from Hooks when block or "
+        "body_only; when allowed they still require a credible immediate proof."
+        " A HookPair also needs a real attention mechanism in its original first sentence: emotion, "
+        "strong judgement, clear result, pain/persona, contrast, curiosity, identity/style, scene, "
+        "social proof, source, allowed price, after-sale confidence, or allowed CTA. A neutral "
+        "function list is body content, not a fallback HookPair."
     )
     return system_prompt, user_prompt
 
@@ -1362,9 +2099,31 @@ def repair_hook_pairs(
                 pairs.append(pair)
                 if len(pairs) >= 3:
                     break
+            packages: list[HookPackage] = []
+            seen_packages: set[tuple[int, int]] = set()
+            raw_packages = data.get("hook_packages")
+            if isinstance(raw_packages, list):
+                for raw_package in raw_packages:
+                    package = _normalize_hook_package(
+                        raw_package,
+                        card_ids=card_ids,
+                        candidates=candidates,
+                        cards_by_id=bundle.card_map(),
+                        content_policy=content_policy,
+                    )
+                    if package is None:
+                        continue
+                    signature = (package.hook_id, package.followup_id)
+                    if signature in seen_packages:
+                        continue
+                    seen_packages.add(signature)
+                    packages.append(package)
+                    if len(packages) >= 3:
+                        break
             resolved = replace(
                 bundle,
                 hook_pairs=tuple(pairs),
+                hook_packages=tuple(packages),
                 hook_pair_reviewed=True,
             )
             _write_cache(resolved)
@@ -1563,10 +2322,12 @@ def _final_review_duration_estimate(
 
 def _final_objective_issues(
     sequence: Sequence[Mapping[str, Any]],
+    content_policy: Any = None,
 ) -> list[str]:
     if not sequence:
         return ["\u7247\u5355\u4e3a\u7a7a"]
     issues: list[str] = []
+    policy = normalize_content_policy(content_policy)
     first_text = _clean_text(sequence[0].get("text"), 360)
     compact_first = re.sub(r"[\s,\uff0c\u3002.!\uff01?\uff1f]", "", first_text)
     if re.search(r"(?:\u60f3\u8981|\u9700\u8981|\u60f3\u770b).{0,24}\u7684[\u554a\u5440\u5462\u5427]?$", compact_first):
@@ -1605,7 +2366,9 @@ def _final_objective_issues(
                 issues.append(f"第{order}段不可作Hook:{','.join(hook_quality)}")
         if production_pattern.search(text):
             issues.append(f"\u7b2c{order}\u6bb5\u542b\u5bfc\u64ad/\u6295\u6d41/\u5207\u753b\u9762\u6307\u4ee4")
-        if purchase_cta_pattern.search(text):
+        role = "hook" if order == 1 or str(item.get("clip_type") or "").lower() == "hook" else "body"
+        cta_blocked, _cta_reason = blocks_role(policy, "cta", text, role=role)
+        if purchase_cta_pattern.search(text) and cta_blocked:
             issues.append(f"\u7b2c{order}\u6bb5\u542b\u63a8\u8350\u62cd\u5355\u7c7bCTA")
         if str(item.get("clip_type") or "").lower() == "product" and duration > 12.0:
             issues.append(f"\u7b2c{order}\u6bb5{duration:.1f}\u79d2\u8fc7\u957f\uff0c\u5e94\u6362\u6210\u66f4\u77ed\u7684\u5b8c\u6574\u5356\u70b9")
@@ -1619,6 +2382,8 @@ def audit_final_sequence(
     model: str,
     selected_sequence: Sequence[Mapping[str, Any]],
     hook_pairs: Sequence[Mapping[str, Any]] = (),
+    hook_threads: Mapping[int, Mapping[str, Any]] | None = None,
+    content_policy: Any = None,
     log_fn=None,
 ) -> FinalSequenceAudit:
     """Audit quality without giving the reviewer authority to re-edit.
@@ -1645,7 +2410,8 @@ def audit_final_sequence(
     if not normalized_sequence:
         raise ContentReviewError("成片终审缺少可审阅片单")
 
-    objective_issues = _final_objective_issues(normalized_sequence)
+    content_policy = normalize_content_policy(content_policy)
+    objective_issues = _final_objective_issues(normalized_sequence, content_policy)
     pair_lines = []
     for pair in hook_pairs or ():
         try:
@@ -1655,11 +2421,34 @@ def audit_final_sequence(
             continue
         if hook_id > 0 and followup_id > 0:
             pair_lines.append(f"#{hook_id}->#{followup_id}")
+    thread_lines = []
+    for raw_hook_id, raw_thread in (hook_threads or {}).items():
+        try:
+            hook_id = int(raw_hook_id)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(raw_thread, Mapping) or hook_id <= 0:
+            continue
+        followup_ids = []
+        for raw_followup_id in raw_thread.get("allowed_followup_ids") or ():
+            try:
+                followup_id = int(raw_followup_id)
+            except (TypeError, ValueError):
+                continue
+            if followup_id > 0 and followup_id != hook_id:
+                followup_ids.append(followup_id)
+        if followup_ids:
+            thread_lines.append(
+                f"#{hook_id}[{_clean_text(raw_thread.get('topic'), 40) or '同一卖点'}]"
+                f"->" + "/".join(f"#{value}" for value in sorted(set(followup_ids)))
+            )
 
     system_prompt = (
         "你是带货短视频的成片审稿人，只做审计，不做导演。"
         "你不能选择候选、不能输出编号、不能要求重排，也不能给出替换片单。"
-        "检查第一句是否有独立且具体的购买价值、第二句是否立即兑现、正文是否重复或断裂、结尾是否自然。"
+        "检查开头两句是否作为一个整体成立、第二句是否立即兑现、正文是否重复或断裂、结尾是否自然。"
+        "当已知Hook主题线程表明前两句属于同一验证组合时，第一句可以是短促的强情绪、强态度或强判断；"
+        "应按两句整体判断，不能只因第一句单独信息量低就判为问题。"
         "直播互动、报尺码、个人身高体重、价格CTA、上新预告、展示铺垫和泛泛夸赞一律判为问题。"
         "只输出JSON对象：{\"status\":\"pass|flag\",\"issues\":[\"...\"],\"opening_issue\":true|false}。"
         "只有不存在实质问题才可pass；flag最多列出6条可验证问题。"
@@ -1667,11 +2456,20 @@ def audit_final_sequence(
     user_prompt = (
         "当前导演片单：\n"
         + json.dumps(normalized_sequence, ensure_ascii=False, separators=(",", ":"))
-        + ("\n已知开头组合：" + ", ".join(pair_lines) if pair_lines else "")
+        + (
+            "\n已知Hook主题线程：" + ", ".join(thread_lines)
+            + "。第二段允许使用同一线程内更清楚的解释、证明或展开，不要求固定接审稿示例编号。"
+            if thread_lines else ("\n已知开头组合：" + ", ".join(pair_lines) if pair_lines else "")
+        )
         + ("\n程序已发现的客观问题：" + "；".join(objective_issues[:6]) if objective_issues else "")
     )
     if log_fn:
         log_fn("AI成片终审: 只审计，不重排片单...")
+    system_prompt += (
+        " Task content policy is authoritative: price, CTA, origin/source claims, social proof, "
+        "and after-sale commitments are issues only when the policy says block or body_only."
+    )
+    user_prompt += "\nContent policy:\n" + "\n".join(policy_prompt_lines(content_policy))
     content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
     data = _extract_json_object(content)
     status = _clean_text(data.get("status"), 16).lower()
@@ -1713,6 +2511,7 @@ def review_final_sequence(
     duration_high: float = 0.0,
     required_sources: Mapping[str, int] | None = None,
     hook_pairs: Sequence[Mapping[str, Any]] = (),
+    hook_threads: Mapping[int, Mapping[str, Any]] | None = None,
     allowed_hook_ids: Iterable[int] | None = None,
     log_fn=None,
 ) -> FinalSequenceReview:
@@ -1721,7 +2520,7 @@ def review_final_sequence(
         int(value) for value in (allowed_hook_ids or [])
         if str(value).strip().isdigit() and int(value) in allowed_ids
     }
-    hook_pair_map: dict[int, int] = {}
+    hook_followups_by_hook: dict[int, set[int]] = {}
     for raw_pair in hook_pairs or ():
         try:
             hook_id = int(raw_pair.get("hook_id") or 0)
@@ -1729,7 +2528,30 @@ def review_final_sequence(
         except (AttributeError, TypeError, ValueError):
             continue
         if hook_id in allowed_ids and followup_id in allowed_ids and hook_id != followup_id:
-            hook_pair_map[hook_id] = followup_id
+            hook_followups_by_hook.setdefault(hook_id, set()).add(followup_id)
+    hook_thread_contract = False
+    if hook_threads:
+        normalized_threads: dict[int, set[int]] = {}
+        for raw_hook_id, raw_thread in hook_threads.items():
+            try:
+                hook_id = int(raw_hook_id)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_thread, Mapping) or hook_id not in allowed_ids:
+                continue
+            followups = set()
+            for raw_followup_id in raw_thread.get("allowed_followup_ids") or ():
+                try:
+                    followup_id = int(raw_followup_id)
+                except (TypeError, ValueError):
+                    continue
+                if followup_id in allowed_ids and followup_id != hook_id:
+                    followups.add(followup_id)
+            if followups:
+                normalized_threads[hook_id] = followups
+        if normalized_threads:
+            hook_followups_by_hook = normalized_threads
+            hook_thread_contract = True
     compact_inventory = []
     for item in inventory:
         if int(item.get("srt_index") or 0) not in allowed_ids:
@@ -1787,16 +2609,25 @@ def review_final_sequence(
             for source, count in sorted(required_sources.items())
         )
     hook_pair_rule = ""
-    if hook_pair_map:
+    if hook_followups_by_hook:
         pair_text = "\u3001".join(
             f"#{hook_id}->#{followup_id}"
-            for hook_id, followup_id in sorted(hook_pair_map.items())
+            for hook_id, followup_ids in sorted(hook_followups_by_hook.items())
+            for followup_id in sorted(followup_ids)
         )
-        hook_pair_rule = (
-            "\u5ba1\u7a3fHook\u5408\u540c:" + pair_text
-            + "\u3002\u82e5\u4fee\u8ba2\u7247\u5355\uff0cHook\u5fc5\u987b\u4ec5\u4f7f\u7528\u5de6\u4fa7\u7f16\u53f7\uff0c"
-            "\u7b2c2\u6bb5\u5fc5\u987b\u7d27\u63a5\u4f7f\u7528\u5bf9\u5e94\u53f3\u4fa7\u7f16\u53f7\u3002\u4e0d\u5f97\u53e6\u9009\u5f00\u5934\u3002\n"
-        )
+        if hook_thread_contract:
+            hook_pair_rule = (
+                "Reviewed Hook topic threads: " + pair_text
+                + ". A revised sequence may use only a listed left-side ID as Hook. "
+                "The second segment may use any listed same-topic right-side ID, including a later timestamp, "
+                "but must explain, prove, or extend the same product promise.\n"
+            )
+        else:
+            hook_pair_rule = (
+                "\u5ba1\u7a3fHook\u5408\u540c:" + pair_text
+                + "\u3002\u82e5\u4fee\u8ba2\u7247\u5355\uff0cHook\u5fc5\u987b\u4ec5\u4f7f\u7528\u5de6\u4fa7\u7f16\u53f7\uff0c"
+                "\u7b2c2\u6bb5\u5fc5\u987b\u7d27\u63a5\u4f7f\u7528\u8be5Hook\u5217\u51fa\u7684\u4efb\u4e00\u53f3\u4fa7\u7f16\u53f7\u3002\u4e0d\u5f97\u53e6\u9009\u5f00\u5934\u3002\n"
+            )
     elif allowed_hook_set:
         hook_pair_rule = (
             "Strict Hook ID contract: "
@@ -1864,22 +2695,23 @@ def review_final_sequence(
                     "\u5df2\u6709\u5ba2\u89c2\u95ee\u9898\u9884\u6807\u8bb0\uff0c\u4e0d\u5141\u8bb8pass"
                 )
             if review.status == "revise":
-                if hook_pair_map:
+                if hook_followups_by_hook:
                     first = review.clips[0] if review.clips else {}
                     second = review.clips[1] if len(review.clips) > 1 else {}
                     first_indices = list(first.get("srt_indices") or [])
                     second_indices = list(second.get("srt_indices") or [])
                     hook_id = first_indices[0] if len(first_indices) == 1 else 0
-                    expected_followup = hook_pair_map.get(int(hook_id or 0))
+                    expected_followups = hook_followups_by_hook.get(int(hook_id or 0), set())
                     if (
                         str(first.get("clip_type") or "").lower() != "hook"
-                        or not expected_followup
-                        or second_indices != [expected_followup]
+                        or not expected_followups
+                        or len(second_indices) != 1
+                        or second_indices[0] not in expected_followups
                     ):
                         contract_issues.append(
                             "\u7ec8\u5ba1Hook\u672a\u9075\u5b88\u5ba1\u7a3f\u7684Hook+\u627f\u63a5\u7f16\u53f7\u5408\u540c"
                         )
-                if not hook_pair_map and allowed_hook_set:
+                if not hook_followups_by_hook and allowed_hook_set:
                     first = review.clips[0] if review.clips else {}
                     first_indices = list(first.get("srt_indices") or [])
                     hook_id = first_indices[0] if len(first_indices) == 1 else 0

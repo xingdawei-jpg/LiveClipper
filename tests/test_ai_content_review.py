@@ -121,6 +121,193 @@ class ContentReviewValidationTests(unittest.TestCase):
         self.assertNotIn("public_score", bundle.cards[0].to_dict())
         self.assertEqual(bundle.cards[0].evidence_quote, "肩线会往里收")
 
+    def test_plain_feature_list_cannot_reopen_a_fallback_hook_pair(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = (
+            "\u50cf\u8fd9\u79cd\u9886\u578b\u7684\uff0c\u5b83\u6bd4\u8f83\u7ecf\u5178\uff0c"
+            "\u53ef\u4ee5\u7acb\u9886\uff0c\u4e5f\u53ef\u4ee5\u7ffb\u9886\u7a7f\u3002"
+        )
+
+        bundle = self._validate(_review_payload(), inventory)
+
+        self.assertEqual(bundle.hook_pairs, ())
+
+    def test_neutral_material_evidence_cannot_be_promoted_to_hook_pair(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = (
+            "150克纯棉面料是挺括和柔软度适中，非常刚刚好的那种，"
+            "不会让你觉得又硬又塌。"
+        )
+        inventory[1]["text"] = "你看它属于有型，而且还比较耐皱。"
+
+        bundle = self._validate(_review_payload(), inventory)
+
+        self.assertEqual(bundle.hook_pairs, ())
+
+    def test_hook_package_becomes_director_contract_when_grounded_and_strong(self) -> None:
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线解释视觉重心为什么会向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }]
+
+        bundle = self._validate(payload)
+        package = bundle.hook_packages[0]
+
+        self.assertEqual(package.hook_promise, "肩线会往里收")
+        self.assertEqual(package.proof_relation, "design_reason")
+        self.assertTrue(package.package_complete)
+        self.assertEqual(package.opening_tier, "B")
+        self.assertIn("result", package.semantic_signals)
+        self.assertEqual(bundle.hook_pairs, ())
+        hook_records, threads, source = bundle.director_hook_contract()
+        self.assertEqual(source, "hook_package")
+        self.assertEqual(hook_records[0]["hook_id"], 1)
+        self.assertEqual(threads[1]["seed_followup_ids"], [2])
+        self.assertEqual(set(threads[1]["allowed_followup_ids"]), {2})
+        self.assertEqual(bundle.hook_candidate_ids, {1})
+        self.assertIn("HookPackage", bundle.director_hint())
+        self.assertEqual(bundle.summary("shadow")["hook_package_complete_count"], 1)
+        self.assertEqual(bundle.summary("on")["director_hook_contract"], "hook_package")
+        self.assertIn("hook_packages", bundle.to_dict())
+
+    def test_tier_c_hook_package_does_not_displace_safe_pair_fallback(self) -> None:
+        payload = _review_payload()
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线解释视觉重心为什么会向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "C",
+        }]
+
+        bundle = self._validate(payload)
+        hook_records, threads, source = bundle.director_hook_contract()
+
+        self.assertEqual(source, "hook_pair")
+        self.assertEqual(hook_records[0]["hook_id"], 1)
+        self.assertEqual(threads[1]["seed_followup_ids"], [2])
+
+    def test_hook_pair_and_package_require_executable_segment_durations(self) -> None:
+        payload = _review_payload()
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线解释视觉重心为什么会向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }]
+
+        inventory = _inventory(duration=8.1)
+        for index, item in enumerate(inventory):
+            item["start"] = index * 8.1
+            item["end"] = (index + 1) * 8.1
+        bundle = self._validate(payload, inventory)
+
+        self.assertEqual(bundle.hook_pairs, ())
+        self.assertEqual(bundle.hook_packages, ())
+
+    def test_unrelated_good_selling_point_is_not_a_complete_hook_package(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = "哇，这件西装真的好帅，像明星机场穿搭。"
+        inventory[1]["text"] = "面料摸起来细腻，而且贴身不扎。"
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "流行趋势",
+            "reason": "面料很好",
+            "hook_promise": "真的好帅，像明星机场穿搭",
+            "proof_relation": "material_evidence",
+            "package_complete": True,
+            "semantic_signals": ["emotion", "style_projection"],
+            "opening_tier": "A",
+        }]
+
+        bundle = self._validate(payload, inventory)
+
+        self.assertEqual(bundle.hook_packages, ())
+
+    def test_incomplete_or_ungrounded_hook_package_is_rejected(self) -> None:
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "下一句解释原因",
+            "hook_promise": "不存在的营销承诺",
+            "proof_relation": "design_reason",
+            "package_complete": False,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }]
+
+        self.assertEqual(self._validate(payload).hook_packages, ())
+
+    def test_delivery_signal_is_an_honest_text_proxy(self) -> None:
+        self.assertEqual(
+            content_review._textual_delivery_signal("哇，这件西装真的很帅！我的菜真的我的菜。"),
+            "textual_high",
+        )
+        self.assertEqual(
+            content_review._textual_delivery_signal("这件上衣肩线向内收，看起来更利落。"),
+            "unknown",
+        )
+
+    def test_emotional_reaction_can_be_a_diagnostic_package_only_when_proved(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = "很帅，真的很帅，我的菜真的我的菜。"
+        inventory[1]["text"] = "你看这个肩往外走，下面又是松的，整个型特别利落。"
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "流行趋势",
+            "reason": "肩线和廓形直接证明利落风格",
+            "hook_promise": "很帅，真的很帅",
+            "proof_relation": "identity_projection",
+            "package_complete": True,
+            "semantic_signals": ["emotion", "style_projection"],
+            "opening_tier": "A",
+        }]
+
+        bundle = self._validate(payload, inventory)
+
+        self.assertEqual(len(bundle.hook_packages), 1)
+        self.assertEqual(bundle.hook_packages[0].opening_tier, "A")
+        self.assertEqual(bundle.hook_pairs, ())
+
+    def test_hook_thread_keeps_seed_proof_and_same_topic_extensions(self) -> None:
+        payload = _review_payload()
+        payload["cards"][2]["topic"] = "版型显瘦"
+        payload["cards"][2]["subtopic"] = "肩线修饰后的搭配效果"
+        bundle = self._validate(payload)
+
+        thread = bundle.hook_thread_contract()[1]
+
+        self.assertEqual(thread["topic"], "版型显瘦")
+        self.assertEqual(thread["seed_followup_ids"], [2])
+        self.assertEqual(set(thread["allowed_followup_ids"]), {2, 3})
+
     def test_evidence_grounding_tolerates_only_punctuation_and_spacing(self) -> None:
         source = "通勤搭西裤，周末搭牛仔裤都能穿。"
         self.assertEqual(
@@ -171,7 +358,9 @@ class ContentReviewValidationTests(unittest.TestCase):
             {"hook_id": 2, "followup_id": 99, "topic": "版型显瘦", "reason": "未知编号"},
         ]
         bundle = self._validate(payload, inventory)
-        self.assertEqual([(pair.hook_id, pair.followup_id) for pair in bundle.hook_pairs], [(2, 3)])
+        # Candidate #2 is safe body material, but does not carry an opening
+        # mechanism by itself. Safety alone must not create a fallback Hook.
+        self.assertEqual(bundle.hook_pairs, ())
     def test_invalid_and_duplicate_ids_never_enter_cards(self) -> None:
         payload = _review_payload()
         payload["cards"].insert(1, dict(payload["cards"][0]))
@@ -360,6 +549,72 @@ class ContentReviewValidationTests(unittest.TestCase):
             "\u6301\u5986\u6548\u679c",
         )
 
+    def test_apparel_taxonomy_separates_try_on_style_and_actual_trend(self) -> None:
+        self.assertEqual(content_review._normalize_topic("\u4e0a\u8eab\u53cd\u5dee"), "\u4e0a\u8eab\u6548\u679c")
+        self.assertEqual(content_review._normalize_topic("\u5b66\u9662\u7f8e\u5f0f\u98ce\u683c"), "\u98ce\u683c\u5b9a\u4f4d")
+        self.assertEqual(content_review._normalize_topic("\u4eca\u5e74\u6d41\u884c\u5b66\u9662\u98ce"), "\u6d41\u884c\u8d8b\u52bf")
+        self.assertEqual(
+            content_review._topic_from_candidate_text("\u6302\u7740\u5e73\u5e73\u65e0\u5947\uff0c\u4e0a\u8eab\u4e4b\u540e\u6574\u4e2a\u4eba\u5c31\u7cbe\u81f4\u4e86\u3002"),
+            "\u4e0a\u8eab\u6548\u679c",
+        )
+        self.assertEqual(
+            content_review._topic_from_candidate_text("\u7f8e\u5f0f\u5b66\u9662\u611f\u5f88\u4fcf\u76ae\uff0c\u65e5\u5e38\u7a7f\u4e5f\u4e0d\u5938\u5f20\u3002"),
+            "\u98ce\u683c\u5b9a\u4f4d",
+        )
+    def test_content_card_reconciles_decisive_apparel_topic_conflicts(self) -> None:
+        def normalize(reported_topic: str, text: str, subtopic: str = ""):
+            return content_review._normalize_card(
+                {
+                    "candidate_id": 1,
+                    "topic": reported_topic,
+                    "subtopic": subtopic,
+                    "buyer_value": "\u5177\u4f53\u5356\u70b9",
+                    "evidence_type": "\u5b9e\u6d4b\u8bc1\u636e",
+                    "evidence_quote": text,
+                    "roles": ["effect"],
+                    "dependency": "independent",
+                    "quality_tags": ["\u5177\u4f53\u6548\u679c"],
+                    "tier": "main",
+                },
+                {1},
+                {1: {"text": text}},
+            )
+
+        self.assertEqual(
+            normalize("\u7a7f\u7740\u4f53\u9a8c", "\u6302\u7740\u5f88\u666e\u901a\uff0c\u4e0a\u8eab\u540e\u53cd\u800c\u5f88\u7cbe\u81f4").topic,
+            "\u4e0a\u8eab\u6548\u679c",
+        )
+        self.assertEqual(
+            normalize("\u6d41\u884c\u8d8b\u52bf", "\u8fd9\u4ef6\u4e0d\u4e0a\u8eab\u7a7f\uff0c\u4f60\u4e0d\u4f1a\u77e5\u9053\u5b83\u7684\u9b45\u529b").topic,
+            "\u4e0a\u8eab\u6548\u679c",
+        )
+        self.assertEqual(
+            normalize("\u6d41\u884c\u8d8b\u52bf", "\u8fd9\u6761\u88d9\u5b50\u662f\u7f8e\u5f0f\u5b66\u9662\u611f\uff0c\u7a7f\u8d77\u6765\u5f88\u51cf\u9f84").topic,
+            "\u98ce\u683c\u5b9a\u4f4d",
+        )
+        self.assertEqual(
+            normalize("\u7a7f\u7740\u4f53\u9a8c", "\u8fd9\u4e2a\u6b3e\u5f88\u8584\uff0c\u590f\u5929\u5230\u65e9\u79cb\u90fd\u80fd\u7a7f").topic,
+            "\u573a\u666f\u642d\u914d",
+        )
+        self.assertEqual(
+            normalize("\u98ce\u683c\u5b9a\u4f4d", "\u4eca\u5e74\u6d41\u884c\u7684\u5b66\u9662\u98ce\u5c31\u662f\u8fd9\u79cd").topic,
+            "\u6d41\u884c\u8d8b\u52bf",
+        )
+        self.assertEqual(
+            normalize("\u6d41\u884c\u8d8b\u52bf", "\u7a7f\u4e0a\u663e\u5f97\u4eba\u5f88\u9ad8\u667a\u5546\u9ad8\u5b66\u5386").topic,
+            "\u98ce\u683c\u5b9a\u4f4d",
+        )
+        self.assertEqual(
+            normalize("\u7a7f\u7740\u4f53\u9a8c", "\u4e0a\u8eab\u5f88\u8212\u670d\uff0c\u900f\u6c14\u4e0d\u95f7").topic,
+            "\u7a7f\u7740\u4f53\u9a8c",
+        )
+
+    def test_legacy_style_words_are_not_retained_as_trend_keywords(self) -> None:
+        migrated = ai_clipper._migrate_legacy_trend_style_keywords({
+            "\u6d41\u884c\u8d8b\u52bf": ["\u6d41\u884c", "\u97e9\u7cfb", "\u5c0f\u9999\u98ce", "\u8d8b\u52bf"],
+        })
+        self.assertEqual(migrated["\u6d41\u884c\u8d8b\u52bf"], ["\u6d41\u884c", "\u8d8b\u52bf"])
+        self.assertEqual(migrated["\u98ce\u683c\u5b9a\u4f4d"], ["\u97e9\u7cfb", "\u5c0f\u9999\u98ce"])
     def test_all_main_response_is_retiered_by_topic_and_source(self) -> None:
         inventory = [
             {
@@ -409,7 +664,9 @@ class ContentReviewValidationTests(unittest.TestCase):
             source_topic_counts[key] = source_topic_counts.get(key, 0) + 1
         self.assertTrue(all(count <= 4 for count in main_counts.values()))
         self.assertTrue(all(count <= 2 for count in source_topic_counts.values()))
-        self.assertEqual(len(bundle.hook_pairs), 4)
+        # This fixture intentionally contains generic body text only. It still
+        # exercises card tier balancing, but must not manufacture HookPairs.
+        self.assertEqual(bundle.hook_pairs, ())
 class ContentReviewSubjectPriorityTests(unittest.TestCase):
     def _validate(self, payload: dict, inventory=None, required_sources=None):
         return content_review._validate_bundle(
@@ -529,6 +786,30 @@ class ContentReviewSubjectPriorityTests(unittest.TestCase):
 
 
 class ContentReviewDirectorContractTests(unittest.TestCase):
+    def test_completed_empty_hook_review_rejects_a_director_hook_but_keeps_body(self) -> None:
+        entries = [
+            (0.0, 3.0, "150克纯棉面料挺括柔软适中，不会又硬又塌。"),
+            (3.0, 6.0, "它属于有型，而且还比较耐皱。"),
+        ]
+        response = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [2]},
+        ])
+
+        clips = ai_clipper._parse_ai_response(
+            response,
+            None,
+            entries,
+            require_srt_indices=True,
+            # An empty set differs from None: content review completed and
+            # explicitly left no verified Hook source for this task.
+            allowed_hook_indices=set(),
+            allowed_candidate_indices={1, 2},
+        )
+
+        self.assertEqual([clip[0] for clip in clips], ["product"])
+        self.assertEqual(clips[0][1], entries[1][2])
+
     def test_review_hook_pair_requires_its_immediate_followup(self) -> None:
         entries = [
             (0.0, 2.0, "\u8fd9\u4ef6\u4e0a\u8eab\u80a9\u7ebf\u4f1a\u5411\u5185\u6536\uff0c\u770b\u8d77\u6765\u66f4\u5229\u843d\u3002"),
@@ -565,6 +846,111 @@ class ContentReviewDirectorContractTests(unittest.TestCase):
             required_hook_followups={1: 2},
         )
         self.assertEqual([clip[0] for clip in clips], ["hook", "product"])
+
+    def test_review_hook_pair_accepts_any_verified_followup_for_the_same_hook(self) -> None:
+        entries = [
+            (0.0, 2.0, "这条裙子不怎么挑人，肩宽和小肚子都能修饰。"),
+            (2.0, 4.0, "有袖子，不会显得大手臂很粗。"),
+            (4.0, 6.0, "下摆留有余量，肚子大也能自然遮住。"),
+            (6.0, 8.0, "面料摸起来柔软，贴身不会扎。"),
+        ]
+        contract = {1: {2, 3}}
+        for followup_id in (2, 3):
+            with self.subTest(followup_id=followup_id):
+                response = json.dumps([
+                    {"clip_type": "hook", "srt_indices": [1]},
+                    {"clip_type": "product", "srt_indices": [followup_id]},
+                ])
+                clips = ai_clipper._parse_ai_response(
+                    response,
+                    None,
+                    entries,
+                    require_srt_indices=True,
+                    allowed_hook_indices={1},
+                    allowed_candidate_indices={1, 2, 3, 4},
+                    required_hook_followups=contract,
+                )
+                self.assertEqual([clip[0] for clip in clips], ["hook", "product"])
+
+        logs: list[str] = []
+        invalid = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [4]},
+        ])
+        self.assertEqual(
+            ai_clipper._parse_ai_response(
+                invalid,
+                logs.append,
+                entries,
+                require_srt_indices=True,
+                allowed_hook_indices={1},
+                allowed_candidate_indices={1, 2, 3, 4},
+                required_hook_followups=contract,
+            ),
+            [],
+        )
+        self.assertTrue(any("要求紧接 #2 或 #3" in line for line in logs))
+
+    def test_hook_thread_allows_a_same_topic_extension_not_just_seed_proof(self) -> None:
+        entries = [
+            (0.0, 2.0, "这条裙子肩宽和小肚子都能修饰，看起来更利落。"),
+            (2.0, 4.0, "肩部黑色编织线把视觉重心向内收。"),
+            (4.0, 6.0, "下摆留有余量，肚子大也能自然遮住。"),
+        ]
+        response = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [3]},
+        ])
+
+        clips = ai_clipper._parse_ai_response(
+            response,
+            None,
+            entries,
+            require_srt_indices=True,
+            allowed_hook_indices={1},
+            allowed_candidate_indices={1, 2, 3},
+            hook_followup_threads={
+                1: {
+                    "topic": "版型显瘦",
+                    "seed_followup_ids": [2],
+                    "allowed_followup_ids": [2, 3],
+                }
+            },
+        )
+
+        self.assertEqual([clip[0] for clip in clips], ["hook", "product"])
+        self.assertEqual([clip[1] for clip in clips], [entries[0][2], entries[2][2]])
+
+    def test_hook_thread_mismatch_is_a_quality_warning_not_a_parse_failure(self) -> None:
+        entries = [
+            (0.0, 2.0, "这条裙子肩宽和小肚子都能修饰，看起来更利落。"),
+            (2.0, 4.0, "肩部黑色编织线把视觉重心向内收。"),
+            (4.0, 6.0, "面料摸起来柔软，贴身不会扎。"),
+        ]
+        response = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [3]},
+        ])
+        logs: list[str] = []
+
+        clips = ai_clipper._parse_ai_response(
+            response,
+            logs.append,
+            entries,
+            require_srt_indices=True,
+            allowed_hook_indices={1},
+            allowed_candidate_indices={1, 2, 3},
+            hook_followup_threads={
+                1: {
+                    "topic": "版型显瘦",
+                    "seed_followup_ids": [2],
+                    "allowed_followup_ids": [2],
+                }
+            },
+        )
+
+        self.assertEqual([clip[0] for clip in clips], ["hook", "product"])
+        self.assertTrue(any("Hook主题承接提示" in line for line in logs))
 
 
 class ContentReviewCacheTests(unittest.TestCase):
@@ -1013,6 +1399,56 @@ class ContentReviewIntegrationTests(unittest.TestCase):
         self.assertEqual(safety["removed_count"], 5)
 
 
+class ContentReviewSemanticBindingTests(unittest.TestCase):
+    def test_final_clip_provenance_keeps_reviewed_semantics_without_mutating_clip(self) -> None:
+        clip = (
+            "product",
+            "肩线往里收，视觉上整个人会更利落。",
+            10.0,
+            16.0,
+            50.0,
+            6.0,
+            "面料质感",
+        )
+        card = content_review.ContentCard(
+            1,
+            "版型显瘦",
+            "肩线内收修饰肩宽",
+            "让上半身线条更利落",
+            "上身效果",
+            "肩线往里收",
+            ("effect", "evidence"),
+            "independent",
+            ("具体效果",),
+            "main",
+            "上衣",
+            "primary",
+            "肩线往里收",
+        )
+        bundle = content_review.ContentReviewBundle(
+            "semantic-key", "digest", "上衣", "deepseek-v4-flash", (card,), 6.0,
+        )
+        entries = [(10.0, 16.0, clip[1])]
+
+        ai_clipper._begin_analysis_metadata()
+        ai_clipper._record_director_clip_provenance(
+            clip,
+            candidate_indices=[1],
+            reason="导演选择肩线证据",
+        )
+        attached = ai_clipper._attach_content_review_semantics([clip], bundle, entries)
+        metadata = ai_clipper.get_last_analysis_metadata()
+        provenance = next(iter(metadata["director_clip_provenance"].values()))
+
+        self.assertEqual(attached, 1)
+        self.assertEqual(clip[1], entries[0][2])
+        self.assertEqual(clip[2:4], (10.0, 16.0))
+        self.assertEqual(provenance["content_semantics"]["topic"], "版型显瘦")
+        self.assertEqual(provenance["content_semantics"]["subtopic"], "肩线内收修饰肩宽")
+        self.assertEqual(provenance["content_semantics"]["candidate_ids"], [1])
+        self.assertEqual(metadata["content_review_summary"]["selected_semantic_count"], 1)
+
+
 class FinalSequenceReviewTests(unittest.TestCase):
     def _selected(self) -> list[dict]:
         return [
@@ -1148,6 +1584,35 @@ class FinalSequenceReviewTests(unittest.TestCase):
         self.assertEqual(result.clips[0]["srt_indices"], [1])
         self.assertEqual(result.clips[1]["srt_indices"], [2])
         self.assertEqual(request.call_count, 2)
+
+    def test_final_review_accepts_any_verified_followup_for_the_same_hook(self) -> None:
+        response = json.dumps({
+            "status": "revise",
+            "issues": ["use another verified proof"],
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1]},
+                {"clip_type": "product", "srt_indices": [3]},
+            ],
+        }, ensure_ascii=False)
+        with mock.patch.object(
+            content_review, "_post_review_request", return_value=response
+        ) as request:
+            result = content_review.review_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                inventory=_inventory(),
+                allowed_candidate_ids={1, 2, 3, 4},
+                duration_low=20.0,
+                duration_high=50.0,
+                hook_pairs=[
+                    {"hook_id": 1, "followup_id": 2},
+                    {"hook_id": 1, "followup_id": 3},
+                ],
+            )
+        self.assertEqual([item["srt_indices"] for item in result.clips[:2]], [[1], [3]])
+        self.assertEqual(request.call_count, 1)
 
     def test_final_review_cannot_escape_strict_fallback_hook_ids(self) -> None:
         invalid = json.dumps({
@@ -1440,6 +1905,31 @@ class FinalSequenceAuditTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "clips"))
         self.assertNotIn("expansion_plan", request.call_args.args[3])
         self.assertNotIn("安全候选", request.call_args.args[4])
+
+    def test_audit_receives_flexible_hook_thread_not_only_seed_pair(self) -> None:
+        response = json.dumps(
+            {"status": "pass", "issues": [], "opening_issue": False},
+            ensure_ascii=False,
+        )
+        with mock.patch.object(content_review, "_post_review_request", return_value=response) as request:
+            result = content_review.audit_final_sequence(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                selected_sequence=self._selected(),
+                hook_pairs=[{"hook_id": 1, "followup_id": 2}],
+                hook_threads={
+                    1: {
+                        "topic": "版型显瘦",
+                        "seed_followup_ids": [2],
+                        "allowed_followup_ids": [2, 3],
+                    }
+                },
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("Hook主题线程", request.call_args.args[4])
+        self.assertIn("#1[版型显瘦]->#2/#3", request.call_args.args[4])
 
     def test_audit_forces_flag_when_local_check_detects_display_preamble(self) -> None:
         selected = self._selected()

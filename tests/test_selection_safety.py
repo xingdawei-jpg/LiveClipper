@@ -22,6 +22,7 @@ class LiveInteractionSafetyTests(unittest.TestCase):
             "我一。7米，我是大女。我是我1.7哦。",
             "105斤的你直接M码。",
             "160斤以内轻松驾驭，可以单买上衣。",
+            "80到160斤以内，随便穿，不挑身高，不挑体重。",
             "你子身高170，体重105，上身的东西看一下吧。",
             "姐妹有尺码问题抓紧问。",
             "1.6米98S码。好看吧。",
@@ -41,6 +42,23 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertFalse(selection_safety.live_interaction_or_size_response_reason(text))
+
+    def test_asr_reversed_personal_size_and_staff_instruction_are_hard_rejected(self) -> None:
+        self.assertTrue(
+            selection_safety.live_interaction_or_size_response_reason(
+                "L码你本来高度就是自己控出来的。"
+            )
+        )
+        self.assertTrue(
+            selection_safety.live_interaction_or_size_response_reason(
+                "你把那个风衣给我一下。"
+            )
+        )
+        self.assertFalse(
+            selection_safety.live_interaction_or_size_response_reason(
+                "L码衣长72厘米，落肩穿起来更松弛。"
+            )
+        )
 
     def test_frozen_director_candidates_never_include_personal_size_reply(self) -> None:
         source = (
@@ -293,6 +311,40 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         )
 
         self.assertIsNone(repaired)
+
+    def test_ai_opening_pair_cannot_reverse_a_reviewed_hook_thread(self) -> None:
+        entries = [
+            (0.0, 2.0, "[V1] 这件上衣穿上以后肩线会往里收，看起来更利落。"),
+            (2.2, 5.2, "[V1] 肩部黑色编织线把视觉重心向内收。"),
+            (5.2, 8.8, "[V1] 通勤和周末都很耐看。"),
+        ]
+        body = [("product", entries[2][2], 5.2, 8.8, 50, 3.6)]
+        thread = {
+            1: {
+                "topic": "版型显瘦",
+                "seed_followup_ids": [2],
+                "allowed_followup_ids": [2],
+            }
+        }
+
+        reversed_pair = ai_clipper._apply_ai_opening_pair(
+            body,
+            {"hook_id": 2, "followup_id": 1},
+            entries,
+            allowed_candidate_ids={1, 2, 3},
+            hook_threads=thread,
+        )
+        valid_pair = ai_clipper._apply_ai_opening_pair(
+            body,
+            {"hook_id": 1, "followup_id": 2},
+            entries,
+            allowed_candidate_ids={1, 2, 3},
+            hook_threads=thread,
+        )
+
+        self.assertIsNone(reversed_pair)
+        self.assertIsNotNone(valid_pair)
+        self.assertEqual([clip[0] for clip in valid_pair[:2]], ["hook", "product"])
 
     def test_display_preamble_cannot_be_used_as_close(self) -> None:
         clips = [

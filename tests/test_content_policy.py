@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "app"))
 ai_clipper = importlib.import_module("ai_clipper")
 candidate_quality = importlib.import_module("candidate_quality")
 content_policy = importlib.import_module("content_policy")
+content_review = importlib.import_module("content_review")
 
 
 def _policy(**overrides: object) -> dict[str, object]:
@@ -28,6 +29,9 @@ class ContentPolicyTests(unittest.TestCase):
 
         self.assertEqual(policy["price"], "block")
         self.assertEqual(policy["cta"], "block")
+        self.assertEqual(policy["source_claim"], "block")
+        self.assertEqual(policy["social_proof"], "block")
+        self.assertEqual(policy["after_sale"], "block")
         self.assertEqual(policy["size_interaction"], "block")
         self.assertEqual(policy["live_interaction"], "block")
 
@@ -44,6 +48,94 @@ class ContentPolicyTests(unittest.TestCase):
         retained = ai_clipper._filter_price_and_cta(clips, content_policy=policy)
 
         self.assertEqual(retained, clips)
+
+    def test_live_price_change_with_bare_amount_honors_price_policy(self) -> None:
+        clip = (
+            "product",
+            "来，我们这个给大家开卫衣改价本来是290。",
+            0.0,
+            4.0,
+            0,
+            4.0,
+        )
+        blocked = _policy(price="block")
+        allowed = _policy(price="allow")
+
+        self.assertTrue(candidate_quality.candidate_quality_flags(clip[1], content_policy=blocked))
+        self.assertFalse(candidate_quality.candidate_quality_flags(clip[1], content_policy=allowed))
+        self.assertEqual(ai_clipper._filter_price_and_cta([clip], content_policy=blocked), [])
+        self.assertEqual(ai_clipper._filter_price_and_cta([clip], content_policy=allowed), [clip])
+
+    def test_source_social_proof_and_after_sale_follow_task_policy(self) -> None:
+        clips = [
+            ("product", "这件是原厂同款，肩线往里收，视觉更利落。", 0.0, 4.0, 0, 4.0),
+            ("product", "全公司都留了一件，因为这个颜色上身特别显白。", 4.1, 8.1, 0, 4.0),
+            ("product", "收到不喜欢可以退，但你先看它的垂感怎么修饰腿型。", 8.2, 12.2, 0, 4.0),
+        ]
+        allowed = _policy(source_claim="allow", social_proof="allow", after_sale="allow")
+
+        self.assertEqual(ai_clipper._filter_price_and_cta(clips, content_policy=allowed), clips)
+        self.assertEqual(ai_clipper._filter_price_and_cta(clips), [])
+
+    def test_policy_only_body_content_cannot_be_promoted_to_hook(self) -> None:
+        clip = ("hook", "原厂同款的肩线往里收，穿起来更利落。", 0.0, 4.0, 0, 4.0)
+        policy = _policy(source_claim="body_only")
+
+        body_safe = ai_clipper._filter_price_and_cta([clip], content_policy=policy)
+        hook_safe = ai_clipper._filter_hook_ineligible_clips(body_safe, content_policy=policy)
+
+        self.assertEqual(body_safe, [clip])
+        self.assertEqual(hook_safe, [])
+
+    def test_content_review_cache_isolated_by_content_policy(self) -> None:
+        blocked = _policy(source_claim="block", social_proof="block")
+        allowed = _policy(source_claim="allow", social_proof="allow")
+
+        blocked_key = content_review.build_cache_key(
+            "digest", "上衣", "西装", [], "deepseek-v4-flash", content_policy=blocked
+        )
+        allowed_key = content_review.build_cache_key(
+            "digest", "上衣", "西装", [], "deepseek-v4-flash", content_policy=allowed
+        )
+
+        self.assertNotEqual(blocked_key, allowed_key)
+        self.assertEqual(
+            allowed_key,
+            content_review.build_cache_key(
+                "digest", "上衣", "西装", [], "deepseek-v4-flash", content_policy=allowed
+            ),
+        )
+
+    def test_director_audit_uses_explicit_policy_not_saved_defaults(self) -> None:
+        clips = [
+            ("product", "这件是原厂同款，肩线往里收，视觉更利落。", 0.0, 4.0, 0, 4.0),
+            ("product", "全公司都留了一件，因为上身显白。", 4.1, 8.1, 0, 4.0),
+        ]
+        policy = _policy(source_claim="allow", social_proof="allow")
+
+        safe, _audit = ai_clipper._director_hard_audit(
+            clips,
+            8.0,
+            5.0,
+            content_policy=policy,
+        )
+
+        self.assertEqual(safe, clips)
+
+    def test_final_audit_only_flags_cta_when_task_policy_blocks_it(self) -> None:
+        sequence = [
+            {
+                "clip_type": "product",
+                "text": "这个肩型很利落，我推荐大家直接拍。",
+                "duration_sec": 4.0,
+            }
+        ]
+
+        blocked = content_review._final_objective_issues(sequence, _policy(cta="block"))
+        allowed = content_review._final_objective_issues(sequence, _policy(cta="allow"))
+
+        self.assertTrue(any("CTA" in issue for issue in blocked))
+        self.assertFalse(any("CTA" in issue for issue in allowed))
 
     def test_body_only_content_never_promotes_to_hook(self) -> None:
         price = "今天到手价199，但这件肩线向内收，视觉更利落。"

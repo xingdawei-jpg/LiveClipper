@@ -33,6 +33,50 @@ else:
     # Windows 下 drawtext 需要转义冒号
     DRAWTEXT_FONT_PATH = FONT_BOLD_PATH.replace("\\", "/").replace(":", "\\:")
 
+
+def resolve_subtitle_font(preferred_name):
+    """Return a usable subtitle font name/path, falling back safely when needed.
+
+    LiveClipper intentionally does not distribute the optional display fonts.
+    Windows font registration is the most reliable availability signal for both
+    ASS/libass and drawtext, so only an installed font is selected here.
+    """
+    preferred = str(preferred_name or "").strip()
+    if not preferred:
+        return FONT_BOLD_NAME, FONT_BOLD_PATH, True
+    if IS_WIN:
+        try:
+            import winreg
+
+            key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    key = winreg.OpenKey(hive, key_path)
+                except OSError:
+                    continue
+                with key:
+                    index = 0
+                    while True:
+                        try:
+                            registered_name, filename, _kind = winreg.EnumValue(key, index)
+                        except OSError:
+                            break
+                        index += 1
+                        if preferred.casefold() not in str(registered_name).casefold():
+                            continue
+                        candidate = os.path.expandvars(str(filename or ""))
+                        if not os.path.isabs(candidate):
+                            candidate = os.path.join(FONT_DIR, candidate)
+                        if os.path.isfile(candidate):
+                            # The registry name is generally closer to libass's
+                            # family name than a font-file name, and exact matching
+                            # works for the common Chinese installed fonts.
+                            family = str(registered_name).split("(", 1)[0].strip() or preferred
+                            return family, candidate, False
+        except Exception:
+            pass
+    return FONT_BOLD_NAME, FONT_BOLD_PATH, True
+
 # ============================================================
 # FFmpeg 配置（自动检测）
 # ============================================================

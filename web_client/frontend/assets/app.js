@@ -178,12 +178,12 @@ const primaryCategoryToBackendCategory = {
 const categoryAiProfiles = {
   "服饰内衣": {
     preset_keys: ["viral", "slim", "quality", "commute", "fast", "gentle"],
-    focus: ["自动", "版型显瘦", "面料质感", "尺寸长度", "穿着体验", "品质细节", "工艺细节", "颜色氛围", "场景搭配", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺"],
+    focus: ["自动", "版型显瘦", "上身效果", "面料质感", "尺寸长度", "穿着体验", "品质细节", "工艺细节", "颜色氛围", "风格定位", "场景搭配", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺"],
     secondary: ["自动识别", "女装", "男装", "内衣", "女鞋", "箱包", "钟表配饰"],
     goal: ["自动", "爆款种草", "专业讲解", "显瘦转化", "质感高级", "快速促单"],
     hook: ["自动", "痛点开头", "上身效果开头", "爆点金句开头", "主播强推荐开头", "细节近景开头", "不强制Hook"],
     ending: ["自动", "尺码引导", "信任背书", "场景收尾", "自然结束", "不要促单"],
-    selling: ["版型显瘦", "面料质感", "品质细节", "颜色氛围", "场景搭配", "穿着体验", "性价比", "情绪感染", "流行趋势", "紧迫稀缺", "尺寸长度", "工艺细节", "对比优势"],
+    selling: ["版型显瘦", "上身效果", "面料质感", "品质细节", "颜色氛围", "风格定位", "场景搭配", "穿着体验", "性价比", "情绪感染", "流行趋势", "紧迫稀缺", "尺寸长度", "工艺细节", "对比优势"],
     avoid: ["价格", "尺码", "库存", "闲聊", "搭配其他品", "重复卖点"],
     default_focus: "版型显瘦",
     default_goal: "爆款种草",
@@ -732,6 +732,11 @@ const settingFields = {
   ui_theme: "s-ui-theme",
   hardware_encoder_enabled: "s-hardware-encoder",
   subtitle_font_size: "s-subtitle-font-size",
+  subtitle_font_family: "s-subtitle-font-family",
+  subtitle_font_color: "s-subtitle-font-color",
+  subtitle_text_effect: "s-subtitle-text-effect",
+  subtitle_opacity: "s-subtitle-opacity",
+  subtitle_blur: "s-subtitle-blur",
   ui_font_size: "s-ui-font-size",
   style_profile_strength: "s-style-profile-strength",
   content_review_mode: "s-content-review-mode",
@@ -1884,6 +1889,8 @@ function bindActions() {
   });
   $("s-ui-font-size")?.addEventListener("input", (event) => applyUiFontSize(event.target.value));
   $("s-subtitle-font-size")?.addEventListener("input", syncSubtitleFontSize);
+  $("s-subtitle-opacity")?.addEventListener("input", syncSubtitleStyleValues);
+  $("s-subtitle-blur")?.addEventListener("input", syncSubtitleStyleValues);
   $("s-ui-theme")?.addEventListener("change", (event) => {
     applyTheme(event.target.value);
   });
@@ -3355,6 +3362,7 @@ async function loadSettings(showToast = false) {
   });
   applyUiFontSize(data.ui_font_size || 14);
   syncSubtitleFontSize();
+  syncSubtitleStyleValues();
   applyTheme(data.ui_theme || "system");
   applyPreferenceWeights(data.preference_weights || {});
   applyAiRules(data.ai_rules || {});
@@ -3375,6 +3383,8 @@ function collectSettings() {
   data.volc_app_id = "";
   data.volc_access_token = "";
   data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
+  data.subtitle_opacity = Math.max(20, Math.min(100, Number(data.subtitle_opacity || 70)));
+  data.subtitle_blur = Math.max(0, Math.min(20, Number(data.subtitle_blur || 10)));
   data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
   data.style_profile_strength = normalizeStyleProfileStrength(data.style_profile_strength);
   data.preference_weights = collectPreferenceWeights();
@@ -3441,6 +3451,9 @@ function bindAiSelectionAutoSave() {
   const choiceSelector = [
     "#s-policy-price",
     "#s-policy-cta",
+    "#s-policy-source-claim",
+    "#s-policy-social-proof",
+    "#s-policy-after-sale",
     "#s-policy-size-interaction",
     "#s-policy-live-interaction",
     "#s-content-review-mode",
@@ -4145,6 +4158,15 @@ function syncSubtitleFontSize() {
   label.textContent = input.value;
 }
 
+function syncSubtitleStyleValues() {
+  const opacity = $("s-subtitle-opacity");
+  const opacityLabel = $("s-subtitle-opacity-value");
+  if (opacity && opacityLabel) opacityLabel.textContent = `${opacity.value}%`;
+  const blur = $("s-subtitle-blur");
+  const blurLabel = $("s-subtitle-blur-value");
+  if (blur && blurLabel) blurLabel.textContent = blur.value;
+}
+
 function applyPreferenceWeights(weights) {
   document.querySelectorAll("[data-pref-key]").forEach((input) => {
     const key = input.dataset.prefKey;
@@ -4166,6 +4188,9 @@ function collectPreferenceWeights() {
 const contentPolicyDefaults = Object.freeze({
   price: "block",
   cta: "block",
+  source_claim: "block",
+  social_proof: "block",
+  after_sale: "block",
   size_interaction: "block",
   live_interaction: "block",
   custom_rules: [],
@@ -4178,6 +4203,9 @@ function normalizeContentPolicy(policy = {}) {
   const normalized = {
     price: contentPolicyActions.has(source.price) ? source.price : contentPolicyDefaults.price,
     cta: contentPolicyActions.has(source.cta) ? source.cta : contentPolicyDefaults.cta,
+    source_claim: contentPolicyActions.has(source.source_claim) ? source.source_claim : contentPolicyDefaults.source_claim,
+    social_proof: contentPolicyActions.has(source.social_proof) ? source.social_proof : contentPolicyDefaults.social_proof,
+    after_sale: contentPolicyActions.has(source.after_sale) ? source.after_sale : contentPolicyDefaults.after_sale,
     size_interaction: contentPolicyActions.has(source.size_interaction) ? source.size_interaction : contentPolicyDefaults.size_interaction,
     live_interaction: contentPolicyActions.has(source.live_interaction) ? source.live_interaction : contentPolicyDefaults.live_interaction,
     custom_rules: [],
@@ -4258,6 +4286,9 @@ function applyContentPolicy(policy) {
   const controls = {
     price: "s-policy-price",
     cta: "s-policy-cta",
+    source_claim: "s-policy-source-claim",
+    social_proof: "s-policy-social-proof",
+    after_sale: "s-policy-after-sale",
     size_interaction: "s-policy-size-interaction",
     live_interaction: "s-policy-live-interaction",
   };
@@ -4272,6 +4303,9 @@ function collectContentPolicy() {
   const policy = normalizeContentPolicy({
     price: $("s-policy-price")?.value,
     cta: $("s-policy-cta")?.value,
+    source_claim: $("s-policy-source-claim")?.value,
+    social_proof: $("s-policy-social-proof")?.value,
+    after_sale: $("s-policy-after-sale")?.value,
     size_interaction: $("s-policy-size-interaction")?.value,
     live_interaction: $("s-policy-live-interaction")?.value,
   });
@@ -7379,10 +7413,20 @@ function previewClipReasonParts(clip, analysis, { includeRisk = true } = {}) {
     return [risk?.detail || "未选"];
   }
   const parts = [];
+  const reviewed = clip?.content_semantics && typeof clip.content_semantics === "object"
+    ? clip.content_semantics
+    : null;
+  const reviewedTopic = String(reviewed?.topic || "").trim();
+  const reviewedSubtopic = String(reviewed?.subtopic || "").trim();
+  const reviewedValue = String(reviewed?.buyer_value || "").trim();
+  if (reviewedTopic) {
+    parts.push(`卖点：${reviewedTopic}${reviewedSubtopic ? ` · ${reviewedSubtopic}` : ""}`);
+    if (reviewedValue) parts.push(`价值：${reviewedValue}`);
+  }
   const focus = String(clip?.focus || clip?.focus_block || "").trim();
-  if (focus && focus !== "其他") parts.push(`重点：${focus}`);
+  if (!reviewedTopic && focus && focus !== "其他") parts.push(`重点：${focus}`);
   const tags = classifyClipScoreTags(clip, analysis)
-    .filter((tag) => tag.label && tag.label !== "普通")
+    .filter((tag) => tag.label && tag.label !== "普通" && tag.label !== reviewedTopic)
     .map((tag) => tag.label);
   if (tags.length) parts.push(`标签：${Array.from(new Set(tags)).slice(0, 4).join("/")}`);
   if (includeRisk && risk?.label && risk.label !== "正常") parts.push(`检查：${risk.label}`);
@@ -8168,8 +8212,8 @@ function clipTextForScore(clip) {
 }
 
 const previewPreferenceBlocks = [
-  "版型显瘦", "面料质感", "穿着体验", "品质细节", "尺寸长度", "颜色氛围",
-  "场景搭配", "工艺细节", "性价比", "对比优势", "情绪感染", "流行趋势",
+  "版型显瘦", "上身效果", "面料质感", "穿着体验", "品质细节", "尺寸长度", "颜色氛围",
+  "风格定位", "场景搭配", "工艺细节", "性价比", "对比优势", "情绪感染", "流行趋势",
   "紧迫稀缺", "口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法",
 ];
 
@@ -8177,10 +8221,17 @@ const previewPreferenceAliases = {
   身材痛点: "版型显瘦",
   版型: "版型显瘦",
   显瘦: "版型显瘦",
+  上身: "上身效果",
+  试穿: "上身效果",
+  上身反差: "上身效果",
   面料: "面料质感",
   质感: "面料质感",
   颜色: "颜色氛围",
   色彩: "颜色氛围",
+  风格: "风格定位",
+  学院: "风格定位",
+  美式: "风格定位",
+  气质: "风格定位",
   场景: "场景搭配",
   搭配: "场景搭配",
   工艺: "工艺细节",
@@ -8224,11 +8275,14 @@ function previewPreferenceLabelFromSummary(summary = {}) {
 
 const finalClipTopicRules = [
   ["版型显瘦", ["显瘦", "遮肉", "藏肉", "收腰", "显高", "显腿长", "比例", "版型", "廓形", "剪裁", "修身", "宽松", "遮胯", "遮肚", "肩宽", "胯宽", "小个子", "梨形", "拜拜肉", "盖臀", "盖胯"]],
+  ["上身效果", ["挂着", "挂起来", "上身", "上身后", "穿上", "一穿", "试穿", "试一下", "穿起来", "整体效果", "镜子里", "实物上身"]],
   ["面料质感", ["面料", "材质", "莱赛尔", "天丝", "氨纶", "弹力", "聚酯纤维", "纯棉", "棉麻", "针织", "冰丝", "真丝", "垂感", "垂坠", "高织", "薄纱", "克重"]],
   ["穿着体验", ["舒服", "舒适", "亲肤", "柔软", "冰凉", "凉感", "裸肤", "裸感", "透气", "不闷", "不热", "不勒", "不卡", "不紧绷", "轻盈", "自在", "不透", "活动方便"]],
   ["品质细节", ["品质", "质感", "做工", "走线", "高级感", "精致", "质检", "不起球", "不褪色", "不变形", "色牢度"]],
   ["颜色氛围", ["颜色", "色系", "显白", "提亮", "气色", "肤色", "黄皮", "黑皮", "绿色", "白色", "黑色", "藏青", "藏蓝", "亮色", "彩色", "米白", "冷白", "复古色", "氛围感"]],
-  ["场景搭配", ["通勤", "上班", "约会", "日常", "出门", "旅游", "度假", "放假", "聚会", "职场", "搭配", "内搭", "外穿", "单穿", "叠穿", "百搭", "拍照", "出片"]],
+  ["风格定位", ["学院", "美式", "韩系", "法式", "日系", "辣妹", "甜酷", "小香风", "老钱风", "千金风", "轻奢", "街头", "松弛感", "俏皮", "减龄", "优雅", "得体", "气质", "清纯", "帅", "风格", "小众", "不烂大街", "复古风"]],
+  ["流行趋势", ["流行", "当季", "今年", "本季", "热门", "爆款", "趋势", "秀场", "时装周", "流行元素", "流行款"]],
+  ["场景搭配", ["通勤", "上班", "约会", "日常", "出门", "旅游", "度假", "放假", "聚会", "职场", "搭配", "内搭", "外穿", "单穿", "叠穿", "百搭", "拍照", "出片", "夏天", "夏季", "早秋", "初秋", "秋天", "换季", "天气凉"]],
   ["尺寸长度", ["衣长", "袖长", "长度", "短款", "中长款", "盖住", "遮住", "到脚踝", "九分", "七分"]],
   ["工艺细节", ["工艺", "拼接", "包边", "锁边", "加固", "扣子", "纽扣", "亨利扣", "领口", "U领", "圆领", "V领", "口袋", "里衬", "定染", "固色"]],
   ["对比优势", ["买不到", "外面没有", "不一样", "独特", "独家", "全网无同款", "比外面", "比市面", "同品质", "没有第二家", "原创"]],
@@ -8241,6 +8295,8 @@ const finalClipTopicRules = [
 ];
 
 function classifyFinalClipTopic(clip) {
+  const reviewedTopic = normalizePreviewPreferenceLabel(clip?.content_semantics?.topic);
+  if (reviewedTopic) return reviewedTopic;
   const text = String(selectedPreviewText(clip) || "").replace(/\s+/g, "").toLowerCase();
   let bestTopic = "其他";
   let bestScore = 0;
@@ -8368,9 +8424,11 @@ const previewSalesRoleLabels = {
 
 const previewPreferenceEvidencePatterns = {
   版型显瘦: /显瘦|遮肉|藏肉|收腰|显高|显腿长|比例|小个子|梨形|苹果型|胯宽|腿粗|大骨架|盖臀|修身|宽松|版型/,
+  上身效果: /挂着|挂起来|上身|上身后|穿上|一穿|试穿|试一下|穿起来|整体效果|镜子里|实物上身/,
   面料质感: /面料|材质|手感|触感|亲肤|柔软|垂感|垂坠|透气|冰丝|真丝|纯棉|棉麻|针织|不闷|不透|厚实|薄款/,
   颜色氛围: /颜色|色系|显白|提气色|抬气色|黄皮|黑色|白色|咖色|复古|高级色|温柔色|氛围感|上镜|亮色/,
-  场景搭配: /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭|出门|出片|拍照/,
+  风格定位: /学院|美式|韩系|法式|日系|辣妹|甜酷|小香风|老钱风|千金风|轻奢|街头|松弛感|俏皮|减龄|优雅|得体|气质|清纯|帅|风格|小众|不烂大街|复古风/,
+  场景搭配: /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭|出门|出片|拍照|夏天|夏季|早秋|初秋|秋天|换季|天气凉/,
   穿着体验: /舒服|舒适|不勒|不紧绷|自在|轻盈|无感|不卡|不掉|不卷边|活动方便|不束缚|不扎人|凉爽|温暖/,
   品质细节: /品质|质感|做工|走线|细节|高级感|精致|缝合|刺绣|蕾丝|重工|大牌|专柜/,
 };
@@ -8386,9 +8444,9 @@ function previewSalesRole(clip) {
   if (/^(嗯+|啊+|好+|好的|是的|对|然后|而且|但是|不过|其实|就是)/.test(text) || /(然后|而且|但是|不过|所以|因为|就是|对不对|能理解吗|呢|吧|啊|呀)$/.test(text)) {
     if (text.length < 24) return "weak_fragment";
   }
-  if (["版型显瘦", "穿着体验", "口感食欲"].includes(focus) || /显瘦|遮肉|显高|显腿长|上身|穿上|效果|显白|好吃|爆汁|口感|试吃/.test(text)) return "direct_effect";
+  if (["版型显瘦", "上身效果", "穿着体验", "口感食欲"].includes(focus) || /显瘦|遮肉|显高|显腿长|上身|穿上|效果|显白|好吃|爆汁|口感|试吃/.test(text)) return "direct_effect";
   if (["面料质感", "品质细节", "工艺细节", "新鲜品质", "产地溯源", "规格分量", "发货保鲜"].includes(focus) || /面料|材质|质感|手感|做工|工艺|细节|品质|新鲜|产地|源头|规格|分量|冷链|包赔/.test(text)) return "proof_detail";
-  if (["场景搭配", "场景吃法", "流行趋势"].includes(focus) || /通勤|上班|约会|日常|出门|旅游|搭配|出片|小个子|微胖|梨形|苹果型|全家|早餐|办公室|送礼/.test(text)) return "scene_crowd";
+  if (["风格定位", "场景搭配", "场景吃法", "流行趋势"].includes(focus) || /通勤|上班|约会|日常|出门|旅游|搭配|出片|小个子|微胖|梨形|苹果型|全家|早餐|办公室|送礼|学院|美式|韩系|法式|俏皮|减龄|优雅|气质/.test(text)) return "scene_crowd";
   if (["尺寸长度", "对比优势"].includes(focus) || /不挑|不用担心|不会|不显|不胖|不勒|不卡|不闷|不透|不起球|遮肚子|胯宽|腿粗|尺码|码数|身高|体重|放心|安心|不踩雷/.test(text)) return "objection_resolver";
   if (/推荐|建议|适合|放心|安心|闭眼|值得|自留|复购|老客/.test(text)) return "natural_close";
   return "other";
@@ -8430,6 +8488,11 @@ function classifyClipScoreTags(clip, analysis = null) {
   };
   const type = String(clip?.clip_type || "").toLowerCase();
   const focus = String(clip?.focus_block || clip?.focus || "").trim();
+  const reviewed = clip?.content_semantics && typeof clip.content_semantics === "object"
+    ? clip.content_semantics
+    : null;
+  const reviewedTopic = String(reviewed?.topic || "").trim();
+  const reviewedSubtopic = String(reviewed?.subtopic || "").trim();
 
   if (type === "hook" || /hook|爆点|痛点|开头|第一眼|有没有发现|姐妹/.test(text)) {
     add("开头候选", "strong", "可能承担开头吸引作用");
@@ -8444,22 +8507,26 @@ function classifyClipScoreTags(clip, analysis = null) {
     add(salesLabel, tone, `成交链路角色：${salesLabel}`);
   }
 
-  if (focus && focus !== "其他") {
+  if (reviewedTopic) {
+    add(reviewedTopic, "good", `AI 内容审稿卖点：${reviewedTopic}${reviewedSubtopic ? ` · ${reviewedSubtopic}` : ""}`);
+  } else if (focus && focus !== "其他") {
     add(focus, "good", `AI 标注卖点：${focus}`);
   }
 
   const focusRules = [
     ["版型显瘦", /显瘦|遮肉|藏肉|收腰|显高|显腿长|比例|小个子|梨形|苹果型|胯宽|腿粗|大骨架|盖臀|修身|宽松|版型/, "修饰身材或版型效果"],
+    ["上身效果", /挂着|挂起来|上身|上身后|穿上|一穿|试穿|试一下|穿起来|整体效果|镜子里|实物上身/, "挂着、试穿或上身后的视觉变化"],
     ["面料质感", /面料|材质|手感|触感|亲肤|柔软|垂感|垂坠|透气|冰丝|真丝|纯棉|棉麻|针织|不闷|不透|厚实|薄款/, "面料、触感或穿着质感"],
     ["颜色氛围", /颜色|色系|显白|提气色|抬气色|黄皮|黑色|白色|咖色|复古|高级色|温柔色|氛围感|上镜/, "颜色、肤色或视觉氛围"],
-    ["场景搭配", /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭/, "穿着场景或搭配建议"],
+    ["风格定位", /学院|美式|韩系|法式|日系|辣妹|甜酷|小香风|老钱风|千金风|轻奢|街头|松弛感|俏皮|减龄|优雅|得体|气质|清纯|帅|风格|小众|不烂大街|复古风/, "款式风格、气质或身份定位"],
+    ["场景搭配", /通勤|上班|约会|日常|逛街|旅游|度假|聚会|职场|见家长|搭配|套穿|叠穿|内搭|外穿|成套|百搭|夏天|夏季|早秋|初秋|秋天|换季|天气凉/, "穿着场景、季节或搭配建议"],
     ["穿着体验", /舒服|舒适|不勒|不紧绷|自在|轻盈|无感|不卡|不掉|不卷边|活动方便|不束缚|不扎人|凉爽|温暖/, "穿着感受或活动体验"],
     ["品质细节", /品质|质感|做工|走线|细节|高级感|精致|缝合|刺绣|蕾丝|重工|大牌|专柜/, "品质背书或细节描述"],
     ["尺寸长度", /裙长|衣长|袖长|长度|九分|七分|短款|中长款|过膝|不过膝|露脚踝|遮小腿|盖住|刚好/, "长度、比例或遮盖位置"],
     ["工艺细节", /工艺|成本|拼接|剪裁|立体|定型|压褶|包边|锁边|加固|五金|拉链|扣子|里衬|固色/, "工艺结构或制作细节"],
     ["对比优势", /买不到|外面没有|不一样|区别|独特|独家|同价位|同品质|比外面|比商场|没有第二家|源头/, "对比、稀缺或差异化"],
     ["情绪感染", /绝了|太漂亮|太好看|美爆|太爱|神仙|封神|超级|天呐|妈呀|信我|相信我|真心|自留|美哭|疯了/, "主播情绪或强推荐语气"],
-    ["流行趋势", /流行|当季|新款|原创|不撞款|爆款|热门|趋势|法式|新中式|设计师|小众|时髦|松弛感|多巴胺|复古|国风/, "流行趋势或风格标签"],
+    ["流行趋势", /流行|当季|今年|本季|热门|爆款|趋势|秀场|时装周|流行元素|流行款/, "明确的当季、热门或趋势表达"],
     ["紧迫稀缺", /限量|限时|手慢无|秒空|断码|断货|补不到|不补货|最后|错过|下架|余量|稀缺|卖完/, "紧迫或稀缺表达"],
     ["口感食欲", /好吃|鲜甜|脆甜|爆汁|多汁|汁水|入口|口感|鲜嫩|软糯|酥脆|q弹|弹牙|拉丝|试吃|咬一口/, "试吃、口感或食欲画面"],
     ["新鲜品质", /新鲜|鲜活|现摘|现采|现捕|现捞|当天发|鲜度|品质|果形|果径|个头|饱满|坏果包赔|基地|果园/, "新鲜度、品质或售后信任"],
@@ -8468,9 +8535,11 @@ function classifyClipScoreTags(clip, analysis = null) {
     ["发货保鲜", /发货|现发|冷链|冰袋|保温箱|泡沫箱|顺丰|次日达|保鲜|锁鲜|冷冻|速冻|冷藏|破损包赔/, "发货、物流或保鲜保障"],
     ["场景吃法", /早餐|夜宵|下午茶|办公室|孩子|老人|全家|聚餐|火锅|烧烤|煲汤|下饭|拌饭|空气炸锅|即食|囤货|送礼/, "食用场景或吃法建议"],
   ];
-  focusRules.forEach(([label, pattern, detail]) => {
-    if (label !== focus && pattern.test(text)) add(label, "good", detail);
-  });
+  if (!reviewedTopic) {
+    focusRules.forEach(([label, pattern, detail]) => {
+      if (label !== focus && pattern.test(text)) add(label, "good", detail);
+    });
+  }
 
   if (/尺码|码数|s码|m码|l码|xl|xxl|身高|体重|小码|中码|大码|正码|拍大|拍小|卡码/.test(text)) {
     add("尺码信息", "neutral", "包含尺码、身高或体重信息");

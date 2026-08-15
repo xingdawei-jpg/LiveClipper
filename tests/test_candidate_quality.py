@@ -105,6 +105,52 @@ class CandidateQualityTests(unittest.TestCase):
         self.assertTrue(candidate_quality.candidate_quality_flags("站远看就像在海边风吹过来整。"))
         self.assertFalse(candidate_quality.candidate_quality_flags("风吹起来以后，罩衫的垂感会更明显。"))
 
+    def test_live_follow_up_and_bare_body_stats_tail_are_not_candidates(self) -> None:
+        self.assertTrue(
+            candidate_quality.candidate_quality_flags(
+                "下面穿另外一种就好了可以搭防走光防走光还有吗"
+            )
+        )
+        self.assertTrue(
+            candidate_quality.candidate_quality_flags("你就可以这样去穿177142斤。")
+        )
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags("内搭防走光短裤，抬手也更安心。")
+        )
+
+    def test_incomplete_request_and_broken_condition_are_not_candidates(self) -> None:
+        self.assertTrue(
+            candidate_quality.candidate_quality_flags(
+                "搭这双也好看，头发一半放后面，会不会把头发给"
+            )
+        )
+        self.assertTrue(
+            candidate_quality.candidate_quality_flags(
+                "我觉得大家如果喜欢。这个卫衣的女生，反正买回就懒人必备好穿。"
+            )
+        )
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags("会不会把头发给撅起来？")
+        )
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags("如果喜欢这个卫衣，露腿穿也很好看。")
+        )
+
+    def test_live_overlay_orphaned_material_and_model_switch_are_not_candidates(self) -> None:
+        unusable = [
+            "好，家人这字大的有点看不见了，这个太大了，小一点啊，它里面是有棉加人。",
+            "的一个混纺，内里的话是这样的。",
+            "换个风格，换个人给你们看看短头发的效果。",
+        ]
+
+        for text in unusable:
+            with self.subTest(text=text):
+                self.assertTrue(candidate_quality.candidate_quality_flags(text))
+
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags("棉和人丝混纺，贴身穿会更柔软。")
+        )
+
     def test_malformed_audience_opening_is_hook_only_defect(self) -> None:
         malformed = "你们机洗水洗久穿久如新的整件衣服能够做到遮肉显瘦"
 

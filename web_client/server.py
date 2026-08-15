@@ -95,6 +95,11 @@ from ai_model_config import (
     normalize_ai_base_url,
     normalize_ai_model_defaults as _shared_normalize_ai_model_defaults,
 )
+from config import (
+    SUBTITLE_COLOR_OPTIONS,
+    SUBTITLE_FONT_OPTIONS,
+    SUBTITLE_STYLE_DEFAULTS,
+)
 
 import logging
 _LOG = logging.getLogger("liveclipper.server")
@@ -725,8 +730,10 @@ def _legacy_runtime_overlays_present() -> bool:
 
 DEFAULT_PREFERENCE_WEIGHTS = {
     "版型显瘦": 2.0,
+    "上身效果": 1.5,
     "面料质感": 2.0,
     "颜色氛围": 1.5,
+    "风格定位": 1.0,
     "场景搭配": 1.5,
     "情绪感染": 1.0,
     "性价比": 1.0,
@@ -739,6 +746,10 @@ PREFERENCE_WEIGHT_ALIASES = {
     "闈㈡枡璐ㄦ劅": "面料质感",
     "棰滆壊姘涘洿": "颜色氛围",
     "穿着场景": "场景搭配",
+    "上身反差": "上身效果",
+    "试穿效果": "上身效果",
+    "款式风格": "风格定位",
+    "风格气质": "风格定位",
     "鎯呯华鎰熸煋": "情绪感染",
 }
 
@@ -751,6 +762,9 @@ DEFAULT_AI_RULES = {
     "content_policy": {
         "price": "block",
         "cta": "block",
+        "source_claim": "block",
+        "social_proof": "block",
+        "after_sale": "block",
         "size_interaction": "block",
         "live_interaction": "block",
         "custom_rules": [],
@@ -965,6 +979,7 @@ def _load_settings() -> dict[str, Any]:
         "hardware_encoder_enabled": False,
         "subtitle_font_size": 52,
         "ui_font_size": 14,
+        **SUBTITLE_STYLE_DEFAULTS,
     }
     loaded = load_settings()
     defaults.update(loaded or {})
@@ -977,8 +992,17 @@ def _load_settings() -> dict[str, Any]:
     ai_rules = dict(DEFAULT_AI_RULES)
     if isinstance((loaded or {}).get("ai_rules"), dict):
         ai_rules.update((loaded or {}).get("ai_rules", {}))
+    # Older saved settings only contain the first four policy fields. Expand
+    # them on read as well as write so every task receives one complete policy
+    # contract even before the user opens this settings panel again.
+    from content_policy import normalize_content_policy
+
+    ai_rules["content_policy"] = normalize_content_policy(
+        ai_rules.get("content_policy")
+    )
     defaults["ai_rules"] = ai_rules
     defaults["volc_region"] = _normalize_volc_region(defaults.get("volc_region"))
+    _normalize_subtitle_style_settings(defaults)
     return _normalize_ai_model_defaults(defaults)
 
 
@@ -997,11 +1021,35 @@ def _save_settings(settings: dict[str, Any]) -> bool:
         data["subtitle_font_size"] = max(32, min(96, int(float(data.get("subtitle_font_size", 52)))))
     except Exception:
         data["subtitle_font_size"] = 52
+    _normalize_subtitle_style_settings(data)
     try:
         data["ui_font_size"] = max(12, min(18, int(float(data.get("ui_font_size", 14)))))
     except Exception:
         data["ui_font_size"] = 14
     return bool(save_settings(data))
+
+
+def _normalize_subtitle_style_settings(settings: dict[str, Any]) -> None:
+    """Keep persisted subtitle style values safe for the renderer and older settings files."""
+    font_family = str(settings.get("subtitle_font_family") or "").strip()
+    settings["subtitle_font_family"] = (
+        font_family if font_family in SUBTITLE_FONT_OPTIONS else SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
+    )
+
+    color = str(settings.get("subtitle_font_color") or "").strip().lower()
+    settings["subtitle_font_color"] = (
+        color if color in SUBTITLE_COLOR_OPTIONS else SUBTITLE_STYLE_DEFAULTS["subtitle_font_color"]
+    )
+
+    effect = str(settings.get("subtitle_text_effect") or "").strip().lower()
+    settings["subtitle_text_effect"] = effect if effect in {"shadow", "outline"} else "shadow"
+
+    for key, minimum, maximum in (("subtitle_opacity", 20, 100), ("subtitle_blur", 0, 20)):
+        try:
+            value = int(float(settings.get(key, SUBTITLE_STYLE_DEFAULTS[key])))
+        except Exception:
+            value = int(SUBTITLE_STYLE_DEFAULTS[key])
+        settings[key] = max(minimum, min(maximum, value))
 
 
 def _normalize_ai_model_defaults(settings: dict[str, Any]) -> dict[str, Any]:
@@ -1934,6 +1982,11 @@ class SettingsPayload(BaseModel):
     ui_theme: str = "system"
     hardware_encoder_enabled: bool = False
     subtitle_font_size: int = Field(default=52, ge=32, le=96)
+    subtitle_font_family: str = SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
+    subtitle_font_color: str = SUBTITLE_STYLE_DEFAULTS["subtitle_font_color"]
+    subtitle_text_effect: str = SUBTITLE_STYLE_DEFAULTS["subtitle_text_effect"]
+    subtitle_opacity: int = Field(default=SUBTITLE_STYLE_DEFAULTS["subtitle_opacity"], ge=20, le=100)
+    subtitle_blur: int = Field(default=SUBTITLE_STYLE_DEFAULTS["subtitle_blur"], ge=0, le=20)
     ui_font_size: int = Field(default=14, ge=12, le=18)
 
 
@@ -2552,9 +2605,17 @@ def _batch_best_effort_detail(label: str, result: Any) -> dict[str, Any] | None:
         or ""
     ).strip()
     if soft_warning:
+        soft_kind = str(
+            result.get("duration_soft_kind")
+            or metadata.get("duration_soft_kind")
+            or ""
+        ).strip()
+        is_short = soft_kind == "under_target" or (
+            not soft_kind and "低于建议下限" in soft_warning
+        )
         return {
             "label": str(label or "").strip(),
-            "code": "duration_overrun_output",
+            "code": "duration_shortage_output" if is_short else "duration_overrun_output",
             "message": soft_warning,
         }
     relaxation = dict(metadata.get("duration_relaxation") or {})
@@ -2581,6 +2642,8 @@ def _batch_best_effort_detail(label: str, result: Any) -> dict[str, Any] | None:
 def _batch_best_effort_prefix(detail: dict[str, Any]) -> str:
     if detail.get("code") == "duration_overrun_output":
         return "时长超出建议范围但已成片"
+    if detail.get("code") == "duration_shortage_output":
+        return "时长低于建议范围但已成片"
     return "内容不足但已成片"
 
 
@@ -2603,11 +2666,20 @@ def _batch_summary_message(
         1 for item in (best_effort_details or [])
         if item.get("code") == "duration_overrun_output"
     )
-    shortage_outputs = max(0, len(best_effort_details or []) - duration_overrun_outputs)
+    duration_shortage_outputs = sum(
+        1 for item in (best_effort_details or [])
+        if item.get("code") == "duration_shortage_output"
+    )
+    shortage_outputs = max(
+        0,
+        len(best_effort_details or []) - duration_overrun_outputs - duration_shortage_outputs,
+    )
     if shortage_outputs:
         parts.append(f"内容不足但已成片 {shortage_outputs}")
     if duration_overrun_outputs:
         parts.append(f"时长超出建议范围但已成片 {duration_overrun_outputs}")
+    if duration_shortage_outputs:
+        parts.append(f"时长低于建议范围但已成片 {duration_shortage_outputs}")
     if insufficient:
         parts.append(f"内容不足 {insufficient}")
     if duration_mismatch:
@@ -5193,6 +5265,12 @@ def _preview_effective_clip_tuples(raw_clips: list[Any], public_clips: list[dict
         values[2] = start
         values[3] = end
         values[5] = max(0.0, end - start)
+        reviewed_semantics = public_clip.get("content_semantics") if isinstance(public_clip.get("content_semantics"), dict) else {}
+        reviewed_topic = str(reviewed_semantics.get("topic") or "").strip()
+        if reviewed_topic:
+            # Keep preview-wide topic coverage on the same reviewed taxonomy
+            # shown on each row.  Fallback clips retain their original focus.
+            values[6] = reviewed_topic
         if not values[7]:
             values[7] = str(public_clip.get("source") or "")
         effective.append(tuple(values))
@@ -5847,10 +5925,69 @@ def _refresh_preview_clip_sales_metadata(public_clips: list[dict[str, Any]]) -> 
         segments = list(clip.get("segments") or [])
         if segments and not any(seg.get("selected") is not False for seg in segments if isinstance(seg, dict)):
             clip["selected"] = False
-        clip["focus_block"] = _preview_focus_block(clip)
+        reviewed_semantics = clip.get("content_semantics") if isinstance(clip.get("content_semantics"), dict) else {}
+        reviewed_topic = str(reviewed_semantics.get("topic") or "").strip()
+        # A user may trim words inside a reviewed clip.  That changes the
+        # rendered sentence, not the AI review that selected the source
+        # candidate.  Keep the reviewed taxonomy stable instead of re-tagging
+        # the edited remainder with a second keyword system.
+        clip["focus_block"] = reviewed_topic or _preview_focus_block(clip)
         sales_role = _preview_sales_role(clip)
         clip["sales_role"] = sales_role
         clip["sales_role_label"] = _PREVIEW_SALES_ROLE_LABELS.get(sales_role, "补充卖点")
+
+
+def _preview_review_semantics_for_clip(clip: Any, provenance: dict[str, Any] | None) -> dict[str, Any]:
+    """Find final reviewed semantics without changing the clip itself."""
+    if not isinstance(provenance, dict) or not provenance:
+        return {}
+    try:
+        import ai_clipper as ai_mod
+
+        exact = provenance.get(ai_mod._director_clip_trim_key(clip))
+        if isinstance(exact, dict) and isinstance(exact.get("content_semantics"), dict):
+            return dict(exact["content_semantics"])
+    except Exception:
+        pass
+
+    # Preview-only boundary cleanup can make a clip key differ by a few words
+    # or milliseconds.  Fall back to a conservative same-source overlap match.
+    info = _clip_public(-1, clip)
+    text_key = _preview_compact_text(info.get("text") or "")
+    marker = _preview_source_marker(info.get("text") or "")
+    try:
+        start = float(info.get("start") or 0.0)
+        end = float(info.get("end") or start)
+    except (TypeError, ValueError):
+        return {}
+    if end <= start:
+        return {}
+
+    best_match = None
+    best_score = 0.0
+    for value in provenance.values():
+        if not isinstance(value, dict) or not isinstance(value.get("content_semantics"), dict):
+            continue
+        source = str(value.get("source") or "").strip().upper()
+        if marker and source and marker != source.strip("[]"):
+            continue
+        try:
+            old_start = float(value.get("start") or 0.0)
+            old_end = float(value.get("end") or old_start)
+        except (TypeError, ValueError):
+            continue
+        overlap = max(0.0, min(end, old_end) - max(start, old_start))
+        old_duration = max(0.001, old_end - old_start)
+        coverage = overlap / min(max(0.001, end - start), old_duration)
+        old_text_key = _preview_compact_text(value.get("text") or "")
+        text_related = bool(text_key and old_text_key and (text_key in old_text_key or old_text_key in text_key))
+        score = coverage + (0.35 if text_related else 0.0)
+        if score > best_score and (coverage >= 0.82 or text_related):
+            best_match = value
+            best_score = score
+    if isinstance(best_match, dict):
+        return dict(best_match.get("content_semantics") or {})
+    return {}
 
 
 def _preview_public_clips(
@@ -5860,6 +5997,7 @@ def _preview_public_clips(
     sources: list[Any] | None = None,
     merge_mode: bool = False,
     word_timings: list[dict[str, Any]] | None = None,
+    director_provenance: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     srt_segments: list[dict[str, Any]] = []
     if srt_text:
@@ -5871,7 +6009,16 @@ def _preview_public_clips(
             emit_log("warning", f"preview segment split skipped: {exc}", "system")
     source_list = list(sources or [])
     public_clips = [_clip_public(index, clip) for index, clip in enumerate(clips)]
-    for clip in public_clips:
+    for raw_clip, clip in zip(clips, public_clips):
+        reviewed_semantics = _preview_review_semantics_for_clip(raw_clip, director_provenance)
+        if reviewed_semantics:
+            clip["director_focus"] = clip.get("focus") or ""
+            reviewed_topic = str(reviewed_semantics.get("topic") or "").strip()
+            if reviewed_topic:
+                clip["focus"] = reviewed_topic
+                clip["focus_block"] = reviewed_topic
+            clip["content_semantics"] = reviewed_semantics
+            clip["semantic_source"] = "content_review"
         expected_marker = _preview_expected_source_marker(clip, source_list) if merge_mode else ""
         if expected_marker:
             clip["source_marker"] = expected_marker
@@ -8661,6 +8808,9 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
             sources=mix_sources,
             merge_mode=True,
             word_timings=word_timings,
+            director_provenance=dict(
+                (result_cache.get("analysis_metadata") or {}).get("director_clip_provenance") or {}
+            ),
         )
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
         if unusable_removed:
@@ -11995,7 +12145,14 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         )
         dedup_summary["word_timing_summary"] = dict(word_timing_summary)
         _set_task_progress(task_id, 94, "生成预览列表")
-        public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
+        public_clips = _preview_public_clips(
+            raw_clips,
+            srt_text,
+            word_timings=word_timings,
+            director_provenance=dict(
+                (result_cache.get("analysis_metadata") or {}).get("director_clip_provenance") or {}
+            ),
+        )
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
         if unusable_removed:
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed

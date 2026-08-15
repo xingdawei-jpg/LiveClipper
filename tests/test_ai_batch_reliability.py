@@ -124,9 +124,78 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertFalse(metadata["selection_result"]["ok"])
         self.assertEqual(metadata["selection_manifest"]["selected_count"], 2)
 
+    def test_partial_shortage_can_be_explicitly_exportable_without_becoming_success(self) -> None:
+        ai_clipper._begin_analysis_metadata()
+        contract = selection_contracts.DurationContract.create(90, 1.15, tolerance=15)
+        clips = [
+            ("hook", "这件上衣肩线很利落。", 0.0, 4.0, 50, 4.0, "版型"),
+            ("product", "面料轻薄透气，夏天穿不会闷。", 4.0, 52.0, 50, 48.0, "面料"),
+        ]
+
+        details = ai_clipper._record_partial_insufficient(
+            clips,
+            candidate_count=2,
+            duration_contract=contract,
+            export_allowed=True,
+            preview_only=False,
+        )
+        metadata = ai_clipper.get_last_analysis_metadata()
+
+        self.assertFalse(details["preview_only"])
+        self.assertFalse(details["requires_user_confirmation"])
+        self.assertTrue(details["export_allowed"])
+        self.assertTrue(details["duration_soft_constraint"])
+        self.assertEqual(metadata["selection_result"]["status"], "partial_insufficient")
+        self.assertFalse(metadata["selection_result"]["ok"])
+
+    def test_director_returns_short_safe_plan_for_direct_output(self) -> None:
+        srt = (
+            "1\n00:00:00,000 --> 00:00:12,000\n"
+            "这件上衣肩线向内收，穿上整个人看起来更利落。\n"
+        )
+        planned = [
+            ("product", "这件上衣肩线向内收，穿上整个人看起来更利落。", 0.0, 12.0, 1, 12.0, "版型显瘦"),
+        ]
+        settings = {
+            "api_key": "key",
+            "base_url": "https://example.com/v1",
+            "model": "deepseek-v4-flash",
+            "content_review_mode": "off",
+        }
+        audit = {
+            "issues": [],
+            "warnings": ["总时长12.0s低于目标下限50s"],
+            "needs_repair": False,
+            "hard_removed": 0,
+            "total_duration": 12.0,
+            "duration_short": True,
+            "duration_long": False,
+            "duration_low": 50.0,
+            "duration_high": 70.0,
+            "duration_gap": 38.0,
+        }
+        with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
+             mock.patch.object(ai_clipper, "_director_safe_candidate_inventory", return_value=[
+                 {"srt_index": 1, "source": "V1", "duration_sec": 12.0, "text": planned[0][1]}
+             ]), \
+             mock.patch.object(ai_clipper, "_call_ai", return_value=planned), \
+             mock.patch.object(ai_clipper, "_director_hard_audit", return_value=(planned, audit)):
+            clips = ai_clipper.ai_analyze_clips(
+                srt,
+                target_duration=60,
+                allow_short_duration_output=True,
+            )
+
+        metadata = ai_clipper.get_last_analysis_metadata()
+        self.assertEqual(clips, planned)
+        self.assertEqual(metadata["selection_result"]["status"], "partial_insufficient")
+        self.assertTrue(metadata["selection_result"]["details"]["export_allowed"])
+        self.assertFalse(metadata["selection_result"]["details"]["preview_only"])
+
     def test_only_preview_paths_enable_partial_ai_selection(self) -> None:
         source = inspect.getsource(cutter_logic)
         self.assertGreaterEqual(source.count("allow_partial=_clips_only"), 2)
+        self.assertGreaterEqual(source.count("allow_short_duration_output=not _clips_only"), 2)
         self.assertGreaterEqual(source.count("record_history=not _clips_only"), 2)
 
     def test_partial_selection_bypasses_duration_only_for_preview(self) -> None:
@@ -460,23 +529,17 @@ class AiCandidateReliabilityTests(unittest.TestCase):
 
     def test_user_confirmed_preview_duration_is_warning_not_failure(self) -> None:
         clips = [("hook", "用户确认保留的完整片单", 0.0, 72.9, 50, 72.9, "场景搭配")]
-        with self.assertRaises(RuntimeError):
-            cutter_logic._validate_selected_duration_contract(clips, 90, 1.0)
         selected = cutter_logic._validate_selected_duration_contract(
             clips,
             90,
             1.0,
-            user_confirmed=True,
         )
-        self.assertTrue(selected["user_confirmed"])
-        self.assertFalse(cutter_logic._validate_actual_duration_contract(72.9, 90)[0])
-        self.assertTrue(
-            cutter_logic._validate_actual_duration_contract(
-                72.9,
-                90,
-                user_confirmed=True,
-            )[0]
-        )
+        self.assertTrue(selected["underlength"])
+        self.assertIn("低于建议下限", selected["duration_soft_warning"])
+        actual_ok, actual = cutter_logic._validate_actual_duration_contract(72.9, 90)
+        self.assertTrue(actual_ok)
+        self.assertTrue(actual["underlength"])
+        self.assertIn("低于建议下限", actual["duration_soft_warning"])
 
     def test_duration_grace_metadata_is_explicit_and_capped(self) -> None:
         self.assertEqual(cutter_logic._selection_shortage_grace_seconds({}), 0.0)
@@ -487,7 +550,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             5.0,
         )
 
-    def test_verified_best_effort_policy_no_longer_bypasses_duration_contract(self) -> None:
+    def test_verified_best_effort_policy_keeps_short_safe_output_as_warning(self) -> None:
         metadata = {
             "duration_relaxation": {
                 "applied": True,
@@ -500,20 +563,20 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         grace = cutter_logic._selection_shortage_grace_seconds(metadata)
         clips = [("product", "安全候选用尽后的最佳完整片单", 0.0, 28.75, 50, 28.75)]
         self.assertEqual(grace, 0.0)
-        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-            cutter_logic._validate_selected_duration_contract(
-                clips,
-                60,
-                1.15,
-                shortage_grace_seconds=grace,
-            )
-        self.assertFalse(
-            cutter_logic._validate_actual_duration_contract(
-                25.0,
-                60,
-                shortage_grace_seconds=grace,
-            )[0]
+        selected = cutter_logic._validate_selected_duration_contract(
+            clips,
+            60,
+            1.15,
+            shortage_grace_seconds=grace,
         )
+        self.assertTrue(selected["underlength"])
+        accepted, actual = cutter_logic._validate_actual_duration_contract(
+            25.0,
+            60,
+            shortage_grace_seconds=grace,
+        )
+        self.assertTrue(accepted)
+        self.assertTrue(actual["underlength"])
 
     def test_best_effort_policy_rejects_inconsistent_or_unsafe_metadata(self) -> None:
         for relaxation in (
@@ -590,7 +653,22 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertIn("成功 3/3", summary)
         self.assertIn("时长超出建议范围但已成片 1", summary)
 
-    def test_stale_best_effort_metadata_cannot_cross_ai_to_cutter_contract(self) -> None:
+    def test_duration_shortage_output_is_reported_as_completed_warning(self) -> None:
+        detail = server._batch_best_effort_detail("短素材.mp4", {
+            "ok": True,
+            "duration_soft_kind": "under_target",
+            "duration_soft_warning": "成片45.2秒，低于建议下限50秒，已保留输出",
+        })
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["code"], "duration_shortage_output")
+        self.assertEqual(server._batch_best_effort_prefix(detail), "时长低于建议范围但已成片")
+        summary = server._batch_summary_message(
+            "智能成片完成", 3, 3, [], "个", [detail]
+        )
+        self.assertIn("成功 3/3", summary)
+        self.assertIn("时长低于建议范围但已成片 1", summary)
+
+    def test_stale_best_effort_metadata_cannot_hide_short_duration_warning(self) -> None:
         metadata = ai_clipper._begin_analysis_metadata()
         metadata["duration_relaxation"] = {
             "applied": True,
@@ -606,13 +684,13 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         grace = cutter_logic._selection_shortage_grace_seconds(public_metadata)
         clips = [("product", "安全候选已经用尽后的完整片单", 0.0, 52.0, 50, 52.0)]
         self.assertEqual(grace, 0.0)
-        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-            cutter_logic._validate_selected_duration_contract(
-                clips,
-                60,
-                1.15,
-                shortage_grace_seconds=grace,
-            )
+        selected = cutter_logic._validate_selected_duration_contract(
+            clips,
+            60,
+            1.15,
+            shortage_grace_seconds=grace,
+        )
+        self.assertTrue(selected["underlength"])
 
     def test_vocal_prefix_is_trimmed_but_semantic_connector_is_preserved(self) -> None:
         words = [
@@ -840,6 +918,113 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             ["场景搭配"],
         )
 
+    def test_director_uses_verified_hook_package_as_the_only_hook_source(self) -> None:
+        entries = [
+            (0.0, 3.0, "这件短风衣立起来不会显得脖子短。"),
+            (3.1, 6.0, "领子撑起来，视觉上把脖颈线条留得更利落。"),
+            (6.1, 9.0, "短风衣搭牛仔裤也很干净。"),
+        ]
+        source = (
+            "00:00:00,000 --> 00:00:03,000\n这件短风衣立起来不会显得脖子短。\n\n"
+            "00:00:03,100 --> 00:00:06,000\n领子撑起来，视觉上把脖颈线条留得更利落。\n\n"
+            "00:00:06,100 --> 00:00:09,000\n短风衣搭牛仔裤也很干净。"
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": json.dumps([
+                {"clip_type": "hook", "srt_indices": [1], "focus": "领型修饰", "reason": "视觉结果"},
+                {"clip_type": "product", "srt_indices": [2], "focus": "领型修饰", "reason": "立刻证明"},
+                {"clip_type": "close", "srt_indices": [3], "focus": "场景搭配", "reason": "场景收束"},
+            ], ensure_ascii=False)}}]
+        }).encode("utf-8")
+        ai_clipper._begin_analysis_metadata()
+        hook_package = {
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "领型直接解释脖颈比例",
+            "hook_promise": "立起来不会显得脖子短",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "opening_tier": "B",
+        }
+        with (
+            mock.patch.object(ai_clipper, "load_settings", return_value={}),
+            mock.patch.object(ai_clipper.urllib.request, "urlopen", return_value=response) as request,
+        ):
+            clips = ai_clipper._call_ai(
+                "key",
+                "https://example.com/v1",
+                "deepseek-test",
+                source,
+                None,
+                srt_entries=entries,
+                allowed_candidate_ids={1, 2, 3},
+                content_review_hint="reviewed content",
+                review_hook_pairs=[hook_package],
+                review_hook_contract_kind="hook_package",
+                review_hook_pairs_checked=True,
+                review_hook_threads={
+                    1: {
+                        "topic": "版型显瘦",
+                        "seed_followup_ids": [2],
+                        "allowed_followup_ids": [2],
+                    }
+                },
+            )
+
+        self.assertEqual([clip[0] for clip in clips], ["hook", "product", "close"])
+        self.assertEqual(clips[0][1], entries[0][2])
+        payload = json.loads(request.call_args.args[0].data.decode("utf-8"))
+        prompt = "\n".join(message["content"] for message in payload["messages"])
+        self.assertIn("完整A/B HookPackage", prompt)
+        self.assertIn("不得用普通候选或普通HookPair替换", prompt)
+        self.assertIn("正文信息增量合同", prompt)
+        self.assertEqual(
+            ai_clipper.get_last_analysis_metadata()["hook_candidate_summary"]["review_hook_contract"],
+            "hook_package",
+        )
+
+    def test_director_rejects_a_hook_package_without_its_same_topic_followup(self) -> None:
+        entries = [
+            (0.0, 3.0, "这件短风衣立起来不会显得脖子短。"),
+            (3.1, 6.0, "领子撑起来，视觉上把脖颈线条留得更利落。"),
+            (6.1, 9.0, "短风衣搭牛仔裤也很干净。"),
+        ]
+        source = (
+            "00:00:00,000 --> 00:00:03,000\n这件短风衣立起来不会显得脖子短。\n\n"
+            "00:00:03,100 --> 00:00:06,000\n领子撑起来，视觉上把脖颈线条留得更利落。\n\n"
+            "00:00:06,100 --> 00:00:09,000\n短风衣搭牛仔裤也很干净。"
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": json.dumps([
+                {"clip_type": "hook", "srt_indices": [1], "focus": "版型显瘦", "reason": "强开场"},
+                {"clip_type": "product", "srt_indices": [3], "focus": "场景搭配", "reason": "错误跳题"},
+            ], ensure_ascii=False)}}]
+        }).encode("utf-8")
+        ai_clipper._begin_analysis_metadata()
+        with (
+            mock.patch.object(ai_clipper, "load_settings", return_value={}),
+            mock.patch.object(ai_clipper.urllib.request, "urlopen", return_value=response),
+        ):
+            clips = ai_clipper._call_ai(
+                "key",
+                "https://example.com/v1",
+                "deepseek-test",
+                source,
+                None,
+                srt_entries=entries,
+                allowed_candidate_ids={1, 2, 3},
+                review_hook_pairs=[{"hook_id": 1, "followup_id": 2, "topic": "版型显瘦"}],
+                review_hook_contract_kind="hook_package",
+                review_hook_threads={
+                    1: {"topic": "版型显瘦", "seed_followup_ids": [2], "allowed_followup_ids": [2]}
+                },
+            )
+
+        self.assertEqual(clips, [])
+
     def test_standalone_dangling_fragments_are_rejected_but_complete_group_is_kept(self) -> None:
         ai_clipper._begin_analysis_metadata()
         self.assertEqual(
@@ -1039,6 +1224,33 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual(audit["per_clip_duration"]["split_count"], 0)
         self.assertEqual(audit["per_clip_duration"]["removed_count"], 1)
         self.assertAlmostEqual(audit["per_clip_duration"]["removed_duration"], 17.0)
+
+    def test_ai_expansion_skips_overlong_product_before_hard_audit(self) -> None:
+        entries = [
+            (0.0, 4.0, "这件上衣上身很显精神。"),
+            (4.0, 15.0, "这是一段完整但超过单段节奏上限的商品讲解。"),
+            (15.0, 20.0, "肩线向内收，视觉会更利落。"),
+            (20.0, 24.0, "通勤穿这一身很耐看。"),
+        ]
+        clips = [
+            ("hook", entries[0][2], 0.0, 4.0, 50, 4.0, "效果"),
+            ("close", entries[3][2], 20.0, 24.0, 50, 4.0, "场景"),
+        ]
+        expanded = ai_clipper._apply_ai_expansion_plan(
+            clips,
+            [{
+                "priority": 1,
+                "after_srt_indices": [1],
+                "after_order": 1,
+                "srt_indices": [2],
+                "focus": "长讲解",
+            }],
+            entries,
+            24,
+            duration_contract=selection_contracts.DurationContract.create(24, 1.0),
+        )
+
+        self.assertEqual(expanded, [])
 
     def test_specialized_ai_trim_applies_ai_removal_priority_with_exact_arithmetic(self) -> None:
         clips = [
@@ -1335,8 +1547,9 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertAlmostEqual(result["projected_final"], 60.0, places=1)
 
         short = [("product", "完整卖点", 0.0, 46.3, 50, 46.3)]
-        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-            cutter_logic._validate_selected_duration_contract(short, 60, 1.15)
+        short_result = cutter_logic._validate_selected_duration_contract(short, 60, 1.15)
+        self.assertTrue(short_result["underlength"])
+        self.assertIn("低于建议下限", short_result["duration_soft_warning"])
 
         overlong = [("product", "完整卖点", 0.0, 137.1, 50, 137.1)]
         overlong_result = cutter_logic._validate_selected_duration_contract(
@@ -1345,9 +1558,12 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertTrue(overlong_result["overlong"])
         self.assertIn("超过建议上限", overlong_result["duration_soft_warning"])
 
-    def test_actual_duration_contract_keeps_overrun_output_but_rejects_shortage(self) -> None:
+    def test_actual_duration_contract_keeps_both_out_of_range_outputs(self) -> None:
         self.assertTrue(cutter_logic._validate_actual_duration_contract(60.0, 60)[0])
-        self.assertFalse(cutter_logic._validate_actual_duration_contract(44.6, 60)[0])
+        accepted_short, short = cutter_logic._validate_actual_duration_contract(44.6, 60)
+        self.assertTrue(accepted_short)
+        self.assertTrue(short["underlength"])
+        self.assertEqual(short["duration_soft_kind"], "under_target")
         accepted, detail = cutter_logic._validate_actual_duration_contract(
             78.7, 60, duration_tolerance=15,
         )
@@ -1503,8 +1719,8 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         self.assertTrue(audit["duration_short"])
         self.assertAlmostEqual(audit["duration_low"], 86.25, places=2)
-        with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-            cutter_logic._validate_selected_duration_contract(clips, 90, 1.15)
+        selected = cutter_logic._validate_selected_duration_contract(clips, 90, 1.15)
+        self.assertTrue(selected["underlength"])
     def test_declared_expansion_plan_adds_only_ai_approved_complete_clip(self) -> None:
         ai_clipper._begin_analysis_metadata()
         entries = [

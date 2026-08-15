@@ -1264,16 +1264,22 @@ def _validate_selected_duration_contract(
     target, high = contract.final_target, contract.final_max
     standard_low = contract.final_min
     low = float(status["relaxed_low"])
-    # The configured upper bound is a publishing recommendation.  Anything
-    # beyond it stays exportable, but must be surfaced to the batch summary.
+    # Duration is an editorial target, not an export gate. A complete,
+    # hard-safe selection remains more valuable than padding it with weak or
+    # prohibited material just to hit the requested range.
+    underlength = bool(projected < low - 1e-6)
     overlong = bool(projected > high + 1e-6)
-    accepted = bool(
-        status["accepted"]
-        or overlong
-        or (user_confirmed and source_total > 0)
-    )
+    accepted = bool(source_total > 0)
     soft_warning = ""
-    if overlong:
+    soft_kind = ""
+    if underlength:
+        soft_kind = "under_target"
+        soft_warning = (
+            f"预计成片{projected:.1f}秒，低于建议下限{low:.0f}秒，"
+            "已保留完整安全片单继续成片"
+        )
+    elif overlong:
+        soft_kind = "over_target"
         soft_warning = (
             f"预计成片{projected:.1f}秒，超过建议上限{high:.0f}秒，"
             "已保留片单继续成片"
@@ -1281,7 +1287,7 @@ def _validate_selected_duration_contract(
     if log_fn:
         log_fn(
             f"时长合同: 片单原时长{source_total:.1f}s，按{speed:.2f}x预计成片{projected:.1f}s，"
-            f"要求{low:.0f}-{high:.0f}s"
+            f"建议{low:.0f}-{high:.0f}s"
         )
         if user_confirmed and not status["accepted"]:
             log_fn(
@@ -1297,8 +1303,7 @@ def _validate_selected_duration_contract(
             log_fn(f"时长提示: {soft_warning}")
     if not accepted:
         raise RuntimeError(
-            f"AI未满足时长：片单原时长{source_total:.1f}秒，预计成片{projected:.1f}秒，"
-            f"目标{target:.0f}秒（允许{low:.0f}-{high:.0f}秒）"
+            "AI未返回任何有效安全片段，无法继续成片"
         )
     return {
         "source_total": source_total,
@@ -1310,7 +1315,9 @@ def _validate_selected_duration_contract(
         "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
         "used_shortage_grace": bool(status.get("used_shortage_grace")),
         "user_confirmed": bool(user_confirmed),
+        "underlength": underlength,
         "overlong": overlong,
+        "duration_soft_kind": soft_kind,
         "duration_soft_warning": soft_warning,
         "duration_contract": contract.to_dict(),
     }
@@ -1335,16 +1342,26 @@ def _validate_actual_duration_contract(
         actual,
         shortage_grace_seconds=shortage_grace_seconds,
     )
-    # Keep the generic contract's acceptance margin for diagnostics, while
-    # reporting every upper-bound overrun as a soft publishing warning.
+    # Keep the generic contract's range for diagnostics only. Both sides are
+    # soft warnings; a real rendered duration is exportable whenever it is
+    # positive.
+    underlength = bool(actual < float(status["relaxed_low"]) - 1e-6)
     overlong = bool(actual > contract.final_max + 1e-6)
     soft_warning = ""
-    if overlong:
+    soft_kind = ""
+    if underlength:
+        soft_kind = "under_target"
+        soft_warning = (
+            f"成片{actual:.1f}秒，低于建议下限{float(status['relaxed_low']):.0f}秒，"
+            "已保留输出"
+        )
+    elif overlong:
+        soft_kind = "over_target"
         soft_warning = (
             f"成片{actual:.1f}秒，超过建议上限{contract.final_max:.0f}秒，"
             "已保留输出"
         )
-    ok = actual > 0 and bool(status["accepted"] or overlong or user_confirmed)
+    ok = actual > 0
     return ok, {
         "actual": actual,
         "target": contract.final_target,
@@ -1354,7 +1371,9 @@ def _validate_actual_duration_contract(
         "shortage_grace_seconds": float(shortage_grace_seconds or 0.0),
         "used_shortage_grace": bool(status.get("used_shortage_grace")),
         "user_confirmed": bool(user_confirmed),
+        "underlength": underlength,
         "overlong": overlong,
+        "duration_soft_kind": soft_kind,
         "duration_soft_warning": soft_warning,
     }
 
@@ -2161,9 +2180,12 @@ def _highlight_text(text, keywords, sc):
 def generate_ass(clips, width, height, output_path):
     """为片段生成 ASS 字幕文件（支持关键词高亮）"""
     from config import SUBTITLE_KEYWORDS
-    from platform_config import FONT_BOLD_NAME
     sc = dict(SUBTITLE_OVERLAY)  # 复制避免修改原配置
-    sc["font_name"] = FONT_BOLD_NAME
+    style = _load_subtitle_render_style()
+    sc["font_name"] = style["font_name"]
+    sc["font_color"] = _ass_color(style["color_hex"], style["opacity"])
+    sc["outline_color"] = _ass_color("000000", style["opacity"])
+    sc["outline_width"] = 3 if style["effect"] == "outline" else 0
     margin_v = sc["margin_v"]
     outline_w = sc.get("outline_width", 3)
     # 底部对齐：用 PlayResY - margin_v
@@ -2184,7 +2206,7 @@ def generate_ass(clips, width, height, output_path):
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{sc['font_name']},{sc['font_size']},{sc['font_color']},&H000000FF,{sc['outline_color']},&H80000000,-1,0,0,0,100,100,0,0,1,{outline_w},1,{alignment},10,10,{margin_v},1",
+        f"Style: Default,{sc['font_name']},{sc['font_size']},{sc['font_color']},&H000000FF,{sc['outline_color']},{_ass_color('000000', round(style['opacity'] * 0.6))},-1,0,0,0,100,100,0,0,1,{outline_w},{0 if style['effect'] == 'outline' else 2},{alignment},10,10,{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -2214,7 +2236,8 @@ def generate_ass(clips, width, height, output_path):
             ass_s = _sec_to_ass_time(seg_start)
             ass_e = _sec_to_ass_time(seg_end)
             highlighted = _highlight_text(seg, all_keywords, sc)
-            lines.append(f"Dialogue: 0,{ass_s},{ass_e},Default,,0,0,0,,{highlighted}")
+            blur_tag = f"{{\\blur{style['blur']}}}" if style["blur"] else ""
+            lines.append(f"Dialogue: 0,{ass_s},{ass_e},Default,,0,0,0,,{blur_tag}{highlighted}")
         current_time += duration
 
     with open(output_path, "w", encoding="utf-8-sig") as f:
@@ -2965,6 +2988,20 @@ def process_video(video_path, srt_path=None, output_path=None,
             import ai_clipper as _ai_mod; _ai_mod._AI_TARGET_DURATION = _ai_target_duration
             # 动态控制AI输出的片段数量；统一由 ai_clipper 按目标时长推导。
             _ai_mod._AI_CLIP_COUNT = _ai_mod.target_clip_count_text(_ai_target_duration)
+            # A single source often states the exact garment in its filename
+            # while later live subtitles only say "this one".  Use that cue for
+            # this invocation only; never overwrite the user's saved control.
+            _task_ai_controls = dict(ai_controls or {})
+            if not str(_task_ai_controls.get("main_product") or "").strip():
+                try:
+                    _filename_main_product = _ai_mod.infer_main_product_from_filename(
+                        os.path.basename(str(original_video_path))
+                    )
+                except Exception:
+                    _filename_main_product = None
+                if _filename_main_product:
+                    _task_ai_controls["main_product"] = _filename_main_product
+                    _log(f"自动主商品: 文件名强信号 → {_filename_main_product}")
             _effective_force_category = force_category
             if not _effective_force_category:
                 try:
@@ -2983,10 +3020,11 @@ def process_video(video_path, srt_path=None, output_path=None,
                 target_duration=_ai_target_duration,
                 final_target_duration=target_duration,
                 duration_contract=_duration_contract,
-                ai_controls=ai_controls,
+                ai_controls=_task_ai_controls,
                 record_history=not _clips_only,
                 word_timings=_word_timings,
                 allow_partial=_clips_only,
+                allow_short_duration_output=not _clips_only,
             )
             try:
                 analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
@@ -3888,7 +3926,7 @@ def process_video(video_path, srt_path=None, output_path=None,
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
-        f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
+        f"建议{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
     )
     if _duration_contract.get("duration_soft_warning"):
         _log(
@@ -3898,12 +3936,9 @@ def process_video(video_path, srt_path=None, output_path=None,
     # Only the final, post-subtitle file may enter the task summary.  The
     # preflight measurement is diagnostic and can differ by a few frames.
     _duration_soft_warnings = []
+    _duration_soft_kinds = []
     if not _duration_ok:
-        _duration_error = (
-            f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
-            f"目标{_duration_contract['target']:.0f}秒"
-            f"（允许{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}秒）"
-        )
+        _duration_error = "无法读取有效成片时长，媒体文件可能未完整生成"
         _log(_duration_error + "，已停止字幕烧录，避免继续耗时并输出错误成片")
         _run_log["结果"] = "失败"
         _run_log["错误"] = _duration_error
@@ -4013,11 +4048,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             duration_tolerance=duration_tolerance,
         )
         if not _final_duration_ok:
-            _duration_error = (
-                f"最终成片时长未达标：实际{_final_contract['actual']:.1f}秒，"
-                f"目标{_final_contract['target']:.0f}秒"
-                f"（允许{_final_contract['low']:.0f}-{_final_contract['high']:.0f}秒）"
-            )
+            _duration_error = "无法读取有效最终成片时长，媒体文件可能未完整生成"
             _log(_duration_error)
             try:
                 os.remove(output_path)
@@ -4034,6 +4065,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             raise RuntimeError(_duration_error)
         if _final_contract.get("duration_soft_warning"):
             _duration_soft_warnings.append(_final_contract["duration_soft_warning"])
+            _duration_soft_kinds.append(str(_final_contract.get("duration_soft_kind") or ""))
             _log(f"时长提示: {_final_contract['duration_soft_warning']}")
 
     # ---- 切割评分 ----
@@ -4063,11 +4095,16 @@ def process_video(video_path, srt_path=None, output_path=None,
         _result_metadata["duration_soft_warning"] = "；".join(
             dict.fromkeys(_duration_soft_warnings)
         )
+        _result_metadata["duration_soft_kind"] = next(
+            (kind for kind in reversed(_duration_soft_kinds) if kind),
+            "",
+        )
     return {
         "ok": True,
         "report": report,
         "analysis_metadata": _result_metadata,
         "duration_soft_warning": _result_metadata.get("duration_soft_warning", ""),
+        "duration_soft_kind": _result_metadata.get("duration_soft_kind", ""),
     }
 
 
@@ -4477,8 +4514,106 @@ def _ffmpeg_filter_path(path):
     )
 
 
-def _write_mapped_subtitle_ass(path, segments, width, height, font_name, font_size, margin_v):
-    sc = SUBTITLE_OVERLAY
+def _load_subtitle_render_style():
+    """Read the persisted subtitle appearance once for an export."""
+    from config import (
+        SUBTITLE_COLOR_HEX,
+        SUBTITLE_COLOR_OPTIONS,
+        SUBTITLE_FONT_OPTIONS,
+        SUBTITLE_STYLE_DEFAULTS,
+    )
+    from platform_config import resolve_subtitle_font
+
+    settings = {}
+    try:
+        from ai_clipper import load_settings as _load_subtitle_settings
+        settings = _load_subtitle_settings() or {}
+    except Exception:
+        _LOG.warning("Could not load subtitle style settings; using defaults.", exc_info=True)
+
+    requested_font = str(settings.get("subtitle_font_family") or "").strip()
+    if requested_font not in SUBTITLE_FONT_OPTIONS:
+        requested_font = SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
+    font_name, font_path, font_fallback = resolve_subtitle_font(requested_font)
+
+    color_key = str(settings.get("subtitle_font_color") or "").strip().lower()
+    if color_key not in SUBTITLE_COLOR_OPTIONS:
+        color_key = SUBTITLE_STYLE_DEFAULTS["subtitle_font_color"]
+    effect = str(settings.get("subtitle_text_effect") or "").strip().lower()
+    if effect not in {"shadow", "outline"}:
+        effect = SUBTITLE_STYLE_DEFAULTS["subtitle_text_effect"]
+
+    try:
+        opacity = int(float(settings.get("subtitle_opacity", SUBTITLE_STYLE_DEFAULTS["subtitle_opacity"])))
+    except Exception:
+        opacity = SUBTITLE_STYLE_DEFAULTS["subtitle_opacity"]
+    try:
+        blur = int(float(settings.get("subtitle_blur", SUBTITLE_STYLE_DEFAULTS["subtitle_blur"])))
+    except Exception:
+        blur = SUBTITLE_STYLE_DEFAULTS["subtitle_blur"]
+
+    return {
+        "requested_font": requested_font,
+        "font_name": font_name,
+        "font_path": font_path,
+        "font_fallback": font_fallback,
+        "color_key": color_key,
+        "color_hex": SUBTITLE_COLOR_HEX[color_key],
+        "effect": effect,
+        "opacity": max(20, min(100, opacity)),
+        "blur": max(0, min(20, blur)),
+    }
+
+
+def _ass_color(hex_color, opacity=100):
+    """Build an ASS AABBGGRR colour, where AA is inverse opacity."""
+    rgb = str(hex_color or "FFFFFF").lstrip("#")
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", rgb):
+        rgb = "FFFFFF"
+    red, green, blue = rgb[0:2], rgb[2:4], rgb[4:6]
+    alpha = int(round(255 * (1 - max(0, min(100, int(opacity))) / 100)))
+    return f"&H{alpha:02X}{blue}{green}{red}"
+
+
+def _subtitle_ass_text(text, style):
+    escaped = str(text or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+    blur = int(style.get("blur", 0) or 0)
+    return f"{{\\blur{blur}}}{escaped}" if blur else escaped
+
+
+def _subtitle_drawtext_style(style):
+    """Options shared by the compatibility drawtext fallback."""
+    opacity = max(0.2, min(1.0, float(style.get("opacity", 70)) / 100))
+    options = f":fontcolor=0x{style['color_hex']}:alpha={opacity:.2f}"
+    if style.get("effect") == "outline":
+        options += f":borderw=3:bordercolor=black@{opacity:.2f}"
+    else:
+        options += f":shadowx=2:shadowy=2:shadowcolor=black@{opacity * 0.6:.2f}"
+    return options
+
+
+def _copy_subtitle_font_for_ass(style, target_dir):
+    """Make a font available through an ASCII fontsdir for libass on Windows."""
+    source = str(style.get("font_path") or "")
+    if not source or not os.path.isfile(source):
+        return None
+    suffix = os.path.splitext(source)[1] or ".ttf"
+    destination = os.path.join(target_dir, f"subtitle_font{suffix}")
+    try:
+        if not os.path.exists(destination):
+            shutil.copy2(source, destination)
+        return destination
+    except OSError:
+        return None
+
+
+def _write_mapped_subtitle_ass(path, segments, width, height, font_name, font_size, margin_v, style=None):
+    style = style or _load_subtitle_render_style()
+    render_font_name = str(style.get("font_name") or font_name)
+    opacity = int(style.get("opacity", 70))
+    use_outline = style.get("effect") == "outline"
+    outline_width = 3 if use_outline else 0
+    shadow_size = 0 if use_outline else 2
     lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -4490,17 +4625,17 @@ def _write_mapped_subtitle_ass(path, segments, width, height, font_name, font_si
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         (
-            f"Style: Default,{font_name},{int(font_size)},"
-            f"{sc.get('font_color', '&H00FFFFFF')},&H000000FF,"
-            f"{sc.get('outline_color', '&H00000000')},&H80000000,"
-            f"-1,0,0,0,100,100,0,0,1,{max(0, int(sc.get('outline_width', 0)))},2,2,20,20,{int(margin_v)},1"
+            f"Style: Default,{render_font_name},{int(font_size)},"
+            f"{_ass_color(style.get('color_hex'), opacity)},&H000000FF,"
+            f"{_ass_color('000000', opacity)},{_ass_color('000000', round(opacity * 0.6))},"
+            f"-1,0,0,0,100,100,0,0,1,{outline_width},{shadow_size},2,20,20,{int(margin_v)},1"
         ),
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     for seg in segments:
-        text = str(seg.get("text") or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+        text = _subtitle_ass_text(seg.get("text"), style)
         if not text:
             continue
         lines.append(
@@ -4522,16 +4657,15 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
     _log("[PROGRESS] 0.78")
 
     try:
-        from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_NAME, FONT_BOLD_PATH, IS_MAC
+        from platform_config import IS_MAC
 
-        font_dest = os.path.join(temp_dir, "drawtext_font.ttc")
-        if os.path.exists(FONT_BOLD_PATH) and not os.path.exists(font_dest):
-            import shutil as _shutil_font
-            _shutil_font.copy2(FONT_BOLD_PATH, font_dest)
-        if os.path.exists(font_dest):
-            drawtext_font = font_dest.replace(os.sep, "/").replace(":", "\\:")
+        style = _load_subtitle_render_style()
+        font_dest = _copy_subtitle_font_for_ass(style, temp_dir)
+        drawtext_font_path = font_dest or style["font_path"]
+        if IS_MAC:
+            drawtext_font = str(drawtext_font_path).replace("'", "'\\''")
         else:
-            drawtext_font = DRAWTEXT_FONT_PATH
+            drawtext_font = str(drawtext_font_path).replace("\\", "/").replace(":", "\\:")
 
         sc = SUBTITLE_OVERLAY
         font_size = sc.get("font_size", 52)
@@ -4605,7 +4739,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
 
         ass_path = os.path.join(temp_dir, "mapped_subtitles.ass")
         _write_mapped_subtitle_ass(
-            ass_path, fixed_segments, w, h, FONT_BOLD_NAME, font_size, margin_v,
+            ass_path, fixed_segments, w, h, style["font_name"], font_size, margin_v, style=style,
         )
         ass_filter = (
             f"ass=filename='{_ffmpeg_filter_path(ass_path)}'"
@@ -4643,8 +4777,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
                 text_file = txt_path.replace("\\", "/").replace(":", "\\:")
             drawtext_filters.append(
                 f"drawtext=fontfile='{drawtext_font}':textfile='{text_file}'"
-                f":fontsize={font_size}:fontcolor=white"
-                f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
+                f":fontsize={font_size}{_subtitle_drawtext_style(style)}"
                 f":x=(w-text_w)/2:y=h-{margin_v}"
                 f":enable='between(t\\,{seg['start']:.3f}\\,{seg['end']:.3f})'"
             )
@@ -5254,12 +5387,12 @@ def _add_subtitles_final(
         seg["text"] = _strip_output_subtitle_punctuation(seg["text"])
     _log(f"字幕标点已清除")
 
-    # --- 4d+4e: drawtext 逐条烧录字幕 ---
-    # 不用 subtitles/ass 滤镜（Windows 上 fontconfig 不可靠）
-    # 直接用 drawtext + textfile + enable 逐条烧录，最可靠
+    # --- 4d+4e: single-track ASS first, then drawtext compatibility fallback ---
+    # ASS is the only renderer here that supports the user-selected blur without
+    # blurring the underlying video. Keep drawtext as a defensive fallback.
     _subtitle_render_started = time.monotonic()
-    _log("正在用 drawtext 烧录字幕...")
-    from platform_config import DRAWTEXT_FONT_PATH, FONT_BOLD_PATH, IS_MAC
+    _log("正在准备字幕样式与单轨 ASS 烧录...")
+    from platform_config import IS_MAC
     # drawtext parses filter option paths itself and fails on the Unicode user
     # profile path common on Chinese Windows installations. Keep its text files
     # in an ASCII-only workspace and use the system font's ASCII Windows path.
@@ -5269,8 +5402,14 @@ def _add_subtitles_final(
         shutil.copy2(video_path, output_path)
         _log("字幕未烧录，输出为无字幕版本")
         return
-    _drawtext_font = DRAWTEXT_FONT_PATH
     sc = SUBTITLE_OVERLAY
+    style = _load_subtitle_render_style()
+    copied_font = _copy_subtitle_font_for_ass(style, filter_asset_dir)
+    drawtext_font_path = copied_font or style["font_path"]
+    if IS_MAC:
+        _drawtext_font = str(drawtext_font_path).replace("'", "'\\''")
+    else:
+        _drawtext_font = str(drawtext_font_path).replace("\\", "/").replace(":", "\\:")
     font_size = sc.get("font_size", 52)
     try:
         from ai_clipper import load_settings as _load_subtitle_settings
@@ -5284,8 +5423,62 @@ def _add_subtitles_final(
     if w and w > 0:
         font_size = max(28, int(font_size * w / 1080))
     _log(f"字幕字号: {_base_font_size}（输出适配后 {font_size}）")
-    outline_w = sc.get("outline_width", 4)
     margin_v = sc.get("margin_v", 270) + 100  # 上移100
+    fallback_note = "（未安装，已回退系统默认粗体）" if style["font_fallback"] else ""
+    _log(
+        f"字幕样式: {style['requested_font']}{fallback_note} | "
+        f"{style['color_key']} | {'描边' if style['effect'] == 'outline' else '阴影'} | "
+        f"不透明度 {style['opacity']}% | 模糊度 {style['blur']}"
+    )
+
+    # The normal no-PIP export path gets a single ASS track. It preserves all
+    # user style settings, including the requested blur. PIP has its own filter
+    # graph below and retains the drawtext fallback for compatibility.
+    if pip_path is None:
+        try:
+            ass_path = os.path.join(filter_asset_dir, "final_subtitles.ass")
+            _write_mapped_subtitle_ass(
+                ass_path, fixed_segments, w, h, style["font_name"], font_size, margin_v, style=style,
+            )
+            ass_filter = (
+                f"ass=filename='{_ffmpeg_filter_path(ass_path)}'"
+                f":fontsdir='{_ffmpeg_filter_path(filter_asset_dir)}'"
+            )
+            ass_cmd = [ffmpeg, "-y", "-i", video_path, "-vf", ass_filter]
+            ass_cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+            ass_cmd += _final_vcodec_args()
+            ass_cmd += _final_audio_sync_args()
+            ass_cmd += ["-movflags", "+faststart", output_path.replace("/", os.sep)]
+            ass_popen_kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace")
+            if sys.platform == "win32":
+                fontconfig = os.path.join(filter_asset_dir, "fonts.conf")
+                with open(fontconfig, "w", encoding="utf-8") as fc_file:
+                    fc_file.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig><include ignore_missing="yes"/></fontconfig>\n')
+                with open(os.path.join(filter_asset_dir, "fonts.dtd"), "w", encoding="utf-8") as dtd_file:
+                    dtd_file.write('<!ELEMENT fontconfig (dir|cache|match)*>\n<!ELEMENT dir (#PCDATA)>\n<!ELEMENT cache (#PCDATA)>\n<!ELEMENT match (test|edit)*>\n<!ELEMENT test (#PCDATA)>\n<!ELEMENT edit (#PCDATA)>\n')
+                ass_popen_kw["env"] = dict(os.environ)
+                ass_popen_kw["env"]["FONTCONFIG_FILE"] = fontconfig
+            ok, rc, stderr_data = _run_ffmpeg_with_hw_fallback(
+                ass_cmd, ass_popen_kw, 450, _log, "单轨 ASS 字幕烧录", output_path,
+                software_args=_final_software_vcodec_args(), cancel_event=cancel_event,
+            )
+            if ok:
+                subtitle_applied = True
+                _log(f"字幕烧录: 单轨 ASS，共 {len(fixed_segments)} 条字幕")
+                _log("字幕烧录成功！")
+                _log("字幕处理完成")
+                _log(f"字幕阶段耗时: 字幕烧录 {time.monotonic() - _subtitle_render_started:.1f}s")
+                _log(f"字幕阶段耗时: 总计 {time.monotonic() - _subtitle_total_started:.1f}s")
+                shutil.rmtree(filter_asset_dir, ignore_errors=True)
+                return
+            _log(f"单轨 ASS 字幕烧录失败，改用兼容渲染。exit={rc}")
+            if stderr_data:
+                for line in stderr_data.strip().split("\n")[-3:]:
+                    if line.strip():
+                        _log(f"  ffmpeg: {line.strip()}")
+        except Exception as ass_error:
+            _log(f"单轨 ASS 字幕烧录异常，改用兼容渲染: {ass_error}")
 
     try:
         drawtext_filters = []
@@ -5314,8 +5507,7 @@ def _add_subtitles_final(
                 line_offset = li * (font_size + 6)
                 dt = (
                     f"drawtext={font}:textfile='{tf}'"
-                    f":fontsize={font_size}:fontcolor=white"
-                    f":shadowx=2:shadowy=2:shadowcolor=black@0.5"
+                    f":fontsize={font_size}{_subtitle_drawtext_style(style)}"
                     f":x=(w-text_w)/2:y=h-{margin_v}-{line_offset}"
                     f":enable='between(t\\,{s_start:.3f}\\,{s_end:.3f})'"
                 )
@@ -5568,6 +5760,19 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
     ))
     if _multi_duration_warnings:
         _multi_metadata["duration_soft_warning"] = "；".join(_multi_duration_warnings)
+        _multi_duration_kinds = [
+            str(
+                item.get("duration_soft_kind")
+                or dict(item.get("analysis_metadata") or {}).get("duration_soft_kind")
+                or ""
+            ).strip()
+            for item in results
+            if isinstance(item, dict)
+        ]
+        _multi_metadata["duration_soft_kind"] = next(
+            (kind for kind in reversed(_multi_duration_kinds) if kind),
+            "",
+        )
     return {
         "ok": bool(generated_outputs),
         "版本数": produced_versions,
@@ -5578,6 +5783,7 @@ def process_video_multi(video_path, srt_path=None, output_path=None,
         "outputs": generated_outputs,
         "analysis_metadata": _multi_metadata,
         "duration_soft_warning": _multi_metadata.get("duration_soft_warning", ""),
+        "duration_soft_kind": _multi_metadata.get("duration_soft_kind", ""),
     }
 
 
@@ -6091,7 +6297,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                                           ai_controls=ai_controls,
                                           record_history=not _clips_only,
                                           word_timings=_mix_word_timings,
-                                          allow_partial=_clips_only)
+                                          allow_partial=_clips_only,
+                                          allow_short_duration_output=not _clips_only)
         try:
             analysis_metadata = dict(_ai_mod.get_last_analysis_metadata() or {})
             preference_summary = dict(analysis_metadata.get("preference_summary") or {})
@@ -7054,7 +7261,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     )
     _log(
         f"成片时长预验收: {_duration_contract['actual']:.1f}s，"
-        f"要求{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
+        f"建议{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}s"
     )
     if _duration_contract.get("duration_soft_warning"):
         _log(
@@ -7064,12 +7271,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # Keep a single final-duration warning in batch summaries; this preflight
     # value is still recorded in the detailed log above.
     _duration_soft_warnings = []
+    _duration_soft_kinds = []
     if not _duration_ok:
-        _duration_error = (
-            f"成片时长未达标：实际{_duration_contract['actual']:.1f}秒，"
-            f"目标{_duration_contract['target']:.0f}秒"
-            f"（允许{_duration_contract['low']:.0f}-{_duration_contract['high']:.0f}秒）"
-        )
+        _duration_error = "无法读取有效成片时长，媒体文件可能未完整生成"
         _log(_duration_error + "，已停止字幕烧录")
         shutil.rmtree(tmp, ignore_errors=True)
         raise RuntimeError(_duration_error)
@@ -7126,11 +7330,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             duration_tolerance=duration_tolerance,
         )
         if not _final_duration_ok:
-            _duration_error = (
-                f"最终成片时长未达标：实际{_final_contract['actual']:.1f}秒，"
-                f"目标{_final_contract['target']:.0f}秒"
-                f"（允许{_final_contract['low']:.0f}-{_final_contract['high']:.0f}秒）"
-            )
+            _duration_error = "无法读取有效最终成片时长，媒体文件可能未完整生成"
             _log(_duration_error)
             try:
                 os.remove(final)
@@ -7140,6 +7340,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             raise RuntimeError(_duration_error)
         if _final_contract.get("duration_soft_warning"):
             _duration_soft_warnings.append(_final_contract["duration_soft_warning"])
+            _duration_soft_kinds.append(str(_final_contract.get("duration_soft_kind") or ""))
             _log(f"时长提示: {_final_contract['duration_soft_warning']}")
 
     _report_old_dur, _report_old_tol = TARGET_DURATION, TARGET_DURATION_TOLERANCE
@@ -7180,6 +7381,10 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _result_metadata["duration_soft_warning"] = "；".join(
             dict.fromkeys(_duration_soft_warnings)
         )
+        _result_metadata["duration_soft_kind"] = next(
+            (kind for kind in reversed(_duration_soft_kinds) if kind),
+            "",
+        )
     return {
         "ok": True,
         "output_path": final,
@@ -7188,4 +7393,5 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         "size_mb": final_mb,
         "analysis_metadata": _result_metadata,
         "duration_soft_warning": _result_metadata.get("duration_soft_warning", ""),
+        "duration_soft_kind": _result_metadata.get("duration_soft_kind", ""),
     }

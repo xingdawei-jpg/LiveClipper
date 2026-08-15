@@ -54,9 +54,36 @@ _HIGH_CONFIDENCE_FRAGMENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("口语病句", re.compile(r"整件衣服(?:唉|哎|诶)好多毛边|(?:你看)?毛边[。！？!?，,\s]*袖口的毛边")),
     ("亚麻转写残句", re.compile(r"^麻它是植物的根茎|亚麻纱很难[。！？!?，,\s]*$")),
     ("直播核算尾话", re.compile(r"(?:真假了|真的假的).{0,24}(?:计算机|按一下)")),
+    # A final "还有吗" turns this into an on-air follow-up, not an independent
+    # anti-exposure selling point. Ordinary anti-exposure claims remain valid.
+    ("直播追问残句", re.compile(r"(?:防走光|打底|内搭|下面穿).{0,28}(?:还有吗|有吗|有没有)[。！？!?\s]*$")),
+    # ASR can collapse height and weight into a bare tail such as
+    # "你就可以这样去穿177142斤". It has no standalone product value, even
+    # when useful sizing information is allowed in the body.
+    ("裸身高体重残句", re.compile(r"^(?:你|你们|姐妹(?:们)?)?.{0,16}(?:穿|试穿).{0,4}1[4-9]\d(?:1\d{2}|[4-9]\d)斤[。！？!?\s]*$")),
+    # These stop at a helper verb and need the next clause to carry any
+    # meaning.  Do not match a completed question such as "会不会把头发给
+    # 撅起来？"; only the bare verb tail is unusable by itself.
+    ("未完成请求残句", re.compile(r"(?:会不会|能不能|要不要).{0,20}(?:给|帮|拿|放|看|问|说|叫|找|递)[。！？!?，,\s]*$")),
+    # A hard ASR punctuation break in the middle of "如果喜欢这个..." loses
+    # the condition's object and cannot form an independent buyer statement.
+    ("破碎条件残句", re.compile(r"(?:我觉得大家)?如果喜欢[。！？!?，,\s]+(?:这个|这件|这条|这种)")),
+    # These are directions for the live overlay rather than product evidence.
+    # The product material statement that sometimes follows is available in
+    # its own clean candidate, so keep this mixed live-room sentence out.
+    ("直播画面调度", re.compile(r"(?:这字大(?:的有点)?看不见|这个太大了?[，,\s]*(?:小一点|大一点))")),
+    # A candidate beginning with "的一个混纺" is an orphaned tail from the
+    # preceding material sentence, not a complete claim by itself.
+    ("成分续句残片", re.compile(r"^的一个(?:混纺|混合|成分)[，,。！？!?\s]*")),
+    # Switching people/styles is live presentation coordination, not a
+    # meaningful close for the selected product.
+    ("直播换人展示", re.compile(r"^(?:换个风格[，,]?换个人|换个人给(?:你们|大家)看看)")),
 )
 _PRICE_COST_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("数字成本报价", re.compile(r"(?:成本|价格|单价).{0,8}\d{1,4}")),
+    # Live rooms frequently omit "元" while changing a price, for example
+    # "改价本来是290".  It is still a price announcement when price is blocked.
+    ("直播改价报价", re.compile(r"(?:改价|调价)[^。！？!?]{0,16}(?:\d{2,4}|[一二三四五六七八九十百千万]+)")),
     ("每米报价", re.compile(r"\d{2,4}\s*(?:多)?\s*(?:一|1)米")),
     ("价格导向话术", re.compile(r"(?:价位|成本|收费|计价|便宜|越贵|更贵|太贵|很贵|不贵|不便宜|抢着买|秒带|秒拍)")),
 )

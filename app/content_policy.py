@@ -23,7 +23,15 @@ POLICY_ACTIONS = (
     POLICY_ACTION_PREFER,
 )
 
-POLICY_KINDS = ("price", "cta", "size_interaction", "live_interaction")
+POLICY_KINDS = (
+    "price",
+    "cta",
+    "source_claim",
+    "social_proof",
+    "after_sale",
+    "size_interaction",
+    "live_interaction",
+)
 
 _ACTION_ALIASES = {
     "": POLICY_ACTION_BLOCK,
@@ -46,6 +54,9 @@ _ACTION_ALIASES = {
 _KIND_LABELS = {
     "price": "价格/报价",
     "cta": "促销/行动引导",
+    "source_claim": "来源/原厂背书",
+    "social_proof": "社会证明",
+    "after_sale": "售后承诺",
     "size_interaction": "尺码/身高体重互动",
     "live_interaction": "直播互动回复",
     "custom": "自定义规则",
@@ -61,6 +72,9 @@ _ACTION_LABELS = {
 DEFAULT_CONTENT_POLICY = {
     "price": POLICY_ACTION_BLOCK,
     "cta": POLICY_ACTION_BLOCK,
+    "source_claim": POLICY_ACTION_BLOCK,
+    "social_proof": POLICY_ACTION_BLOCK,
+    "after_sale": POLICY_ACTION_BLOCK,
     "size_interaction": POLICY_ACTION_BLOCK,
     "live_interaction": POLICY_ACTION_BLOCK,
     "custom_rules": [],

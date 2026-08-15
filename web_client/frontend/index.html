@@ -365,7 +365,9 @@
                   <option>自动</option>
                   <option>面料质感</option>
                   <option>版型显瘦</option>
+                  <option>上身效果</option>
                   <option>颜色氛围</option>
+                  <option>风格定位</option>
                   <option>场景搭配</option>
                   <option>情绪感染</option>
                   <option>性价比</option>
@@ -425,9 +427,11 @@
               <label>本次覆盖卖点</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="sc-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="上身效果"> 上身效果</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="面料质感"> 面料质感</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="品质细节"> 品质细节</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="颜色氛围"> 颜色氛围</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="风格定位"> 风格定位</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="场景搭配"> 场景搭配</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="穿着体验"> 穿着体验</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="性价比"> 性价比</label>
@@ -861,7 +865,9 @@
                   <option>自动</option>
                   <option>面料质感</option>
                   <option>版型显瘦</option>
+                  <option>上身效果</option>
                   <option>颜色氛围</option>
+                  <option>风格定位</option>
                   <option>场景搭配</option>
                   <option>情绪感染</option>
                   <option>性价比</option>
@@ -921,9 +927,11 @@
               <label>本次覆盖卖点</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="mix-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="上身效果"> 上身效果</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="面料质感"> 面料质感</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="品质细节"> 品质细节</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="颜色氛围"> 颜色氛围</label>
+                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="风格定位"> 风格定位</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="场景搭配"> 场景搭配</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="穿着体验"> 穿着体验</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="性价比"> 性价比</label>
@@ -1773,6 +1781,9 @@
                 <div class="content-policy-grid">
                   <label class="content-policy-row"><span>价格与报价</span><select id="s-policy-price"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>促销与行动引导</span><select id="s-policy-cta"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>来源与原厂背书</span><select id="s-policy-source-claim"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>社会证明</span><select id="s-policy-social-proof"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>售后承诺</span><select id="s-policy-after-sale"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>尺码与身材互动</span><select id="s-policy-size-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>直播互动回复</span><select id="s-policy-live-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                 </div>
@@ -1803,6 +1814,11 @@
                     <strong data-pref-value="版型显瘦">2</strong>
                   </label>
                   <label class="slider-row">
+                    <span>上身效果</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="上身效果">
+                    <strong data-pref-value="上身效果">1.5</strong>
+                  </label>
+                  <label class="slider-row">
                     <span>面料质感</span>
                     <input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="面料质感">
                     <strong data-pref-value="面料质感">2</strong>
@@ -1811,6 +1827,11 @@
                     <span>颜色氛围</span>
                     <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="颜色氛围">
                     <strong data-pref-value="颜色氛围">1.5</strong>
+                  </label>
+                  <label class="slider-row">
+                    <span>风格定位</span>
+                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="风格定位">
+                    <strong data-pref-value="风格定位">1</strong>
                   </label>
                   <label class="slider-row">
                     <span>场景搭配</span>
@@ -2054,6 +2075,50 @@
                   <input id="s-subtitle-font-size" type="range" min="32" max="96" step="2" value="52">
                   <strong id="s-subtitle-font-size-value">52</strong>
                 </label>
+                <div class="field-row">
+                  <label for="s-subtitle-font-family">字幕字体</label>
+                  <select id="s-subtitle-font-family">
+                    <option value="思源粗宋">思源粗宋</option>
+                    <option value="细体">细体</option>
+                    <option value="金陵体">金陵体</option>
+                    <option value="凌丝体">凌丝体</option>
+                    <option value="阳熙体">阳熙体</option>
+                    <option value="苍耳丰黑">苍耳丰黑</option>
+                    <option value="雅乐体">雅乐体</option>
+                  </select>
+                </div>
+                <div class="field-row">
+                  <label for="s-subtitle-font-color">字幕颜色</label>
+                  <select id="s-subtitle-font-color">
+                    <option value="white">白色</option>
+                    <option value="yellow">黄色</option>
+                    <option value="orange">橙色</option>
+                    <option value="red">红色</option>
+                    <option value="pink">粉色</option>
+                    <option value="purple">紫色</option>
+                    <option value="blue">蓝色</option>
+                    <option value="green">绿色</option>
+                    <option value="black">黑色</option>
+                  </select>
+                </div>
+                <div class="field-row">
+                  <label for="s-subtitle-text-effect">文字效果</label>
+                  <select id="s-subtitle-text-effect">
+                    <option value="shadow">阴影</option>
+                    <option value="outline">描边</option>
+                  </select>
+                </div>
+                <label class="slider-row">
+                  <span>字幕不透明度</span>
+                  <input id="s-subtitle-opacity" type="range" min="20" max="100" step="5" value="70">
+                  <strong id="s-subtitle-opacity-value">70%</strong>
+                </label>
+                <label class="slider-row">
+                  <span>字幕模糊度</span>
+                  <input id="s-subtitle-blur" type="range" min="0" max="20" step="1" value="10">
+                  <strong id="s-subtitle-blur-value">10</strong>
+                </label>
+                <p class="panel-note">默认白色、阴影、不透明度 70%、模糊度 10。字体需已安装在本机；未安装时成片会自动使用系统默认粗体。</p>
                 <label class="switch-row">
                   <span>启用硬件加速</span>
                   <input id="s-hardware-encoder" type="checkbox">

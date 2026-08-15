@@ -93,6 +93,91 @@ class PreviewWordEditingTests(unittest.TestCase):
             "面料质感",
         )
 
+    def test_apparel_topic_classifier_keeps_try_on_style_and_season_distinct(self):
+        self.assertEqual(
+            ai_clipper._clip_primary_topic(
+                ("product", "\u6302\u7740\u770b\u7740\u5f88\u666e\u901a\uff0c\u4e0a\u8eab\u4ee5\u540e\u6574\u4e2a\u4eba\u5c31\u7cbe\u81f4\u4e86\u3002", 0.0, 4.0, 50.0, 4.0, "")
+            ),
+            "\u4e0a\u8eab\u6548\u679c",
+        )
+        self.assertEqual(
+            ai_clipper._clip_primary_topic(
+                ("product", "\u7f8e\u5f0f\u5b66\u9662\u611f\u5f88\u4fcf\u76ae\uff0c\u7a7f\u8d77\u6765\u7279\u522b\u51cf\u9f84\u3002", 0.0, 4.0, 50.0, 4.0, "")
+            ),
+            "\u98ce\u683c\u5b9a\u4f4d",
+        )
+        self.assertEqual(
+            ai_clipper._clip_primary_topic(
+                ("product", "\u65e9\u79cb\u5929\u6c14\u51c9\u4e00\u70b9\u7684\u65f6\u5019\uff0c\u5916\u9762\u53e0\u4e00\u4ef6\u76ae\u8863\u5c31\u53ef\u4ee5\u3002", 0.0, 4.0, 50.0, 4.0, "")
+            ),
+            "\u573a\u666f\u642d\u914d",
+        )
+        self.assertEqual(
+            ai_clipper._clip_primary_topic(
+                ("product", "\u4eca\u5e74\u6700\u6d41\u884c\u7684\u5b66\u9662\u98ce\u5c31\u662f\u8fd9\u79cd\u957f\u5ea6\u3002", 0.0, 4.0, 50.0, 4.0, "")
+            ),
+            "\u6d41\u884c\u8d8b\u52bf",
+        )
+    def test_client_final_topic_prefers_reviewed_semantics(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        classifier = script.split("function classifyFinalClipTopic(clip)", 1)[1].split(
+            "function buildFinalTopicCoverageFromClips", 1
+        )[0]
+        self.assertIn("clip?.content_semantics?.topic", classifier)
+        self.assertIn("if (reviewedTopic) return reviewedTopic", classifier)
+    def test_reviewed_semantics_are_the_preview_label_and_survive_word_edits(self):
+        raw_clip = (
+            "product",
+            "垂感让裤腿自然落下，胯部不会横向撑开。",
+            10.0,
+            16.0,
+            50.0,
+            6.0,
+            "面料质感",
+        )
+        provenance = {
+            ai_clipper._director_clip_trim_key(raw_clip): {
+                "candidate_indices": [1],
+                "start": 10.0,
+                "end": 16.0,
+                "text": raw_clip[1],
+                "content_semantics": {
+                    "source": "content_review",
+                    "candidate_ids": [1],
+                    "topic": "版型显瘦",
+                    "subtopic": "垂感修饰胯部线条",
+                    "buyer_value": "让胯部视觉更利落",
+                    "evidence_type": "上身效果",
+                },
+            }
+        }
+
+        public = server._preview_public_clips(
+            [raw_clip],
+            director_provenance=provenance,
+        )
+
+        self.assertEqual(public[0]["focus"], "版型显瘦")
+        self.assertEqual(public[0]["focus_block"], "版型显瘦")
+        self.assertEqual(public[0]["director_focus"], "面料质感")
+        self.assertEqual(public[0]["content_semantics"]["subtopic"], "垂感修饰胯部线条")
+        effective = server._preview_effective_clip_tuples([raw_clip], public)
+        self.assertEqual(effective[0][6], "版型显瘦")
+        public[0]["segments"] = [{
+            "text": "胯部不会横向撑开。",
+            "selected": True,
+        }]
+        server._refresh_preview_clip_sales_metadata(public)
+        self.assertEqual(public[0]["focus_block"], "版型显瘦")
+
+    def test_preview_falls_back_to_keyword_topic_when_no_reviewed_semantics_exist(self):
+        public = server._preview_public_clips([
+            ("product", "面料轻薄透气，贴身穿不闷。", 0.0, 4.0, 50.0, 4.0, ""),
+        ])
+
+        self.assertEqual(public[0]["focus_block"], "面料质感")
+        self.assertNotIn("content_semantics", public[0])
+
     def test_preview_refresh_loops_start_before_optional_page_initialization(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
         listener = script.split('document.addEventListener("DOMContentLoaded", () => {', 1)[1].split("});", 1)[0]
@@ -425,7 +510,7 @@ class PreviewWordEditingTests(unittest.TestCase):
         finally:
             cutter_logic._multi_result_cache = original_cache
 
-    def test_partial_ai_preview_reaches_result_cache_but_final_cut_remains_blocked(self):
+    def test_partial_ai_preview_reaches_result_cache_with_preview_only_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             video = root / "short.mp4"
@@ -467,14 +552,9 @@ class PreviewWordEditingTests(unittest.TestCase):
                     result_cache["analysis_metadata"]["selection_result"]["status"],
                     "partial_insufficient",
                 )
-                with self.assertRaisesRegex(RuntimeError, "AI未满足时长"):
-                    cutter_logic.process_video(
-                        str(video),
-                        srt_path=str(subtitle),
-                        output_path=str(root / "final.mp4"),
-                        target_duration=60,
-                        duration_tolerance=15,
-                    )
+                details = result_cache["analysis_metadata"]["selection_result"]["details"]
+                self.assertTrue(details["preview_only"])
+                self.assertFalse(details["export_allowed"])
 
     def _public_clip(self):
         raw_clip = (
