@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "version": "2026.9.4.1",
+  "release_type": "runtime_v4_business",
+  "source_commit": "51eb3480dbdc9d4b01257a0b679345738683dc1c",
+  "release_authorization": "User explicitly requested immediate incremental publication on 2026-09-04 after disclosed remaining acceptance and baseline issues.",
+  "checks": {
+    "cross_window_sync": "pass: scoped runtime and tests only; unrelated work excluded",
+    "deterministic_build": "pass: two clean-commit builds are byte-identical",
+    "signature_and_compatibility": "pass: 85 business files, Core 4.0.0",
+    "scoped_regressions": "pass: 179 tests",
+    "business_workspace_integrity": "pass: extracted bundle writes workspace outside signed code",
+    "isolated_932_update": "pass: signed install, repeated business verification, frozen Host diagnostic",
+    "source_launcher_confirmed_core_rollback": "pass: simulated receipt; not full frozen launcher acceptance",
+    "remote_bundle_roundtrip": "pass: 1495679 bytes; e0fdb3bbf705544112e80f02521e151819d8221569324985a9c60442336dcad0",
+    "full_core_validation": "fail: historical delivered desktop.py does not match signed Core manifest",
+    "polluted_933_recovery": "pending: rescue tool acceptance not complete",
+    "second_clean_machine_gui": "not_run",
+    "real_media_audio_tail_review": "not_run",
+    "ready_public_channel": "pending"
+  }
+}
