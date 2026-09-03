@@ -1,6 +1,6 @@
 # LiveClipper V4 Business Update 2026.9.3.3
 
-状态：签名 hold 候选；`2026.9.3.2` 线上通道已暂停，尚未恢复 ready。
+状态：已发布至 V4 OSS 主更新通道；不是全量包。
 
 ## 冻结与范围
 
@@ -31,7 +31,13 @@
 
 - ZIP 已上传并从公网重新下载：`https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/LiveClipperBusiness_2026.9.3.3.zip`。
 - 公网 ZIP SHA-256 与本地一致：`5e446e912d801bcbd61cc6672c45b6711b5973e6ab55baec3a0168646aaa8b20`；签名、85 个业务文件和 Core `4.0.0` 兼容性再次验证通过。
-- 正式 `stable.json` 仍为 `2026.9.3.2 / hold`，不引用该候选资产；因此当前没有客户端会自动安装 `2026.9.3.3`。
+- 在 OSS ZIP 回读验收期间，正式 `stable.json` 保持 `2026.9.3.2 / hold`，没有客户端会提前安装 `2026.9.3.3`。
+
+## 正式通道
+
+- `stable.json` 已切换为 `2026.9.3.3 / ready`：`https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/stable.json`。
+- 公网通道 SHA-256：`e8f02a1b762488ca7901ec2ab9ce411cfec032ccb22b9ae66f5456d5a838d0cc`；签名通过。
+- 对 `2026.9.3.2 / Core 4.0.0` 的公网通道判定为 `update_available`。
 
 ## 完整发现测试的已知基线问题
 
