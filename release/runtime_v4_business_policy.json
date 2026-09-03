@@ -14,6 +14,13 @@
   ],
   "include": [
     "bundle_entry.py",
+    "run_commercial_asset_ledger_audit.py",
+    "run_m1_asset_aware_goldens.py",
+    "run_m1_story_goldens.py",
+    "run_m2_story_consumption_validation.py",
+    "run_m2_story_goldens.py",
+    "run_m3_golden_source_identity.py",
+    "run_m3_new_golden_plan_fidelity.py",
     "app/*.py",
     "app/**/*.py",
     "app/*.json",
