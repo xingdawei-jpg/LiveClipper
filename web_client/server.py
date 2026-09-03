@@ -1122,6 +1122,17 @@ def _safe_user_child(*parts: str) -> Path:
     return target
 
 
+def _commerce_director_workspace_root() -> Path:
+    """Return the writable Commercial Director workspace without tainting V4 bundles."""
+
+    if CODE_SOURCE == "source":
+        root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    else:
+        root = _safe_user_child("workspace", "ui_commerce_director_experiment").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _default_user_data_dir() -> Path:
     try:
         import config
@@ -13210,7 +13221,7 @@ def _prepare_mix_director_source(
     from cutter_logic import _parse_srt_to_segments
     from volcengine_asr import load_word_timing_sidecar, write_word_timing_sidecar
 
-    work_dir = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment" / task_id).resolve()
+    work_dir = (_commerce_director_workspace_root() / task_id).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     virtual_rows: list[dict[str, Any]] = []
     preview_rows: list[dict[str, Any]] = []
@@ -13459,7 +13470,7 @@ def _run_commerce_director_preview(
         if not bundle:
             _verify_local_asr_temp_identity_for_experiment(video, srt_path, scope)
 
-        experiment_dir = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment" / task_id).resolve()
+        experiment_dir = (_commerce_director_workspace_root() / task_id).resolve()
         # M1/M2 raw-response hooks write into this directory during the run,
         # before the final audit artifact writer is reached.
         experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -14704,7 +14715,7 @@ def _commerce_director_batch_entries_from_discovery(
         raise RuntimeError("当前素材没有可自动生成的 AI 导演方案。")
 
     experiment_dir = Path(str((source_preview.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
-    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    experiment_root = _commerce_director_workspace_root()
     try:
         experiment_dir.relative_to(experiment_root)
     except ValueError as exc:
@@ -16694,7 +16705,7 @@ def select_commerce_director_story(payload: CommerceDirectorStorySelectionPayloa
     if not any(str(item.get("story_id") or "") == story_id for item in story_rows if isinstance(item, Mapping)):
         raise HTTPException(status_code=404, detail="所选故事不在当前 M1 故事库中。")
     experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
-    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    experiment_root = _commerce_director_workspace_root()
     try:
         experiment_dir.relative_to(experiment_root)
     except ValueError:
@@ -16761,7 +16772,7 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
     if not bool(proposal.get("available")):
         raise HTTPException(status_code=409, detail=str(proposal.get("unavailable_reason") or "当前素材无法支撑此方案。"))
     experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
-    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    experiment_root = _commerce_director_workspace_root()
     try:
         experiment_dir.relative_to(experiment_root)
     except ValueError:
@@ -16914,7 +16925,7 @@ def select_mix_commerce_director_strategy(
     experiment_dir = Path(
         str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")
     ).resolve()
-    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    experiment_root = _commerce_director_workspace_root()
     try:
         experiment_dir.relative_to(experiment_root)
         brief = json.loads((experiment_dir / "m1_story_brief.json").read_text(encoding="utf-8"))
@@ -17013,7 +17024,7 @@ def generate_commerce_director_strategies(payload: CommerceDirectorStrategyBatch
     proposals = proposals[:3]
 
     experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
-    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    experiment_root = _commerce_director_workspace_root()
     try:
         experiment_dir.relative_to(experiment_root)
     except ValueError:

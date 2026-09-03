@@ -17,11 +17,13 @@ from runtime_v4.business_bundle import (
     _load_policy,
     build_business_archive,
     extract_verified_business_archive,
+    verify_business_directory,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "release" / "runtime_v4_business_policy.json"
+TEST_VERSION = "2026.9.3.4"
 COMMERCIAL_DIRECTOR_RUNNERS = (
     "run_commercial_asset_ledger_audit.py",
     "run_m1_asset_aware_goldens.py",
@@ -66,7 +68,7 @@ class CommercialDirectorBundleContractTests(unittest.TestCase):
             build_business_archive(
                 ROOT,
                 archive,
-                application_version="2026.9.3.3",
+                application_version=TEST_VERSION,
                 private_key_path=private_key,
                 policy_path=POLICY,
             )
@@ -74,7 +76,7 @@ class CommercialDirectorBundleContractTests(unittest.TestCase):
                 archive,
                 temporary_root / "extracted",
                 public_key,
-                expected_version="2026.9.3.3",
+                expected_version=TEST_VERSION,
                 expected_core_version="4.0.0",
             )
             script = """
@@ -115,6 +117,89 @@ if not callable(module._run_case):
                 result.returncode,
                 0,
                 msg=f"bundle-only runner import failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+
+    def test_bundled_commercial_director_workspace_is_outside_signed_bundle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="liveclipper-director-workspace-") as temporary:
+            temporary_root = Path(temporary)
+            private_key, public_key = _write_keypair(temporary_root)
+            archive = temporary_root / "business.zip"
+            build_business_archive(
+                ROOT,
+                archive,
+                application_version=TEST_VERSION,
+                private_key_path=private_key,
+                policy_path=POLICY,
+            )
+            verified = extract_verified_business_archive(
+                archive,
+                temporary_root / "extracted",
+                public_key,
+                expected_version=TEST_VERSION,
+                expected_core_version="4.0.0",
+            )
+            appdata = temporary_root / "appdata"
+            script = """
+import importlib
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+bundle_root = Path(sys.argv[1]).resolve()
+source_root = Path(sys.argv[2]).resolve()
+appdata = Path(sys.argv[3]).resolve()
+os.environ['APPDATA'] = str(appdata)
+os.environ['LIVECLIPPER_BUNDLE_DIR'] = str(bundle_root)
+os.environ['LIVECLIPPER_V4_BUNDLE_VERIFIED'] = '1'
+os.environ['LIVECLIPPER_RUNTIME_LAYOUT'] = '4'
+sys.path[:] = [
+    str(bundle_root / 'app'),
+    str(bundle_root / 'web_client'),
+    str(bundle_root),
+] + [
+    entry for entry in sys.path
+    if Path(entry or '.').resolve() != source_root
+]
+server = importlib.import_module('server')
+workspace = server._commerce_director_workspace_root()
+expected = (appdata / 'LiveClipper' / 'workspace' / 'ui_commerce_director_experiment').resolve()
+if workspace != expected:
+    raise SystemExit(f'wrong bundled workspace: {workspace}')
+if bundle_root in workspace.parents:
+    raise SystemExit(f'workspace is inside signed bundle: {workspace}')
+(workspace / 'runtime-artifact.json').write_text('{}', encoding='utf-8')
+"""
+            environment = dict(os.environ)
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(verified.root),
+                    str(ROOT),
+                    str(appdata),
+                ],
+                cwd=temporary_root,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"bundled workspace placement failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            verify_business_directory(
+                verified.root,
+                public_key,
+                expected_version=TEST_VERSION,
+                expected_core_version="4.0.0",
             )
 
 
