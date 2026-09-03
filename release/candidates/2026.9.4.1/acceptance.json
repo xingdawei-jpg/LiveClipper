@@ -17,6 +17,6 @@
     "polluted_933_recovery": "pending: rescue tool acceptance not complete",
     "second_clean_machine_gui": "not_run",
     "real_media_audio_tail_review": "not_run",
-    "ready_public_channel": "pending"
+    "ready_public_channel": "pass: OSS public signature and 9.3.3/Core 4.0.0 route verified; fa640a3a7d1934c64eb088aac61f465cdcc47f275e3d5ade9bf26af477f0a59b"
   }
 }

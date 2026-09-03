@@ -1,6 +1,6 @@
 # LiveClipper V4 2026.9.4.1
 
-状态：已上传并回下载验证业务 ZIP，待最后切换 ready 通道。用户于 2026-09-04 明确要求先推送增量包。
+状态：已上传并回下载验证业务 ZIP，公网 V4 通道已切换为 `2026.9.4.1 / ready`。用户于 2026-09-04 明确要求先推送增量包。
 
 ## 版本与范围
 
@@ -27,6 +27,9 @@
 - 上传地址：`https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/LiveClipperBusiness_2026.9.4.1.zip`。
 - 上传后公网回下载，大小和 SHA-256 与本地完全相同；再次通过 `tools/verify_business_bundle.py` 的签名与 Core 兼容性验证。
 - 上传 ZIP 时公网 stable 为 `2026.9.3.3 / hold`。
+- 2026-09-04 发布 `stable.json` 后从公网回读，签名通过，`9.3.3 / Core 4.0.0` 判定为 `update_available`。
+- ready 通道 SHA-256：`fa640a3a7d1934c64eb088aac61f465cdcc47f275e3d5ade9bf26af477f0a59b`。
+- 公网通道：`https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/stable.json`。源码与候选先推送至 GitHub，ready 通道由最后单独提交记录。
 
 ## 未完成与已知问题（不计为通过）
 
