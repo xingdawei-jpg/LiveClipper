@@ -20,7 +20,13 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from local_asr_chunking import AudioChunk, build_pause_aware_audio_chunks, write_audio_chunk
+from local_asr_chunking import (
+    AudioChunk,
+    SHORT_FORM_MAX_CHUNK_SECONDS,
+    SHORT_FORM_TARGET_CHUNK_SECONDS,
+    build_pause_aware_audio_chunks,
+    write_audio_chunk,
+)
 
 
 _SENSEVOICE_MODEL: Any | None = None
@@ -400,7 +406,11 @@ def _sensevoice_pause_aware_segments(
     hard_boundaries = sum(1 for chunk in chunks if chunk.boundary_reason == "hard_limit")
     if log_fn:
         suffix = f"，其中 {hard_boundaries} 处无静音按时长切分" if hard_boundaries else ""
-        log_fn(f"SenseVoice 音频停顿分段: {len(chunks)} 段（目标9s，最长12s）{suffix}")
+        log_fn(
+            "SenseVoice 短视频停顿分段: "
+            f"{len(chunks)} 段（目标{SHORT_FORM_TARGET_CHUNK_SECONDS:.0f}s，"
+            f"最长{SHORT_FORM_MAX_CHUNK_SECONDS:.0f}s）{suffix}"
+        )
 
     segments: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="liveclipper_sensevoice_") as temp_dir:
@@ -568,9 +578,14 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
     if not segments:
         raise LocalASRUnavailable("SenseVoice returned no timestamped speech segments")
 
+    # Apply only deterministic, context-bound transcript repairs before the
+    # quality scan.  Otherwise a known repaired token such as ``下0天40度``
+    # would unnecessarily consume one of the very limited retry windows.
+    from local_asr_quality import apply_domain_corrections, improve_sensevoice_segments
+
+    segments, _ = apply_domain_corrections(segments, log_fn=log_fn)
     segments = _review_sensevoice_segments(segments, audio_path, srt_output, log_fn=log_fn)
 
-    from local_asr_quality import improve_sensevoice_segments
     from volcengine_asr import semantic_segments_to_srt, write_word_timing_sidecar
 
     segments, semantic_segments = improve_sensevoice_segments(segments, log_fn=log_fn)

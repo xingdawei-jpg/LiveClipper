@@ -1,0 +1,43 @@
+{
+  "jccc_shoulder_narrowing": {
+    "product": "焦糖朗姆针织罩衫套装",
+    "commercial_change": {
+      "problem": [["肩宽", "圆肩", "溜肩", "大骨架"]],
+      "solution": [["黑", "线", "编织"], ["肩", "视觉", "收"]],
+      "outcome": [["显窄", "窄", "收", "显瘦"]]
+    }
+  },
+  "jccc_vacation_escape": {
+    "product": "焦糖朗姆针织罩衫套装",
+    "commercial_change": {
+      "problem": [["日常", "上班", "疲惫", "逃离"]],
+      "solution": [["套装", "罩衫", "穿上"]],
+      "outcome": [["度假", "松弛", "放松", "海岛"]]
+    }
+  },
+  "jccc_cool_comfort": {
+    "product": "焦糖朗姆针织罩衫套装",
+    "commercial_change": {
+      "problem": [["闷"], ["汗", "出汗"]],
+      "solution": [["竹节"]],
+      "outcome": [["干爽", "清爽", "舒适", "不闷"]]
+    }
+  },
+  "jianzhi_standalone_not_office": {
+    "product": "简致衬衫",
+    "commercial_change": {
+      "problem": [["职业", "板正", "通勤"]],
+      "solution": [["单穿", "一件", "叠搭"]],
+      "outcome": [["有型", "好看", "利落", "成立", "自信", "显瘦"]],
+      "optional_body_inclusivity": [["微胖", "显瘦", "遮肉", "身材"]]
+    }
+  },
+  "hanxi_short_skirt_safety": {
+    "product": "韩系学院风连衣裙",
+    "commercial_change": {
+      "problem": [["短", "裙长"], ["走光", "露"]],
+      "solution": [["加长", "两公分", "2cm"]],
+      "outcome": [["安全", "敢穿", "不露", "放心"]]
+    }
+  }
+}

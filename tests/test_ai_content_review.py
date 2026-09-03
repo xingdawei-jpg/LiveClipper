@@ -121,6 +121,29 @@ class ContentReviewValidationTests(unittest.TestCase):
         self.assertNotIn("public_score", bundle.cards[0].to_dict())
         self.assertEqual(bundle.cards[0].evidence_quote, "肩线会往里收")
 
+    def test_review_parser_extracts_complete_object_after_model_preface(self) -> None:
+        payload = {"cards": [[1, "版型显瘦", "肩线", "肩线更利落", "设计解释", "肩线 {向内收}", ["effect"], "independent", ["具体效果"], "main", "上衣", "primary", "肩线"]], "hook_pairs": []}
+        content = "下面是审稿结果：\n```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```\n仅供导演使用。"
+
+        parsed = content_review._extract_json_object(content)
+
+        self.assertEqual(parsed["cards"][0][0], 1)
+        self.assertEqual(parsed["cards"][0][5], "肩线 {向内收}")
+
+    def test_review_retry_prompt_requires_compact_output(self) -> None:
+        _system, prompt = content_review._review_prompts(
+            _inventory(),
+            category="上衣",
+            main_product="上衣",
+            avoid=[],
+            required_sources=None,
+            format_retry=True,
+            content_policy=None,
+            include_marketing_intent=False,
+        )
+
+        self.assertIn("18-28 representative cards", prompt)
+
     def test_plain_feature_list_cannot_reopen_a_fallback_hook_pair(self) -> None:
         inventory = _inventory()
         inventory[0]["text"] = (
@@ -178,6 +201,54 @@ class ContentReviewValidationTests(unittest.TestCase):
         self.assertEqual(bundle.summary("shadow")["hook_package_complete_count"], 1)
         self.assertEqual(bundle.summary("on")["director_hook_contract"], "hook_package")
         self.assertIn("hook_packages", bundle.to_dict())
+
+    def test_only_main_cards_can_form_an_executable_opening_package(self) -> None:
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["cards"][1]["tier"] = "reserve"
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线解释视觉重心为什么会向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }]
+
+        bundle = self._validate(payload)
+
+        self.assertEqual(bundle.director_hook_packages, ())
+        self.assertEqual(bundle.narrative_opportunities, ())
+        self.assertEqual(bundle.director_hook_contract()[2], "none")
+
+    def test_narrative_opportunity_keeps_only_a_small_opening_chapter(self) -> None:
+        payload = _review_payload()
+        payload["hook_pairs"] = []
+        payload["cards"][2]["topic"] = "场景搭配"
+        payload["hook_packages"] = [{
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线解释视觉重心为什么会向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }]
+
+        bundle = self._validate(payload)
+        opportunity = bundle.narrative_opportunities[0]
+
+        self.assertEqual(opportunity.narrative_id, "ARC-01")
+        self.assertEqual((opportunity.hook_id, opportunity.followup_id), (1, 2))
+        self.assertEqual(opportunity.topic, "版型显瘦")
+        self.assertIn("场景搭配", opportunity.next_topics)
+        self.assertNotIn(4, opportunity.opening_support_ids)
+        self.assertEqual(bundle.summary("on")["narrative_opportunity_count"], 1)
 
     def test_tier_c_hook_package_does_not_displace_safe_pair_fallback(self) -> None:
         payload = _review_payload()
@@ -1039,6 +1110,10 @@ class ContentReviewCacheTests(unittest.TestCase):
             [(pair.hook_id, pair.followup_id) for pair in repaired.hook_pairs],
             [(1, 2)],
         )
+        self.assertEqual(
+            [(package.hook_id, package.followup_id) for package in repaired.director_hook_packages],
+            [(1, 2)],
+        )
 
         with mock.patch.object(content_review, "_post_review_request") as request:
             cached = self._review()
@@ -1055,6 +1130,73 @@ class ContentReviewCacheTests(unittest.TestCase):
         self.assertTrue(cached.cache_hit)
         self.assertTrue(repeat.hook_pair_reviewed)
         self.assertEqual([(pair.hook_id, pair.followup_id) for pair in repeat.hook_pairs], [(1, 2)])
+
+    def test_existing_hook_pair_gets_one_package_review_and_preserves_the_pair(self) -> None:
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=self._response(),
+        ):
+            bundle = self._review()
+        package = {
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "版型显瘦",
+            "reason": "肩部编织线证明肩线向内收",
+            "hook_promise": "肩线会往里收",
+            "proof_relation": "design_reason",
+            "package_complete": True,
+            "semantic_signals": ["result"],
+            "opening_tier": "B",
+        }
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps({"hook_pairs": [], "hook_packages": [package]}, ensure_ascii=False),
+        ) as request:
+            repaired = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=_inventory(),
+                bundle=bundle,
+                category="上衣",
+            )
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual([(pair.hook_id, pair.followup_id) for pair in repaired.hook_pairs], [(1, 2)])
+        self.assertEqual(
+            [(item.hook_id, item.followup_id) for item in repaired.director_hook_packages],
+            [(1, 2)],
+        )
+
+    def test_pair_repair_never_synthesizes_an_unrelated_package(self) -> None:
+        inventory = _inventory()
+        inventory[0]["text"] = "哇，这件西装真的好帅，像明星机场穿搭。"
+        inventory[1]["text"] = "面料摸起来细腻，而且贴身不扎。"
+        payload = _review_payload()
+        payload["hook_pairs"] = [[1, 2, "流行趋势", "面料舒服"]]
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps(payload, ensure_ascii=False),
+        ):
+            bundle = self._review(inventory=inventory)
+
+        with mock.patch.object(
+            content_review,
+            "_post_review_request",
+            return_value=json.dumps({"hook_pairs": [], "hook_packages": []}, ensure_ascii=False),
+        ):
+            repaired = content_review.repair_hook_pairs(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="deepseek-v4-flash",
+                inventory=inventory,
+                bundle=bundle,
+            )
+
+        self.assertEqual(repaired.director_hook_packages, ())
 
     def test_empty_focused_repair_is_cached_without_repeating_the_api_call(self) -> None:
         broad_payload = _review_payload()
@@ -1115,6 +1257,24 @@ class ContentReviewCacheTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertFalse(bundle.cache_hit)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], content_review.CONTENT_REVIEW_VERSION)
+
+    def test_stale_cache_version_is_ignored_and_replaced(self) -> None:
+        with mock.patch.object(content_review, "_post_review_request", return_value=self._response()):
+            first = self._review()
+        path = content_review.content_review_cache_dir() / f"{first.cache_key}.json"
+        stale = json.loads(path.read_text(encoding="utf-8"))
+        stale["version"] = "content-review-v0"
+        path.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+        with mock.patch.object(content_review, "_post_review_request", return_value=self._response()) as request:
+            refreshed = self._review()
+
+        self.assertEqual(request.call_count, 1)
+        self.assertFalse(refreshed.cache_hit)
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8"))["version"],
+            content_review.CONTENT_REVIEW_VERSION,
+        )
 
     def test_atomic_write_leaves_no_temp_file(self) -> None:
         with mock.patch.object(content_review, "_post_review_request", return_value=self._response()):
@@ -1267,6 +1427,10 @@ class ContentReviewIntegrationTests(unittest.TestCase):
         )
         def capture_reviewed(*_args, **kwargs):
             self.assertEqual(kwargs["allowed_candidate_ids"], {1})
+            self.assertEqual(
+                [chapter["candidate_ids"] for chapter in kwargs["review_story_chapters"]],
+                [[1]],
+            )
             raise RuntimeError("reviewed-director")
 
         with mock.patch.object(ai_clipper, "load_settings", return_value=settings), \
@@ -1368,6 +1532,249 @@ class ContentReviewIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["selection_result"]["status"], "insufficient_safe_material")
         self.assertIn("无法完成90秒目标", ai_clipper.selection_failure_message(metadata))
 
+    def test_review_reserve_stays_available_after_main_covers_duration(self) -> None:
+        contract = ai_clipper.DurationContract.create(60, 1.0)
+        inventory = [
+            {"srt_index": 1, "source": "V1", "duration_sec": 32.0, "text": "肩线向内收，视觉更利落。"},
+            {"srt_index": 2, "source": "V1", "duration_sec": 32.0, "text": "高腰位置把比例提起来。"},
+            {"srt_index": 3, "source": "V1", "duration_sec": 32.0, "text": "面料里含有再生纤维素纤维。"},
+        ]
+
+        policy = ai_clipper._content_review_candidate_policy(
+            {1, 2, 3},
+            96.0,
+            inventory,
+            contract,
+            main_candidate_ids={1, 2},
+        )
+
+        self.assertTrue(policy["main_pool_covers_contract"])
+        self.assertEqual(policy["allowed_candidate_ids"], {1, 2, 3})
+        self.assertEqual(policy["review_reserve_ids"], {3})
+        self.assertEqual(policy["pool_policy"], "reviewed_priority_with_safe_reserve")
+
+    def test_unreviewed_safe_reserve_stays_visible_after_review_covers_duration(self) -> None:
+        contract = ai_clipper.DurationContract.create(60, 1.0)
+        inventory = [
+            {"srt_index": 1, "source": "V1", "duration_sec": 32.0, "text": "肩线向内收，视觉更利落。"},
+            {"srt_index": 2, "source": "V1", "duration_sec": 32.0, "text": "高腰位置把比例提起来。"},
+            {"srt_index": 3, "source": "V1", "duration_sec": 10.0, "text": "侧缝前移让胯部更利落。"},
+        ]
+
+        policy = ai_clipper._content_review_candidate_policy(
+            {1, 2},
+            64.0,
+            inventory,
+            contract,
+            main_candidate_ids={1, 2},
+        )
+
+        self.assertTrue(policy["reviewed_pool_covers_contract"])
+        self.assertEqual(policy["allowed_candidate_ids"], {1, 2, 3})
+        self.assertEqual(policy["safe_reserve_ids"], {3})
+
+    def test_safe_reserve_cannot_hide_inside_a_multi_candidate_hook(self) -> None:
+        entries = [
+            (0.0, 3.0, "主选开场说清楚上身效果。"),
+            (3.0, 6.0, "安全备用只适合正文补充。"),
+            (6.0, 9.0, "主选证据解释肩线怎么收。"),
+        ]
+        response = json.dumps([
+            {"clip_type": "hook", "srt_indices": [1, 2]},
+            {"clip_type": "product", "srt_indices": [3]},
+        ], ensure_ascii=False)
+
+        clips = ai_clipper._parse_ai_response(
+            response,
+            None,
+            entries,
+            set(),
+            require_srt_indices=True,
+            allowed_candidate_indices={1, 2, 3},
+            reserve_only_candidate_indices={2},
+        )
+
+        self.assertEqual([clip[1] for clip in clips], [entries[2][2]])
+
+    def test_review_reserve_cannot_claim_opening_or_close_roles(self) -> None:
+        entries = [
+            (0.0, 3.0, "主选开场说清楚上身效果。"),
+            (3.0, 6.0, "主选证据解释肩线怎么收。"),
+            (6.0, 9.0, "备用面料细节用来补充证明。"),
+        ]
+        response = json.dumps([
+            {"clip_type": "hook", "srt_indices": [3]},
+            {"clip_type": "product", "srt_indices": [1]},
+            {"clip_type": "product", "srt_indices": [2]},
+            {"clip_type": "close", "srt_indices": [3]},
+        ], ensure_ascii=False)
+        logs: list[str] = []
+
+        clips = ai_clipper._parse_ai_response(
+            response,
+            logs.append,
+            entries,
+            set(),
+            require_srt_indices=True,
+            allowed_candidate_indices={1, 2, 3},
+            reserve_only_candidate_indices={3},
+        )
+
+        self.assertEqual([clip[1] for clip in clips], [entries[0][2], entries[1][2]])
+        self.assertTrue(any("备用越权2" in message for message in logs))
+
+    def test_natural_opening_candidates_are_main_short_and_independent(self) -> None:
+        cards = (
+            content_review.ContentCard(
+                1, "版型显瘦", "肩线", "肩线内收", "具体效果", "肩线向内收",
+                ("effect",), "independent", ("具体效果",), "main",
+            ),
+            content_review.ContentCard(
+                2, "面料质感", "纤维成分", "说明成分", "材质说明", "再生纤维素",
+                ("evidence",), "independent", ("材质说明",), "main",
+            ),
+            content_review.ContentCard(
+                3, "场景搭配", "搭配", "搭配说明", "场景举例", "搭配牛仔裤",
+                ("scene",), "needs_previous", ("场景清晰",), "main",
+            ),
+        )
+        bundle = content_review.ContentReviewBundle(
+            "key", "digest", "上衣", "deepseek-v4-flash", cards, 12.0,
+        )
+        inventory = [
+            {"srt_index": 1, "duration_sec": 4.0, "text": "肩线向内收，视觉更利落。"},
+            {"srt_index": 2, "duration_sec": 4.0, "text": "面料里含有再生纤维素纤维。"},
+            {"srt_index": 3, "duration_sec": 4.0, "text": "而且搭配牛仔裤也很好看。"},
+        ]
+
+        self.assertEqual(
+            ai_clipper._review_natural_opening_candidate_ids(bundle, inventory),
+            (1,),
+        )
+
+        ai_clipper._begin_analysis_metadata()
+        advised = ai_clipper._parse_ai_response(
+            json.dumps({"clips": [{
+                "clip_type": "product", "srt_indices": [2],
+                "focus": "面料质感", "reason": "错误地把备用事实当开场", "trim_priority": 1,
+            }]}, ensure_ascii=False),
+            None,
+            [
+                (0.0, 4.0, "肩线向内收，视觉更利落。"),
+                (4.0, 8.0, "面料里含有再生纤维素纤维。"),
+            ],
+            require_srt_indices=True,
+            allowed_candidate_indices={1, 2},
+            required_natural_opening_ids={1},
+        )
+        self.assertEqual([clip[1] for clip in advised], ["面料里含有再生纤维素纤维。"])
+        self.assertEqual(
+            ai_clipper._analysis_metadata_context()["director_natural_opening_advisory"]["code"],
+            "natural_opening_advisory",
+        )
+
+    def test_lexical_hook_fallback_uses_visible_words_but_keeps_safety_gate(self) -> None:
+        cards = (
+            content_review.ContentCard(
+                1, "情绪感染", "强评价", "主播强烈推荐", "口播反应", "这条真的绝了",
+                ("effect",), "independent", ("强情绪",), "main",
+            ),
+            content_review.ContentCard(
+                2, "面料质感", "成分", "说明材质", "材质说明", "再生纤维素",
+                ("evidence",), "independent", ("材质说明",), "main",
+            ),
+            content_review.ContentCard(
+                3, "直播互动", "关注", "要求关注", "直播操作", "点点关注",
+                ("effect",), "independent", ("互动",), "main",
+            ),
+        )
+        bundle = content_review.ContentReviewBundle(
+            "key", "digest", "上衣", "deepseek-v4-flash", cards, 12.0,
+        )
+        inventory = [
+            {"srt_index": 1, "duration_sec": 3.0, "text": "哇，这条真的绝了，太好看了。"},
+            {"srt_index": 2, "duration_sec": 3.0, "text": "面料里含有再生纤维素纤维。"},
+            {"srt_index": 3, "duration_sec": 3.0, "text": "姐妹点点关注，马上给你们上链接。"},
+        ]
+
+        candidates = ai_clipper._review_lexical_hook_candidates(
+            bundle, inventory, ["绝了", "巨好看"], limit=6,
+        )
+
+        self.assertEqual([item["candidate_id"] for item in candidates], [1])
+        self.assertEqual(candidates[0]["keywords"], ["绝了"])
+
+    def test_director_allows_visible_lexical_hook_when_no_package_survived(self) -> None:
+        entries = [
+            (0.0, 3.0, "哇，这个颜色真的绝了，黄皮很显白。"),
+            (3.1, 6.2, "因为里面加了一点灰调，所以提亮但不会显脏。"),
+            (6.3, 9.2, "通勤搭深色下装也很有气质。"),
+        ]
+        source = (
+            "00:00:00,000 --> 00:00:03,000\n哇，这个颜色真的绝了，黄皮很显白。\n\n"
+            "00:00:03,100 --> 00:00:06,200\n因为里面加了一点灰调，所以提亮但不会显脏。\n\n"
+            "00:00:06,300 --> 00:00:09,200\n通勤搭深色下装也很有气质。"
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{"message": {"content": json.dumps({"clips": [
+                {"clip_type": "hook", "srt_indices": [1], "focus": "颜色氛围"},
+                {"clip_type": "product", "srt_indices": [2], "focus": "颜色氛围"},
+                {"clip_type": "close", "srt_indices": [3], "focus": "场景搭配"},
+            ]}, ensure_ascii=False)}}]
+        }).encode("utf-8")
+        keyword_data = {
+            "clip_keywords": {"hook": ["绝了"], "product": [], "close": [], "bridge": [], "trend": []},
+            "hook_keywords": ["绝了"],
+            "forbidden_phrases": [],
+            "filler_words": [],
+            "preference_keywords": {},
+            "preference_weights": {},
+            "detail_keywords": [],
+            "negative_signals": [],
+        }
+
+        ai_clipper._begin_analysis_metadata()
+        logs: list[str] = []
+        with (
+            mock.patch.object(ai_clipper.urllib.request, "urlopen", return_value=response) as request,
+            mock.patch.object(ai_clipper, "load_keywords", return_value=keyword_data),
+        ):
+            clips = ai_clipper._call_ai(
+                "key",
+                "https://example.com/v1",
+                "deepseek-test",
+                source,
+                logs.append,
+                srt_entries=entries,
+                allowed_candidate_ids={1, 2, 3},
+                content_review_hint="reviewed content",
+                review_hook_pairs_checked=True,
+                review_lexical_hook_candidates=[{"candidate_id": 1, "keywords": ["绝了"]}],
+            )
+
+        self.assertEqual([clip[0] for clip in clips], ["hook", "product", "close"], logs)
+        payload = json.loads(request.call_args.args[0].data.decode("utf-8"))
+        prompt = "\n".join(message["content"] for message in payload["messages"])
+        self.assertIn("visible user-rule hook words", prompt)
+        self.assertIn("#01[绝了]", prompt)
+
+    def test_length_or_coverage_hook_requires_a_matching_proof(self) -> None:
+        self.assertFalse(
+            content_review._proof_relation_is_grounded(
+                "这个长度很安全，不会走光。",
+                "一点都不扎，贴身穿很舒服。",
+                "wearing_experience",
+            )
+        )
+        self.assertTrue(
+            content_review._proof_relation_is_grounded(
+                "这个长度很安全，不会走光。",
+                "你看里面的内衬刚好遮住，抬手也不会走光。",
+                "visual_result",
+            )
+        )
+
     def test_safe_reserve_inventory_cannot_reintroduce_hard_exclusions(self) -> None:
         entries = [
             (0.0, 8.0, "肩线向内收，视觉上更利落。"),
@@ -1388,6 +1795,7 @@ class ContentReviewIntegrationTests(unittest.TestCase):
         safety = ai_clipper.get_last_analysis_metadata()["candidate_safety_summary"]
 
         self.assertEqual([item["srt_index"] for item in safe], [1, 7])
+        self.assertEqual([(item["start"], item["end"]) for item in safe], [(0.0, 8.0), (48.0, 56.0)])
         joined = " ".join(item["text"] for item in safe)
         self.assertNotIn("成本", joined)
         self.assertNotIn("关注", joined)

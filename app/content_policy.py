@@ -26,6 +26,7 @@ POLICY_ACTIONS = (
 POLICY_KINDS = (
     "price",
     "cta",
+    "inventory_pressure",
     "source_claim",
     "social_proof",
     "after_sale",
@@ -54,6 +55,7 @@ _ACTION_ALIASES = {
 _KIND_LABELS = {
     "price": "价格/报价",
     "cta": "促销/行动引导",
+    "inventory_pressure": "库存/稀缺催促",
     "source_claim": "来源/原厂背书",
     "social_proof": "社会证明",
     "after_sale": "售后承诺",
@@ -72,6 +74,7 @@ _ACTION_LABELS = {
 DEFAULT_CONTENT_POLICY = {
     "price": POLICY_ACTION_BLOCK,
     "cta": POLICY_ACTION_BLOCK,
+    "inventory_pressure": POLICY_ACTION_BLOCK,
     "source_claim": POLICY_ACTION_BLOCK,
     "social_proof": POLICY_ACTION_BLOCK,
     "after_sale": POLICY_ACTION_BLOCK,
@@ -121,6 +124,38 @@ def normalize_content_policy(value: Any) -> dict[str, Any]:
             break
     policy["custom_rules"] = normalized_rules
     return policy
+
+
+def apply_run_avoid_overrides(policy: Any, avoid: Any = ()) -> dict[str, Any]:
+    """Return one immutable task policy with restrictive run-only avoids.
+
+    The compact "本次避选" chips are deliberately not a second content-policy
+    system.  A matching chip may only make this run stricter; it never changes
+    the saved setting and it never turns another run's preference into a ban.
+    Non-policy chips (for example repetition) stay as director instructions.
+    """
+
+    resolved = normalize_content_policy(policy)
+    labels = {
+        str(value or "").strip().casefold()
+        for value in (avoid if isinstance(avoid, (list, tuple, set)) else (avoid,))
+        if str(value or "").strip()
+    }
+    aliases = {
+        "价格": "price",
+        "报价": "price",
+        "尺码": "size_interaction",
+        "身高体重": "size_interaction",
+        "库存": "inventory_pressure",
+        "稀缺": "inventory_pressure",
+        "促销": "cta",
+        "促单": "cta",
+        "行动引导": "cta",
+    }
+    for label, kind in aliases.items():
+        if label.casefold() in labels:
+            resolved[kind] = POLICY_ACTION_BLOCK
+    return resolved
 
 
 def interaction_policy_kind(reason: Any) -> str:

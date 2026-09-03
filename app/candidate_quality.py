@@ -8,7 +8,7 @@ timestamps, so the selection contract remains tied to spoken audio.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from content_policy import blocks_role, interaction_policy_kind
 from selection_safety import live_interaction_or_size_response_reason
@@ -25,10 +25,39 @@ _LEADING_FRAGMENT_QUESTION_RE = re.compile(
 
 _HIGH_CONFIDENCE_GARBLE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("疑似ASR错词", re.compile(r"(?:富贵这|肌励感|森侣|麻着个料子|树质非常高)")),
+    # These are recurring ASR substitutions inside otherwise tempting material
+    # descriptions. A valid phrase must not launder an unplayable sentence.
+    ("疑似ASR错词", re.compile(r"(?:非常的高会(?:热|闷)吗|会不被(?:面儿)?(?:热|闷)|想把它(?:防风|凉快))")),
     ("疑似ASR断词", re.compile(r"(?:整个的版|还原本真|这件感兴趣的是)")),
     ("明显ASR错词", re.compile(r"(?:麻巾跟肠温柔软|支树织|枝树密度|独望无处|稀疏疏嘟|烂大些|带吊印|白白亚麻|亚一0|下意识中还蛮好看的|好的[，,]麻|烂不了网|版型[，,]?呃|是整个的[。！]?版型)")),
     ("异常重复", re.compile(r"白搭白搭绿")),
     ("英文残片", re.compile(r"(?i)(?<![a-z])ca的")),
+    # A source that still carries one of these observed local-ASR residues is
+    # useful for a quality report or a targeted retry, never as a final
+    # director utterance.  The patterns are narrow so normal fashion/size
+    # claims remain in the complete pool.
+    (
+        "明显ASR错词",
+        re.compile(
+            r"(?:下0天|人间一定是直角|(?:是那个)?35厘米|"
+            r"自带3(?:到|-)?5厘米的销售|A类母婴店|就是你小宝宝|像100斤葡萄)"
+        ),
+    ),
+    # These are not merely colloquial.  The ASR unit has lost the word that
+    # resolves the claim ("肩干嘛？"), joined two conjunctions, or stopped
+    # immediately after a negation.  Do not infer or rewrite the missing
+    # spoken word: keep only a source line a viewer can hear as complete.
+    ("未闭合口播问句", re.compile(r"(?:会显得|显得).{0,12}(?:干嘛|什么(?:呢|啊|呀)?)[？?。！!，,\s]*$")),
+    ("异常连接词", re.compile(r"^(?:是但是|而不是说是)")),
+    (
+        "未完成否定口播",
+        re.compile(r"(?:而且|但是).{0,32}(?:上身|穿上).{0,12}(?:完全不|都不|不会不)[。！？!?，,\s]*$"),
+    ),
+    ("ASR谓语错位", re.compile(r"^它是大是(?:显瘦|好看|舒服)")),
+)
+
+_INVENTORY_PRESSURE_RULES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:库存|限量|断货|首批|现货|最后\d*件|没了|拼手速|手慢无|补不到|不补货)"),
 )
 _HIGH_CONFIDENCE_FRAGMENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # A bare "...的。" at the beginning is the tail of a prior sentence, not a
@@ -46,7 +75,10 @@ _HIGH_CONFIDENCE_FRAGMENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("未完成场景残句", re.compile(r"(?:风吹过来整)[。！？!?，,\s]*$")),
     # These are not product claims. They are unedited live-chat/try-on tails
     # from the source transcript, so they cannot become a standalone clip.
-    ("直播闲聊残留", re.compile(r"(?:那|就)?拜拜(?:亚麻)?|脑壳痛(?:了)?|我这个面料我不骗你")),
+    # ``拜拜`` by itself can be a live-room sign-off, but ``拜拜肉`` is a
+    # concrete body-shape benefit and must remain available as a commercial
+    # beat.  Do not let the former broad phrase erase the latter.
+    ("直播闲聊残留", re.compile(r"(?:那|就)?拜拜(?:亚麻)?(?!肉)|脑壳痛(?:了)?|我这个面料我不骗你")),
     (
         "个人体重试穿结论",
         re.compile(r"(?:\d{2,3}|[一二三四五六七八九十百]+)斤(?:内)?(?:我|你|她|他).{0,12}(?:没毛病|没问题|能穿|可以)"),
@@ -75,9 +107,31 @@ _HIGH_CONFIDENCE_FRAGMENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # A candidate beginning with "的一个混纺" is an orphaned tail from the
     # preceding material sentence, not a complete claim by itself.
     ("成分续句残片", re.compile(r"^的一个(?:混纺|混合|成分)[，,。！？!?\s]*")),
+    # These two forms are observed mid-word ASR boundaries. When their
+    # adjacent prefix/suffix exists, candidate freezing rejoins the original
+    # spoken wording first; reaching this gate means repair was not possible.
+    ("合成纤维成分残片", re.compile(r"^酯纤维(?:的)?(?:面料|成分)?[，,。！？!?\s]*$")),
+    ("结构术语残片", re.compile(r"(?:三角|梯形)的立[，,。！？!?\s]*$")),
     # Switching people/styles is live presentation coordination, not a
     # meaningful close for the selected product.
     ("直播换人展示", re.compile(r"^(?:换个风格[，,]?换个人|换个人给(?:你们|大家)看看)")),
+    # A sentence beginning with a trailing particle plus a connective has lost
+    # its subject in the previous ASR unit, for example "呢还遮肚子".
+    ("语气承接开头", re.compile(r"^(?:呢|吧)(?:还|也|会|能|可以)")),
+    # "会稍微亮一点点" and similar forms require the omitted subject from
+    # the previous subtitle. They cannot stand alone in a selected clip.
+    (
+        "省略主语效果残句",
+        re.compile(r"^(?:会|能|可以)(?:稍微|更|比较)(?:亮|白|显|薄|厚|松|紧|舒服|好看)"),
+    ),
+    # Preserve a full material or season conclusion, but reject the observed
+    # ASR tail that stops at "...早秋秋高气爽的季节".
+    ("未完成季节残句", re.compile(r"(?:单穿)?早秋秋高气爽的季节[。！？!?，,\\s]*$")),
+    # "再加上它立体的" promises a noun that is missing from the candidate.
+    ("设计续句残尾", re.compile(r"^(?:再)?加上(?:它|这个|这件|这条).{0,16}的[。！？!?，,\\s]*$")),
+    # A styling action without its consequence is a cut-off demonstration,
+    # not a self-contained scene claim.
+    ("搭配动作残句", re.compile(r"(?:帽|包|鞋|外套).{0,12}(?:一戴|一背|一穿|一搭)[。！？!?，,\\s]*$")),
 )
 _PRICE_COST_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("数字成本报价", re.compile(r"(?:成本|价格|单价).{0,8}\d{1,4}")),
@@ -86,6 +140,13 @@ _PRICE_COST_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("直播改价报价", re.compile(r"(?:改价|调价)[^。！？!?]{0,16}(?:\d{2,4}|[一二三四五六七八九十百千万]+)")),
     ("每米报价", re.compile(r"\d{2,4}\s*(?:多)?\s*(?:一|1)米")),
     ("价格导向话术", re.compile(r"(?:价位|成本|收费|计价|便宜|越贵|更贵|太贵|很贵|不贵|不便宜|抢着买|秒带|秒拍)")),
+    # Local ASR sometimes turns a live price into forms such as "V4五0百" or
+    # "388388".  A numeric amount coupled with a price judgement, or a
+    # duplicated three-digit amount, is still a price announcement even when
+    # the recognizer lost "元" / "一套".
+    ("口语价格判断", re.compile(r"(?:[0-9０-９]|[一二三四五六七八九十百千万零〇]).{0,10}(?:贵|便宜|划算)(?:的|了|啊|呀|吧)?[。！？!?，,\s]*$")),
+    ("重复数字报价", re.compile(r"(\d{3})\1")),
+    ("裸套装报价", re.compile(r"\d{3,4}(?:一|1)?(?:整)?套(?:来|啊|呀|吧|对吧)?[。！？!?，,\s]*$")),
 )
 
 # Hook needs a narrower standard than a body candidate.  An address such as
@@ -99,9 +160,240 @@ _HOOK_AUDIENCE_FRAGMENT_RE = re.compile(
     r"这件|这个|这条|这种))"
 )
 
+# A subtitle row is an ASR transport unit, not necessarily a short-video
+# candidate.  These limits only guide splitting at already-spoken boundaries;
+# they never authorize a word-count or midpoint cut.
+_SHORT_FORM_PREFERRED_MAX_SECONDS = 5.5
+_SHORT_FORM_MIN_CLAUSE_SECONDS = 1.55
+_SHORT_FORM_MIN_STRONG_SENTENCE_SECONDS = 0.75
+_SHORT_FORM_MIN_REMAINDER_SECONDS = 1.15
+_SHORT_FORM_STRONG_PUNCTUATION = set("。！？!?")
+_SHORT_FORM_CLAUSE_PUNCTUATION = set("，,；;：:")
+_SHORT_FORM_SCENE_COMPLETE_RE = re.compile(
+    r"^(?:去|穿去|出门|度假|上班|旅行).{1,48}"
+    r"(?:可以|合适|好看|适合|没问题|行)[，,。！？!?]*$"
+)
+
 
 def _compact_text(value: Any) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(value or ""))
+
+
+def _short_form_timed_words(segment: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Copy valid source words without changing their text or boundaries."""
+
+    words: list[dict[str, Any]] = []
+    for raw in segment.get("words") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        text = str(raw.get("text") or "").strip()
+        try:
+            start = float(raw.get("start"))
+            end = float(raw.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not text or end <= start:
+            continue
+        item = dict(raw)
+        item["text"] = text
+        item["start"] = start
+        item["end"] = end
+        words.append(item)
+    return words
+
+
+def _short_form_punctuation_after_words(
+    segment: Mapping[str, Any],
+    words: Sequence[Mapping[str, Any]],
+) -> dict[int, str]:
+    """Map only punctuation already present in the source semantic text.
+
+    ``build_semantic_segments`` deliberately stores timed spoken words without
+    punctuation.  Reuse its exact alignment helper instead of guessing where a
+    comma or full stop belongs.  If alignment is not exact, leave the segment
+    untouched rather than inventing a boundary.
+    """
+
+    try:
+        from volcengine_asr import _semantic_plain_text, _semantic_punctuation_offsets
+
+        expected_plain = "".join(
+            _semantic_plain_text(word.get("text") or "") for word in words
+        )
+        offsets = _semantic_punctuation_offsets(
+            str(segment.get("text") or ""), expected_plain
+        )
+    except Exception:
+        return {}
+    if not offsets:
+        return {}
+
+    punctuation: dict[int, str] = {}
+    spoken_offset = 0
+    for index, word in enumerate(words):
+        spoken_offset += len(_semantic_plain_text(word.get("text") or ""))
+        marker = str(offsets.get(spoken_offset) or "")
+        if marker:
+            punctuation[index] = marker
+    return punctuation
+
+
+def _short_form_boundary_kind(
+    words: Sequence[Mapping[str, Any]],
+    punctuation: Mapping[int, str],
+    index: int,
+) -> str:
+    marker = str(punctuation.get(index) or "")
+    if any(char in _SHORT_FORM_STRONG_PUNCTUATION for char in marker):
+        return "strong_punctuation"
+    if any(char in _SHORT_FORM_CLAUSE_PUNCTUATION for char in marker):
+        return "clause_punctuation"
+    if index + 1 < len(words):
+        try:
+            gap = float(words[index + 1]["start"]) - float(words[index]["end"])
+        except (KeyError, TypeError, ValueError):
+            gap = 0.0
+        if gap >= 0.65:
+            return "long_pause"
+        if gap >= 0.45:
+            return "pause"
+    return ""
+
+
+def _short_form_render(
+    words: Sequence[Mapping[str, Any]],
+    punctuation: Mapping[int, str],
+    start_index: int,
+    end_index: int,
+) -> str:
+    parts: list[str] = []
+    for index in range(start_index, end_index + 1):
+        parts.append(str(words[index].get("text") or ""))
+        marker = str(punctuation.get(index) or "")
+        if marker:
+            parts.append(marker)
+    return "".join(parts).strip()
+
+
+def short_form_independent_clause(text: Any) -> bool:
+    """Recognize a short scene conclusion that can stand before the next topic.
+
+    A live speaker often continues with "它..." after a complete line such as
+    "去草原我觉得也很可以".  Joining them only because the ASR wrote a comma
+    turns two usable short-video beats into one mixed candidate.  Keep this
+    narrow: it applies solely to a concrete occasion ending in an explicit
+    conclusion, never to a generic comma-ended product description.
+    """
+
+    value = re.sub(r"^\s*\[V\d+\]\s*", "", str(text or ""), flags=re.IGNORECASE)
+    value = re.sub(r"\s+", "", value).strip()
+    return bool(_SHORT_FORM_SCENE_COMPLETE_RE.match(value))
+
+
+def refine_short_form_semantic_segments(
+    segments: Iterable[Mapping[str, Any]],
+    *,
+    preferred_max_seconds: float = _SHORT_FORM_PREFERRED_MAX_SECONDS,
+) -> tuple[list[dict[str, Any]], dict[str, int | float]]:
+    """Split long semantic units only at exact spoken sentence boundaries.
+
+    The ASR transcript and the ``.words.json`` sidecar stay immutable.  This
+    creates a finer candidate view for the AI director: every emitted segment
+    contains an unchanged contiguous slice of original timed words.  Where an
+    ASR row has no reliable punctuation or pause, it is retained as one longer
+    unit so a mechanical split cannot create a fresh half sentence.
+    """
+
+    try:
+        target_max = max(2.0, float(preferred_max_seconds))
+    except (TypeError, ValueError):
+        target_max = _SHORT_FORM_PREFERRED_MAX_SECONDS
+
+    source_segments = [dict(segment) for segment in (segments or ()) if isinstance(segment, Mapping)]
+    refined: list[dict[str, Any]] = []
+    split_segments = 0
+    long_unsplit = 0
+
+    for segment in source_segments:
+        words = _short_form_timed_words(segment)
+        if len(words) < 2:
+            refined.append(segment)
+            continue
+        punctuation = _short_form_punctuation_after_words(segment, words)
+        duration = float(words[-1]["end"]) - float(words[0]["start"])
+        has_internal_strong_boundary = any(
+            any(char in _SHORT_FORM_STRONG_PUNCTUATION for char in str(marker or ""))
+            for index, marker in punctuation.items()
+            if index < len(words) - 1
+        )
+        # A short row can still contain two spoken sentences.  Split that
+        # particular case so candidate freezing cannot join unrelated topics
+        # merely because the ASR row happened to be under the duration target.
+        if duration <= target_max + 1e-6 and not has_internal_strong_boundary:
+            refined.append(segment)
+            continue
+
+        boundaries: list[tuple[int, str]] = []
+        start_index = 0
+        last_index = len(words) - 1
+        for index in range(last_index):
+            boundary_kind = _short_form_boundary_kind(words, punctuation, index)
+            if not boundary_kind:
+                continue
+            current_duration = float(words[index]["end"]) - float(words[start_index]["start"])
+            remaining_duration = float(words[-1]["end"]) - float(words[index + 1]["start"])
+            minimum = (
+                _SHORT_FORM_MIN_STRONG_SENTENCE_SECONDS
+                if boundary_kind == "strong_punctuation"
+                else _SHORT_FORM_MIN_CLAUSE_SECONDS
+            )
+            if current_duration + 1e-6 < minimum:
+                continue
+            if remaining_duration + 1e-6 < _SHORT_FORM_MIN_REMAINDER_SECONDS:
+                continue
+            boundaries.append((index, boundary_kind))
+            start_index = index + 1
+
+        if not boundaries:
+            refined.append(segment)
+            long_unsplit += 1
+            continue
+
+        split_segments += 1
+        start_index = 0
+        for end_index, boundary_kind in boundaries:
+            item = dict(segment)
+            item_words = [dict(word) for word in words[start_index:end_index + 1]]
+            item["start"] = round(float(item_words[0]["start"]), 3)
+            item["end"] = round(float(item_words[-1]["end"]), 3)
+            item["text"] = _short_form_render(words, punctuation, start_index, end_index)
+            item["words"] = item_words
+            item["semantic_unit"] = True
+            item["boundary_reason"] = f"short_form:{boundary_kind}"
+            item["short_form_refined"] = True
+            refined.append(item)
+            start_index = end_index + 1
+
+        item = dict(segment)
+        item_words = [dict(word) for word in words[start_index:]]
+        item["start"] = round(float(item_words[0]["start"]), 3)
+        item["end"] = round(float(item_words[-1]["end"]), 3)
+        item["text"] = _short_form_render(words, punctuation, start_index, last_index)
+        item["words"] = item_words
+        item["semantic_unit"] = True
+        item["boundary_reason"] = "short_form:source_end"
+        item["short_form_refined"] = True
+        refined.append(item)
+
+    metrics: dict[str, int | float] = {
+        "input_segments": len(source_segments),
+        "output_segments": len(refined),
+        "split_segments": split_segments,
+        "added_segments": max(0, len(refined) - len(source_segments)),
+        "long_unsplit_segments": long_unsplit,
+        "preferred_max_seconds": round(target_max, 2),
+    }
+    return refined, metrics
 
 
 def leading_fragment_trim(tokens: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
@@ -152,6 +444,10 @@ def candidate_quality_flags(text: Any, content_policy: Any = None) -> list[str]:
         blocked, _reason = blocks_role(content_policy, "price", value)
         if blocked:
             flags.append("价格/成本报价")
+    if any(pattern.search(value) for pattern in _INVENTORY_PRESSURE_RULES):
+        blocked, _reason = blocks_role(content_policy, "inventory_pressure", value)
+        if blocked:
+            flags.append("库存/稀缺催促")
     safety_reason = live_interaction_or_size_response_reason(value)
     if safety_reason:
         blocked, _reason = blocks_role(

@@ -30,6 +30,14 @@ _KNOWN_ASR_ERROR_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:料子|面料)非(?=$|[，。！？!?])"), "known_asr_phrase"),
     (re.compile(r"风吹过来整(?:[。！？!?]|$)"), "known_asr_phrase"),
     (re.compile(r"普通面料做椅"), "known_asr_phrase"),
+    (re.compile(r"下0天"), "known_asr_zero_day"),
+    # Concrete high-risk live-ASR residues observed in the caramel source.
+    # These are audit/retry triggers only: a finding never rewrites a word by
+    # itself and never turns a guessed phrase into a publishable sentence.
+    (re.compile(r"人间一定是直角"), "known_asr_semantic_confusion"),
+    (re.compile(r"(?:是那个)?35厘米|自带3(?:到|-)?5厘米的销售"), "known_asr_number_unit"),
+    (re.compile(r"A类母婴店|就是你小宝宝"), "known_asr_listener_reference"),
+    (re.compile(r"像100斤葡萄"), "known_asr_or_delivery_anomaly"),
 )
 _UNFINISHED_TAIL_RE = re.compile(r"(?:的|是|和|与|而且|但是|因为|所以|如果|然后)$")
 _ABNORMAL_REPEAT_RE = re.compile(r"(.)(?:\1){3,}")

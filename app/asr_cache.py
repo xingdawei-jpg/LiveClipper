@@ -17,6 +17,11 @@ from typing import Any
 CACHE_SCHEMA_VERSION = 1
 FINGERPRINT_METHOD = "sampled-sha256-v1"
 _SAMPLE_SIZE = 1024 * 1024
+# A transcript may be resegmented or receive a narrowly context-bound repair
+# without changing SenseVoice itself.  Keep that revision separate from the
+# cache schema so an existing managed word-timed transcript can be upgraded
+# from its sidecar instead of needlessly decoding the source audio again.
+SENSEVOICE_TEXT_PIPELINE_REVISION = "sensevoice-director-source-v2"
 
 
 def _sha256_file(path: Path) -> str:
@@ -72,14 +77,18 @@ def write_metadata(
     if not source.is_file() or not srt.is_file():
         raise FileNotFoundError("ASR cache source or SRT is missing")
     words = word_timing_path(srt)
+    provider_name = str(provider or "unknown")
+    asr_payload = {
+        "provider": provider_name,
+        "model": str(model or ""),
+        "timing_precision": str(timing_precision or "segment"),
+    }
+    if provider_name.strip().lower() == "sensevoice":
+        asr_payload["text_pipeline_revision"] = SENSEVOICE_TEXT_PIPELINE_REVISION
     payload = {
         "schema_version": CACHE_SCHEMA_VERSION,
         "source": source_fingerprint(source),
-        "asr": {
-            "provider": str(provider or "unknown"),
-            "model": str(model or ""),
-            "timing_precision": str(timing_precision or "segment"),
-        },
+        "asr": asr_payload,
         "outputs": {
             "srt_sha256": _sha256_file(srt),
             "words_sha256": _sha256_file(words) if words.is_file() else "",
@@ -130,13 +139,29 @@ def inspect_cache(
         if words_digest and (not words.is_file() or _sha256_file(words) != words_digest):
             return {"valid": False, "managed": True, "reason": "words_changed"}
         asr = payload.get("asr") if isinstance(payload.get("asr"), dict) else {}
+        provider = str(asr.get("provider") or "unknown")
+        model = str(asr.get("model") or "")
+        timing_precision = str(asr.get("timing_precision") or "segment")
+        if (
+            provider.strip().lower() == "sensevoice"
+            and str(asr.get("text_pipeline_revision") or "")
+            != SENSEVOICE_TEXT_PIPELINE_REVISION
+        ):
+            return {
+                "valid": False,
+                "managed": True,
+                "reason": "sensevoice_text_pipeline_changed",
+                "provider": provider,
+                "model": model,
+                "timing_precision": timing_precision,
+            }
         return {
             "valid": True,
             "managed": True,
             "reason": "verified",
-            "provider": str(asr.get("provider") or "unknown"),
-            "model": str(asr.get("model") or ""),
-            "timing_precision": str(asr.get("timing_precision") or "segment"),
+            "provider": provider,
+            "model": model,
+            "timing_precision": timing_precision,
         }
     except Exception as exc:
         return {

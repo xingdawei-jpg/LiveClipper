@@ -477,6 +477,9 @@ SUBTITLE_STYLE_DEFAULTS = {
     "subtitle_text_effect": "shadow",
     "subtitle_opacity": 70,
     "subtitle_blur": 10,
+    # Distance from the bottom edge as a percentage of video height.  A
+    # relative value keeps the same composition on 720p/1080p portrait video.
+    "subtitle_position_percent": 24,
 }
 
 SUBTITLE_KEYWORDS = [

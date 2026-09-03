@@ -224,6 +224,9 @@ class SelectionCandidate:
     end: float
     text: str
     hook_eligible: bool
+    # Immutable ASR semantic ancestors.  This is audit/provenance data only;
+    # selection, safety, and ordering must not derive policy from it.
+    origin_subtitle_ids: tuple[int, ...] = ()
     story_block_id: str = ""
     continuity_group_id: str = ""
     # Subject identity is immutable metadata about the original candidate.  It
@@ -243,6 +246,7 @@ class SelectionCandidate:
             "end": round(self.end, 3),
             "text": self.text,
             "hook_eligible": self.hook_eligible,
+            "origin_subtitle_ids": list(self.origin_subtitle_ids),
             "story_block_id": self.story_block_id,
             "continuity_group_id": self.continuity_group_id,
             "subject_relation": self.subject_relation,

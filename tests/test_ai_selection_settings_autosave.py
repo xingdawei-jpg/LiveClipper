@@ -31,6 +31,7 @@ class AiSelectionSettingsAutosaveTests(unittest.TestCase):
         }
         payload = server.AiSelectionSettingsPayload(
             content_review_mode="shadow",
+            m2_planner_mode="lite_director_experiment",
             preference_weights={"场景搭配": 2.5},
             ai_rules={
                 "category_filter": False,
@@ -48,6 +49,7 @@ class AiSelectionSettingsAutosaveTests(unittest.TestCase):
         self.assertEqual(saved["api_key"], "do-not-rewrite")
         self.assertTrue(saved["asr_enabled"])
         self.assertEqual(saved["content_review_mode"], "shadow")
+        self.assertEqual(saved["m2_planner_mode"], "lite_director_experiment")
         self.assertEqual(saved["preference_weights"], {"场景搭配": 2.5})
         self.assertFalse(saved["ai_rules"]["category_filter"])
         self.assertEqual(saved["ai_rules"]["narrative"], "旧叙事")

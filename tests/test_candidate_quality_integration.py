@@ -75,6 +75,21 @@ class CandidateQualityIntegrationTests(unittest.TestCase):
         self.assertEqual(entries[0][1], 18.0)
         self.assertIn("早上一觉睡醒。穿个这个衣服", entries[0][2])
 
+    def test_freeze_keeps_a_complete_short_scene_before_the_next_explanation(self) -> None:
+        source = (
+            "1\n00:00:01,000 --> 00:00:03,000\n"
+            "去草原我觉得也很可以，\n\n"
+            "2\n00:00:03,200 --> 00:00:07,600\n"
+            "它自带一点点民族风在里面。\n"
+        )
+
+        frozen = ai_clipper._freeze_director_candidates(source)
+        entries = ai_clipper._parse_srt_entries_for_hook(frozen)
+
+        self.assertEqual([(start, end) for start, end, _text in entries], [(1.0, 3.0), (3.2, 7.6)])
+        self.assertEqual(entries[0][2], "去草原我觉得也很可以，")
+        self.assertEqual(entries[1][2], "它自带一点点民族风在里面。")
+
     def test_word_timed_fragment_is_trimmed_to_complete_question(self) -> None:
         text = "而且亚麻的。哎，你们有没有发现今年大衣里面都有亚麻。"
         timings = _word_timing_segment(text)
@@ -116,6 +131,32 @@ class CandidateQualityIntegrationTests(unittest.TestCase):
         ])
 
         self.assertEqual([item["srt_index"] for item in inventory], [2])
+
+    def test_caramel_bad_final_utterances_and_obfuscated_prices_stay_out_of_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory(
+            [
+                (0.0, 3.6, "直到3到5厘米的一个挖尖挖进来会显得我们的肩干嘛？"),
+                (3.7, 5.74, "是但是你的视觉重心会落在这个线上。"),
+                (5.8, 9.04, "它是很很凉爽的一个面料，而且上身完全不。"),
+                (9.1, 11.38, "V4五0百啊，你们要400多买都是贵的。"),
+                (11.4, 13.14, "来388388对吧？"),
+                (13.2, 16.44, "这就是一个很透薄，三伏天随便穿的料子。"),
+            ],
+            content_policy=content_policy.default_content_policy(),
+        )
+
+        self.assertEqual([item["srt_index"] for item in inventory], [6])
+
+    def test_observed_orphan_tails_cannot_reenter_safe_inventory(self) -> None:
+        inventory = ai_clipper._director_safe_candidate_inventory([
+            (0.0, 3.0, "呢还遮肚子前短后长前衣长58。"),
+            (3.1, 6.1, "会稍微亮一点点。"),
+            (6.2, 9.2, "再加上它立体的。"),
+            (9.3, 12.3, "出去玩的时候，棒球帽一戴。"),
+            (12.4, 16.4, "立体肩线向内收，穿起来显精神又不显壮。"),
+        ])
+
+        self.assertEqual([item["srt_index"] for item in inventory], [5])
 
     def test_exact_product_context_excludes_foreign_garment_thread_only(self) -> None:
         clips = [

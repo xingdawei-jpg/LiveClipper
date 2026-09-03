@@ -161,6 +161,15 @@ _LIVE_REPLY_PATTERNS = (
     ),
     re.compile(r"(?:姐妹|宝宝|姐姐|家人).{0,16}(?:有|没有|想|要|问|穿|选|拿|看).{0,18}(?:吗|呢|吧|？|\?)"),
     re.compile(r"(?:我们|咱们).{0,12}(?:有|没有|上(?:了)?|做(?:了)?).{0,18}(?:吗|呢|吧|？|\?)"),
+    # Stock/top-up calls are live-room operations, not a buyer-facing product
+    # claim. Keep this narrow: it requires the actual "add another batch"
+    # wording, so normal garment explanations remain available when a user
+    # enables price, source, social proof, or after-sale content.
+    re.compile(
+        r"(?:(?:来|咱们|我们).{0,8})?"
+        r"(?:上衣|裤子|裙子|外套|这件|这条|这一套|这个款).{0,8}"
+        r"(?:再)?加一波"
+    ),
     # Staff coordination is a live-room instruction, not a product claim.
     re.compile(r"(?:你|帮我|谁).{0,8}(?:把|拿|递|给).{0,14}(?:给我|一下|过来|拿来)"),
 )

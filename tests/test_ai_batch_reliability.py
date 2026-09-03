@@ -874,6 +874,56 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(clips, [])
 
+    def test_hook_boundary_gate_rejects_tail_particle_and_freeze_rejoins_exact_word_tails(self) -> None:
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason(
+                "吧？它一定不是靠身材去撑起来的。"
+            ),
+            "开头承接上句",
+        )
+        self.assertEqual(
+            ai_clipper._hook_role_ineligibility_reason(
+                "吧？它一定不是靠身材去撑起来的。"
+            ),
+            "开头承接上句",
+        )
+        rejected = ai_clipper._parse_ai_response(
+            json.dumps([
+                {
+                    "clip_type": "hook",
+                    "srt_indices": [1],
+                    "focus": "版型显瘦",
+                },
+            ], ensure_ascii=False),
+            None,
+            [(0.0, 3.0, "吧？它一定不是靠身材去撑起来的。")],
+            set(),
+            require_srt_indices=True,
+            allowed_hook_indices={1},
+        )
+        self.assertEqual(rejected, [])
+
+        source = (
+            "1\n00:00:00,000 --> 00:00:01,000\n聚\n\n"
+            "2\n00:00:01,100 --> 00:00:04,000\n酯纤维的面料不显廉价。\n\n"
+            "3\n00:00:05,000 --> 00:00:07,000\n侧面做了一个三角的立\n\n"
+            "4\n00:00:07,100 --> 00:00:10,000\n体捏褶，腰线更利落。\n"
+        )
+        ai_clipper._begin_analysis_metadata()
+        frozen = ai_clipper._freeze_director_candidates(source)
+        entries = ai_clipper._parse_srt_entries_for_hook(frozen)
+
+        self.assertEqual([entry[2] for entry in entries], [
+            "聚酯纤维的面料不显廉价。",
+            "侧面做了一个三角的立体捏褶，腰线更利落。",
+        ])
+        self.assertTrue(all(
+            not ai_clipper._director_standalone_boundary_reason(entry[2])
+            for entry in entries
+        ))
+        candidates = ai_clipper.get_last_analysis_metadata()["director_candidates"]
+        self.assertTrue(all(candidate["hook_eligible"] for candidate in candidates))
+
     def test_auto_focus_respects_current_selling_points_before_global_weights(self) -> None:
         entries = [
             (0.0, 3.0, "这件衬衫修饰腰线，视觉上很显瘦。"),
@@ -1030,6 +1080,12 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual(
             ai_clipper._director_standalone_boundary_reason("完整卖点说到一半呃"),
             "结尾语气残留",
+        )
+        self.assertEqual(
+            ai_clipper._director_standalone_boundary_reason(
+                "我的肩比我这根线多出来这么多呢，但是你会不会发现这个线像是我肩最宽的位置啊？"
+            ),
+            "",
         )
         self.assertEqual(
             ai_clipper._director_standalone_boundary_reason("吧对上班族日常都能穿"),
@@ -1199,7 +1255,7 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertEqual(audit["per_clip_duration"]["removed_count"], 0)
         self.assertEqual(sum(clip[5] for clip in safe), 26.0)
 
-    def test_director_duration_contract_rejects_unsplittable_long_product(self) -> None:
+    def test_director_duration_contract_preserves_unsplittable_complete_product(self) -> None:
         entries = [
             (0.0, 4.0, "这件上衣上身很显精神。"),
             (4.0, 21.0, "这是一段完整但过长的商品讲解，内容不能在冻结候选边界内拆开。"),
@@ -1219,11 +1275,23 @@ class AiCandidateReliabilityTests(unittest.TestCase):
             srt_entries=entries,
         )
 
-        self.assertEqual([clip[0] for clip in safe], ["hook", "close"])
-        self.assertTrue(all(clip[5] <= 8.2 for clip in safe if clip[0] == "product"))
+        self.assertEqual([clip[0] for clip in safe], ["hook", "product", "close"])
+        self.assertEqual([round(clip[5], 1) for clip in safe if clip[0] == "product"], [17.0])
         self.assertEqual(audit["per_clip_duration"]["split_count"], 0)
-        self.assertEqual(audit["per_clip_duration"]["removed_count"], 1)
-        self.assertAlmostEqual(audit["per_clip_duration"]["removed_duration"], 17.0)
+        self.assertEqual(audit["per_clip_duration"]["removed_count"], 0)
+        self.assertEqual(audit["per_clip_duration"]["preserved_overlong_count"], 1)
+        self.assertAlmostEqual(audit["per_clip_duration"]["preserved_overlong_duration"], 17.0)
+        self.assertTrue(any("为避免截断已保留原句" in warning for warning in audit["warnings"]))
+
+    def test_final_ai_selection_range_lock_bypasses_legacy_srt_expansion(self) -> None:
+        preview_clip = (
+            "product", "完整卖点。", 10.0, 16.0, 50.0, 6.0, "品质细节",
+            {"preview_exact": True},
+        )
+
+        self.assertTrue(cutter_logic._clip_range_locked(preview_clip))
+        self.assertTrue(cutter_logic._clip_range_locked(ai_selected=True))
+        self.assertFalse(cutter_logic._clip_range_locked(("product", "普通片段", 0, 4, 50, 4, "")))
 
     def test_ai_expansion_skips_overlong_product_before_hard_audit(self) -> None:
         entries = [
@@ -1721,6 +1789,38 @@ class AiCandidateReliabilityTests(unittest.TestCase):
         self.assertAlmostEqual(audit["duration_low"], 86.25, places=2)
         selected = cutter_logic._validate_selected_duration_contract(clips, 90, 1.15)
         self.assertTrue(selected["underlength"])
+    def test_parser_extracts_prefixed_director_object_without_losing_expansion_plan(self) -> None:
+        entries = [
+            (0.0, 4.0, "这一件上身很有精神。"),
+            (4.0, 8.0, "肩线利落，轮廓不会显得松垮。"),
+        ]
+        response = {
+            "clips": [
+                {"clip_type": "hook", "srt_indices": [1], "focus": "上身效果"},
+                {"clip_type": "product", "srt_indices": [2], "focus": "版型显瘦"},
+            ],
+            "expansion_plan": [{
+                "priority": 1,
+                "srt_indices": [2],
+                "after_srt_indices": [1],
+                "reason": "补充肩线证据 {完整}",
+            }],
+        }
+        content = "导演结果如下：\n```json\n" + json.dumps(response, ensure_ascii=False) + "\n```\n请按此执行。"
+        ai_clipper._begin_analysis_metadata()
+        clips = ai_clipper._parse_ai_response(
+            content,
+            None,
+            entries,
+            set(),
+            require_srt_indices=True,
+        )
+
+        self.assertEqual([clip[1] for clip in clips], [entry[2] for entry in entries])
+        plan = ai_clipper._analysis_metadata_context()["expansion_plan"]
+        self.assertEqual(plan[0]["srt_indices"], [2])
+        self.assertEqual(plan[0]["reason"], "补充肩线证据 {完整}")
+
     def test_declared_expansion_plan_adds_only_ai_approved_complete_clip(self) -> None:
         ai_clipper._begin_analysis_metadata()
         entries = [

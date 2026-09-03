@@ -24,6 +24,7 @@ from ai_model_config import (
     DEEPSEEK_DEFAULT_MODEL,
     normalize_ai_base_url,
 )
+from ai_cost_ledger import record_ai_call
 
 
 # ---------- SRT 工具 ----------
@@ -173,6 +174,10 @@ def _call_ai_products(srt_text, api_key, base_url, model):
         conn.request("POST", path_api, body=body, headers={"Content-Type":"application/json","Authorization":"Bearer "+api_key})
         resp = conn.getresponse(); data = resp.read().decode("utf-8"); conn.close()
         result = _json.loads(data)
+        record_ai_call(
+            module="product_scanner", stage="product_scan_full", model=model,
+            request_payload=payload, response_payload=result, success=True,
+        )
         if "choices" not in result or not result["choices"]: return []
         content = result["choices"][0]["message"].get("content","").strip()
         if content.startswith("```"): content = re.sub(r"^```(?:json)?\s*","",content); content = re.sub(r"\s*```$","",content)
@@ -180,6 +185,10 @@ def _call_ai_products(srt_text, api_key, base_url, model):
         if isinstance(parsed, list): return parsed
         return []
     except Exception as e:
+        record_ai_call(
+            module="product_scanner", stage="product_scan_full", model=model,
+            request_payload=payload, success=False, error_type=type(e).__name__,
+        )
         print("_call_ai_products error:", e, flush=True)
         return []
 
@@ -238,6 +247,10 @@ SRT:
         conn.close()
 
         result = json.loads(data)
+        record_ai_call(
+            module="product_scanner", stage="product_scan_legacy", model=model,
+            request_payload=payload, response_payload=result, success=True,
+        )
         if "choices" not in result or not result["choices"]:
             return []
 
@@ -253,7 +266,11 @@ SRT:
         if isinstance(parsed, list):
             return parsed
         return []
-    except Exception:
+    except Exception as error:
+        record_ai_call(
+            module="product_scanner", stage="product_scan_legacy", model=model,
+            request_payload=payload, success=False, error_type=type(error).__name__,
+        )
         return []
 
 
@@ -314,6 +331,10 @@ def _call_ai_segment(srt_text_segment, seg_start, api_key, base_url, model):
         conn.request("POST", path, body=body, headers={"Content-Type":"application/json","Authorization":"Bearer "+api_key})
         resp = conn.getresponse(); data = resp.read().decode("utf-8"); conn.close()
         result = json.loads(data)
+        record_ai_call(
+            module="product_scanner", stage="product_scan_segment", model=model,
+            request_payload=payload, response_payload=result, success=True,
+        )
         if "choices" not in result or not result["choices"]: return []
         content_ = result["choices"][0]["message"].get("content","").strip()
         if content_.startswith("```"): content_ = re.sub(r"^```(?:json)?\s*","",content_); content_ = re.sub(r"\s*```$","",content_)
@@ -324,7 +345,11 @@ def _call_ai_segment(srt_text_segment, seg_start, api_key, base_url, model):
                 if "end" in item and item["end"] is not None: item["end"] += seg_start
             return parsed
         return []
-    except Exception:
+    except Exception as error:
+        record_ai_call(
+            module="product_scanner", stage="product_scan_segment", model=model,
+            request_payload=payload, success=False, error_type=type(error).__name__,
+        )
         return []
 def _merge_products(seg_products_list):
     merged = {}

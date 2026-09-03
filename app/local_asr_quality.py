@@ -21,11 +21,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from typing import Any, Callable
 
 
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z]+(?:['-][A-Za-z]+)*|\d+(?:[.,:]\d+)*")
 _PUNCTUATION_CLUSTER_RE = re.compile(r"[。！？!?，,；;：:、](?:\s*[。！？!?，,；;：:、])+")
+# This is deliberately a subtitle/Director source-unit preference, not a
+# forced editing duration.  We only split on punctuation or a pause already
+# present in the CTC word timeline; no midpoint or character-count cuts.
+_DIRECTOR_SOURCE_UNIT_MAX_SECONDS = 3.0
 _CONTEXTUAL_PUNCTUATION_REPAIRS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(首先)[。！？!?；;]+(?=\s*这个世界)"), r"\1，"),
     (re.compile(r"(各种)[。！？!?；;]+(?=\s*(?:高端|高级|优质|好的|面料))"), r"\1"),
@@ -101,6 +106,12 @@ _DOMAIN_CORRECTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"一多穿"), "一衣多穿"),
     (re.compile(r"偏岔气(?=的一个款)"), "偏禅系"),
     (re.compile(r"100串元(?=[吗呢啊？?。])"), "1000元"),
+    # Observed on the caramel fashion live.  Each substitution is narrowly
+    # tied to its surrounding phrase and preserves the original timed-token
+    # span; this is not a free-form transcript rewrite.
+    (re.compile(r"下0天(?=\s*40度)"), "夏天"),
+    (re.compile(r"(?<=溜肩)原肩(?=大斜方)"), "圆肩"),
+    (re.compile(r"斜方间(?=了[，,。！？!?]?$)"), "斜方肩"),
 )
 
 
@@ -262,10 +273,103 @@ def improve_sensevoice_segments(
     corrected, _ = apply_domain_corrections(segments, log_fn=log_fn)
     try:
         from volcengine_asr import build_semantic_segments
+        from candidate_quality import refine_short_form_semantic_segments
 
         semantic = build_semantic_segments(corrected, log_fn=log_fn) or []
+        if semantic:
+            refined, metrics = refine_short_form_semantic_segments(
+                semantic,
+                preferred_max_seconds=_DIRECTOR_SOURCE_UNIT_MAX_SECONDS,
+            )
+            semantic = refined
+            if log_fn and int(metrics.get("added_segments") or 0):
+                log_fn(
+                    "本地 ASR 导演细断句: "
+                    f"{int(metrics.get('input_segments') or 0)} 条语义段 -> "
+                    f"{int(metrics.get('output_segments') or 0)} 条自然源片段"
+                    f"（仅使用原始停顿/标点边界）"
+                )
     except Exception as exc:
         if log_fn:
             log_fn(f"本地 ASR 语义断句不可用，保留原始语音段: {exc}")
         semantic = []
     return corrected, semantic
+
+
+def refresh_managed_sensevoice_transcript(
+    srt_path: str | os.PathLike[str],
+    log_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Upgrade a managed SenseVoice transcript using its existing word timings.
+
+    This is deliberately a no-audio migration: it only consumes a LiveClipper
+    SenseVoice ``.words.json`` sidecar, applies deterministic fixes, and
+    regenerates visible source units at natural boundaries.  A user-provided
+    SRT never reaches this function.
+    """
+    from volcengine_asr import (
+        load_word_timing_sidecar,
+        semantic_segments_to_srt,
+        word_timing_sidecar_path,
+        write_word_timing_sidecar,
+    )
+
+    destination = os.fspath(srt_path)
+    sidecar_path = word_timing_sidecar_path(destination)
+    try:
+        with open(sidecar_path, "r", encoding="utf-8-sig") as handle:
+            sidecar_payload = json.load(handle)
+        if str(sidecar_payload.get("provider") or "").strip().lower() != "sensevoice":
+            return {"refreshed": False, "reason": "not_sensevoice_sidecar"}
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return {"refreshed": False, "reason": f"sidecar_unavailable:{type(exc).__name__}"}
+
+    raw_segments = load_word_timing_sidecar(destination, semantic=False, log_fn=log_fn)
+    if not raw_segments:
+        return {"refreshed": False, "reason": "word_timing_missing"}
+
+    # Retain quality findings, but do not use audio or activate an optional
+    # cloud retry while upgrading a cache.
+    from local_asr_review import review_segments, write_quality_report
+
+    reviewed_segments, report = review_segments(raw_segments, retry_enabled=False)
+    corrected_segments, semantic_segments = improve_sensevoice_segments(
+        reviewed_segments,
+        log_fn=log_fn,
+    )
+    if not semantic_segments:
+        return {"refreshed": False, "reason": "semantic_segmentation_empty"}
+
+    content = semantic_segments_to_srt(semantic_segments)
+    if not content.strip():
+        return {"refreshed": False, "reason": "srt_empty"}
+    destination_dir = os.path.dirname(os.path.abspath(destination)) or "."
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".liveclipper_sensevoice_",
+        suffix=".srt",
+        dir=destination_dir,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+    write_word_timing_sidecar(destination, corrected_segments, provider="sensevoice", log_fn=log_fn)
+    write_quality_report(destination, report)
+    result = {
+        "refreshed": True,
+        "raw_segments": len(corrected_segments),
+        "visible_segments": len(semantic_segments),
+    }
+    if log_fn:
+        log_fn(
+            "本地 ASR 缓存已升级: "
+            f"{result['raw_segments']} 条词级原始段 -> {result['visible_segments']} 条自然源片段"
+        )
+    return result

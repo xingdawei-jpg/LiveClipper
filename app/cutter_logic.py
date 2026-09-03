@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from srt_parser import open_srt, _time_to_seconds
+from ai_cost_ledger import record_ai_call
 from selection_contracts import DurationContract, SHORTAGE_GRACE_SECONDS
 
 # 编码器辅助：优先硬件加速，回退软件编码
@@ -180,6 +181,15 @@ def _clip_preview_exact(clip):
     if not isinstance(clip, (list, tuple)):
         return False
     return any(isinstance(item, dict) and item.get("preview_exact") for item in clip)
+
+
+def _clip_range_locked(clip=None, *, ai_selected=False):
+    """Keep a user-confirmed or AI-finalized clip inside its approved range."""
+    if ai_selected:
+        return True
+    if isinstance(clip, dict):
+        return bool(clip.get("preview_exact") or clip.get("selection_range_locked"))
+    return _clip_preview_exact(clip)
 
 
 def _infer_mix_source_idx_from_srt(text, start, end, srt_entries):
@@ -352,9 +362,32 @@ def _copy_srt_with_word_timing_sidecar(
 
 def _inspect_srt_cache(source_video, srt_path):
     try:
-        from asr_cache import inspect_cache
+        from asr_cache import inspect_cache, write_metadata
 
-        return inspect_cache(source_video, srt_path)
+        status = inspect_cache(source_video, srt_path)
+        if status.get("reason") != "sensevoice_text_pipeline_changed":
+            return status
+
+        # This is a managed SenseVoice cache whose source/video fingerprint
+        # still matches.  Upgrade it from its CTC word sidecar rather than
+        # deleting it and paying for another full local ASR pass.
+        from local_asr_quality import refresh_managed_sensevoice_transcript
+
+        refreshed = refresh_managed_sensevoice_transcript(srt_path)
+        if not refreshed.get("refreshed"):
+            status["migration"] = refreshed.get("reason") or "not_refreshed"
+            return status
+        write_metadata(
+            source_video,
+            srt_path,
+            provider="sensevoice",
+            model=str(status.get("model") or ""),
+            timing_precision=str(status.get("timing_precision") or "word"),
+        )
+        upgraded = inspect_cache(source_video, srt_path)
+        if upgraded.get("valid"):
+            upgraded["text_pipeline_upgraded"] = True
+        return upgraded
     except Exception as exc:
         return {
             "valid": False,
@@ -2186,11 +2219,11 @@ def generate_ass(clips, width, height, output_path):
     sc["font_color"] = _ass_color(style["color_hex"], style["opacity"])
     sc["outline_color"] = _ass_color("000000", style["opacity"])
     sc["outline_width"] = 3 if style["effect"] == "outline" else 0
-    margin_v = sc["margin_v"]
+    margin_v = _subtitle_margin_v(style, height)
     outline_w = sc.get("outline_width", 3)
     # 底部对齐：用 PlayResY - margin_v
     if sc["position"] == "top":
-        margin_v = sc["margin_v"]
+        margin_v = _subtitle_margin_v(style, height)
         alignment = 8  # top center
     elif sc["position"] == "center":
         margin_v = 0
@@ -3067,6 +3100,17 @@ def process_video(video_path, srt_path=None, output_path=None,
             from stt import cleanup_srt; cleanup_srt(temp_srt)
         return False
 
+    _ai_selection_range_lock = bool(
+        ai_is_enabled()
+        and isinstance(analysis_metadata, dict)
+        and analysis_metadata.get("selection_manifest")
+    )
+    if _ai_selection_range_lock and not _clips_only:
+        _log(
+            "AI切割边界锁定: 片单已在冻结候选边界完成语义选片，"
+            "跳过旧SRT补齐、结尾续句和尾音扩展，保持时长合同"
+        )
+
     _duration_shortage_grace = _selection_shortage_grace_seconds(analysis_metadata)
     if ai_is_enabled() and not _is_preview_only_partial_selection(analysis_metadata, _clips_only):
         _validate_selected_duration_contract(
@@ -3301,6 +3345,10 @@ def process_video(video_path, srt_path=None, output_path=None,
             c_type, text, start, end, score, dur = clip[0], clip[1], clip[2], clip[3], clip[4], clip[5]
             _orig_start, _orig_end = float(start), float(end)
             _preview_exact = _clip_preview_exact(clip)
+            _range_locked = _clip_range_locked(
+                clip,
+                ai_selected=_ai_selection_range_lock,
+            )
             _preview_meta = next((item for item in clip if isinstance(item, dict) and item.get("preview_exact")), {}) if isinstance(clip, (list, tuple)) else {}
             _log(f"[T] [{time.strftime('%H:%M:%S')}] loop clip_idx={clip_idx}")
             if _cancelled():
@@ -3322,7 +3370,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             end_buf = 0
             # [v9.6] 所有片段SRT边界对齐：防止说半句话
             # 找到start/end所在的SRT条目→对齐到该条目边界；口播长句允许适度补尾。
-            if _srt_boundaries and not _preview_exact:
+            if _srt_boundaries and not _range_locked:
                 start_srt, end_srt = None, None
                 for _ts, _te in _srt_boundaries:
                     if _ts <= end <= _te:
@@ -3333,7 +3381,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     end = end_srt
                 if start_srt and start - start_srt <= 3.0:
                     start = start_srt
-            if (not _preview_exact) and _srt_segments_for_cut and (clip_idx == total_clips - 1 or str(c_type).lower() in ("close", "cta", "call_to_action")):
+            if (not _range_locked) and _srt_segments_for_cut and (clip_idx == total_clips - 1 or str(c_type).lower() in ("close", "cta", "call_to_action")):
                 try:
                     for _si, _seg in enumerate(_srt_segments_for_cut):
                         _ts = float(_seg.get("start", 0))
@@ -3363,7 +3411,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     continue
 
             # [v9.2] 切割编码模式 + Smart Crop + mirror
-            if _preview_exact:
+            if _range_locked:
                 _shared_boundary_changed = False
             else:
                 start, end, _shared_boundary_changed = _apply_srt_cut_alignment(
@@ -3373,7 +3421,9 @@ def process_video(video_path, srt_path=None, output_path=None,
                 end = video_duration - 0.1
                 if end <= start:
                     continue
-            _tail_guard = LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS if clip_idx == total_clips - 1 else CLIP_AUDIO_TAIL_GUARD_SECONDS
+            _tail_guard = 0.0 if _range_locked else (
+                LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS if clip_idx == total_clips - 1 else CLIP_AUDIO_TAIL_GUARD_SECONDS
+            )
             if _tail_guard > 0:
                 old_end = end
                 end = min(video_duration, end + _tail_guard)
@@ -3416,7 +3466,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             _fade_out_start = max(0.0, clip_duration - _clip_audio_fade)
             _audio_filter = (
                 _stable_audio_tail_filter()
-                if _preview_exact
+                if _range_locked
                 else (
                     f"atrim=0:{clip_duration:.3f},{_stable_audio_tail_filter()},"
                     f"afade=t=in:st=0:d={_clip_audio_fade:.3f},"
@@ -3425,7 +3475,7 @@ def process_video(video_path, srt_path=None, output_path=None,
             )
             _log("[T] VF: " + combined_vf[:200])
 
-            if _preview_exact:
+            if _range_locked:
                 cmd = _preview_exact_cut_cmd(
                     ffmpeg, video_path, start, clip_duration, combined_vf,
                     _audio_filter, temp_file, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
@@ -3496,7 +3546,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                     _hw_fallback = True
                     # 重新构建命令，用软件编码替换硬件编码
                     cmd = [ffmpeg, "-y"]
-                    _append_seek_input_args(cmd, video_path, start, accurate=_preview_exact)
+                    _append_seek_input_args(cmd, video_path, start, accurate=_range_locked)
                     cmd += ["-t", f"{clip_duration:.3f}"]
                     cmd += ["-fflags", "+genpts"]
                     cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
@@ -4519,7 +4569,6 @@ def _load_subtitle_render_style():
     from config import (
         SUBTITLE_COLOR_HEX,
         SUBTITLE_COLOR_OPTIONS,
-        SUBTITLE_FONT_OPTIONS,
         SUBTITLE_STYLE_DEFAULTS,
     )
     from platform_config import resolve_subtitle_font
@@ -4532,7 +4581,7 @@ def _load_subtitle_render_style():
         _LOG.warning("Could not load subtitle style settings; using defaults.", exc_info=True)
 
     requested_font = str(settings.get("subtitle_font_family") or "").strip()
-    if requested_font not in SUBTITLE_FONT_OPTIONS:
+    if not requested_font:
         requested_font = SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
     font_name, font_path, font_fallback = resolve_subtitle_font(requested_font)
 
@@ -4551,6 +4600,13 @@ def _load_subtitle_render_style():
         blur = int(float(settings.get("subtitle_blur", SUBTITLE_STYLE_DEFAULTS["subtitle_blur"])))
     except Exception:
         blur = SUBTITLE_STYLE_DEFAULTS["subtitle_blur"]
+    try:
+        position_percent = int(float(settings.get(
+            "subtitle_position_percent",
+            SUBTITLE_STYLE_DEFAULTS["subtitle_position_percent"],
+        )))
+    except Exception:
+        position_percent = SUBTITLE_STYLE_DEFAULTS["subtitle_position_percent"]
 
     return {
         "requested_font": requested_font,
@@ -4561,8 +4617,19 @@ def _load_subtitle_render_style():
         "color_hex": SUBTITLE_COLOR_HEX[color_key],
         "effect": effect,
         "opacity": max(20, min(100, opacity)),
-        "blur": max(0, min(20, blur)),
+        "blur": max(0, min(100, blur)),
+        "position_percent": max(8, min(70, position_percent)),
     }
+
+
+def _subtitle_margin_v(style, video_height):
+    """Convert the saved portrait-friendly height percentage to ASS MarginV."""
+    try:
+        height = max(1, int(float(video_height or 1920)))
+    except Exception:
+        height = 1920
+    percent = max(8, min(70, int(style.get("position_percent", 24) or 24)))
+    return max(20, int(round(height * percent / 100)))
 
 
 def _ass_color(hex_color, opacity=100):
@@ -4577,8 +4644,11 @@ def _ass_color(hex_color, opacity=100):
 
 def _subtitle_ass_text(text, style):
     escaped = str(text or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
-    blur = int(style.get("blur", 0) or 0)
-    return f"{{\\blur{blur}}}{escaped}" if blur else escaped
+    # The UI stores a 0-100 softness value, while libass takes a pixel radius.
+    # Passing the UI value through made the requested default 10 become a huge
+    # 10px blur. Scale it so 10 means the intended subtle 1px softening.
+    blur = max(0.0, min(10.0, float(style.get("blur", 0) or 0) / 10.0))
+    return f"{{\\blur{blur:g}}}{escaped}" if blur else escaped
 
 
 def _subtitle_drawtext_style(style):
@@ -4678,7 +4748,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
             pass
         if w and w > 0:
             font_size = max(28, int(font_size * w / 1080))
-        margin_v = sc.get("margin_v", 270) + 100
+        margin_v = _subtitle_margin_v(style, h)
         norm_output = str(output_path).replace("/", os.sep)
         has_pip = pip_path is not None
         pos_map = {"左上": "10:10", "右上": "W-w-10:10", "左下": "10:H-h-10", "右下": "W-w-10:H-h-10"}
@@ -5220,6 +5290,11 @@ def _add_subtitles_final(
                 )
                 with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
                     resp_data = _json.loads(resp.read().decode("utf-8"))
+                record_ai_call(
+                    module="cutter_logic", stage="subtitle_processing", model=model,
+                    request_payload=_json.loads(req_body.decode("utf-8")),
+                    response_payload=resp_data, success=True,
+                )
 
                 fixed_text = resp_data["choices"][0]["message"]["content"].strip()
                 # V4 Flash sometimes wraps in markdown code blocks
@@ -5234,6 +5309,11 @@ def _add_subtitles_final(
                 else:
                     _log(f"DeepSeek修复: {len(fixed_segments)} 条字幕（保留最终ASR时间轴）")
             except Exception as e:
+                record_ai_call(
+                    module="cutter_logic", stage="subtitle_processing", model=model,
+                    request_payload=_json.loads(req_body.decode("utf-8")) if "req_body" in locals() else None,
+                    success=False, error_type=type(e).__name__,
+                )
                 _log(f"DeepSeek修复失败: {e}，回退到 ASR 原始文本")
                 fixed_segments = raw_segments
 
@@ -5423,12 +5503,13 @@ def _add_subtitles_final(
     if w and w > 0:
         font_size = max(28, int(font_size * w / 1080))
     _log(f"字幕字号: {_base_font_size}（输出适配后 {font_size}）")
-    margin_v = sc.get("margin_v", 270) + 100  # 上移100
+    margin_v = _subtitle_margin_v(style, h)
     fallback_note = "（未安装，已回退系统默认粗体）" if style["font_fallback"] else ""
     _log(
         f"字幕样式: {style['requested_font']}{fallback_note} | "
         f"{style['color_key']} | {'描边' if style['effect'] == 'outline' else '阴影'} | "
-        f"不透明度 {style['opacity']}% | 模糊度 {style['blur']}"
+        f"不透明度 {style['opacity']}% | 模糊度 {style['blur']} | "
+        f"距底部 {style['position_percent']}%"
     )
 
     # The normal no-PIP export path gets a single ASS track. It preserves all
@@ -6316,6 +6397,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         raise RuntimeError(failure_message)
 
     _duration_shortage_grace = _selection_shortage_grace_seconds(analysis_metadata)
+    _ai_selection_range_lock = bool(
+        isinstance(analysis_metadata, dict)
+        and analysis_metadata.get("selection_manifest")
+    )
+    if _ai_selection_range_lock and not _clips_only:
+        _log(
+            "AI切割边界锁定: 片单已在冻结候选边界完成语义选片，"
+            "跳过旧SRT补齐、结尾续句和尾音扩展，保持时长合同"
+        )
     _log(f"AI 选到 {len(ordered_clips)} 个片段")
 
     # Map clips back to source videos
@@ -6716,14 +6806,20 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         start = float(clip["start"])
         _next_same_source_start = _next_selected_start_same_source(ci, vp, start)
         preview_exact = bool(clip.get("preview_exact"))
+        range_locked = _clip_range_locked(
+            clip,
+            ai_selected=_ai_selection_range_lock,
+        )
         if preview_exact:
             clip = dict(clip)
             clip["end"] = clip["end"]
-        end = float(clip["end"]) + 0.1  # 缓冲避免尾部被切 + 0.1  # +0.1s缓冲避免语音尾部被切
+        end = float(clip["end"])
+        if not range_locked:
+            end += 0.1  # 非AI精确片段保留最小尾部缓冲
 
         # 混剪每个源视频都有自己的0秒时间轴，按当前source的SRT边界补齐完整句。
         try:
-            if preview_exact:
+            if range_locked:
                 raise RuntimeError("preview exact range")
             _src_entries = [e for e in _mix_srt_entries if e.get("source") == vp]
             _start_srt, _end_srt = None, None
@@ -6758,7 +6854,9 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             end = max(start + 0.1, _next_same_source_start - 0.02)
             _log(f"相邻片段保护: clip {ci+1} end {old_end:.2f}s→{end:.2f}s，避免与下一段重复")
 
-        _tail_guard = LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS if ci == len(sorted_clips) - 1 else CLIP_AUDIO_TAIL_GUARD_SECONDS
+        _tail_guard = 0.0 if range_locked else (
+            LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS if ci == len(sorted_clips) - 1 else CLIP_AUDIO_TAIL_GUARD_SECONDS
+        )
         _extra_tail_guard = max(0.0, _tail_guard - 0.1)
         if _extra_tail_guard > 0:
             old_end = end
@@ -6822,7 +6920,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _mix_fade_out_start = max(0.0, duration - _mix_audio_fade)
         _mix_audio_filter = (
             _stable_audio_tail_filter()
-            if preview_exact
+            if range_locked
             else (
                 f"atrim=0:{duration:.3f},{_stable_audio_tail_filter()},"
                 f"afade=t=in:st=0:d={_mix_audio_fade:.3f},"
@@ -6830,14 +6928,14 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             )
         )
 
-        if preview_exact:
+        if range_locked:
             cmd = _preview_exact_cut_cmd(
                 ffmpeg, vp, start, duration, combined_vf,
                 _mix_audio_filter, out_clip, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
             )
         else:
             cmd = [ffmpeg, "-y"]
-            _append_seek_input_args(cmd, vp, start, accurate=False)
+            _append_seek_input_args(cmd, vp, start, accurate=range_locked)
             cmd += ["-t", f"{duration:.3f}"]
             cmd += ["-fflags", "+genpts"]
             cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
@@ -6868,7 +6966,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         if rc == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
             temp_files.append(out_clip)
             _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
-            _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
+            _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": range_locked})
         else:
             _log(f"  Cut failed (rc={rc})")
             if not _hw_fallback and _get_video_encoder():
@@ -6877,7 +6975,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 _log(f"  硬件编码切割失败，切换到 {_sw_name} 软件编码重试，后续片段不再尝试硬件编码。")
                 _hw_fallback = True
                 cmd = [ffmpeg, "-y"]
-                _append_seek_input_args(cmd, vp, start, accurate=preview_exact)
+                _append_seek_input_args(cmd, vp, start, accurate=range_locked)
                 cmd += ["-t", f"{duration:.3f}"]
                 cmd += ["-fflags", "+genpts"]
                 cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
@@ -6895,7 +6993,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                     if rc2 == 0 and os.path.exists(out_clip) and os.path.getsize(out_clip) > 1000:
                         temp_files.append(out_clip)
                         _clip_kb_caps.append(_kb_quality_cap_for_zoom(_sc_zoom, _sc_crop))
-                        _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": preview_exact})
+                        _mix_cut_maps.append({"start": start, "end": end, "source": vp, "type": c_type, "preview_exact": range_locked})
                         _log(f"  Cut retry OK ({_sw_name})")
                     else:
                         _log(f"  Cut retry failed ({_sw_name}, rc={rc2})")

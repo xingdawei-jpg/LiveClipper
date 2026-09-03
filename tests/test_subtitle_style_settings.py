@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ class SubtitleStyleSettingsTests(unittest.TestCase):
         self.assertEqual(payload.subtitle_text_effect, "shadow")
         self.assertEqual(payload.subtitle_opacity, 70)
         self.assertEqual(payload.subtitle_blur, 10)
+        self.assertEqual(payload.subtitle_position_percent, 24)
 
     def test_style_normalization_rejects_unknown_values(self) -> None:
         values = {
@@ -31,14 +33,26 @@ class SubtitleStyleSettingsTests(unittest.TestCase):
             "subtitle_font_color": "teal",
             "subtitle_text_effect": "glow",
             "subtitle_opacity": 200,
-            "subtitle_blur": -5,
+            "subtitle_blur": 200,
+            "subtitle_position_percent": 90,
         }
         server._normalize_subtitle_style_settings(values)
         self.assertEqual(values["subtitle_font_family"], "思源粗宋")
         self.assertEqual(values["subtitle_font_color"], "white")
         self.assertEqual(values["subtitle_text_effect"], "shadow")
         self.assertEqual(values["subtitle_opacity"], 100)
-        self.assertEqual(values["subtitle_blur"], 0)
+        self.assertEqual(values["subtitle_blur"], 100)
+        self.assertEqual(values["subtitle_position_percent"], 70)
+
+    def test_installed_system_font_is_accepted(self) -> None:
+        values = {"subtitle_font_family": "Noto Sans SC"}
+        with mock.patch("platform_config.list_installed_subtitle_fonts", return_value=("Noto Sans SC",)):
+            server._normalize_subtitle_style_settings(values)
+        self.assertEqual(values["subtitle_font_family"], "Noto Sans SC")
+
+    def test_subtitle_height_scales_with_video_height(self) -> None:
+        self.assertEqual(cutter_logic._subtitle_margin_v({"position_percent": 24}, 1920), 461)
+        self.assertEqual(cutter_logic._subtitle_margin_v({"position_percent": 24}, 1280), 307)
 
     def test_ass_style_applies_color_opacity_shadow_and_blur(self) -> None:
         style = {
@@ -58,7 +72,7 @@ class SubtitleStyleSettingsTests(unittest.TestCase):
 
         self.assertIn("Style: Default,Test Font,52,&H4DFFFFFF", rendered)
         self.assertIn(",0,2,2,20,20,300,1", rendered)
-        self.assertIn(r"{\blur10}字幕", rendered)
+        self.assertIn(r"{\blur1}字幕", rendered)
 
     def test_ass_outline_replaces_shadow_and_drawtext_fallback_keeps_appearance(self) -> None:
         style = {
@@ -81,6 +95,21 @@ class SubtitleStyleSettingsTests(unittest.TestCase):
         fallback = cutter_logic._subtitle_drawtext_style(style)
         self.assertIn(":fontcolor=0xFF3B30:alpha=0.70", fallback)
         self.assertIn(":borderw=3:bordercolor=black@0.70", fallback)
+
+    def test_ass_blur_scale_keeps_default_readable(self) -> None:
+        self.assertEqual(cutter_logic._subtitle_ass_text("字幕", {"blur": 10}), r"{\blur1}字幕")
+        self.assertEqual(cutter_logic._subtitle_ass_text("字幕", {"blur": 100}), r"{\blur10}字幕")
+
+    def test_settings_ui_uses_system_fonts_portrait_preview_and_live_height(self) -> None:
+        html = (ROOT / "web_client" / "frontend" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="s-subtitle-position-percent"', html)
+        self.assertIn('id="subtitle-preview-state"', html)
+        self.assertIn("populateSubtitleFontOptions", script)
+        self.assertIn("preview.style.bottom", script)
+        self.assertIn("aspect-ratio: 9 / 16", styles)
 
 
 if __name__ == "__main__":

@@ -95,5 +95,88 @@ class ManualPreferenceDirectionTests(unittest.TestCase):
         self.assertEqual(contract["reason"], "no_safe_focus_evidence")
 
 
+class ReviewedNarrativeOpportunityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.entries = [
+            (0.0, 3.0, "哇，这件西装真的好帅，像明星机场穿搭。"),
+            (3.0, 6.0, "你看这个肩往外走，下面又是松的，整个型特别利落。"),
+            (6.0, 9.0, "通勤搭西裤，周末搭牛仔裤都能穿。"),
+        ]
+        self.thread = {
+            1: {
+                "topic": "风格定位",
+                "allowed_followup_ids": {2},
+                "seed_followup_ids": {2},
+            }
+        }
+        self.opportunity = {
+            "narrative_id": "ARC-01",
+            "hook_id": 1,
+            "followup_id": 2,
+            "topic": "风格定位",
+            "hook_promise": "真的好帅，像明星机场穿搭",
+            "proof_relation": "identity_projection",
+            "opening_support_ids": [3],
+            "next_topics": ["场景搭配"],
+        }
+
+    def test_contract_keeps_only_real_hook_proof_and_support_ids(self) -> None:
+        contract = ai_clipper._normalize_review_narrative_opportunities(
+            [self.opportunity],
+            srt_entry_map={index: entry for index, entry in enumerate(self.entries, 1)},
+            hook_threads=self.thread,
+            allowed_candidate_ids={1, 2, 3},
+        )
+
+        self.assertEqual(len(contract), 1)
+        self.assertEqual(contract[0]["opening_support_ids"], [3])
+        self.assertIn("ARC-01", ai_clipper._review_narrative_prompt(contract))
+        self.assertIn("不必把整条视频锁死", ai_clipper._review_narrative_prompt(contract))
+
+    def test_invalid_or_out_of_thread_proof_never_enters_contract(self) -> None:
+        invalid = {**self.opportunity, "followup_id": 3}
+        contract = ai_clipper._normalize_review_narrative_opportunities(
+            [invalid],
+            srt_entry_map={index: entry for index, entry in enumerate(self.entries, 1)},
+            hook_threads=self.thread,
+            allowed_candidate_ids={1, 2, 3},
+        )
+
+        self.assertEqual(contract, [])
+
+    def test_final_status_accepts_only_the_matching_opening_pair(self) -> None:
+        selected = [
+            ("hook", self.entries[0][2], 0.0, 3.0, 50, 3.0, "风格定位"),
+            ("product", self.entries[1][2], 3.0, 6.0, 50, 3.0, "风格定位"),
+            ("product", self.entries[2][2], 6.0, 9.0, 50, 3.0, "场景搭配"),
+        ]
+        status = ai_clipper._review_narrative_status(
+            selected,
+            [self.opportunity],
+            self.entries,
+            {"selected_narrative_id": "ARC-01"},
+        )
+
+        self.assertTrue(status["checked"])
+        self.assertTrue(status["opening_matches"])
+        self.assertEqual(status["selected_id"], "ARC-01")
+
+    def test_wrong_declared_arc_is_observed_not_locally_rearranged(self) -> None:
+        selected = [
+            ("product", self.entries[2][2], 6.0, 9.0, 50, 3.0, "场景搭配"),
+            ("product", self.entries[1][2], 3.0, 6.0, 50, 3.0, "风格定位"),
+        ]
+        status = ai_clipper._review_narrative_status(
+            selected,
+            [self.opportunity],
+            self.entries,
+            {"selected_narrative_id": "ARC-01"},
+        )
+
+        self.assertTrue(status["checked"])
+        self.assertFalse(status["opening_matches"])
+        self.assertEqual(status["reason"], "declared_arc_does_not_match_opening")
+
+
 if __name__ == "__main__":
     unittest.main()

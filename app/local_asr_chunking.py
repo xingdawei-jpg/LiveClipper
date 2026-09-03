@@ -21,8 +21,14 @@ import wave
 _FRAME_SECONDS = 0.03
 _MIN_SILENCE_SECONDS = 0.42
 _MIN_CHUNK_SECONDS = 3.0
-_TARGET_CHUNK_SECONDS = 9.0
-_MAX_CHUNK_SECONDS = 12.0
+# The former 9-12s window was good for transcription throughput, but gave
+# punctuation recovery too much mixed live-stream speech.  A 7-10s input
+# window still preserves local context while producing cleaner semantic units
+# for later short-form candidate refinement.
+SHORT_FORM_TARGET_CHUNK_SECONDS = 7.0
+SHORT_FORM_MAX_CHUNK_SECONDS = 10.0
+STANDARD_TARGET_CHUNK_SECONDS = 9.0
+STANDARD_MAX_CHUNK_SECONDS = 12.0
 _MIN_TAIL_SECONDS = 2.0
 _MIN_RMS = 80.0
 
@@ -123,8 +129,13 @@ def _pause_boundaries(levels: list[tuple[float, float, float]]) -> list[float]:
     return boundaries
 
 
-def build_pause_aware_audio_chunks(audio_path: str | Path) -> list[AudioChunk]:
-    """Split a supported WAV at pauses, with a strict 12-second hard limit.
+def build_pause_aware_audio_chunks(
+    audio_path: str | Path,
+    *,
+    target_seconds: float | None = None,
+    max_seconds: float | None = None,
+) -> list[AudioChunk]:
+    """Split a supported WAV at pauses, with a bounded short-form window.
 
     Returned intervals always cover the source continuously.  A hard time
     boundary is used only when the audio has no usable pause near the target;
@@ -134,8 +145,16 @@ def build_pause_aware_audio_chunks(audio_path: str | Path) -> list[AudioChunk]:
     analysis = _pcm_frame_levels(audio_path)
     if analysis is None:
         return []
+    try:
+        target = float(target_seconds or SHORT_FORM_TARGET_CHUNK_SECONDS)
+        maximum = float(max_seconds or SHORT_FORM_MAX_CHUNK_SECONDS)
+    except (TypeError, ValueError):
+        target = SHORT_FORM_TARGET_CHUNK_SECONDS
+        maximum = SHORT_FORM_MAX_CHUNK_SECONDS
+    maximum = max(_MIN_CHUNK_SECONDS, maximum)
+    target = min(max(_MIN_CHUNK_SECONDS, target), maximum)
     duration, levels = analysis
-    if duration <= _MAX_CHUNK_SECONDS + 0.001:
+    if duration <= maximum + 0.001:
         return [AudioChunk(0.0, round(duration, 3), "source_end")]
 
     pause_boundaries = _pause_boundaries(levels)
@@ -143,22 +162,22 @@ def build_pause_aware_audio_chunks(audio_path: str | Path) -> list[AudioChunk]:
     start = 0.0
     while duration - start > 0.001:
         remaining = duration - start
-        if remaining <= _MAX_CHUNK_SECONDS + 0.001:
+        if remaining <= maximum + 0.001:
             chunks.append(AudioChunk(round(start, 3), round(duration, 3), "source_end"))
             break
 
         minimum = start + _MIN_CHUNK_SECONDS
-        target = start + _TARGET_CHUNK_SECONDS
-        maximum = min(duration, start + _MAX_CHUNK_SECONDS)
+        target_end = start + target
+        maximum_end = min(duration, start + maximum)
         nearby_pauses = [
             boundary for boundary in pause_boundaries
-            if minimum <= boundary <= maximum
+            if minimum <= boundary <= maximum_end
         ]
         if nearby_pauses:
-            end = min(nearby_pauses, key=lambda boundary: abs(boundary - target))
+            end = min(nearby_pauses, key=lambda boundary: abs(boundary - target_end))
             reason = "pause"
         else:
-            end = target
+            end = target_end
             reason = "hard_limit"
         end = min(duration, max(start + _MIN_CHUNK_SECONDS, end))
         chunks.append(AudioChunk(round(start, 3), round(end, 3), reason))
@@ -167,7 +186,7 @@ def build_pause_aware_audio_chunks(audio_path: str | Path) -> list[AudioChunk]:
     if len(chunks) >= 2 and chunks[-1].duration < _MIN_TAIL_SECONDS:
         previous = chunks[-2]
         tail = chunks[-1]
-        if previous.duration + tail.duration <= _MAX_CHUNK_SECONDS + 0.001:
+        if previous.duration + tail.duration <= maximum + 0.001:
             chunks[-2] = AudioChunk(previous.start, tail.end, "tail_merge")
             chunks.pop()
     return chunks

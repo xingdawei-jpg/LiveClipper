@@ -54,6 +54,57 @@ class LocalAsrQualityTests(unittest.TestCase):
         for before, after in zip(segment["words"], corrected[0]["words"]):
             self.assertEqual((after["start"], after["end"]), (before["start"], before["end"]))
 
+    def test_local_asr_output_refines_long_clause_only_on_spoken_boundaries(self) -> None:
+        text = "这根花边把肩往里收，视觉会更窄，宽肩穿上也很直。"
+        spoken = "".join(char for char in text if char not in "，。！？!?；;：:、 ")
+        segment = {
+            "text": text,
+            "start": 0.0,
+            "end": len(spoken) * 0.2,
+            "words": _timed_characters(spoken, step=0.2),
+        }
+
+        _corrected, semantic = local_asr_quality.improve_sensevoice_segments([segment])
+
+        self.assertGreaterEqual(len(semantic), 2)
+        self.assertEqual(
+            "".join(word["text"] for item in semantic for word in item["words"]),
+            spoken,
+        )
+        self.assertTrue(all(item.get("short_form_refined") for item in semantic))
+        self.assertEqual(semantic[0]["start"], 0.0)
+        self.assertEqual(semantic[-1]["end"], len(spoken) * 0.2)
+
+    def test_managed_sensevoice_cache_refresh_reuses_word_timings_without_audio(self) -> None:
+        text = "这就是一个很透薄，三伏天随便穿的料子。"
+        spoken = "".join(char for char in text if char not in "，。！？!?；;：:、 ")
+        segment = {
+            "text": text,
+            "start": 0.0,
+            "end": len(spoken) * 0.25,
+            "words": _timed_characters(spoken, step=0.25),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            srt_path = Path(temp_dir) / "cached.srt"
+            srt_path.write_text("1\n00:00:00,000 --> 00:00:05,000\n旧字幕\n", encoding="utf-8")
+            volcengine_asr.write_word_timing_sidecar(srt_path, [segment], provider="sensevoice")
+
+            refreshed = local_asr_quality.refresh_managed_sensevoice_transcript(srt_path)
+
+            srt = srt_path.read_text(encoding="utf-8")
+            sidecar = volcengine_asr.load_word_timing_sidecar(srt_path, semantic=False)
+            report_exists = srt_path.with_suffix(".asr_quality.json").is_file()
+
+        self.assertTrue(refreshed["refreshed"])
+        self.assertGreaterEqual(refreshed["visible_segments"], 2)
+        self.assertIn("很透薄", srt)
+        self.assertIn("三伏天随便穿", srt)
+        self.assertEqual(
+            "".join(word["text"] for item in sidecar for word in item["words"]),
+            spoken,
+        )
+        self.assertTrue(report_exists)
+
     def test_user_exact_correction_can_merge_tokens_without_inventing_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             corrections = Path(temp_dir) / "corrections.json"

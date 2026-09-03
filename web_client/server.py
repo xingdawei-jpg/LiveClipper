@@ -24,7 +24,7 @@ import webbrowser
 from collections import deque
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -85,6 +85,12 @@ for required_path in required_runtime_paths:
 
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+# Source-only experiment runners live at the repository root.  Launching this
+# module as ``python web_client/server.py`` otherwise puts only ``web_client``
+# on sys.path, which makes the experimental UI fail after it has already
+# accepted a job.  Bundled runtimes intentionally do not receive this path.
+if CODE_SOURCE == "source" and str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from category_profiles import resolve_vertical_profile
 from selection_continuity import annotate_continuity_groups
@@ -100,6 +106,7 @@ from config import (
     SUBTITLE_FONT_OPTIONS,
     SUBTITLE_STYLE_DEFAULTS,
 )
+from selection_contracts import DurationContract, SelectionManifest
 
 import logging
 _LOG = logging.getLogger("liveclipper.server")
@@ -146,7 +153,7 @@ _CLIP_PREVIEW_LOCK = threading.Lock()
 _PREVIEW_SOURCE_ID_CACHE: dict[str, str] = {}
 _MEDIA_PIPELINE_SCOPES = frozenset({"smart-cut", "mix", "mix-batch"})
 _AI_PREVIEW_CACHE_SCHEMA = "layered_selection_v2"
-_PREVIEW_CANDIDATE_POOL_LIMIT = 120
+_PREVIEW_CANDIDATE_POOL_LIMIT = 240
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -762,6 +769,7 @@ DEFAULT_AI_RULES = {
     "content_policy": {
         "price": "block",
         "cta": "block",
+        "inventory_pressure": "block",
         "source_claim": "block",
         "social_proof": "block",
         "after_sale": "block",
@@ -974,6 +982,8 @@ def _load_settings() -> dict[str, Any]:
         "style_profile_enabled": True,
         "style_profile_strength": "auto",
         "content_review_mode": "off",
+        "ai_director_mode": "legacy",
+        "m2_planner_mode": "legacy",
         "ai_rules": dict(DEFAULT_AI_RULES),
         "ui_theme": "system",
         "hardware_encoder_enabled": False,
@@ -1008,6 +1018,12 @@ def _load_settings() -> dict[str, Any]:
 
 def _save_settings(settings: dict[str, Any]) -> bool:
     from ai_clipper import save_settings
+    from ai_director_experiment import (
+        AI_DIRECTOR_MODE_EXPERIMENTAL,
+        AI_DIRECTOR_MODE_LEGACY,
+        M2_PLANNER_MODE_LEGACY,
+        resolve_m2_planner_mode,
+    )
 
     data = _normalize_ai_model_defaults(settings)
     review_mode = str(data.get("content_review_mode") or "off").strip().lower()
@@ -1016,6 +1032,15 @@ def _save_settings(settings: dict[str, Any]) -> bool:
     elif review_mode in {"true", "1", "enabled"}:
         review_mode = "on"
     data["content_review_mode"] = review_mode if review_mode in {"off", "shadow", "on"} else "off"
+    # This setting is intentionally only consumed by the controlled source
+    # runner.  Saving Heavy/Lite opts into that runner; every existing preview,
+    # export and publication route continues to ignore it.
+    planner_mode = resolve_m2_planner_mode(data)
+    data["m2_planner_mode"] = planner_mode
+    data["ai_director_mode"] = (
+        AI_DIRECTOR_MODE_EXPERIMENTAL
+        if planner_mode != M2_PLANNER_MODE_LEGACY else AI_DIRECTOR_MODE_LEGACY
+    )
     data["volc_region"] = _normalize_volc_region(data.get("volc_region"))
     try:
         data["subtitle_font_size"] = max(32, min(96, int(float(data.get("subtitle_font_size", 52)))))
@@ -1032,8 +1057,18 @@ def _save_settings(settings: dict[str, Any]) -> bool:
 def _normalize_subtitle_style_settings(settings: dict[str, Any]) -> None:
     """Keep persisted subtitle style values safe for the renderer and older settings files."""
     font_family = str(settings.get("subtitle_font_family") or "").strip()
+    try:
+        from platform_config import list_installed_subtitle_fonts
+
+        installed_fonts = {
+            name.casefold(): name for name in list_installed_subtitle_fonts()
+        }
+    except Exception:
+        installed_fonts = {}
     settings["subtitle_font_family"] = (
-        font_family if font_family in SUBTITLE_FONT_OPTIONS else SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
+        installed_fonts.get(font_family.casefold(), font_family)
+        if font_family in SUBTITLE_FONT_OPTIONS or font_family.casefold() in installed_fonts
+        else SUBTITLE_STYLE_DEFAULTS["subtitle_font_family"]
     )
 
     color = str(settings.get("subtitle_font_color") or "").strip().lower()
@@ -1044,12 +1079,21 @@ def _normalize_subtitle_style_settings(settings: dict[str, Any]) -> None:
     effect = str(settings.get("subtitle_text_effect") or "").strip().lower()
     settings["subtitle_text_effect"] = effect if effect in {"shadow", "outline"} else "shadow"
 
-    for key, minimum, maximum in (("subtitle_opacity", 20, 100), ("subtitle_blur", 0, 20)):
+    for key, minimum, maximum in (("subtitle_opacity", 20, 100), ("subtitle_blur", 0, 100)):
         try:
             value = int(float(settings.get(key, SUBTITLE_STYLE_DEFAULTS[key])))
         except Exception:
             value = int(SUBTITLE_STYLE_DEFAULTS[key])
         settings[key] = max(minimum, min(maximum, value))
+
+    try:
+        position = int(float(settings.get(
+            "subtitle_position_percent",
+            SUBTITLE_STYLE_DEFAULTS["subtitle_position_percent"],
+        )))
+    except Exception:
+        position = int(SUBTITLE_STYLE_DEFAULTS["subtitle_position_percent"])
+    settings["subtitle_position_percent"] = max(8, min(70, position))
 
 
 def _normalize_ai_model_defaults(settings: dict[str, Any]) -> dict[str, Any]:
@@ -1656,6 +1700,7 @@ def _preview_selection_config_signature() -> dict[str, Any]:
         _LOG.warning("failed to include AI settings in preview cache identity", exc_info=True)
     return {
         "pipeline": _AI_PREVIEW_CACHE_SCHEMA,
+        "director_contract": "opening-fidelity-v1",
         "settings": settings_summary,
         "keywords": _file_signature(_safe_user_child("keywords.json")),
         "style_profile": _file_signature(
@@ -1978,6 +2023,7 @@ class SettingsPayload(BaseModel):
     style_profile_enabled: bool = True
     style_profile_strength: str = "auto"
     content_review_mode: str = "off"
+    m2_planner_mode: str = "legacy"
     ai_rules: dict[str, Any] = Field(default_factory=dict)
     ui_theme: str = "system"
     hardware_encoder_enabled: bool = False
@@ -1986,7 +2032,10 @@ class SettingsPayload(BaseModel):
     subtitle_font_color: str = SUBTITLE_STYLE_DEFAULTS["subtitle_font_color"]
     subtitle_text_effect: str = SUBTITLE_STYLE_DEFAULTS["subtitle_text_effect"]
     subtitle_opacity: int = Field(default=SUBTITLE_STYLE_DEFAULTS["subtitle_opacity"], ge=20, le=100)
-    subtitle_blur: int = Field(default=SUBTITLE_STYLE_DEFAULTS["subtitle_blur"], ge=0, le=20)
+    subtitle_blur: int = Field(default=SUBTITLE_STYLE_DEFAULTS["subtitle_blur"], ge=0, le=100)
+    subtitle_position_percent: int = Field(
+        default=SUBTITLE_STYLE_DEFAULTS["subtitle_position_percent"], ge=8, le=70,
+    )
     ui_font_size: int = Field(default=14, ge=12, le=18)
 
 
@@ -1996,6 +2045,7 @@ class AiSelectionSettingsPayload(BaseModel):
     preference_weights: dict[str, float] | None = None
     style_profile_strength: str | None = None
     content_review_mode: str | None = None
+    m2_planner_mode: str | None = None
     ai_rules: dict[str, Any] | None = None
 
 
@@ -2167,6 +2217,32 @@ class SmartPreviewClipPayload(BaseModel):
     selected_words_by_key: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
     updated_at: float = 0
     inspect_only: bool = False
+
+
+class CommerceDirectorReviewPayload(BaseModel):
+    preview_id: str = ""
+
+
+class CommerceDirectorStorySelectionPayload(BaseModel):
+    preview_id: str = ""
+    story_id: str = ""
+
+
+class CommerceDirectorStrategySelectionPayload(BaseModel):
+    preview_id: str = ""
+    director_strategy_id: str = ""
+    confirm_additional_ai_call: bool = False
+
+
+class CommerceDirectorStrategyBatchPayload(BaseModel):
+    """Optional subset for a review-only multi-strategy run.
+
+    An empty list means every available Director Strategy from this exact M1
+    Story Map.  It is deliberately separate from normal preview/export input.
+    """
+
+    preview_id: str = ""
+    director_strategy_ids: list[str] = Field(default_factory=list)
 
 
 class AiFeedbackImportPayload(BaseModel):
@@ -4989,7 +5065,7 @@ def _preview_word_timings_with_recovery(
     return recovered, summary
 
 
-def _preview_segment_block_reason(text: Any) -> str:
+def _preview_segment_block_reason(text: Any, content_policy: Mapping[str, Any] | None = None) -> str:
     clean = _strip_preview_source_marker(text)
     compact = _preview_compact_text(clean)
     if not compact:
@@ -5002,6 +5078,16 @@ def _preview_segment_block_reason(text: Any) -> str:
     except Exception:
         _LOG.warning("unexpected error", exc_info=True)
         pass
+    if isinstance(content_policy, Mapping):
+        import ai_clipper as ai_mod
+
+        reasons = ai_mod._policy_block_reasons(clean, content_policy)
+        risks = ai_mod._content_safety_pattern_matches(clean, content_policy)
+        if reasons or risks:
+            return "内容边界：" + "、".join([*reasons, *risks][:3])
+        if ai_mod._is_backstage_instruction(clean):
+            return "直播现场调度"
+        return ""
     price_patterns = [
         r"\d{2,4}\s*[元块]",
         r"[到拿]手价?\s*\d",
@@ -5024,25 +5110,26 @@ def _preview_segment_block_reason(text: Any) -> str:
     return ""
 
 
-def _preview_has_forbidden_or_price(text: Any) -> bool:
-    return bool(_preview_segment_block_reason(text))
+def _preview_has_forbidden_or_price(text: Any, content_policy: Mapping[str, Any] | None = None) -> bool:
+    return bool(_preview_segment_block_reason(text, content_policy))
 
 
 def _preview_lock_unsafe_segments(public_clips: list[dict[str, Any]]) -> int:
     """Keep unsafe subtitle units out while allowing a precisely removed forbidden token."""
     locked = 0
     for clip in public_clips or []:
+        content_policy = clip.get("task_content_policy")
         for segment in list(clip.get("segments") or []):
             if not isinstance(segment, dict):
                 continue
             words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
             safe_words = [word for word in words if not word.get("selection_locked")]
-            reason = _preview_segment_block_reason(segment.get("text") or "")
+            reason = _preview_segment_block_reason(segment.get("text") or "", content_policy)
             # Only a configured forbidden phrase can be excised word-by-word.
             # Price, CTA, content-risk and backstage language remain whole-sentence locks.
             if reason.startswith("\u8fdd\u7981\u8bcd\uff1a") and words and safe_words:
                 remaining_text = "".join(str(word.get("text") or "") for word in safe_words)
-                remaining_reason = _preview_segment_block_reason(remaining_text)
+                remaining_reason = _preview_segment_block_reason(remaining_text, content_policy)
                 if not remaining_reason:
                     segment["selected"] = True
                     segment.pop("selection_locked", None)
@@ -5275,6 +5362,160 @@ def _preview_effective_clip_tuples(raw_clips: list[Any], public_clips: list[dict
             values[7] = str(public_clip.get("source") or "")
         effective.append(tuple(values))
     return effective
+
+
+def _preview_renderable_selection_tuples(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+) -> list[tuple[Any, ...]]:
+    """Return the exact auto-selected subtitle groups that preview rendering uses."""
+
+    result: list[tuple[Any, ...]] = []
+    for raw_clip, public_clip in zip(raw_clips or [], public_clips or []):
+        if not isinstance(public_clip, dict) or public_clip.get("selected") is False:
+            continue
+        result.extend(_merge_selected_segments(public_clip, raw_clip, None, None))
+    return result
+
+
+def _sync_preview_final_selection_metadata(
+    raw_clips: list[Any],
+    public_clips: list[dict[str, Any]],
+    dedup_summary: dict[str, Any],
+) -> None:
+    """Make preview metadata describe the same clauses the user can render.
+
+    Preview safety and word-boundary cleanup can remove a whole row or a
+    subtitle unit after the director created its manifest. The retained public
+    segments are the source of truth here; this only records that result and
+    never selects, reorders, or rewrites any content.
+    """
+
+    manifest_before = dict(dedup_summary.get("selection_manifest") or {})
+    if not manifest_before:
+        return
+
+    duration_contract = dict(manifest_before.get("duration_contract") or {})
+    if not duration_contract:
+        return
+
+    renderable = _preview_renderable_selection_tuples(raw_clips, public_clips)
+    source_total = sum(
+        max(0.0, float(clip[5] if len(clip) > 5 else 0.0))
+        for clip in renderable
+    )
+    duration = DurationContract.coerce(duration_contract)
+    relaxation = dict(dedup_summary.get("duration_relaxation") or {})
+    duration_status = duration.status(
+        source_total,
+        shortage_grace_seconds=(
+            relaxation.get("grace_seconds", 0.0)
+            if relaxation.get("applied") else 0.0
+        ),
+    )
+    final_manifest = SelectionManifest.from_clips(
+        renderable,
+        candidate_digest=str(manifest_before.get("candidate_digest") or ""),
+        duration_contract=duration_contract,
+    ).to_dict()
+    final_manifest.update({
+        "selected_row_count": sum(
+            1 for clip in public_clips or []
+            if isinstance(clip, dict)
+            and clip.get("selected") is not False
+            and _preview_selected_text(clip)
+        ),
+        "render_part_count": len(renderable),
+        "director_initial_selected_count": int(manifest_before.get("selected_count") or 0),
+        "sync_basis": "preview_final_selected_segments",
+    })
+    dedup_summary["selection_manifest"] = final_manifest
+
+    selection_result = dict(dedup_summary.get("selection_result") or {})
+    if selection_result:
+        selection_result["manifest"] = dict(final_manifest)
+        selection_details = dict(selection_result.get("details") or {})
+        selection_details.update({
+            "source_duration": round(source_total, 3),
+            "projected_final_duration": round(duration_status["projected_final"], 3),
+            "preview_final_selected_rows": final_manifest["selected_row_count"],
+            "sync_basis": "preview_final_selected_segments",
+        })
+        selection_result["details"] = selection_details
+        if (
+            selection_result.get("status") == "success"
+            and not duration_status["accepted"]
+        ):
+            selection_result.update({
+                "status": "partial_insufficient",
+                "ok": False,
+                "failure_code": "insufficient_content",
+                "message": (
+                    "预览清理后可用安全内容为"
+                    f"{duration_status['projected_final']:.1f}秒，低于本次时长范围；"
+                    "请人工确认保留内容后再成片。"
+                ),
+            })
+        dedup_summary["selection_result"] = selection_result
+
+    source_contract = dict(dedup_summary.get("source_contract") or {})
+    if source_contract:
+        try:
+            import ai_clipper as ai_mod
+
+            required_counts = dict(source_contract.get("required_counts") or {})
+            contract_renderable: list[tuple[Any, ...]] = []
+            for clip in renderable:
+                values = list(clip)
+                while len(values) < 8:
+                    values.append("")
+                marker = _preview_source_marker(values[1] if len(values) > 1 else "")
+                preview_meta = values[8] if len(values) > 8 and isinstance(values[8], dict) else {}
+                try:
+                    parent_index = int(preview_meta.get("preview_parent_index", -1))
+                except (TypeError, ValueError):
+                    parent_index = -1
+                if 0 <= parent_index < len(raw_clips or ()):
+                    marker = (
+                        _preview_expected_source_marker(public_clips[parent_index])
+                        or _preview_source_marker(raw_clips[parent_index][1])
+                        or marker
+                    )
+                if marker:
+                    # The render tuple carries a physical source path, while
+                    # the director contract deliberately uses [Vn] identities.
+                    values[7] = f"[{marker}]"
+                contract_renderable.append(tuple(values))
+            source_contract["selected_counts"] = dict(sorted(
+                ai_mod._director_source_counts(contract_renderable).items()
+            ))
+            source_contract["distribution"] = ai_mod._director_source_distribution_summary(
+                contract_renderable,
+                required_counts,
+            )
+            source_contract["balanced"] = bool(
+                source_contract["distribution"].get("balanced")
+            )
+            source_contract["sync_basis"] = "preview_final_selected_segments"
+            dedup_summary["source_contract"] = source_contract
+        except Exception:
+            _LOG.warning("preview source-contract sync skipped", exc_info=True)
+
+    plan_report = dict(dedup_summary.get("plan_quality_report") or {})
+    if plan_report:
+        plan_report["selected_clip_count"] = len(renderable)
+        plan_report["source_counts"] = dict(
+            (dedup_summary.get("source_contract") or {}).get("selected_counts") or {}
+        )
+        plan_report["duration"] = {
+            **dict(plan_report.get("duration") or {}),
+            "source_total": round(source_total, 3),
+            "projected_final": round(duration_status["projected_final"], 3),
+            "accepted": bool(duration_status["accepted"]),
+        }
+        plan_report["preview_final_selected_row_count"] = final_manifest["selected_row_count"]
+        plan_report["sync_basis"] = "preview_final_selected_segments"
+        dedup_summary["plan_quality_report"] = plan_report
 
 
 def _preview_effective_topic_coverage(
@@ -5707,6 +5948,8 @@ def _preview_segments_for_clip(
     expected_marker: str = "",
     word_timings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    preserve = bool(public_clip.get("director_preserve_selection"))
+    content_policy = public_clip.get("task_content_policy")
     try:
         start = float(public_clip.get("start") or 0)
         end = float(public_clip.get("end") or start)
@@ -5729,7 +5972,7 @@ def _preview_segments_for_clip(
             # Word timing is also the editing source of truth. Do not hide a
             # leading connector in text while leaving its audio selected.
             text = "".join(str(word.get("text") or "") for word in words).strip()
-            if not text or _preview_is_pure_filler(text):
+            if not text or (not preserve and _preview_is_pure_filler(text)):
                 continue
             piece_start = max(start, float(words[0]["start"]))
             piece_end = min(end, float(words[-1]["end"]))
@@ -5739,7 +5982,7 @@ def _preview_segments_for_clip(
                 "end": round(piece_end, 3),
                 "duration": round(max(0.0, piece_end - piece_start), 3),
                 "text": text,
-                "selected": not _preview_has_forbidden_or_price(text),
+                "selected": not _preview_has_forbidden_or_price(text, content_policy),
                 "word_timed": True,
                 "words": words,
             })
@@ -5775,10 +6018,13 @@ def _preview_segments_for_clip(
                     previous["semantic_piece_count"] = int(previous.get("semantic_piece_count") or 1) + 1
                     continue
                 if compact.startswith(continuation_prefixes):
-                    # A connective clause without its preceding sentence is
-                    # visible for review but cannot silently become a cut.
-                    piece["selected"] = False
-                    piece["auto_unselected_reason"] = "承接短语需保留前句"
+                    if preserve:
+                        # The preceding Beat may live in another source clip.
+                        # Only the Director/user owns this semantic decision.
+                        piece["continuity_warning"] = "承接句：请与前一片段连读确认"
+                    else:
+                        piece["selected"] = False
+                        piece["auto_unselected_reason"] = "承接短语需保留前句"
                 merged_pieces.append(piece)
             pieces = merged_pieces
             weak_tail_segments = {
@@ -5791,6 +6037,9 @@ def _preview_segments_for_clip(
                     continue
                 compact = _preview_compact_text(piece.get("text") or "")
                 if compact in weak_tail_segments:
+                    if preserve:
+                        piece["continuity_warning"] = "短句需与前后片段连读确认"
+                        continue
                     piece["selected"] = False
                     piece["weak_edge"] = True
                     continue
@@ -5818,9 +6067,10 @@ def _preview_segments_for_clip(
             text = _strip_preview_source_marker(seg_text)
             if not text:
                 continue
-            if _preview_is_pure_filler(text):
+            if not preserve and _preview_is_pure_filler(text):
                 continue
-            text = _clean_preview_filler_prefix(text)
+            if not preserve:
+                text = _clean_preview_filler_prefix(text)
             if not text:
                 continue
             pieces.append({
@@ -5829,7 +6079,7 @@ def _preview_segments_for_clip(
                 "end": round(seg_end, 3),
                 "duration": round(max(0.0, seg_end - seg_start), 3),
                 "text": text,
-                "selected": overlap >= 0.04 and not _preview_has_forbidden_or_price(text),
+                "selected": overlap >= 0.04 and not _preview_has_forbidden_or_price(text, content_policy),
                 "word_timed": False,
                 "words": _preview_fallback_word_payload(text, seg_start, seg_end),
             })
@@ -5838,14 +6088,15 @@ def _preview_segments_for_clip(
     text = _preview_text_for_marker(public_clip.get("text") or "", marker)
     if not text:
         text = str(public_clip.get("text") or "")
-    text = _clean_preview_filler_prefix(text)
+    if not preserve:
+        text = _clean_preview_filler_prefix(text)
     return [{
         "index": 0,
         "start": round(start, 3),
         "end": round(end, 3),
         "duration": round(max(0.0, end - start), 3),
         "text": text,
-        "selected": not _preview_is_pure_filler(text) and not _preview_has_forbidden_or_price(text),
+        "selected": bool(text) and (preserve or not _preview_is_pure_filler(text)) and not _preview_has_forbidden_or_price(text, content_policy),
         "word_timed": False,
         "words": _preview_fallback_word_payload(text, start, end),
     }]
@@ -5998,6 +6249,8 @@ def _preview_public_clips(
     merge_mode: bool = False,
     word_timings: list[dict[str, Any]] | None = None,
     director_provenance: dict[str, Any] | None = None,
+    preserve_director_selection: bool = False,
+    content_policy: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     srt_segments: list[dict[str, Any]] = []
     if srt_text:
@@ -6010,6 +6263,10 @@ def _preview_public_clips(
     source_list = list(sources or [])
     public_clips = [_clip_public(index, clip) for index, clip in enumerate(clips)]
     for raw_clip, clip in zip(clips, public_clips):
+        if preserve_director_selection:
+            clip["director_preserve_selection"] = True
+        if isinstance(content_policy, Mapping):
+            clip["task_content_policy"] = dict(content_policy)
         reviewed_semantics = _preview_review_semantics_for_clip(raw_clip, director_provenance)
         if reviewed_semantics:
             clip["director_focus"] = clip.get("focus") or ""
@@ -6033,6 +6290,43 @@ def _preview_public_clips(
     _refresh_preview_clip_sales_metadata(public_clips)
     annotate_continuity_groups(public_clips)
     return public_clips
+
+
+def _director_preview_fidelity_audit(public_clips: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report boundary removals; never choose a replacement or repair a story."""
+    changes: list[dict[str, Any]] = []
+    first_chapter = str((public_clips[0] if public_clips else {}).get("director_chapter_id") or "")
+    for position, clip in enumerate(public_clips):
+        reasons: list[str] = []
+        for segment in clip.get("segments") or []:
+            if segment.get("selected") is False or segment.get("selection_locked"):
+                reasons.append(str(segment.get("blocked_reason") or segment.get("auto_unselected_reason") or "片段未保留"))
+            for word in segment.get("words") or []:
+                if word.get("selection_locked"):
+                    reasons.append(str(word.get("blocked_reason") or "部分词命中内容边界"))
+        if reasons:
+            changes.append({
+                "index": int(clip.get("index", position)),
+                "chapter_id": str(clip.get("director_chapter_id") or ""),
+                "candidate_id": clip.get("director_candidate_id", clip.get("candidate_id")),
+                "reasons": list(dict.fromkeys(reasons)),
+            })
+    opening_affected = any(
+        item["index"] == 0 or (first_chapter and item["chapter_id"] == first_chapter)
+        for item in changes
+    )
+    return {
+        "status": "warning" if changes else "preserved",
+        "changed_clips": changes,
+        "affected_chapters": list(dict.fromkeys(item["chapter_id"] for item in changes if item["chapter_id"])),
+        "opening_affected": opening_affected,
+        "semantic_auto_mutation": False,
+        "opening_auto_replaced": False,
+        "message": (
+            "内容边界影响了开场，请连读确认；系统未自动替换开头。" if opening_affected
+            else "内容边界影响了部分章节，请连读确认。" if changes else "导演短句顺序已保留。"
+        ),
+    }
 
 
 def _drop_unusable_preview_clips(
@@ -6238,17 +6532,21 @@ def _preview_requested_word_indices(
     return True, set(_clean_preview_int_list(values, word_count))
 
 
+def _preview_standalone_fragment_reason(text: Any) -> str:
+    try:
+        import ai_clipper as ai_mod
+        return str(ai_mod._director_standalone_boundary_reason(text) or "")
+    except Exception:
+        return ""
+
+
 def _preview_segment_selection_units(
     segment: dict[str, Any],
     selected_words_by_segment: Any,
+    *,
+    preserve_director_selection: bool = False,
+    content_policy: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    def _standalone_fragment_reason(text: Any) -> str:
-        try:
-            import ai_clipper as ai_mod
-            return str(ai_mod._director_standalone_boundary_reason(text) or "")
-        except Exception:
-            return ""
-
     if segment.get("selection_locked"):
         return []
     segment_index = _preview_segment_index(segment)
@@ -6262,34 +6560,30 @@ def _preview_segment_selection_units(
         if explicit:
             return []
         text = _strip_preview_source_marker(segment.get("text") or "")
-        return ([{
+        if not text or segment_end <= segment_start or _preview_segment_block_reason(text, content_policy):
+            return []
+        return [{
             "start": segment_start,
             "end": segment_end,
             "text": text,
             "segment_index": segment_index,
             "whole_segment": True,
+            "boundary_deferred": bool(_preview_standalone_fragment_reason(text)),
             "selected_word_indices": [],
-        }] if (
-            text
-            and segment_end > segment_start
-            and not _preview_segment_block_reason(text)
-            and not _standalone_fragment_reason(text)
-        ) else [])
+        }]
     if not explicit and not locked:
         text = _strip_preview_source_marker(segment.get("text") or "")
-        return ([{
+        if not text or segment_end <= segment_start or _preview_segment_block_reason(text, content_policy):
+            return []
+        return [{
             "start": segment_start,
             "end": segment_end,
             "text": text,
             "segment_index": segment_index,
             "whole_segment": True,
+            "boundary_deferred": bool(_preview_standalone_fragment_reason(text)),
             "selected_word_indices": [],
-        }] if (
-            text
-            and segment_end > segment_start
-            and not _preview_segment_block_reason(text)
-            and not _standalone_fragment_reason(text)
-        ) else [])
+        }]
 
     # ``selected_words`` is a position list inside the final review sentence.
     # Older preview caches can still contain duplicated ``word.index`` values
@@ -6321,8 +6615,8 @@ def _preview_segment_selection_units(
         text = "".join(str(word.get("text") or "") for _index, word in run).strip()
         if (
             not text
-            or _preview_segment_block_reason(text)
-            or _standalone_fragment_reason(text)
+            or _preview_segment_block_reason(text, content_policy)
+            or (not preserve_director_selection and _preview_standalone_fragment_reason(text))
         ):
             continue
         start = max(segment_start, min(float(word.get("start") or segment_start) for _index, word in run))
@@ -6361,7 +6655,11 @@ def _merge_selected_segments(
 
     units: list[dict[str, Any]] = []
     for segment in selected:
-        units.extend(_preview_segment_selection_units(segment, selected_words_by_segment))
+        units.extend(_preview_segment_selection_units(
+            segment, selected_words_by_segment,
+            preserve_director_selection=bool(public_clip.get("director_preserve_selection")),
+            content_policy=public_clip.get("task_content_policy"),
+        ))
     if not units:
         return []
 
@@ -6384,17 +6682,29 @@ def _merge_selected_segments(
             # A word-level gap represents an explicit user deletion or lock.
             groups.append([unit])
 
-    base = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
-    while len(base) < 8:
-        base.append("")
-    result: list[tuple[Any, ...]] = []
-    source_marker = _preview_expected_source_marker(public_clip)
-    for group_index, group in enumerate(groups):
+    renderable_groups: list[tuple[float, float, str, list[dict[str, Any]]]] = []
+    for group in groups:
         start = min(float(unit["start"]) for unit in group)
         end = max(float(unit["end"]) for unit in group)
         text = "".join(str(unit["text"]) for unit in group).strip()
         if not text or end <= start:
             continue
+        # A full semantic segment may look incomplete by itself but become a
+        # complete sentence after its selected neighbour is joined.  Validate
+        # only after that deterministic merge; partial word edits were already
+        # validated in _preview_segment_selection_units above.
+        if not public_clip.get("director_preserve_selection") and _preview_standalone_fragment_reason(text):
+            continue
+        renderable_groups.append((start, end, text, group))
+    if not renderable_groups:
+        return []
+
+    base = list(_clip_to_tuple(raw_clip, default_source=str(public_clip.get("source") or "")))
+    while len(base) < 8:
+        base.append("")
+    result: list[tuple[Any, ...]] = []
+    source_marker = _preview_expected_source_marker(public_clip)
+    for group_index, (start, end, text, group) in enumerate(renderable_groups):
         if source_marker:
             text = f"[{source_marker}] {text}"
         values = list(base)
@@ -6402,7 +6712,7 @@ def _merge_selected_segments(
         if base_type == "hook":
             values[0] = "hook" if group_index == 0 else "product"
         elif base_type == "close":
-            values[0] = "close" if group_index == len(groups) - 1 else "product"
+            values[0] = "close" if group_index == len(renderable_groups) - 1 else "product"
         values[1] = text or str(public_clip.get("text") or "")
         values[2] = start
         values[3] = end
@@ -6413,7 +6723,7 @@ def _merge_selected_segments(
             "preview_exact": True,
             "preview_parent_index": int(public_clip.get("index", -1)),
             "preview_group_index": group_index,
-            "preview_group_count": len(groups),
+            "preview_group_count": len(renderable_groups),
             "selected_segment_indices": sorted({int(unit["segment_index"]) for unit in group}),
             "selected_word_indices": {
                 str(unit["segment_index"]): list(unit.get("selected_word_indices") or [])
@@ -6459,12 +6769,16 @@ def _clips_from_preview_selection(
     return result
 
 
-def _hard_filter_preview_selection(clips: list[Any], scope: str) -> list[tuple[Any, ...]]:
+def _hard_filter_preview_selection(
+    clips: list[Any], scope: str, *, content_policy: Mapping[str, Any] | None = None,
+) -> list[tuple[Any, ...]]:
     """Recheck exact user-selected clauses without changing their order."""
     items = [tuple(clip) for clip in (clips or [])]
     try:
         import ai_clipper as ai_mod
-        filtered = list(ai_mod._filter_price_and_cta(items, None) or [])
+        filtered = list(ai_mod._filter_price_and_cta(
+            items, None, content_policy=content_policy,
+        ) or [])
     except Exception as exc:
         emit_log("warning", f"预览最终安全检查跳过：{exc}", scope)
         filtered = items
@@ -6498,6 +6812,51 @@ def _preview_selection_segment_count(selected_segments: dict[str, list[int]] | N
         if isinstance(values, list):
             total += len(values)
     return total
+
+
+def _record_director_export_fidelity(
+    preview: Mapping[str, Any], before: list[Any], after: list[Any], task_id: str, scope: str,
+) -> dict[str, Any]:
+    """Expose final safety removals, separately from intentional manual edits."""
+    if not preview.get("commercial_director_sentence_preview"):
+        return {}
+
+    def identity(clip: Any) -> tuple[Any, ...]:
+        # Ignore role relabelling (hook/close); compare the executed source.
+        info = _clip_public(-1, clip)
+        return (info.get("source"), info.get("start"), info.get("end"), info.get("text"))
+
+    remaining = [identity(clip) for clip in after]
+    public_by_index = {int(clip["index"]): clip for clip in _preview_selection_public_clips(dict(preview))}
+    first_metadata = next((item for item in reversed(before[0]) if isinstance(item, Mapping) and "preview_parent_index" in item), {}) if before else {}
+    first_public = public_by_index.get(first_metadata.get("preview_parent_index"), {})
+    opening_chapter = str(first_public.get("director_chapter_id") or "")
+    changed: list[dict[str, Any]] = []
+    for position, clip in enumerate(before):
+        key = identity(clip)
+        if key in remaining:
+            remaining.remove(key)
+            continue
+        metadata = next((item for item in reversed(clip) if isinstance(item, Mapping) and "preview_parent_index" in item), {})
+        changed.append({
+            "position": position, "preview_parent_index": metadata.get("preview_parent_index"),
+            "chapter_id": str(public_by_index.get(metadata.get("preview_parent_index"), {}).get("director_chapter_id") or ""),
+            "text": str(clip[1]), "reason": "最终内容边界过滤",
+        })
+    result = {
+        "status": "warning" if changed else "preserved",
+        "changed_clips": changed,
+        "opening_affected": any(item["position"] == 0 or (opening_chapter and item["chapter_id"] == opening_chapter) for item in changed),
+        "semantic_auto_mutation": False, "opening_auto_replaced": False,
+    }
+    if changed:
+        result["message"] = "成片内容边界移除了部分已选短句，请复核开场与章节连接；未自动补句或换开头。"
+        emit_log("warning", result["message"], scope, task_id=task_id)
+    review = dict(preview.get("director_review") or {})
+    review["export_fidelity"] = result
+    _store_preview(str(preview.get("id") or ""), director_review=review)
+    _set_task(task_id, director_export_fidelity=result)
+    return result
 
 
 def _path_identity(path: Path) -> str:
@@ -7885,6 +8244,12 @@ def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
         "task_id": preview.get("task_id", ""),
         "scope": preview.get("scope", "smart-cut"),
         "status": preview.get("status", ""),
+        "commercial_director_experiment": bool(preview.get("commercial_director_experiment")),
+        "commercial_director_sentence_preview": bool(
+            preview.get("commercial_director_sentence_preview")
+        ),
+        "planner_mode": preview.get("planner_mode", ""),
+        "director_review": preview.get("director_review", {}),
         "message": preview.get("message", ""),
         "error": preview.get("error", ""),
         "video": preview.get("video", ""),
@@ -7916,7 +8281,9 @@ def _latest_preview(scope: str) -> dict[str, Any] | None:
     with _CLIP_PREVIEW_LOCK:
         previews = [
             p for p in _CLIP_PREVIEWS.values()
-            if p.get("scope") == scope and float(p.get("created_at", 0) or 0) > _PREVIEW_CLEARED_AT
+            if p.get("scope") == scope
+            and not bool(p.get("hidden_from_latest"))
+            and float(p.get("created_at", 0) or 0) > _PREVIEW_CLEARED_AT
         ]
         if not previews:
             return None
@@ -8022,6 +8389,50 @@ def _preview_clip_cache_signature(preview_parts: list[Any], source_sig: str) -> 
     return hashlib.md5("||".join(pieces).encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
+def _preview_media_decode_error(path: Path, *, timeout: int = 120) -> str:
+    """Return a compact decode error for a cached preview, or an empty string.
+
+    File existence and byte size are not enough for preview caching: an older
+    stream-copy renderer could leave a structurally present MP4 with broken
+    H.264 NAL units.  Decode the complete (at most 90 second) review asset so a
+    corrupt cache can never be handed back to the browser indefinitely.
+    """
+    if not path.is_file() or path.stat().st_size < 1000:
+        return "preview_file_missing_or_empty"
+    cmd = [
+        _ffmpeg_cmd(),
+        "-hide_banner",
+        "-v",
+        "error",
+        "-xerror",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return "preview_decode_validation_timeout"
+    if proc.returncode == 0:
+        return ""
+    errors = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    return "; ".join(errors[-3:]) or f"preview_decode_failed:{proc.returncode}"
+
+
 def _render_preview_clip_range(cut_video: Path, start: float, duration: float, target: Path) -> None:
     input_seek = max(0.0, start - 2.0)
     output_seek = max(0.0, start - input_seek)
@@ -8094,8 +8505,12 @@ def _render_preview_clip_range(cut_video: Path, start: float, duration: float, t
         str(target),
     ]
     proc = _run(cmd)
+    decode_error = ""
     if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
-        return
+        decode_error = _preview_media_decode_error(target)
+        if not decode_error:
+            return
+        target.unlink(missing_ok=True)
 
     err_text = proc.stderr or ""
     audio_missing = any(
@@ -8128,10 +8543,13 @@ def _render_preview_clip_range(cut_video: Path, start: float, duration: float, t
         ]
         proc = _run(video_only_cmd)
         if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
-            return
+            decode_error = _preview_media_decode_error(target)
+            if not decode_error:
+                return
+            target.unlink(missing_ok=True)
 
     err = (proc.stderr or "").strip().splitlines()[-3:]
-    detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
+    detail = decode_error or ("; ".join(err) if err else "FFmpeg 未生成有效预览文件。")
     raise HTTPException(status_code=500, detail=f"生成片段预览失败：{detail}")
 
 
@@ -8152,8 +8570,28 @@ def _concat_preview_clip_parts(part_paths: list[Path], target: Path) -> None:
         "0",
         "-i",
         str(list_path),
-        "-c",
-        "copy",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "24",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         str(target),
@@ -8163,9 +8601,13 @@ def _concat_preview_clip_parts(part_paths: list[Path], target: Path) -> None:
                               timeout=120, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=500, detail="合并片段预览超时，请稍后重试。") from exc
-    if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000:
+    decode_error = ""
+    if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
+        decode_error = _preview_media_decode_error(target)
+    if proc.returncode != 0 or not target.exists() or target.stat().st_size < 1000 or decode_error:
         err = (proc.stderr or "").strip().splitlines()[-3:]
-        detail = "; ".join(err) if err else "FFmpeg 未生成有效预览文件。"
+        detail = decode_error or ("; ".join(err) if err else "FFmpeg 未生成有效预览文件。")
+        target.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"合并片段预览失败：{detail}")
 
 
@@ -8264,8 +8706,72 @@ def _preview_clip_video(
 def _ensure_srt(video: Path, scope: str) -> Path | None:
     srt = video.with_suffix(".srt")
     if srt.exists():
-        emit_log("info", f"找到字幕：{srt.name}", scope)
-        return srt
+        # Managed ASR caches are source-bound.  A matching older SenseVoice
+        # cache is upgraded from its own word-timing sidecar; an actually stale
+        # managed cache is discarded and re-recognized.  Plain user SRT files
+        # remain untouched.
+        try:
+            from cutter_logic import _discard_invalid_managed_srt_cache, _inspect_srt_cache
+
+            cache_status = _inspect_srt_cache(str(video), str(srt))
+            if cache_status.get("valid"):
+                if cache_status.get("text_pipeline_upgraded"):
+                    emit_log("info", "已升级本地字幕细断句（复用已有词级时间轴）。", scope)
+                emit_log("info", f"找到字幕：{srt.name}", scope)
+                return srt
+            if cache_status.get("managed"):
+                emit_log(
+                    "warning",
+                    "已发现不可用的本地 ASR 缓存，正在重新识别："
+                    f"{cache_status.get('reason') or 'unknown'}",
+                    scope,
+                )
+                _discard_invalid_managed_srt_cache(str(srt), cache_status)
+            else:
+                emit_log("info", f"找到用户字幕：{srt.name}", scope)
+                return srt
+        except Exception:
+            # Preserve the prior resilient preview behavior if cache inspection
+            # itself is unavailable; a visible SRT is still better than failing
+            # before local ASR has a chance to run.
+            emit_log("warning", f"字幕缓存检查失败，沿用现有字幕：{srt.name}", scope)
+            return srt
+
+    # One-time migration for the historical local-ASR layout.  The legacy
+    # path is deterministic for this exact source video, so a verified cache
+    # can be promoted beside the material without paying for recognition
+    # again.  Copy the complete SRT/word/quality identity set as one asset.
+    try:
+        import hashlib
+        from asr_cache import inspect_cache, write_metadata
+        from cutter_logic import _copy_srt_with_word_timing_sidecar
+
+        legacy_root = Path(tempfile.gettempdir()) / "live_cutter_stt"
+        token = hashlib.md5(str(video).encode("utf-8")).hexdigest()[:8]
+        legacy_srt = legacy_root / f"sub_{token}.srt"
+        if legacy_srt.is_file() and legacy_srt.with_suffix(".words.json").is_file():
+            legacy_status = inspect_cache(video, legacy_srt)
+            if not legacy_status.get("managed"):
+                write_metadata(
+                    video,
+                    legacy_srt,
+                    provider="sensevoice",
+                    model="iic/SenseVoiceSmall",
+                    timing_precision="word",
+                )
+                legacy_status = inspect_cache(video, legacy_srt)
+            if legacy_status.get("valid"):
+                _copy_srt_with_word_timing_sidecar(
+                    legacy_srt,
+                    srt,
+                    source_video=video,
+                    provider=str(legacy_status.get("provider") or "sensevoice"),
+                    model=str(legacy_status.get("model") or "iic/SenseVoiceSmall"),
+                )
+                emit_log("info", f"已将历史本地字幕迁移到素材目录：{srt.name}", scope)
+                return srt
+    except Exception as exc:
+        emit_log("warning", f"历史本地字幕迁移跳过：{type(exc).__name__}", scope)
 
     settings = _load_settings()
     if settings.get("asr_enabled", False):
@@ -8359,6 +8865,18 @@ def _try_volcengine_srt(video: Path, srt: Path, settings: dict[str, Any], scope:
             segments,
             log_fn=lambda msg: emit_log("info", msg, scope),
         )
+        try:
+            from asr_cache import write_metadata
+
+            write_metadata(
+                video,
+                srt,
+                provider="volcengine",
+                model="volc.seedasr.auc",
+                timing_precision="word",
+            )
+        except Exception as exc:
+            emit_log("warning", f"云端字幕缓存身份记录失败：{type(exc).__name__}", scope)
         emit_log("info", f"云端语音识别成功：{len(segments)} 条原始语音段，生成 {len(semantic_segments)} 条语义段。", scope)
         return srt
     except Exception as exc:
@@ -8815,6 +9333,7 @@ def _run_mix_preview(task_id: str, preview_id: str, payload: MixPayload) -> None
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
         if unusable_removed:
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
+        _sync_preview_final_selection_metadata(raw_clips, public_clips, dedup_summary)
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
         dedup_summary["requested_target_duration"] = result_cache.get("requested_target_duration", payload.duration)
@@ -11846,7 +12365,14 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             )
 
 
-def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
+def _run_mix_from_preview(
+    task_id: str,
+    payload: MixPreviewCutPayload,
+    *,
+    finalize_task: bool = True,
+    raise_errors: bool = False,
+    output_extra_suffix: str = "",
+) -> list[str]:
     scope = "mix"
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取混剪预览片段")
     emit_log("info", "使用混剪 AI 选片预览开始成片。", scope)
@@ -11869,7 +12395,13 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
             len(raw_clips),
         )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
-        clips = _hard_filter_preview_selection(clips, scope)
+        before_filter = list(clips)
+        clips = _hard_filter_preview_selection(
+            clips,
+            scope,
+            content_policy=(preview.get("dedup_summary") or {}).get("task_content_policy"),
+        )
+        _record_director_export_fidelity(preview, before_filter, clips, task_id, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再混剪。")
         _log_preview_selection(scope, "预览混剪子句选择", selected_indices, selected_segments, clips)
@@ -11939,12 +12471,20 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
 
         selected_tuples = [_clip_tuple(clip) for clip in clips]
         out_dir = _default_output_dir(existing_sources[0], payload.output_dir, "mix_output")
+        version_count = max(1, int(payload.versions or 1))
         output_path = _mix_output_path(
             out_dir,
             existing_sources[0],
             payload.output_naming_mode,
-            versions=1,
+            versions=version_count,
+            extra_suffix=output_extra_suffix,
         )
+        version_paths = [
+            output_path
+            if version_count == 1
+            else output_path.with_name(f"{output_path.stem}_v{index}{output_path.suffix}")
+            for index in range(1, version_count + 1)
+        ]
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
         _set_task_progress(task_id, 34, "准备混剪输出")
 
@@ -11960,58 +12500,81 @@ def _run_mix_from_preview(task_id: str, payload: MixPreviewCutPayload) -> None:
 
         ai_mod.ai_analyze_clips = _preview_ai_analyze
         ai_mod.is_enabled = lambda: True
+        produced_outputs: list[str] = []
         try:
-            result = process_video_mix(
-                [str(path) for path in existing_sources],
-                output_path=str(output_path),
-                dedup_preset=payload.dedup_preset,
-                dedup_video_options=payload.video,
-                dedup_audio_options=payload.audio,
-                transition_options=payload.transition,
-                subtitle_overlay=payload.subtitle_overlay,
-                log_fn=_task_log_fn(task_id, scope, base=34, span=54),
-                cancel_event=_task_cancel_event(task_id),
-                force_category=_force_category_for_payload(payload),
-                focus_hint=payload.focus_hint,
-                ai_controls=_payload_ai_controls(payload),
-                target_duration=payload.duration,
-                duration_tolerance=payload.duration_tolerance,
-                num_versions=1,
-                pip_path=pip_path or "",
-                pip_size=payload.pip_size,
-                pip_opacity=payload.pip_opacity,
-                pip_pos=payload.pip_pos,
-                smart_crop_enabled=payload.smart_crop_enabled,
-                crop_level=payload.crop_level,
-                ken_burns_enabled=payload.ken_burns_enabled,
-                mirror_enabled=payload.mirror_enabled,
-                kb_intensity=payload.ken_burns_intensity,
-                _user_confirmed_clips=True,
-            )
+            for version_index, version_path in enumerate(version_paths, 1):
+                if _is_task_cancelled(task_id):
+                    break
+                emit_log(
+                    "info",
+                    f"导演方案混剪 {version_index}/{version_count}：复用同一故事片单，不重新调用 AI。",
+                    scope,
+                )
+                result = process_video_mix(
+                    [str(path) for path in existing_sources],
+                    output_path=str(version_path),
+                    dedup_preset=payload.dedup_preset,
+                    dedup_video_options=payload.video,
+                    dedup_audio_options=payload.audio,
+                    transition_options=payload.transition,
+                    subtitle_overlay=payload.subtitle_overlay,
+                    log_fn=_task_log_fn(task_id, scope, base=34, span=54),
+                    cancel_event=_task_cancel_event(task_id),
+                    force_category=_force_category_for_payload(payload),
+                    focus_hint=payload.focus_hint,
+                    ai_controls=_payload_ai_controls(payload),
+                    target_duration=payload.duration,
+                    duration_tolerance=payload.duration_tolerance,
+                    num_versions=1,
+                    pip_path=pip_path or "",
+                    pip_size=payload.pip_size,
+                    pip_opacity=payload.pip_opacity,
+                    pip_pos=payload.pip_pos,
+                    smart_crop_enabled=payload.smart_crop_enabled,
+                    crop_level=payload.crop_level,
+                    ken_burns_enabled=payload.ken_burns_enabled,
+                    mirror_enabled=payload.mirror_enabled,
+                    kb_intensity=payload.ken_burns_intensity,
+                    _user_confirmed_clips=True,
+                )
+                if _result_ok(result) and version_path.exists():
+                    produced_outputs.append(str(version_path))
+                else:
+                    emit_log("warning", f"导演方案混剪第 {version_index} 版未生成输出。", scope)
         finally:
             ai_mod.ai_analyze_clips = original_ai_analyze
             ai_mod.is_enabled = original_ai_enabled
 
-        if not result:
+        if not produced_outputs:
             raise RuntimeError("预览混剪处理失败。")
         _set_task_progress(task_id, 94, "整理输出")
         if _is_task_cancelled(task_id):
             emit_log("warning", "任务已停止。", scope)
-            return
+            return produced_outputs
         _archive_used_pip(used_pip_file, scope)
-        _consume_trial("混剪成片", scope=scope)
-        _set_task(
-            task_id,
-            status="completed",
-            finished_at=time.time(),
-            output=str(output_path),
-            outputs=[str(output_path)],
-            result_count=1,
-        )
-        emit_log("success", f"预览混剪完成：{output_path}", scope)
+        _consume_trial("混剪成片", units=len(produced_outputs), scope=scope)
+        if finalize_task:
+            _set_task(
+                task_id,
+                status="completed",
+                finished_at=time.time(),
+                output=produced_outputs[0],
+                outputs=produced_outputs,
+                result_count=len(produced_outputs),
+                message=(
+                    f"导演方案混剪完成：{len(produced_outputs)}/{version_count} 版"
+                    if version_count > 1 else "导演方案混剪完成"
+                ),
+            )
+        emit_log("success", f"预览混剪完成：{len(produced_outputs)} 个输出", scope)
+        return produced_outputs
     except Exception as exc:
-        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        if finalize_task:
+            _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"预览混剪失败：{exc}", scope)
+        if raise_errors:
+            raise
+        return []
 
 
 def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) -> None:
@@ -12156,6 +12719,7 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         raw_clips, public_clips, unusable_removed = _drop_unusable_preview_clips(raw_clips, public_clips)
         if unusable_removed:
             dedup_summary["unusable_preview_clips_removed"] = unusable_removed
+        _sync_preview_final_selection_metadata(raw_clips, public_clips, dedup_summary)
         dedup_summary["narrative_owner"] = "ai"
         dedup_summary["preference_supplemented"] = 0
         dedup_summary["requested_target_duration"] = result_cache.get("requested_target_duration", payload.target_duration)
@@ -12244,7 +12808,2063 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         emit_log("error", f"AI选片预览失败：{exc}", scope)
 
 
-def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -> None:
+def _write_commerce_director_preview_artifacts(
+    output_dir: Path,
+    *,
+    case: Mapping[str, Any],
+    planner_mode: str,
+    preview_id: str,
+    task_id: str,
+    video: Path,
+    srt_path: Path,
+    cost_report: Mapping[str, Any],
+) -> None:
+    """Persist an auditable experimental run without creating user media output."""
+    from ai_director_experiment import planner_mode_version
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_snapshot = _read_json_file(output_dir / "source_info.json")
+    effective_controls = dict(case.get("director_controls") or source_snapshot.get("director_controls") or {})
+    artifacts = {
+        "source_info.json": {
+            **source_snapshot,
+            "video": str(video),
+            "srt": str(srt_path),
+            "source_identical_to_smart_cut_input": True,
+            "director_controls": effective_controls,
+        },
+        "director_controls.json": effective_controls,
+        "m1_story_brief.json": {
+            "selected_m1_hero": case.get("selected_m1_hero", {}),
+            "m1_result": case.get("m1_result", {}),
+            "hero_selection_reason": case.get("m1_hero_selection_reason", ""),
+        },
+        "m1_story_library.json": case.get("m1_story_library", {}),
+        "director_strategy_library.json": case.get("director_strategy_library", {}),
+        "director_strategy_contract.json": case.get("director_strategy_contract", {}),
+        "m2_plan.json": case.get("m2_plan", {}),
+        "m2_story_consumption_audit.json": case.get("m2_story_consumption_audit", {}),
+        "p0_5a2_beat_inventory.json": case.get("p0_5a2_narrative_mode_beat_inventory", {}),
+        "p0_5a3_actor_pool.json": case.get("p0_5a3_narrative_mode_actor_pool", {}),
+        "p0_5a4_opening_packages.json": {
+            "hook_recall": case.get("p0_5a4_narrative_mode_hook_recall", {}),
+            "opening_packages": case.get("p0_5a4_narrative_mode_opening_packages", {}),
+        },
+        "planner_experiment.json": {
+            "commerce_director": case.get("commerce_director", {}),
+            "commerce_lite": case.get("commerce_lite", {}),
+        },
+        "m3_selector.json": {
+            "selection_result": case.get("m3_selection_result", {}),
+            "plan_fidelity_audit": case.get("m3_plan_fidelity_audit", {}),
+            "chapter_lineage": case.get("chapter_lineage", []),
+        },
+        "draft_review.json": case.get("draft_review", {}),
+        "run_manifest.json": {
+            "version": "ui-commerce-director-preview-v1",
+            "task_id": task_id,
+            "preview_id": preview_id,
+            "planner_mode": planner_mode,
+            "planner_version": planner_mode_version(planner_mode),
+            "mode": "controlled_local_experiment_only",
+            "normal_preview_changed": False,
+            "formal_export_allowed": False,
+            "publication_allowed": False,
+            "rendered_video": False,
+        },
+        "status.json": {
+            "technical_passed": bool(case.get("passed")),
+            "opening_quality_review_requires_human_audit": bool(
+                case.get("opening_quality_review_requires_human_audit")
+            ),
+            "commercial_ready": False,
+            "formal_output_allowed": False,
+        },
+    }
+    for name, value in artifacts.items():
+        (output_dir / name).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    # ``generate_ai_cost_reports`` also writes this same file.  Keep a direct
+    # copy here for a complete artifact set if ledger reporting ever changes.
+    (output_dir / "cost_report.json").write_text(
+        json.dumps(dict(cost_report), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _commerce_director_draft_review(
+    case: Mapping[str, Any],
+    *,
+    video: Path,
+) -> tuple[list[Any], dict[str, Any]] | None:
+    """Expose an invalid M2 plan for review without pretending M3 executed it."""
+    plan = case.get("m2_plan")
+    if not isinstance(plan, Mapping) or bool(plan.get("plan_valid")):
+        return None
+    candidates = list(plan.get("selected_candidates") or [])
+    beats = list(plan.get("beats") or [])
+    if not candidates or not beats:
+        return None
+
+    candidate_by_id: dict[int, Mapping[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            return None
+        try:
+            candidate_id = int(candidate.get("candidate_id"))
+        except (TypeError, ValueError):
+            return None
+        candidate_by_id[candidate_id] = candidate
+
+    exact_candidate_ids: set[int] = set()
+    for lineage in list(case.get("chapter_lineage") or []):
+        if not isinstance(lineage, Mapping):
+            continue
+        try:
+            candidate_id = int(lineage.get("candidate_id"))
+        except (TypeError, ValueError):
+            continue
+        spans = list(lineage.get("semantic_srt_word_spans") or [])
+        if spans and all(
+            isinstance(span, Mapping)
+            and str(span.get("status") or "") == "bound"
+            and str(span.get("alignment_kind") or "") == "exact"
+            and float(span.get("alignment_confidence") or 0.0) >= 1.0
+            for span in spans
+        ):
+            exact_candidate_ids.add(candidate_id)
+
+    ordered_pairs: list[tuple[str, int]] = []
+    for beat in beats:
+        if not isinstance(beat, Mapping):
+            return None
+        chapter_id = str(beat.get("chapter_id") or "").strip()
+        if not chapter_id:
+            return None
+        for value in list(beat.get("candidate_ids") or []):
+            try:
+                ordered_pairs.append((chapter_id, int(value)))
+            except (TypeError, ValueError):
+                return None
+    planned_ids = [candidate_id for _, candidate_id in ordered_pairs]
+    if (
+        len(planned_ids) != len(candidates)
+        or len(set(planned_ids)) != len(planned_ids)
+        or set(planned_ids) != set(candidate_by_id)
+        or any(candidate_id not in exact_candidate_ids for candidate_id in planned_ids)
+    ):
+        return None
+
+    raw_clips: list[Any] = []
+    chapter_rows: list[dict[str, Any]] = []
+    for position, beat in enumerate(beats, start=1):
+        chapter_id = str(beat.get("chapter_id") or "").strip()
+        chapter_ids = [candidate_id for item_chapter, candidate_id in ordered_pairs if item_chapter == chapter_id]
+        seconds = 0.0
+        for candidate_id in chapter_ids:
+            candidate = candidate_by_id[candidate_id]
+            start = float(candidate.get("start") or 0.0)
+            end = float(candidate.get("end") or start)
+            text = str(candidate.get("text") or "").strip()
+            if not text or end <= start:
+                return None
+            duration = round(end - start, 3)
+            raw_clips.append(_preview_clip_with_source((
+                chapter_id, text, start, end, 0.0, duration, chapter_id, str(video),
+            ), str(video)))
+            seconds += duration
+        chapter_rows.append({
+            "position": position,
+            "chapter_id": chapter_id,
+            "narrative_role": str(beat.get("narrative_role") or ""),
+            "goal": str(beat.get("goal") or ""),
+            "candidate_count": len(chapter_ids),
+            "seconds": round(seconds, 3),
+        })
+
+    story = dict(plan.get("story_brief") or case.get("selected_m1_hero") or {})
+    selector = dict(case.get("m3_selection_result") or {})
+    review = {
+        "kind": "m2_draft_review_only",
+        "headline": "草案审阅：M2 计划未通过 M3 可物化合同",
+        "m1_story": {
+            "strategy_id": str(story.get("strategy_id") or ""),
+            "thesis": str(story.get("thesis") or plan.get("thesis") or ""),
+            "audience_tension": str(story.get("audience_tension") or ""),
+            "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
+            "payoff": str(story.get("payoff") or ""),
+            "story_priority": str(story.get("story_priority") or ""),
+        },
+        "m1_story_library": dict(case.get("m1_story_library") or {}),
+        "director_strategy_library": dict(case.get("director_strategy_library") or {}),
+        # A draft is still a real M2 plan.  The experiment workbench needs the
+        # same chapter-level purchase path as a materialized review; otherwise
+        # its right-hand planning panel is blank precisely when a human most
+        # needs to inspect why M3 refused the plan.
+        "m2_outline": _commerce_director_m2_outline(plan),
+        "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
+        "m2_draft": {
+            "target_seconds": float(plan.get("target_duration") or 0.0),
+            "selected_seconds": round(sum(float(clip[5]) for clip in raw_clips), 3),
+            "chapter_count": len(chapter_rows),
+            "candidate_count": len(raw_clips),
+            "chapters": chapter_rows,
+            "issues": [str(item) for item in list(plan.get("issues") or []) if str(item).strip()],
+        },
+        "m3_status": str(selector.get("status") or "selector_blocked"),
+        "review_contract": {
+            "timeline_source": "M2 declared chapter/candidate order",
+            "word_lineage": "every selected candidate has exact semantic-SRT-to-word binding",
+            "m3_materialized": False,
+            "may_not_enter_formal_preview": True,
+            "may_not_enter_export": True,
+            "may_not_enter_publication": True,
+        },
+    }
+    return raw_clips, review
+
+
+def _commerce_director_m2_outline(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Compact read-only M2 outline for the operator comparison screen."""
+    contract = plan.get("selection_contract")
+    contract = dict(contract) if isinstance(contract, Mapping) else {}
+    packet_rows = contract.get("director_chapter_packets") or ()
+    if isinstance(packet_rows, Mapping):
+        packet_rows = (packet_rows,)
+    packets = [dict(item) for item in packet_rows if isinstance(item, Mapping)]
+    if packets:
+        # The packet is authored by the one AI Director.  This grouping only
+        # makes its already-fixed micro-narrative chapters readable in the UI;
+        # it neither combines source clips nor changes their semantic order.
+        metadata = {
+            str(item.get("chapter_id") or "").strip(): item
+            for item in packets if str(item.get("chapter_id") or "").strip()
+        }
+        grouped: dict[str, dict[str, Any]] = {}
+        for position, beat in enumerate(list(plan.get("beats") or []), start=1):
+            if not isinstance(beat, Mapping):
+                continue
+            chapter_id = str(beat.get("chapter_id") or "").strip() or f"D{position}"
+            packet = metadata.get(chapter_id, {})
+            row = grouped.setdefault(chapter_id, {
+                "position": position,
+                "chapter_id": chapter_id,
+                "narrative_role": str(packet.get("structure_slot") or beat.get("narrative_role") or ""),
+                "goal": str(packet.get("title") or packet.get("purpose") or beat.get("goal") or ""),
+                "purchase_value": str(packet.get("new_buyer_knowledge") or ""),
+                "purchase_question": "",
+                "seconds": 0.0,
+            })
+            row["seconds"] = round(float(row["seconds"]) + max(0.0, float(beat.get("target_seconds") or 0.0)), 3)
+            question = str(beat.get("purchase_value_reason") or "").strip()
+            if question and question not in str(row["purchase_question"]).split(" / "):
+                row["purchase_question"] = " / ".join(filter(None, [str(row["purchase_question"]), question]))
+        return list(grouped.values())
+    rows: list[dict[str, Any]] = []
+    for position, beat in enumerate(list(plan.get("beats") or []), start=1):
+        if not isinstance(beat, Mapping):
+            continue
+        outcomes = [str(value).strip() for value in list(beat.get("purchase_value_outcomes") or []) if str(value).strip()]
+        rows.append({
+            "position": position,
+            "chapter_id": str(beat.get("chapter_id") or ""),
+            "narrative_role": str(beat.get("narrative_role") or ""),
+            "goal": str(beat.get("goal") or ""),
+            "purchase_value": " / ".join(outcomes) or str(beat.get("purchase_value_reason") or ""),
+            "seconds": round(max(0.0, float(beat.get("target_seconds") or 0.0)), 3),
+        })
+    return rows
+
+
+def _commerce_director_review_video(preview_id: str) -> Path:
+    """Render a local, non-exportable M2 draft review video for the operator."""
+    preview = _get_preview(preview_id)
+    review = dict((preview or {}).get("director_review") or {})
+    if not preview or not preview.get("commercial_director_experiment") or review.get("kind") not in {
+        "m2_draft_review_only",
+        "m3_materialized_review",
+        "m2_sentence_preview",
+    }:
+        raise HTTPException(status_code=409, detail="此预览没有可生成的商业导演草案审阅视频。")
+    raw_clips = list(preview.get("raw_clips") or [])
+    if not raw_clips:
+        raise HTTPException(status_code=400, detail="草案审阅没有可追溯的候选片段。")
+
+    ranges: list[tuple[Path, float, float]] = []
+    for clip in raw_clips:
+        info = _clip_public(0, clip)
+        source = _preview_clip_source(preview, info)
+        start = max(0.0, float(info.get("start") or 0.0))
+        end = max(start + 0.2, float(info.get("end") or start + 0.2))
+        ranges.append((source, start, end - start))
+    if sum(duration for _, _, duration in ranges) > 90.0:
+        raise HTTPException(status_code=400, detail="草案审阅超过 90 秒，暂不生成在线审阅视频。")
+
+    review_dir = _safe_user_child("commerce_director_draft_reviews", preview_id)
+    review_dir.mkdir(parents=True, exist_ok=True)
+    target = review_dir / "m2_draft_review.mp4"
+    if target.exists() and target.stat().st_size > 1000:
+        if not _preview_media_decode_error(target):
+            return target
+        target.unlink(missing_ok=True)
+    parts: list[Path] = []
+    for index, (source, start, duration) in enumerate(ranges):
+        part = review_dir / f"part_{index:02d}.mp4"
+        if part.exists() and part.stat().st_size > 1000 and _preview_media_decode_error(part):
+            part.unlink(missing_ok=True)
+        if not part.exists() or part.stat().st_size <= 1000:
+            _render_preview_clip_range(source, start, duration, part)
+        parts.append(part)
+    _concat_preview_clip_parts(parts, target)
+    return target
+
+
+def _verify_local_asr_temp_identity_for_experiment(video: Path, srt_path: Path, scope: str) -> bool:
+    """Attach verifiable source identity to a known local-ASR temp sidecar.
+
+    The normal local ASR cache names its temporary SRT from the exact input
+    video path and already writes a word-timing sidecar.  Older cache entries
+    predate ``asr-cache.json`` though, which left the experimental Binder with
+    no way to prove that the otherwise valid word timeline belongs to this
+    video.  Only that exact deterministic temp-file shape is eligible here;
+    arbitrary user SRTs remain untrusted and are never promoted.
+    """
+    import hashlib
+    from asr_cache import inspect_cache, write_metadata
+
+    expected_root = (Path(tempfile.gettempdir()) / "live_cutter_stt").resolve()
+    expected_stem = f"sub_{hashlib.md5(str(video).encode('utf-8')).hexdigest()[:8]}"
+    try:
+        is_expected_temp = (
+            srt_path.resolve().parent == expected_root
+            and srt_path.stem.lower() == expected_stem.lower()
+            and srt_path.with_suffix(".words.json").is_file()
+        )
+    except OSError:
+        return False
+    if not is_expected_temp:
+        return False
+    identity = inspect_cache(video, srt_path)
+    if identity.get("valid") and identity.get("managed") and identity.get("timing_precision") == "word":
+        return True
+    try:
+        write_metadata(
+            video,
+            srt_path,
+            provider="sensevoice",
+            model="iic/SenseVoiceSmall",
+            timing_precision="word",
+        )
+        verified = inspect_cache(video, srt_path)
+        if verified.get("valid") and verified.get("managed") and verified.get("timing_precision") == "word":
+            emit_log("info", "已为同源本地 ASR 临时字幕补齐词级身份记录。", scope)
+            return True
+    except Exception as exc:
+        emit_log("warning", f"本地 ASR 临时字幕身份记录失败：{type(exc).__name__}", scope)
+    return False
+
+
+def _approximate_word_segments_for_srt_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Create a conservative editable word timeline when an imported SRT has no sidecar.
+
+    This does not change subtitle text or select content.  It only divides the
+    subtitle's own time range across its visible characters so the normal
+    preview editor can still remove words and render source-relative cuts.
+    """
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        text = str(row.get("text") or "").strip()
+        try:
+            start = float(row.get("start") or 0.0)
+            end = float(row.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        tokens = [char for char in text if not char.isspace()]
+        if not tokens or end <= start:
+            continue
+        step = (end - start) / len(tokens)
+        words = [
+            {
+                "text": token,
+                "start": round(start + index * step, 3),
+                "end": round(start + (index + 1) * step, 3),
+            }
+            for index, token in enumerate(tokens)
+        ]
+        result.append({"start": start, "end": end, "text": text, "words": words})
+    return result
+
+
+def _prepare_mix_director_source(
+    paths: Sequence[Path],
+    *,
+    task_id: str,
+    scope: str,
+) -> dict[str, Any]:
+    """Build one ordered virtual transcript while retaining every real source.
+
+    The Director sees one complete transcript and therefore still makes only
+    one story decision and one Beat Casting decision.  Virtual offsets prevent
+    timestamps from different videos colliding; selected beats are mapped back
+    to their original video before the editable preview is exposed.
+    """
+    from asr_cache import write_metadata
+    from cutter_logic import _parse_srt_to_segments
+    from volcengine_asr import load_word_timing_sidecar, write_word_timing_sidecar
+
+    work_dir = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment" / task_id).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    virtual_rows: list[dict[str, Any]] = []
+    preview_rows: list[dict[str, Any]] = []
+    virtual_words: list[dict[str, Any]] = []
+    preview_word_timings: list[dict[str, Any]] = []
+    intervals: list[dict[str, Any]] = []
+    source_srts: list[str] = []
+    cursor = 0.0
+
+    for source_index, video in enumerate(paths, start=1):
+        srt_path = _ensure_srt(video, scope)
+        if not srt_path or not srt_path.exists():
+            raise RuntimeError(f"未找到可用于 AI 导演混剪的字幕：{video.name}")
+        _verify_local_asr_temp_identity_for_experiment(video, srt_path, scope)
+        source_srts.append(str(srt_path))
+        source_text = srt_path.read_text(encoding="utf-8-sig")
+        rows = [dict(item) for item in (_parse_srt_to_segments(source_text) or []) if isinstance(item, Mapping)]
+        if not rows:
+            continue
+        source_end = max(float(item.get("end") or 0.0) for item in rows)
+        marker = f"V{source_index}"
+        offset = cursor
+        intervals.append({
+            "marker": marker,
+            "source": str(video),
+            "srt": str(srt_path),
+            "offset": round(offset, 3),
+            "source_end": round(source_end, 3),
+            "virtual_end": round(offset + source_end, 3),
+        })
+        for item in rows:
+            start = float(item.get("start") or 0.0)
+            end = float(item.get("end") or start)
+            text = str(item.get("text") or "").strip()
+            if not text or end <= start:
+                continue
+            virtual_rows.append({"start": start + offset, "end": end + offset, "text": text})
+            preview_rows.append({"start": start, "end": end, "text": f"[{marker}] {text}"})
+
+        word_segments = list(load_word_timing_sidecar(str(srt_path), semantic=False) or [])
+        if not word_segments:
+            word_segments = _approximate_word_segments_for_srt_rows(rows)
+        for segment in word_segments:
+            if not isinstance(segment, Mapping):
+                continue
+            restored = dict(segment)
+            restored["source_marker"] = marker
+            restored["words"] = [dict(word) for word in list(segment.get("words") or []) if isinstance(word, Mapping)]
+            preview_word_timings.append(restored)
+
+            shifted = dict(segment)
+            shifted["start"] = round(float(segment.get("start") or 0.0) + offset, 3)
+            shifted["end"] = round(float(segment.get("end") or 0.0) + offset, 3)
+            shifted["words"] = []
+            for word in list(segment.get("words") or []):
+                if not isinstance(word, Mapping):
+                    continue
+                word_copy = dict(word)
+                word_copy["start"] = round(float(word.get("start") or 0.0) + offset, 3)
+                word_copy["end"] = round(float(word.get("end") or 0.0) + offset, 3)
+                shifted["words"].append(word_copy)
+            if shifted["words"]:
+                virtual_words.append(shifted)
+        cursor = offset + source_end + 30.0
+
+    if not virtual_rows or not intervals:
+        raise RuntimeError("多素材字幕中没有可供 AI 导演分析的真实口播。")
+
+    virtual_srt = work_dir / "mix_director_virtual_source.srt"
+    virtual_srt.write_text(_segments_to_srt(virtual_rows), encoding="utf-8")
+    if virtual_words:
+        write_word_timing_sidecar(str(virtual_srt), virtual_words, provider="liveclipper-mix-director")
+        write_metadata(
+            paths[0], virtual_srt,
+            provider="liveclipper-mix-director", model="virtual-multisource", timing_precision="word",
+        )
+    return {
+        "preview_video": str(paths[0]),
+        "sources": [str(path) for path in paths],
+        "source_srts": source_srts,
+        "srt_path": str(virtual_srt),
+        "preview_srt_text": _segments_to_srt(preview_rows),
+        "preview_word_timings": preview_word_timings,
+        "intervals": intervals,
+        "analysis_video": str(paths[0]),
+    }
+
+
+def _remap_mix_director_raw_clips(
+    clips: Sequence[Any],
+    source_bundle: Mapping[str, Any],
+) -> list[Any]:
+    intervals = [dict(item) for item in list(source_bundle.get("intervals") or []) if isinstance(item, Mapping)]
+    mapped: list[Any] = []
+    for clip in clips:
+        info = _clip_public(0, clip)
+        start = float(info.get("start") or 0.0)
+        end = float(info.get("end") or start)
+        midpoint = (start + end) / 2.0
+        interval = next(
+            (
+                item for item in intervals
+                if float(item.get("offset") or 0.0) - 0.05
+                <= midpoint
+                <= float(item.get("virtual_end") or 0.0) + 0.05
+            ),
+            None,
+        )
+        if not interval:
+            continue
+        offset = float(interval.get("offset") or 0.0)
+        relative_start = max(0.0, start - offset)
+        relative_end = min(float(interval.get("source_end") or end), max(relative_start, end - offset))
+        if relative_end <= relative_start:
+            continue
+        marker = str(interval.get("marker") or "").strip().upper()
+        text = _strip_preview_source_marker(info.get("text") or "")
+        if marker:
+            text = f"[{marker}] {text}"
+        mapped.append((
+            info.get("clip_type") or "product",
+            text,
+            round(relative_start, 3),
+            round(relative_end, 3),
+            float(info.get("score") or 0.0),
+            round(relative_end - relative_start, 3),
+            info.get("focus") or "",
+            str(interval.get("source") or ""),
+        ))
+    return mapped
+
+
+def _run_commerce_director_preview(
+    task_id: str,
+    preview_id: str,
+    payload: SmartCutPayload,
+    m1_strategy_override: Any = None,
+    m1_story_library_override: Mapping[str, Any] | None = None,
+    director_strategy_library_override: Mapping[str, Any] | None = None,
+    director_strategy_contract: Mapping[str, Any] | None = None,
+    selected_story_id: str = "",
+    director_strategy_discovery_only: bool = False,
+    director_focus: Mapping[str, Any] | None = None,
+    preview_scope: str = "smart-cut",
+    source_bundle: Mapping[str, Any] | None = None,
+    finalize_task: bool = True,
+) -> None:
+    """Run story planning, exact Beat casting, then the editable preview.
+
+    Historical experiment modes remain readable as fallback, but the compiled
+    two-stage Director packet is the production preview path and may not
+    trigger another semantic call before rendering.
+    """
+    scope = str(preview_scope or "smart-cut")
+    selected_story_id = str(selected_story_id or "").strip()
+    task_message = (
+        "准备 AI 导演方案预览" if selected_story_id
+        else "AI 正在确定核心故事和购买旅程"
+    )
+    _set_task(task_id, status="running", started_at=time.time(), progress=6, message=task_message)
+    _store_preview(
+        preview_id,
+        task_id=task_id,
+        scope=scope,
+        status="running",
+        message=("正在按已选导演方案准备逐句可编辑预览。" if selected_story_id
+                 else f"本次目标 {payload.target_duration} 秒：先确定故事章节，再从完整字幕一次性选择真实短句。"),
+        created_at=time.time(),
+        target_duration=payload.target_duration,
+        duration_tolerance=payload.duration_tolerance,
+        clips=[],
+        commercial_director_experiment=True,
+        commercial_director_preview=True,
+    )
+    emit_log(
+        "info",
+        (f"AI 导演方案已选定：正在按原始口播物化 {selected_story_id}。"
+         if selected_story_id else f"AI 导演已启动：故事规划后只进行一次短句 Casting；目标 {payload.target_duration} 秒为叙事深度参考。"),
+        scope,
+    )
+    video: Path | None = None
+    srt_path: Path | None = None
+    experiment_dir: Path | None = None
+    try:
+        from ai_cost_ledger import ai_cost_ledger_scope, generate_ai_cost_reports
+        from ai_director_experiment import (
+            M2_PLANNER_MODE_HEAVY_DIRECTOR,
+            M2_PLANNER_MODE_LITE_CHAPTER_COMPRESSION_EXPERIMENT,
+            M2_PLANNER_MODE_LITE_FINAL_EDITOR_EXPERIMENT,
+            M2_PLANNER_MODE_LITE_DIRECTOR_EXPERIMENT,
+            controlled_planner_mode,
+            planner_mode_version,
+        )
+        from run_m3_new_golden_plan_fidelity import _run_case
+
+        settings = dict(_load_settings())
+        # Capture one task policy before candidate discovery.  It flows through
+        # the safe pool, the single AI prompt/audit and the M3-bound preview;
+        # saved preferences are never mutated by a run-only avoid chip.
+        from content_policy import apply_run_avoid_overrides, normalize_content_policy
+        from commercial_analyzer import normalize_director_controls
+
+        task_controls = dict(payload.ai_controls or {})
+        if not task_controls.get("source_product_hints"):
+            task_controls["source_product_hints"] = [
+                Path(str(path).strip().strip('"')).stem for path in payload.video_paths
+            ]
+        task_controls.setdefault("primary_category", payload.primary_category)
+        task_controls.setdefault("category", payload.category)
+        if not isinstance(task_controls.get("preference_weights"), Mapping):
+            task_controls["preference_weights"] = dict(settings.get("preference_weights") or {})
+        if str(payload.focus_hint or "").strip() not in {"", "自动", "auto"}:
+            task_controls.setdefault("focus_hint", payload.focus_hint)
+        effective_director_controls = normalize_director_controls(task_controls)
+        requested_policy = task_controls.get("content_policy")
+        settings["content_policy"] = apply_run_avoid_overrides(
+            normalize_content_policy(
+                requested_policy if isinstance(requested_policy, Mapping)
+                else dict(settings.get("ai_rules") or {}).get("content_policy")
+            ),
+            task_controls.get("avoid") or (),
+        )
+        planner_mode = controlled_planner_mode(settings)
+        single_ai_director_packet = bool(
+            dict(director_strategy_contract or {}).get("single_ai_director_packet")
+        )
+        if not single_ai_director_packet and planner_mode not in {
+            M2_PLANNER_MODE_HEAVY_DIRECTOR,
+            M2_PLANNER_MODE_LITE_DIRECTOR_EXPERIMENT,
+            M2_PLANNER_MODE_LITE_CHAPTER_COMPRESSION_EXPERIMENT,
+            M2_PLANNER_MODE_LITE_FINAL_EDITOR_EXPERIMENT,
+        }:
+            raise RuntimeError("请先在设置中选择 Heavy Director、Lite Director、Lite Chapter Compression 或 Lite Final Editor（仅本地实验）。")
+        paths = _existing_paths(payload.video_paths, "视频")
+        bundle = dict(source_bundle or {})
+        video = Path(str(bundle.get("preview_video") or paths[0]))
+        if bundle:
+            srt_path = Path(str(bundle.get("srt_path") or ""))
+        else:
+            if len(paths) > 1:
+                emit_log("info", "智能成片导演预览按第 1 个视频生成；多素材请使用混剪成片。", scope)
+            explicit_srt = _clean_path(payload.srt_path) if payload.srt_path.strip() else None
+            srt_path = explicit_srt if explicit_srt and explicit_srt.exists() else _ensure_srt(video, scope)
+        if not srt_path or not srt_path.exists():
+            raise RuntimeError("未找到可用于 AI 导演的 SRT 字幕。")
+        if not bundle:
+            _verify_local_asr_temp_identity_for_experiment(video, srt_path, scope)
+
+        experiment_dir = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment" / task_id).resolve()
+        # M1/M2 raw-response hooks write into this directory during the run,
+        # before the final audit artifact writer is reached.
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        (experiment_dir / "source_info.json").write_text(
+            json.dumps({
+                "video": str(video),
+                "srt": str(srt_path),
+                "source_identical_to_smart_cut_input": True,
+                "task_content_policy": settings["content_policy"],
+                "target_duration": payload.target_duration,
+                "duration_tolerance": payload.duration_tolerance,
+                "run_avoid": list(task_controls.get("avoid") or []),
+                "director_controls": effective_director_controls,
+                "selected_director_direction": dict(director_focus or {}),
+                "formal_export_allowed": bool(dict(director_strategy_contract or {}).get("sentence_preview_without_m3")),
+                "preview_scope": scope,
+                "sources": list(bundle.get("sources") or [str(video)]),
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _set_task_progress(task_id, 15, "建立候选账本和词级血缘")
+        sentence_preview_without_m3 = bool(
+            dict(director_strategy_contract or {}).get("sentence_preview_without_m3")
+        )
+
+        def report_director_progress(stage: str) -> None:
+            progress = {
+                "story_contract_started": (20, "AI 正在确定这条视频的核心故事"),
+                "story_contract_completed": (43, "核心故事已确定"),
+                "beat_casting_started": (46, "AI 正从完整字幕选出真实短句"),
+                "beat_casting_completed": (82, "真实短句已选定，正在还原逐句预览"),
+            }.get(str(stage or ""))
+            if progress:
+                _set_task_progress(task_id, progress[0], progress[1])
+
+        with ai_cost_ledger_scope(task_id=f"commerce_preview:{task_id}", session_id=preview_id):
+            case = _run_case(
+                f"ui_{preview_id}",
+                settings=settings,
+                output_dir=experiment_dir,
+                target_duration=float(payload.target_duration),
+                duration_tolerance=payload.duration_tolerance,
+                skip_m3_materialization=sentence_preview_without_m3,
+                strategy_id="",
+                m1_strategy_override=m1_strategy_override,
+                director_strategy_contract=director_strategy_contract,
+                m2_replan_attempts=0,
+                opening_quality_review=False,
+                # A compiled director packet is a new normal preview route.
+                # It deliberately ignores the historical experimental M2 mode
+                # toggle so it cannot silently fall back to another AI chain.
+                commerce_director=(
+                    planner_mode == M2_PLANNER_MODE_HEAVY_DIRECTOR and not single_ai_director_packet
+                ),
+                commerce_lite=(
+                    planner_mode == M2_PLANNER_MODE_LITE_DIRECTOR_EXPERIMENT and not single_ai_director_packet
+                ),
+                commerce_lite_chapter_compression=(
+                    planner_mode == M2_PLANNER_MODE_LITE_CHAPTER_COMPRESSION_EXPERIMENT
+                    and not single_ai_director_packet
+                ),
+                commerce_lite_final_editor=(
+                    single_ai_director_packet
+                    or planner_mode == M2_PLANNER_MODE_LITE_FINAL_EDITOR_EXPERIMENT
+                ),
+                director_strategy_discovery_only=bool(director_strategy_discovery_only),
+                director_focus=director_focus,
+                director_controls=effective_director_controls,
+                director_progress_hook=report_director_progress,
+                source_definition={
+                    "label": ("多素材混剪" if bundle else video.name),
+                    "product": str(effective_director_controls.get("main_product") or "当前直播商品"),
+                    "srt": str(srt_path),
+                    "video": str(bundle.get("analysis_video") or video),
+                },
+            )
+        if m1_story_library_override:
+            case = dict(case)
+            case["m1_story_library"] = dict(m1_story_library_override)
+        if director_strategy_library_override:
+            case = dict(case)
+            case["director_strategy_library"] = dict(director_strategy_library_override)
+        if director_strategy_contract:
+            case = dict(case)
+            case["director_strategy_contract"] = dict(director_strategy_contract)
+        if selected_story_id:
+            case = dict(case)
+            case["selected_from_m1_story_library"] = selected_story_id
+        cost_report, _ = generate_ai_cost_reports(
+            output_dir=experiment_dir,
+            session_id=preview_id,
+        )
+        if case.get("director_discovery_only"):
+            _write_commerce_director_preview_artifacts(
+                experiment_dir, case=case, planner_mode=planner_mode, preview_id=preview_id,
+                task_id=task_id, video=video, srt_path=srt_path, cost_report=cost_report,
+            )
+            story = dict(case.get("selected_m1_hero") or {})
+            review = {
+                "kind": "m1_story_map_discovery",
+                "headline": "AI 导演方案已建立，正在准备真实口播预览",
+                "m1_story": {
+                    "strategy_id": str(story.get("strategy_id") or ""),
+                    "thesis": str(story.get("thesis") or ""),
+                    "audience_tension": str(story.get("audience_tension") or ""),
+                    "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
+                    "payoff": str(story.get("payoff") or ""),
+                    "story_priority": str(story.get("story_priority") or ""),
+                },
+                "m1_story_library": dict(case.get("m1_story_library") or {}),
+                "director_strategy_library": dict(case.get("director_strategy_library") or {}),
+                "review_contract": {
+                    "m1_discovery_completed": True,
+                    "m2_not_started": True,
+                    "m3_not_started": True,
+                    "formal_export_allowed": False,
+                    "publication_allowed": False,
+                },
+            }
+            dedup_summary = {
+                "narrative_owner": "m1_director_strategy_discovery_only",
+                "planner_mode": planner_mode,
+                "experiment_dir": str(experiment_dir),
+                "m2_started": False,
+                "m3_started": False,
+                "task_content_policy": settings["content_policy"],
+                "formal_export_allowed": False,
+                "publication_allowed": False,
+                "cost_report": dict(cost_report),
+            }
+            _store_preview(
+                preview_id, status="ready", message="AI 已一次性给出导演方案；正在按真实口播物化可播放预览。",
+                video=str(video), video_name=video.name, srt_path=str(srt_path),
+                target_duration=payload.target_duration, raw_clips=[], clips=[], candidate_raw_clips=[], candidate_clips=[],
+                dedup_summary=dedup_summary, commercial_director_experiment=True, planner_mode=planner_mode,
+                director_review=review,
+            )
+            if finalize_task:
+                _set_task(task_id, status="completed", finished_at=time.time())
+            emit_log("success", "AI 导演方案已完成：开始准备逐句可编辑预览。", scope)
+            return
+        draft_review_result = None
+        if not case.get("passed"):
+            draft_review_result = _commerce_director_draft_review(case, video=video)
+            if draft_review_result is not None:
+                case = dict(case)
+                case["draft_review"] = draft_review_result[1]
+        _write_commerce_director_preview_artifacts(
+            experiment_dir,
+            case=case,
+            planner_mode=planner_mode,
+            preview_id=preview_id,
+            task_id=task_id,
+            video=video,
+            srt_path=srt_path,
+            cost_report=cost_report,
+        )
+        if sentence_preview_without_m3:
+            _set_task_progress(task_id, 86, "准备逐句可编辑预览")
+            source_srt_text = srt_path.read_text(encoding="utf-8-sig")
+            raw_clips = _commerce_director_sentence_raw_clips(case, video=video)
+            selected_metadata = _commerce_director_candidate_timeline(case)
+            alternative_raw_clips, alternative_metadata = _commerce_director_alternative_raw_clips(
+                case,
+                video=video,
+                source_srt_text=source_srt_text,
+            )
+            inventory_raw_clips, inventory_metadata = _commerce_director_inventory_raw_clips(
+                case,
+                video=video,
+                source_srt_text=source_srt_text,
+            )
+            if bundle:
+                raw_clips = _remap_mix_director_raw_clips(raw_clips, bundle)
+                mapped_alternatives: list[Any] = []
+                mapped_alternative_metadata: list[dict[str, Any]] = []
+                for alternative_raw, alternative_meta in zip(
+                    alternative_raw_clips, alternative_metadata
+                ):
+                    mapped = _remap_mix_director_raw_clips([alternative_raw], bundle)
+                    if not mapped:
+                        continue
+                    mapped_alternatives.append(mapped[0])
+                    mapped_alternative_metadata.append(dict(alternative_meta))
+                alternative_raw_clips = mapped_alternatives
+                alternative_metadata = mapped_alternative_metadata
+                mapped_inventory: list[Any] = []
+                mapped_inventory_metadata: list[dict[str, Any]] = []
+                for inventory_raw, inventory_meta in zip(
+                    inventory_raw_clips, inventory_metadata
+                ):
+                    mapped = _remap_mix_director_raw_clips([inventory_raw], bundle)
+                    if not mapped:
+                        continue
+                    mapped_inventory.append(mapped[0])
+                    mapped_inventory_metadata.append(dict(inventory_meta))
+                inventory_raw_clips = mapped_inventory
+                inventory_metadata = mapped_inventory_metadata
+            if not raw_clips:
+                raise RuntimeError("AI 导演方案没有返回可直接预览的真实字幕句子。")
+            srt_text = str(bundle.get("preview_srt_text") or "") or srt_path.read_text(encoding="utf-8-sig")
+            cached_word_timings = [
+                dict(item) for item in list(bundle.get("preview_word_timings") or [])
+                if isinstance(item, Mapping)
+            ]
+            sidecar_sources = (
+                [
+                    (f"V{index + 1}", source_srt)
+                    for index, source_srt in enumerate(list(bundle.get("source_srts") or []))
+                ]
+                if bundle else [("", str(srt_path))]
+            )
+            word_timings, word_timing_summary = _preview_word_timings_with_recovery(
+                cached_word_timings, sidecar_sources, scope=scope,
+            )
+            public_clips = _preview_public_clips(
+                raw_clips,
+                srt_text,
+                sources=list(bundle.get("sources") or []),
+                merge_mode=bool(bundle),
+                word_timings=word_timings,
+                preserve_director_selection=True,
+                content_policy=settings["content_policy"],
+            )
+            _annotate_commerce_director_public_clips(
+                public_clips,
+                selected_metadata,
+                recommended=True,
+            )
+            selected_identities = {_preview_candidate_identity(item) for item in raw_clips}
+            unique_alternative_raw: list[Any] = []
+            unique_alternative_metadata: list[dict[str, Any]] = []
+            for alternative_raw, alternative_meta in zip(
+                alternative_raw_clips, alternative_metadata
+            ):
+                identity = _preview_candidate_identity(alternative_raw)
+                if not identity[3] or identity in selected_identities:
+                    continue
+                selected_identities.add(identity)
+                unique_alternative_raw.append(alternative_raw)
+                unique_alternative_metadata.append(dict(alternative_meta))
+            alternative_raw_clips = unique_alternative_raw
+            alternative_metadata = unique_alternative_metadata
+            alternative_public_clips = _preview_public_clips(
+                alternative_raw_clips,
+                srt_text,
+                sources=list(bundle.get("sources") or []),
+                merge_mode=bool(bundle),
+                word_timings=word_timings,
+                preserve_director_selection=True,
+                content_policy=settings["content_policy"],
+            )
+            _annotate_commerce_director_public_clips(
+                alternative_public_clips,
+                alternative_metadata,
+                recommended=False,
+            )
+            unique_inventory_raw: list[Any] = []
+            unique_inventory_metadata: list[dict[str, Any]] = []
+            capacity = max(
+                0,
+                _PREVIEW_CANDIDATE_POOL_LIMIT - len(raw_clips) - len(alternative_raw_clips),
+            )
+            for inventory_raw, inventory_meta in zip(
+                inventory_raw_clips, inventory_metadata
+            ):
+                if len(unique_inventory_raw) >= capacity:
+                    break
+                identity = _preview_candidate_identity(inventory_raw)
+                if not identity[3] or identity in selected_identities:
+                    continue
+                selected_identities.add(identity)
+                unique_inventory_raw.append(inventory_raw)
+                unique_inventory_metadata.append(dict(inventory_meta))
+            inventory_raw_clips = unique_inventory_raw
+            inventory_metadata = unique_inventory_metadata
+            inventory_public_clips = _preview_public_clips(
+                inventory_raw_clips,
+                srt_text,
+                sources=list(bundle.get("sources") or []),
+                merge_mode=bool(bundle),
+                word_timings=word_timings,
+                preserve_director_selection=True,
+                content_policy=settings["content_policy"],
+            )
+            _annotate_commerce_director_public_clips(
+                inventory_public_clips,
+                inventory_metadata,
+                recommended=False,
+                origin="source_inventory",
+            )
+            candidate_raw_clips = [*raw_clips, *alternative_raw_clips, *inventory_raw_clips]
+            candidate_public_clips = [
+                *copy.deepcopy(public_clips),
+                *copy.deepcopy(alternative_public_clips),
+                *copy.deepcopy(inventory_public_clips),
+            ]
+            for candidate_index, candidate_clip in enumerate(candidate_public_clips):
+                candidate_clip["index"] = candidate_index
+            plan_payload = dict(case.get("m2_plan") or {})
+            preview_fidelity = _director_preview_fidelity_audit(public_clips)
+            duration_assessment = dict(plan_payload.get("duration_assessment") or {})
+            actual_seconds = round(sum(float(item.get("duration") or 0.0) for item in public_clips), 3)
+            story = dict(plan_payload.get("story_brief") or case.get("selected_m1_hero") or {})
+            final_story = dict(plan_payload.get("final_story_brief") or {})
+            story.update(final_story)
+            if final_story.get("core_desire"):
+                story["thesis"] = str(final_story["core_desire"])
+                story["core_commercial_idea"] = str(final_story["core_desire"])
+            if final_story.get("opening_promise"):
+                story["payoff"] = str(final_story["opening_promise"])
+            director_review = {
+                "kind": "m2_sentence_preview",
+                "headline": "AI 导演逐句预览",
+                "m1_story": {
+                    "strategy_id": str(story.get("strategy_id") or ""),
+                    "thesis": str(story.get("thesis") or ""),
+                    "audience_tension": str(story.get("audience_tension") or ""),
+                    "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
+                    "payoff": str(story.get("payoff") or ""),
+                    "story_priority": str(story.get("story_priority") or ""),
+                },
+                "m1_story_library": dict(case.get("m1_story_library") or {}),
+                "director_strategy_library": dict(case.get("director_strategy_library") or {}),
+                "m2_outline": _commerce_director_m2_outline(plan_payload),
+                "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
+                "duration_assessment": duration_assessment,
+                "candidate_pool_summary": {
+                    "recommended_count": len(public_clips),
+                    "alternative_count": len(alternative_public_clips),
+                    "source_inventory_count": len(inventory_public_clips),
+                    "candidate_pool_count": len(candidate_public_clips),
+                    "semantic_source": "same_ai_call_alternatives_plus_complete_executable_source_inventory",
+                    "program_auto_inserted": False,
+                    "source_inventory_manual_only": True,
+                },
+                "m3_status": "not_run_sentence_preview",
+                "preview_fidelity": preview_fidelity,
+                "review_contract": {
+                    "sentence_source": "M2 selected candidates in exact AI-authored order",
+                    "m3_materialized": False,
+                    "sentence_preview_editable": True,
+                    "formal_export_allowed": True,
+                    "render_path": "existing_smart_or_mix_from_preview",
+                },
+            }
+            target_fulfilled = str(duration_assessment.get("status") or "") == "target_range_fulfilled"
+            message = (
+                f"AI 导演逐句预览已完成：{len(public_clips)} 句 / {actual_seconds:.1f} 秒。"
+                "每句可单独预览、删改和调整顺序；M3 未运行。"
+            )
+            if preview_fidelity["status"] == "warning":
+                message += " " + preview_fidelity["message"]
+                emit_log("warning", preview_fidelity["message"], scope)
+            _store_preview(
+                preview_id,
+                status="ready",
+                message=message,
+                video=str(video),
+                video_name=("多素材混剪" if bundle else video.name),
+                sources=list(bundle.get("sources") or [str(video)]),
+                srt_path=str(srt_path),
+                srt_text=srt_text,
+                target_duration=payload.target_duration,
+                duration_tolerance=payload.duration_tolerance,
+                raw_clips=raw_clips,
+                clips=public_clips,
+                candidate_raw_clips=candidate_raw_clips,
+                candidate_clips=candidate_public_clips,
+                dedup_summary={
+                    "narrative_owner": "two_pass_ai_director_m2_sentence_preview",
+                    "director_preview_fidelity": preview_fidelity,
+                    "planner_mode": planner_mode,
+                    "planner_version": planner_mode_version(planner_mode),
+                    "experiment_dir": str(experiment_dir),
+                    "m2_plan_valid": bool(plan_payload.get("plan_valid")),
+                    "m3_skipped": True,
+                    "sentence_preview_editable": True,
+                    "target_duration_fulfilled": target_fulfilled,
+                    "word_timing_summary": dict(word_timing_summary),
+                    "task_content_policy": settings["content_policy"],
+                    "formal_export_allowed": True,
+                    "publication_allowed": True,
+                    "cost_report": dict(cost_report),
+                },
+                commercial_director_experiment=True,
+                commercial_director_preview=True,
+                commercial_director_sentence_preview=True,
+                planner_mode=planner_mode,
+                director_review=director_review,
+            )
+            if finalize_task:
+                _set_task(task_id, status="completed", finished_at=time.time(), message=message)
+            emit_log("success", message, scope)
+            return
+        if not case.get("passed"):
+            if draft_review_result is not None:
+                _set_task_progress(task_id, 86, "准备 M2 草案审阅")
+                raw_clips, review = draft_review_result
+                srt_text = srt_path.read_text(encoding="utf-8-sig")
+                word_timings, word_timing_summary = _preview_word_timings_with_recovery(
+                    [], [("", str(srt_path))], scope=scope,
+                )
+                review = dict(review)
+                review["word_timing_summary"] = dict(word_timing_summary)
+                public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
+                dedup_summary = {
+                    "narrative_owner": "m1_m2_draft_review_only",
+                    "planner_mode": planner_mode,
+                    "planner_version": planner_mode_version(planner_mode),
+                    "experiment_dir": str(experiment_dir),
+                    "m1_story_strategy_id": str((case.get("selected_m1_hero") or {}).get("strategy_id") or ""),
+                    "m2_plan_valid": False,
+                    "m3_plan_fidelity_passed": False,
+                    "draft_review_only": True,
+                    "word_timing_summary": dict(word_timing_summary),
+                    "task_content_policy": settings["content_policy"],
+                    "formal_export_allowed": False,
+                    "publication_allowed": False,
+                    "cost_report": dict(cost_report),
+                }
+                _store_preview(
+                    preview_id,
+                    status="ready",
+                    message=(
+                        f"商业导演草案审阅已准备：{len(public_clips)} 个 M2 候选片段。"
+                        "M3 未执行；仅可查看主线、草案和审阅视频。"
+                    ),
+                    video=str(video),
+                    video_name=video.name,
+                    srt_path=str(srt_path),
+                    srt_text=srt_text,
+                    target_duration=payload.target_duration,
+                    raw_clips=raw_clips,
+                    clips=public_clips,
+                    candidate_raw_clips=[],
+                    candidate_clips=[],
+                    dedup_summary=dedup_summary,
+                    commercial_director_experiment=True,
+                    planner_mode=planner_mode,
+                    director_review=review,
+                )
+                if finalize_task:
+                    _set_task(task_id, status="completed", finished_at=time.time())
+                emit_log("warning", "M2 草案未通过 M3；已保留为仅审阅的主线与草案视频。", scope)
+                return
+            invalid_plan = dict(case.get("m2_plan") or {})
+            if invalid_plan and not bool(invalid_plan.get("plan_valid")):
+                # Do not turn an earlier M2 opening/Journey block into the
+                # misleading downstream M3/Story-consumption error.  No M3
+                # selector can materialize an empty invalid plan.
+                raise RuntimeError(
+                    "M2 导演计划未成立："
+                    + "；".join(str(item) for item in list(invalid_plan.get("issues") or [])[:4])
+                )
+            fidelity = dict(case.get("m3_plan_fidelity_audit") or {})
+            consumption = dict(case.get("m2_story_consumption_audit") or {})
+            raise RuntimeError(
+                "商业导演实验未通过可物化合同："
+                + "；".join(
+                    str(item) for item in (
+                        list(fidelity.get("issues") or []) + list(consumption.get("issues") or [])
+                    )[:4]
+                )
+            )
+
+        _set_task_progress(task_id, 86, "生成 M3 词级实验预览")
+        srt_text = srt_path.read_text(encoding="utf-8-sig")
+        word_timings, word_timing_summary = _preview_word_timings_with_recovery(
+            [], [("", str(srt_path))], scope=scope,
+        )
+        raw_clips: list[Any] = []
+        for range_item in list((case.get("m3_selection_result") or {}).get("ranges") or []):
+            start = float(range_item.get("start") or 0.0)
+            end = float(range_item.get("end") or start)
+            text = str(range_item.get("text") or "").strip()
+            if not text or end <= start:
+                raise RuntimeError("M3 返回了无效的词级片段。")
+            raw_clips.append(_preview_clip_with_source((
+                str(range_item.get("chapter_id") or "product"), text, start, end, 0.0,
+                round(end - start, 3), str(range_item.get("chapter_id") or ""), str(video),
+            ), str(video)))
+        if not raw_clips:
+            raise RuntimeError("M3 没有返回可审阅的词级片段。")
+        public_clips = _preview_public_clips(raw_clips, srt_text, word_timings=word_timings)
+        plan_payload = dict(case.get("m2_plan") or {})
+        # Keep frozen M1 provenance readable, but make the current Director
+        # contract authoritative in the final preview summary.  Choosing only
+        # ``final_story_brief`` loses legacy fields such as thesis/priority;
+        # choosing only M1 makes the UI describe an old story instead of the
+        # film the two-stage Director actually authored.
+        story = dict(plan_payload.get("story_brief") or case.get("selected_m1_hero") or {})
+        final_story = dict(plan_payload.get("final_story_brief") or {})
+        story.update(final_story)
+        if final_story.get("core_desire"):
+            story["thesis"] = str(final_story["core_desire"])
+            story["core_commercial_idea"] = str(final_story["core_desire"])
+        if final_story.get("opening_promise"):
+            story["payoff"] = str(final_story["opening_promise"])
+        director_review = {
+            "kind": "m3_materialized_review",
+            "headline": "AI 导演方案与真实口播预览",
+            "m1_story": {
+                "strategy_id": str(story.get("strategy_id") or ""),
+                "thesis": str(story.get("thesis") or ""),
+                "audience_tension": str(story.get("audience_tension") or ""),
+                "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
+                "payoff": str(story.get("payoff") or ""),
+                "story_priority": str(story.get("story_priority") or ""),
+            },
+            "m1_story_library": dict(case.get("m1_story_library") or {}),
+            "director_strategy_library": dict(case.get("director_strategy_library") or {}),
+            "m2_outline": _commerce_director_m2_outline(dict(case.get("m2_plan") or {})),
+            "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
+            "duration_assessment": dict(plan_payload.get("duration_assessment") or {}),
+            "m3_status": "materialized",
+            "review_contract": {
+                "m3_materialized": True,
+                "target_duration_fulfilled": (
+                    str(dict(plan_payload.get("duration_assessment") or {}).get("status") or "")
+                    == "target_range_fulfilled"
+                ),
+                "may_not_enter_formal_preview": True,
+                "may_not_enter_export": True,
+                "may_not_enter_publication": True,
+            },
+        }
+        dedup_summary = {
+            "narrative_owner": "m1_m2_m3_experiment",
+            "planner_mode": planner_mode,
+            "planner_version": planner_mode_version(planner_mode),
+            "experiment_dir": str(experiment_dir),
+            "m1_story_strategy_id": str((case.get("selected_m1_hero") or {}).get("strategy_id") or ""),
+            "m2_plan_valid": True,
+            "m3_plan_fidelity_passed": True,
+            "word_timing_summary": dict(word_timing_summary),
+            "task_content_policy": settings["content_policy"],
+            "opening_quality": "human_review_required",
+            "formal_export_allowed": False,
+            "publication_allowed": False,
+            "cost_report": dict(cost_report),
+        }
+        duration_assessment = dict(plan_payload.get("duration_assessment") or {})
+        actual_seconds = float(duration_assessment.get("actual_seconds") or 0.0)
+        target_fulfilled = str(duration_assessment.get("status") or "") == "target_range_fulfilled"
+        preview_message = (
+            f"AI 导演方案预览完成：实际 {actual_seconds:.1f} 秒，已满足本次 {payload.target_duration} 秒目标区间；"
+            f"共 {len(public_clips)} 段真实口播，可手动比较、删改。"
+            if target_fulfilled else
+            f"AI 导演短版草案已生成：实际 {actual_seconds:.1f} 秒 / 本次目标 {payload.target_duration} 秒；"
+            "可编辑、可播放，但没有伪装成已满足目标时长。"
+        )
+        _store_preview(
+            preview_id,
+            status="ready",
+            message=preview_message,
+            video=str(video),
+            video_name=video.name,
+            srt_path=str(srt_path),
+            srt_text=srt_text,
+            target_duration=payload.target_duration,
+            duration_tolerance=payload.duration_tolerance,
+            raw_clips=raw_clips,
+            clips=public_clips,
+            candidate_raw_clips=[],
+            candidate_clips=[],
+            dedup_summary=dedup_summary,
+            commercial_director_experiment=True,
+            planner_mode=planner_mode,
+            director_review=director_review,
+        )
+        if finalize_task:
+            _set_task(task_id, status="completed", finished_at=time.time())
+        emit_log(
+            "success" if target_fulfilled else "warning",
+            preview_message,
+            scope,
+        )
+    except Exception as exc:
+        failure_artifact = ""
+        if experiment_dir is not None:
+            failure_path = experiment_dir / "failure.json"
+            failure_path.write_text(
+                json.dumps({
+                    "status": "failed",
+                    "error": str(exc),
+                    "video": str(video) if video is not None else "",
+                    "srt": str(srt_path) if srt_path is not None else "",
+                    "formal_export_allowed": False,
+                    "publication_allowed": False,
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            failure_artifact = str(failure_path)
+        _store_preview(
+            preview_id,
+            status="failed",
+            error=str(exc),
+            message="商业导演实验预览失败。",
+            commercial_director_experiment=True,
+            video=str(video) if video is not None else "",
+            video_name=video.name if video is not None else "",
+            srt_path=str(srt_path) if srt_path is not None else "",
+            dedup_summary={
+                "experiment_dir": str(experiment_dir) if experiment_dir is not None else "",
+                "failure_artifact": failure_artifact,
+                "formal_export_allowed": False,
+                "publication_allowed": False,
+            },
+        )
+        if finalize_task:
+            _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"商业导演实验预览失败：{exc}", scope)
+
+
+def _director_review_timeline(clips: Sequence[Any]) -> list[dict[str, Any]]:
+    """Return the readable review script without exposing editable preview state."""
+    timeline: list[dict[str, Any]] = []
+    for position, clip in enumerate(clips or [], start=1):
+        info = dict(clip) if isinstance(clip, Mapping) else _clip_public(position - 1, clip)
+        text = str(info.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            duration = max(0.0, float(info.get("duration") or 0.0))
+        except (TypeError, ValueError):
+            duration = 0.0
+        timeline.append({
+            "position": position,
+            "chapter_id": str(info.get("clip_type") or info.get("chapter_id") or ""),
+            "text": text,
+            "duration": round(duration, 3),
+        })
+    return timeline
+
+
+def _commerce_director_candidate_timeline(case: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Project M2's frozen candidate order for the human-only review UI.
+
+    This is intentionally a read-only projection: it carries the candidate's
+    recorded identity and M3 binding verdict to the browser without selecting,
+    reordering, or changing any candidate. The browser can therefore keep a
+    manual draft traceable while the existing M3 contract remains authoritative.
+    """
+    plan = case.get("m2_plan")
+    if not isinstance(plan, Mapping):
+        return []
+    packet_rows = _commerce_director_packet_rows(plan)
+    chapter_metadata = {
+        str(packet.get("chapter_id") or "").strip(): {
+            "director_chapter_id": str(packet.get("chapter_id") or "").strip(),
+            "director_chapter_title": str(
+                packet.get("title") or packet.get("purpose") or packet.get("buyer_advance") or ""
+            ).strip(),
+            "director_chapter_kind": str(packet.get("chapter_kind") or "").strip(),
+            "director_buyer_advance": str(
+                packet.get("buyer_advance") or packet.get("new_buyer_knowledge") or ""
+            ).strip(),
+            "director_chapter_coverage": str(packet.get("coverage") or "recommended").strip(),
+        }
+        for packet in packet_rows
+        if str(packet.get("chapter_id") or "").strip()
+    }
+    beat_metadata: dict[tuple[str, int], dict[str, Any]] = {}
+    for packet in packet_rows:
+        chapter_id = str(packet.get("chapter_id") or "").strip()
+        for beat in list(packet.get("beats") or []):
+            if not isinstance(beat, Mapping):
+                continue
+            for raw_id in list(beat.get("subtitle_ids") or []):
+                try:
+                    subtitle_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                beat_metadata[(chapter_id, subtitle_id)] = {
+                    "director_beat_id": str(beat.get("beat_id") or "").strip(),
+                    "director_beat_function": str(
+                        beat.get("answer_role") or beat.get("role") or beat.get("beat_function") or ""
+                    ).strip(),
+                }
+    candidates: dict[int, Mapping[str, Any]] = {}
+    for raw in list(plan.get("selected_candidates") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            candidate_id = int(raw.get("candidate_id"))
+        except (TypeError, ValueError):
+            continue
+        candidates[candidate_id] = raw
+
+    binding_status: dict[int, str] = {}
+    for raw in list(case.get("chapter_lineage") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            candidate_id = int(raw.get("candidate_id"))
+        except (TypeError, ValueError):
+            continue
+        spans = list(raw.get("semantic_srt_word_spans") or [])
+        binding_status[candidate_id] = (
+            "exact_bound"
+            if spans and all(
+                isinstance(span, Mapping)
+                and str(span.get("status") or "") == "bound"
+                and str(span.get("alignment_kind") or "") == "exact"
+                and float(span.get("alignment_confidence") or 0.0) >= 1.0
+                for span in spans
+            )
+            else "not_exact_bound"
+        )
+
+    rows: list[dict[str, Any]] = []
+    position = 0
+    for beat in list(plan.get("beats") or []):
+        if not isinstance(beat, Mapping):
+            continue
+        chapter_id = str(beat.get("chapter_id") or "").strip()
+        for raw_id in list(beat.get("candidate_ids") or []):
+            try:
+                candidate_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            candidate = candidates.get(candidate_id)
+            if candidate is None:
+                continue
+            text = str(candidate.get("text") or "").strip()
+            start = float(candidate.get("start") or 0.0)
+            end = float(candidate.get("end") or start)
+            duration = max(0.0, float(candidate.get("duration") or (end - start)))
+            if not text or end <= start or duration <= 0.0:
+                continue
+            metadata = dict(chapter_metadata.get(chapter_id) or {})
+            source_subtitle_ids: list[int] = []
+            for raw_subtitle_id in list(candidate.get("origin_subtitle_ids") or []):
+                try:
+                    source_subtitle_ids.append(int(raw_subtitle_id))
+                except (TypeError, ValueError):
+                    continue
+            for source_subtitle_id in source_subtitle_ids or [candidate_id]:
+                if (chapter_id, source_subtitle_id) in beat_metadata:
+                    metadata.update(beat_metadata[(chapter_id, source_subtitle_id)])
+                    break
+            position += 1
+            rows.append({
+                "position": position,
+                "chapter_id": chapter_id,
+                "candidate_id": candidate_id,
+                "text": text,
+                "duration": round(duration, 3),
+                "word_materialization_status": binding_status.get(candidate_id, "not_verified"),
+                **metadata,
+                "source_lineage": {
+                    "candidate_id": candidate_id,
+                    "source_id": str(candidate.get("source_id") or ""),
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "origin_subtitle_ids": list(candidate.get("origin_subtitle_ids") or []),
+                    "subject_relation": str(candidate.get("subject_relation") or ""),
+                    "role_permissions": list(candidate.get("role_permissions") or []),
+                },
+            })
+    return rows
+
+
+def _commerce_director_packet_rows(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the AI-authored chapter packets without deriving new semantics."""
+    contract = plan.get("selection_contract")
+    contract = dict(contract) if isinstance(contract, Mapping) else {}
+    rows = contract.get("director_chapter_packets") or ()
+    if not rows:
+        narrative = contract.get("director_narrative_contract")
+        narrative = dict(narrative) if isinstance(narrative, Mapping) else {}
+        rows = narrative.get("chapter_packets") or ()
+    if isinstance(rows, Mapping):
+        rows = (rows,)
+    return [dict(item) for item in rows if isinstance(item, Mapping)]
+
+
+def _commerce_director_alternative_raw_clips(
+    case: Mapping[str, Any],
+    *,
+    video: Path,
+    source_srt_text: str,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Expose only alternatives explicitly cast by the same Director call.
+
+    This is a mechanical subtitle-ID projection.  It does not search, rank,
+    replace or append any semantic content to the final plan.
+    """
+    plan = case.get("m2_plan")
+    if not isinstance(plan, Mapping) or not source_srt_text.strip():
+        return [], []
+    try:
+        from cutter_logic import _parse_srt_to_segments
+
+        subtitle_rows = [
+            dict(item) for item in (_parse_srt_to_segments(source_srt_text) or [])
+            if isinstance(item, Mapping)
+        ]
+    except Exception:
+        return [], []
+    by_id = {index: row for index, row in enumerate(subtitle_rows, start=1)}
+    selected_ids = {
+        int(raw_id)
+        for packet in _commerce_director_packet_rows(plan)
+        for beat in list(packet.get("beats") or [])
+        if isinstance(beat, Mapping)
+        for raw_id in list(beat.get("subtitle_ids") or [])
+        if str(raw_id).strip().isdigit()
+    }
+    seen = set(selected_ids)
+    raw_clips: list[Any] = []
+    metadata_rows: list[dict[str, Any]] = []
+    for packet in _commerce_director_packet_rows(plan):
+        chapter_id = str(packet.get("chapter_id") or "product").strip() or "product"
+        chapter_title = str(
+            packet.get("title") or packet.get("purpose") or packet.get("buyer_advance") or chapter_id
+        ).strip()
+        alternatives = packet.get("alternative_beats") or packet.get("alternate_beats") or ()
+        if isinstance(alternatives, Mapping):
+            alternatives = (alternatives,)
+        for beat in list(alternatives)[:3]:
+            if not isinstance(beat, Mapping):
+                continue
+            raw_ids = beat.get("subtitle_ids") or ()
+            if isinstance(raw_ids, (str, int)):
+                raw_ids = (raw_ids,)
+            ids: list[int] = []
+            for raw_id in raw_ids:
+                try:
+                    subtitle_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if subtitle_id > 0:
+                    ids.append(subtitle_id)
+            # Casting is explicitly one 1-8s source sentence per alternative.
+            # Do not have the program merge several rows into a new utterance.
+            if len(ids) != 1 or ids[0] in seen or ids[0] not in by_id:
+                continue
+            subtitle_id = ids[0]
+            row = by_id[subtitle_id]
+            text = str(row.get("text") or "").strip()
+            try:
+                start = float(row.get("start") or 0.0)
+                end = float(row.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            if not text or end <= start or end - start > 8.05:
+                continue
+            seen.add(subtitle_id)
+            raw_clips.append(_preview_clip_with_source((
+                chapter_id,
+                text,
+                round(start, 3),
+                round(end, 3),
+                0.0,
+                round(end - start, 3),
+                chapter_id,
+                str(video),
+            ), str(video)))
+            metadata_rows.append({
+                "director_chapter_id": chapter_id,
+                "director_chapter_title": chapter_title,
+                "director_chapter_kind": str(packet.get("chapter_kind") or "").strip(),
+                "director_buyer_advance": str(
+                    packet.get("buyer_advance") or packet.get("new_buyer_knowledge") or ""
+                ).strip(),
+                "director_chapter_coverage": str(packet.get("coverage") or "recommended").strip(),
+                "director_beat_id": str(beat.get("beat_id") or "").strip(),
+                "director_beat_function": str(
+                    beat.get("answer_role") or beat.get("role") or beat.get("beat_function") or ""
+                ).strip(),
+                "director_replaces_beat_id": str(
+                    beat.get("replaces_beat_id") or beat.get("replacement_for_beat_id") or ""
+                ).strip(),
+                "source_subtitle_id": subtitle_id,
+            })
+    return raw_clips, metadata_rows
+
+
+def _commerce_director_inventory_raw_clips(
+    case: Mapping[str, Any],
+    *,
+    video: Path,
+    source_srt_text: str,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Expose the complete executable sentence pool for manual editing only.
+
+    The Director still owns the selected story and exact sentence order. These
+    source-grounded rows are never ranked, inserted or assigned to a chapter by
+    the program.
+    """
+    commerce_lite = case.get("commerce_lite")
+    commerce_lite = dict(commerce_lite) if isinstance(commerce_lite, Mapping) else {}
+    tags = commerce_lite.get("tags") or ()
+    if isinstance(tags, Mapping):
+        tags = (tags,)
+    if not tags or not source_srt_text.strip():
+        return [], []
+    try:
+        from cutter_logic import _parse_srt_to_segments
+
+        subtitle_rows = [
+            dict(item) for item in (_parse_srt_to_segments(source_srt_text) or [])
+            if isinstance(item, Mapping)
+        ]
+    except Exception:
+        return [], []
+    by_id = {index: row for index, row in enumerate(subtitle_rows, start=1)}
+    raw_clips: list[Any] = []
+    metadata_rows: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for tag_raw in tags:
+        if not isinstance(tag_raw, Mapping) or tag_raw.get("materializable") is False:
+            continue
+        try:
+            subtitle_id = int(tag_raw.get("candidate_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if subtitle_id <= 0 or subtitle_id in seen_ids or subtitle_id not in by_id:
+            continue
+        row = by_id[subtitle_id]
+        text = str(row.get("text") or tag_raw.get("text") or "").strip()
+        try:
+            start = float(row.get("start") or 0.0)
+            end = float(row.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        if not text or end <= start or end - start > 8.05:
+            continue
+        seen_ids.add(subtitle_id)
+        raw_clips.append(_preview_clip_with_source((
+            "product",
+            text,
+            round(start, 3),
+            round(end, 3),
+            0.0,
+            round(end - start, 3),
+            "",
+            str(video),
+        ), str(video)))
+        metadata_rows.append({
+            "director_candidate_id": subtitle_id,
+            "source_subtitle_id": subtitle_id,
+            "candidate_asset_role": str(tag_raw.get("asset_role") or "").strip(),
+            "candidate_purchase_value_hints": list(tag_raw.get("purchase_value_hints") or []),
+            "hook_eligible": bool(tag_raw.get("hook_eligible")),
+            "manual_candidate_only": True,
+        })
+    return raw_clips, metadata_rows
+
+
+def _annotate_commerce_director_public_clips(
+    clips: Sequence[dict[str, Any]],
+    metadata_rows: Sequence[Mapping[str, Any]],
+    *,
+    recommended: bool,
+    origin: str = "",
+) -> None:
+    """Keep AI chapter/function labels authoritative in Director previews."""
+    for clip, metadata_raw in zip(clips, metadata_rows):
+        metadata = dict(metadata_raw or {})
+        title = str(metadata.get("director_chapter_title") or "").strip()
+        beat_function = str(metadata.get("director_beat_function") or "").strip()
+        clip.update(metadata)
+        clip["director_candidate_id"] = metadata.get("director_candidate_id", metadata.get("candidate_id"))
+        if title:
+            clip["focus"] = title
+            clip["focus_block"] = title
+        if beat_function:
+            clip["director_beat_function"] = beat_function
+        clip["candidate_origin"] = origin or ("recommended" if recommended else "director_alternative")
+        clip["recommended"] = bool(recommended)
+        if not recommended:
+            clip["selected"] = False
+            for segment in list(clip.get("segments") or []):
+                if isinstance(segment, dict):
+                    segment["selected"] = False
+
+
+def _commerce_director_sentence_raw_clips(
+    case: Mapping[str, Any],
+    *,
+    video: Path,
+) -> list[Any]:
+    """Project M2's exact AI order directly into the legacy sentence preview.
+
+    Each selected candidate remains one independently editable SRT-timed
+    preview item.  There is deliberately no word binding, M3 trimming,
+    semantic replacement, merging, or programmatic reordering here.
+    """
+    rows = _commerce_director_candidate_timeline(case)
+    raw_clips: list[Any] = []
+    for row in rows:
+        lineage = dict(row.get("source_lineage") or {})
+        text = str(row.get("text") or "").strip()
+        chapter_id = str(row.get("chapter_id") or "product").strip() or "product"
+        try:
+            start = float(lineage.get("start") or 0.0)
+            end = float(lineage.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        if not text or end <= start:
+            continue
+        raw_clips.append(_preview_clip_with_source((
+            chapter_id,
+            text,
+            round(start, 3),
+            round(end, 3),
+            0.0,
+            round(end - start, 3),
+            chapter_id,
+            str(video),
+        ), str(video)))
+    return raw_clips
+
+
+def _director_batch_result_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose one child preview without granting it normal-preview authority."""
+    proposal = dict(entry.get("proposal") or {})
+    child = _get_preview(str(entry.get("preview_id") or "")) or {}
+    review = dict(child.get("director_review") or {})
+    clips = list(child.get("clips") or [])
+    selected_seconds = round(sum(float(item.get("duration") or 0.0) for item in clips), 3)
+    kind = str(review.get("kind") or "")
+    if child.get("status") == "ready" and kind == "m3_materialized_review":
+        state = "m3_materialized"
+    elif child.get("status") == "ready" and kind == "m2_sentence_preview":
+        state = "m2_sentence_preview"
+    elif child.get("status") == "ready" and kind == "m2_draft_review_only":
+        state = "m2_draft_review_only"
+    elif child.get("status") == "failed":
+        state = "blocked"
+    else:
+        state = "pending"
+    return {
+        "director_strategy_id": str(proposal.get("director_strategy_id") or ""),
+        "name": str(proposal.get("name") or "AI 导演方案"),
+        "icon": str(proposal.get("icon") or ""),
+        "opening_promise": str(proposal.get("opening_promise") or ""),
+        "commercial_goal": str(proposal.get("commercial_goal") or proposal.get("goal") or ""),
+        "preview_id": str(entry.get("preview_id") or ""),
+        "task_id": str(entry.get("task_id") or ""),
+        "state": state,
+        "review_kind": kind,
+        "selected_seconds": selected_seconds,
+        "clip_count": len(clips),
+        "timeline": list(review.get("m2_candidate_timeline") or []) or _director_review_timeline(clips),
+        "m1_thesis": str((review.get("m1_story") or {}).get("thesis") or ""),
+        "m2_outline": list(review.get("m2_outline") or []),
+        "issues": [str(item) for item in list((review.get("m2_draft") or {}).get("issues") or []) if str(item).strip()],
+        "m3_status": str(review.get("m3_status") or ""),
+        "review_video_available": state in {"m3_materialized", "m2_draft_review_only", "m2_sentence_preview"},
+        "message": str(child.get("message") or ""),
+        "error": str(child.get("error") or ""),
+        "formal_export_allowed": False,
+        "publication_allowed": False,
+    }
+
+
+def _run_commerce_director_strategy_batch(
+    batch_task_id: str,
+    batch_preview_id: str,
+    source_preview: Mapping[str, Any],
+    entries: Sequence[Mapping[str, Any]],
+    story_library: Mapping[str, Any],
+    strategy_library: Mapping[str, Any],
+) -> None:
+    """Materialize one-call director packets sequentially for comparison.
+
+    The parent has one semantic director response.  Child work is only source
+    lineage binding and existing M3 materialization; it must not launch a new
+    strategy, ranking, journey, or audit model call.
+    """
+    scope = "smart-cut"
+    total = len(entries)
+    video = str(source_preview.get("video") or "").strip()
+    srt_path = str(source_preview.get("srt_path") or "").strip()
+    target_duration = max(10, int(source_preview.get("target_duration") or 60))
+    source_story = dict((source_preview.get("director_review") or {}).get("m1_story") or {})
+    _set_task(
+        batch_task_id, status="running", started_at=time.time(), progress=5,
+        message=f"正在物化 AI 导演方案 0/{total}", batch_total=total, batch_done=0,
+    )
+    _store_preview(
+        batch_preview_id,
+        task_id=batch_task_id,
+        scope=scope,
+        status="running",
+        message=f"AI 已完成导演方案，正在忠实物化 {total} 条可播放预览。",
+        created_at=time.time(),
+        target_duration=target_duration,
+        clips=[],
+        commercial_director_experiment=True,
+        director_review={
+            "kind": "m1_m2_m3_batch_review",
+            "headline": "AI 导演方案：正在生成可播放预览",
+            "m1_story": source_story,
+            "m1_story_library": dict(story_library),
+            "director_strategy_library": dict(strategy_library),
+            "batch_results": [],
+            "review_contract": {
+                "m1_reused": True,
+                "semantic_ai_calls": 1,
+                "per_strategy_work": "source_binding_and_m3_materialization_only",
+                "formal_export_allowed": False,
+                "publication_allowed": False,
+            },
+        },
+    )
+    emit_log("info", f"AI 已一次性给出 {total} 条导演方案；正在按原句顺序物化预览。", scope)
+    completed = 0
+    for index, entry in enumerate(entries, 1):
+        if _task_cancel_event(batch_task_id).is_set():
+            break
+        proposal = dict(entry.get("proposal") or {})
+        child_task_id = str(entry.get("task_id") or "")
+        child_preview_id = str(entry.get("preview_id") or "")
+        _set_task_progress(
+            batch_task_id,
+            5 + (index - 1) / max(total, 1) * 88,
+            f"物化 AI 导演方案 {index}/{total}：{proposal.get('name') or proposal.get('director_strategy_id')}",
+            phase="ai_director_batch", phase_label="生成导演审阅成片",
+            phase_current=index, phase_total=total,
+        )
+        child_payload = SmartCutPayload(
+            video_paths=[video], srt_path=srt_path, target_duration=target_duration,
+        )
+        _run_commerce_director_preview(
+            child_task_id,
+            child_preview_id,
+            child_payload,
+            entry.get("composite"),
+            story_library,
+            strategy_library,
+            entry.get("contract"),
+            str(proposal.get("director_strategy_id") or ""),
+        )
+        completed = index
+        current_results = [_director_batch_result_entry(item) for item in entries[:completed]]
+        _store_preview(
+            batch_preview_id,
+            status="running",
+            message=f"已完成 {completed}/{total} 条 AI 导演方案预览。",
+            director_review={
+                "kind": "m1_m2_m3_batch_review",
+                "headline": "AI 导演方案：可播放预览生成中",
+                "m1_story": source_story,
+                "m1_story_library": dict(story_library),
+                "director_strategy_library": dict(strategy_library),
+                "batch_results": current_results,
+                "review_contract": {
+                    "m1_reused": True,
+                    "semantic_ai_calls": 1,
+                    "per_strategy_work": "source_binding_and_m3_materialization_only",
+                    "formal_export_allowed": False,
+                    "publication_allowed": False,
+                },
+            },
+        )
+    results = [_director_batch_result_entry(entry) for entry in entries[:completed]]
+    materialized = sum(item["state"] == "m3_materialized" for item in results)
+    sentence_previews = sum(item["state"] == "m2_sentence_preview" for item in results)
+    drafts = sum(item["state"] == "m2_draft_review_only" for item in results)
+    blocked = sum(item["state"] == "blocked" for item in results)
+    cancelled = _task_cancel_event(batch_task_id).is_set()
+    _store_preview(
+        batch_preview_id,
+        status="ready",
+        # Make the aggregate view win after a page refresh instead of its last
+        # child preview becoming the apparent result.
+        created_at=time.time(),
+        message=(
+            f"导演方案预览完成：{sentence_previews} 条逐句预览、{materialized} 条历史 M3 预览、"
+            f"{drafts} 条仅草案、{blocked} 条阻断。"
+            "仅供人工比较，不能正式导出或发布。"
+        ),
+        video=video,
+        video_name=Path(video).name if video else "",
+        srt_path=srt_path,
+        target_duration=target_duration,
+        clips=[],
+        commercial_director_experiment=True,
+        dedup_summary={
+            "narrative_owner": "m1_reused_multi_m2_m3_experiment",
+            "batch_total": total,
+            "batch_completed": completed,
+            "m3_materialized": materialized,
+            "m2_sentence_preview": sentence_previews,
+            "m2_draft_review_only": drafts,
+            "blocked": blocked,
+            "formal_export_allowed": False,
+            "publication_allowed": False,
+        },
+        director_review={
+            "kind": "m1_m2_m3_batch_review",
+            "headline": "AI 导演方案：多条可播放预览",
+            "m1_story": source_story,
+            "m1_story_library": dict(story_library),
+            "director_strategy_library": dict(strategy_library),
+            "batch_results": results,
+            "review_contract": {
+                "m1_reused": True,
+                "semantic_ai_calls": 1,
+                "per_strategy_work": "source_binding_and_m3_materialization_only",
+                "cancelled": cancelled,
+                "formal_export_allowed": False,
+                "publication_allowed": False,
+            },
+        },
+    )
+    if cancelled:
+        _set_task(batch_task_id, status="cancelled", finished_at=time.time(), message="已停止 AI 导演多方案实验。")
+        emit_log("warning", "AI导演多方案实验已停止；已完成的审阅结果仍可查看。", scope)
+        return
+    _set_task(
+        batch_task_id, status="completed", finished_at=time.time(),
+        message=f"多方案审阅完成：M3 {materialized} 条，M2 草案 {drafts} 条，阻断 {blocked} 条。",
+        batch_total=total, batch_done=completed, batch_succeeded=materialized,
+        batch_insufficient=drafts, batch_failed=blocked,
+    )
+    emit_log("success", "AI导演方案预览完成：请逐条播放、比较，并在旧编辑链路中手动删改。", scope)
+
+
+def _commerce_director_batch_entries_from_discovery(
+    source_preview: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """Compile every available M1 sell path without rediscovering the product.
+
+    The helper is shared by the initial one-click experiment flow and keeps the
+    existing explicit batch endpoint honest: M1 produces the story map once;
+    every M2/M3 child receives only a compiled strategy from that frozen map.
+    """
+    review = dict(source_preview.get("director_review") or {})
+    story_library = dict(review.get("m1_story_library") or {})
+    strategy_library = dict(review.get("director_strategy_library") or {})
+    available = [
+        dict(item) for item in list(strategy_library.get("proposals") or [])
+        if isinstance(item, Mapping) and bool(item.get("available"))
+    ][:3]
+    if not available:
+        raise RuntimeError("当前素材没有可自动生成的 AI 导演方案。")
+
+    experiment_dir = Path(str((source_preview.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
+    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    try:
+        experiment_dir.relative_to(experiment_root)
+    except ValueError as exc:
+        raise RuntimeError("当前实验的 M1 审计目录无效，无法安全复用故事地图。") from exc
+    try:
+        brief = json.loads((experiment_dir / "m1_story_brief.json").read_text(encoding="utf-8"))
+        raw_strategies = list(dict(brief.get("m1_result") or {}).get("strategies") or [])
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("当前实验没有完整的 M1 原始故事，不能自动生成多方案。") from exc
+    if not raw_strategies:
+        raise RuntimeError("当前实验没有完整的 M1 原始故事，不能自动生成多方案。")
+
+    from commercial_analyzer import Strategy
+    from director_strategy import compile_director_strategy
+
+    strategies = tuple(
+        Strategy.from_dict(item, index=index)
+        for index, item in enumerate(raw_strategies, 1)
+        if isinstance(item, Mapping)
+    )
+    entries: list[dict[str, Any]] = []
+    for proposal in available:
+        try:
+            composite, contract = compile_director_strategy(proposal, strategies)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        contract = {**dict(contract or {}), "sentence_preview_without_m3": True}
+        entries.append({
+            "proposal": proposal,
+            "composite": composite,
+            "contract": contract,
+            "task_id": _new_task("smart-cut", f"AI导演方案：{proposal.get('name') or proposal.get('director_strategy_id')}"),
+            "preview_id": uuid.uuid4().hex,
+        })
+    return entries, story_library, strategy_library
+
+
+def _run_commerce_director_preview_auto_batch(
+    task_id: str,
+    preview_id: str,
+    payload: SmartCutPayload,
+    *,
+    finalize_task: bool = True,
+) -> None:
+    """Default flow: Director draft, measured final revision, then exact M3."""
+    _run_commerce_director_preview(
+        task_id,
+        preview_id,
+        payload,
+        director_strategy_contract={
+            # Keep the historical flag only as the exact-source M3 executor
+            # compatibility switch.  Semantic ownership is now two stages.
+            "single_ai_director_packet": True,
+            "two_pass_director_packet": True,
+            "sentence_preview_without_m3": True,
+            "semantic_call_count": 2,
+            "packet_mode": "primary_only",
+        },
+        finalize_task=finalize_task,
+    )
+
+
+def _run_commerce_director_mix_preview(
+    task_id: str,
+    preview_id: str,
+    payload: MixPayload,
+    director_focus: Mapping[str, Any] | None = None,
+    *,
+    finalize_task: bool = True,
+) -> None:
+    """Run the same two-call Director over all mix sources as one story space."""
+    scope = "mix"
+    try:
+        _ensure_feature_access("混剪成片")
+        paths = _existing_paths(payload.video_paths, "视频")
+        _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备多素材字幕")
+        _store_preview(
+            preview_id,
+            task_id=task_id,
+            scope=scope,
+            status="running",
+            message="正在汇总全部素材字幕，由 AI 导演统一规划故事和短句。",
+            created_at=time.time(),
+            target_duration=payload.duration,
+            duration_tolerance=payload.duration_tolerance,
+            clips=[],
+            commercial_director_experiment=True,
+            commercial_director_preview=True,
+        )
+        source_bundle = _prepare_mix_director_source(paths, task_id=task_id, scope=scope)
+        smart_payload = SmartCutPayload(
+            video_paths=[str(path) for path in paths],
+            output_dir=payload.output_dir,
+            output_naming_mode=payload.output_naming_mode,
+            primary_category=payload.primary_category,
+            category=payload.category,
+            focus_hint=payload.focus_hint,
+            ai_controls=dict(payload.ai_controls or {}),
+            target_duration=payload.duration,
+            duration_tolerance=payload.duration_tolerance,
+            versions=payload.versions,
+            dedup_preset=payload.dedup_preset,
+            video=dict(payload.video or {}),
+            audio=dict(payload.audio or {}),
+            transition=dict(payload.transition or {}),
+            mirror_enabled=payload.mirror_enabled,
+            subtitle_overlay=payload.subtitle_overlay,
+            smart_crop_enabled=payload.smart_crop_enabled,
+            crop_level=payload.crop_level,
+            ken_burns_enabled=payload.ken_burns_enabled,
+            ken_burns_intensity=payload.ken_burns_intensity,
+            pip_enabled=payload.pip_enabled,
+            pip_path=payload.pip_path,
+            pip_folder=payload.pip_folder,
+            pip_size=payload.pip_size,
+            pip_opacity=payload.pip_opacity,
+            pip_pos=payload.pip_pos,
+        )
+        _run_commerce_director_preview(
+            task_id,
+            preview_id,
+            smart_payload,
+            director_strategy_contract={
+                "single_ai_director_packet": True,
+                "two_pass_director_packet": True,
+                "sentence_preview_without_m3": True,
+                "semantic_call_count": 2,
+                "packet_mode": "primary_only",
+            },
+            selected_story_id=str(
+                dict(director_focus or {}).get("strategy_id")
+                or dict(director_focus or {}).get("director_strategy_id")
+                or ""
+            ),
+            director_focus=director_focus,
+            preview_scope=scope,
+            source_bundle=source_bundle,
+            finalize_task=finalize_task,
+        )
+    except Exception as exc:
+        _store_preview(
+            preview_id,
+            status="failed",
+            error=str(exc),
+            message="AI 导演混剪预览失败。",
+            commercial_director_experiment=True,
+            commercial_director_preview=True,
+        )
+        if finalize_task:
+            _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"AI 导演混剪预览失败：{exc}", scope)
+
+
+def _run_smart_cut_from_preview(
+    task_id: str,
+    payload: SmartPreviewCutPayload,
+    *,
+    finalize_task: bool = True,
+    raise_errors: bool = False,
+) -> list[str]:
     scope = "smart-cut"
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取预览片段")
     emit_log("info", "使用 AI 选片预览开始成片。", scope)
@@ -12268,7 +14888,12 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
             len(raw_clips),
         )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
-        clips = _hard_filter_preview_selection(clips, scope)
+        before_filter = list(clips)
+        clips = _hard_filter_preview_selection(
+            clips, scope,
+            content_policy=(preview.get("dedup_summary") or {}).get("task_content_policy"),
+        )
+        _record_director_export_fidelity(preview, before_filter, clips, task_id, scope)
         if not clips:
             raise RuntimeError("请至少保留一个片段再成片。")
         _log_preview_selection(scope, "预览成片子句选择", selected_indices, selected_segments, clips)
@@ -12282,50 +14907,414 @@ def _run_smart_cut_from_preview(task_id: str, payload: SmartPreviewCutPayload) -
         _set_task_progress(task_id, 28, "准备输出")
         output_dir = Path(payload.output_dir.strip().strip('"')) if payload.output_dir.strip() else video.parent / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(_smart_output_path(output_dir, video, payload.output_naming_mode, versions=1))
+        version_count = max(1, int(payload.versions or 1))
+        base_output_path = _smart_output_path(
+            output_dir, video, payload.output_naming_mode, versions=version_count
+        )
+        version_paths = [
+            base_output_path
+            if version_count == 1
+            else base_output_path.with_name(
+                f"{base_output_path.stem}_v{index}{base_output_path.suffix}"
+            )
+            for index in range(1, version_count + 1)
+        ]
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
 
-        result = _process_version_with_clips(
-            str(video),
-            srt_path,
-            output_path,
-            clips,
-            payload.dedup_preset,
-            payload.subtitle_overlay,
-            _task_log_fn(task_id, scope, base=30, span=58),
-            _task_cancel_event(task_id),
-            pip_path,
-            payload.pip_size,
-            payload.pip_opacity,
-            payload.pip_pos,
-            smart_crop_enabled=payload.smart_crop_enabled,
-            crop_level=payload.crop_level,
-            ken_burns_enabled=payload.ken_burns_enabled,
-            mirror_enabled=payload.mirror_enabled,
-            kb_intensity=payload.ken_burns_intensity,
-            target_duration=payload.target_duration,
-            duration_tolerance=payload.duration_tolerance,
-            dedup_video_options=payload.video,
-            dedup_audio_options=payload.audio,
-            transition_options=payload.transition,
-        )
-        if not result:
+        produced_outputs: list[str] = []
+        for version_index, version_path in enumerate(version_paths, 1):
+            if _is_task_cancelled(task_id):
+                break
+            emit_log(
+                "info",
+                f"导演方案成片 {version_index}/{version_count}：复用同一故事片单，不重新调用 AI。",
+                scope,
+            )
+            result = _process_version_with_clips(
+                str(video),
+                srt_path,
+                str(version_path),
+                clips,
+                payload.dedup_preset,
+                payload.subtitle_overlay,
+                _task_log_fn(task_id, scope, base=30, span=58),
+                _task_cancel_event(task_id),
+                pip_path,
+                payload.pip_size,
+                payload.pip_opacity,
+                payload.pip_pos,
+                smart_crop_enabled=payload.smart_crop_enabled,
+                crop_level=payload.crop_level,
+                ken_burns_enabled=payload.ken_burns_enabled,
+                mirror_enabled=payload.mirror_enabled,
+                kb_intensity=payload.ken_burns_intensity,
+                target_duration=payload.target_duration,
+                duration_tolerance=payload.duration_tolerance,
+                dedup_video_options=payload.video,
+                dedup_audio_options=payload.audio,
+                transition_options=payload.transition,
+            )
+            if _result_ok(result) and version_path.exists():
+                produced_outputs.append(str(version_path))
+            else:
+                emit_log("warning", f"导演方案成片第 {version_index} 版未生成输出。", scope)
+        if not produced_outputs:
             raise RuntimeError("预览成片失败。")
         _set_task_progress(task_id, 94, "整理输出")
         _archive_used_pip(used_pip_file, scope)
-        _consume_trial("智能成片", scope=scope)
+        _consume_trial("智能成片", units=len(produced_outputs), scope=scope)
+        if finalize_task:
+            _set_task(
+                task_id,
+                status="completed",
+                finished_at=time.time(),
+                output=produced_outputs[0],
+                outputs=produced_outputs,
+                result_count=len(produced_outputs),
+                message=(
+                    f"导演方案成片完成：{len(produced_outputs)}/{version_count} 版"
+                    if version_count > 1 else "导演方案成片完成"
+                ),
+            )
+        emit_log("success", f"预览成片完成：{len(produced_outputs)} 个输出", scope)
+        return produced_outputs
+    except Exception as exc:
+        if finalize_task:
+            _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"预览成片失败：{exc}", scope)
+        if raise_errors:
+            raise
+        return []
+
+
+def _director_direct_retryable(error: Any) -> bool:
+    """Retry only provider/format failures, never a real material decision."""
+
+    text = str(error or "").strip().lower()
+    if not text:
+        return True
+    if any(marker in text for marker in ("http 400", "http 401", "http 402", "http 403", "http 404")):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "json",
+            "timeout",
+            "timed out",
+            "connection",
+            "temporarily",
+            "rate limit",
+            "http 408",
+            "http 409",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "没有返回",
+            "空响应",
+            "响应为空",
+            "截断",
+        )
+    )
+
+
+def _build_director_preview_for_direct_output(
+    task_id: str,
+    payload: SmartCutPayload | MixPayload,
+    *,
+    scope: str,
+    attempts: int = 2,
+) -> tuple[str, dict[str, Any]]:
+    """Create the recommended Director plan internally for direct rendering."""
+
+    last_error = "AI 导演没有生成可执行片单。"
+    for attempt in range(1, max(1, int(attempts or 1)) + 1):
+        if _is_task_cancelled(task_id):
+            raise RuntimeError("任务已停止。")
+        preview_id = uuid.uuid4().hex
+        # Direct rendering and editable preview are separate user journeys.
+        # Keep this internal plan available to the renderer without replacing
+        # the user's latest workbench after a page refresh.
+        _store_preview(
+            preview_id,
+            internal_direct_render=True,
+            hidden_from_latest=True,
+        )
+        if attempt > 1:
+            emit_log("warning", "AI 返回格式不完整，正在自动重试一次。", scope)
+        _set_task_progress(task_id, 10, "AI 导演正在理解素材并编排故事")
+        if scope == "mix":
+            _run_commerce_director_mix_preview(
+                task_id,
+                preview_id,
+                payload if isinstance(payload, MixPayload) else MixPayload(**_payload_to_dict(payload)),
+                finalize_task=False,
+            )
+        else:
+            _run_commerce_director_preview_auto_batch(
+                task_id,
+                preview_id,
+                payload if isinstance(payload, SmartCutPayload) else SmartCutPayload(**_payload_to_dict(payload)),
+                finalize_task=False,
+            )
+        preview = _get_preview(preview_id) or {}
+        recommended = list(preview.get("raw_clips") or [])
+        if preview.get("status") == "ready" and recommended:
+            emit_log(
+                "success",
+                f"AI 导演片单已确定：{len(recommended)} 句，直接进入成片，不再二次选片。",
+                scope,
+            )
+            return preview_id, preview
+        last_error = str(preview.get("error") or preview.get("message") or last_error)
+        if attempt >= attempts or not _director_direct_retryable(last_error):
+            break
+    raise RuntimeError(last_error)
+
+
+def _run_commerce_director_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
+    """Direct Smart Cut: Director plan once per source, then exact editable-plan render."""
+
+    scope = "smart-cut"
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备 AI 导演智能成片")
+    emit_log("info", "智能成片已使用商业导演链路：先编排完整故事，再直接成片。", scope)
+    outputs: list[str] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        _ensure_feature_access("智能成片")
+        paths = [Path(path.strip().strip('"')) for path in payload.video_paths if path.strip()]
+        if not paths:
+            raise ValueError("请至少填写一个视频文件路径。")
+        total = len(paths)
+        _set_task(
+            task_id,
+            batch_total=total,
+            batch_done=0,
+            batch_succeeded=0,
+            batch_current=1,
+            batch_failed=0,
+            batch_label=paths[0].name,
+            batch_failure_details=[],
+        )
+        base_data = _payload_to_dict(payload)
+        for index, video in enumerate(paths, 1):
+            if _is_task_cancelled(task_id):
+                emit_log("warning", "智能成片已停止。", scope)
+                return
+            _set_task(
+                task_id,
+                status="running",
+                batch_current=index,
+                batch_done=index - 1,
+                batch_succeeded=index - 1 - len(failures),
+                batch_failed=len(failures),
+                batch_label=video.name,
+                message=f"导演编排 {index}/{total}: {video.name}",
+            )
+            try:
+                if not video.exists():
+                    raise FileNotFoundError(f"视频不存在：{video}")
+                item_data = dict(base_data)
+                item_data["video_paths"] = [str(video)]
+                if total > 1:
+                    item_data["srt_path"] = ""
+                item_payload = SmartCutPayload(**item_data)
+                preview_id, preview = _build_director_preview_for_direct_output(
+                    task_id, item_payload, scope=scope,
+                )
+                recommended_count = len(list(preview.get("raw_clips") or []))
+                render_data = dict(item_data)
+                render_data.update({
+                    "preview_id": preview_id,
+                    "selected_indices": list(range(recommended_count)),
+                    "order": list(range(recommended_count)),
+                })
+                produced = _run_smart_cut_from_preview(
+                    task_id,
+                    SmartPreviewCutPayload(**render_data),
+                    finalize_task=False,
+                    raise_errors=True,
+                )
+                outputs.extend(produced)
+            except Exception as item_exc:
+                detail = _batch_failure_detail(video.name, item_exc)
+                failures.append(detail)
+                emit_log("warning", f"[{index}/{total}] 已跳过失败素材：{video.name}，{item_exc}", scope)
+            _set_task(
+                task_id,
+                status="running",
+                batch_done=index,
+                batch_succeeded=index - len(failures),
+                batch_current=index + 1 if index < total else 0,
+                batch_failed=len(failures),
+                batch_failure_details=list(failures),
+                batch_label="" if index >= total else paths[index].name,
+            )
+        if not outputs:
+            detail = str((failures[0] if failures else {}).get("message") or "没有成功输出。")
+            raise RuntimeError(detail)
+        message = _batch_summary_message(
+            "AI 导演智能成片完成",
+            total - len(failures),
+            total,
+            failures,
+            "个",
+        )
         _set_task(
             task_id,
             status="completed",
             finished_at=time.time(),
-            output=output_path,
-            outputs=[output_path],
-            result_count=1,
+            output=outputs[0],
+            outputs=outputs,
+            result_count=len(outputs),
+            message=message,
+            batch_total=total,
+            batch_done=total,
+            batch_succeeded=total - len(failures),
+            batch_current=0,
+            batch_failed=len(failures),
+            batch_failure_details=list(failures),
         )
-        emit_log("success", f"预览成片完成：{output_path}", scope)
+        emit_log("success" if not failures else "warning", message, scope)
     except Exception as exc:
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
-        emit_log("error", f"预览成片失败：{exc}", scope)
+        emit_log("error", f"AI 导演智能成片失败：{exc}", scope)
+
+
+def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
+    """Direct Mix: one unified Director plan over all sources, then render it exactly."""
+
+    scope = "mix"
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备 AI 导演混剪")
+    emit_log("info", "混剪已使用商业导演链路：统一理解全部素材后直接成片。", scope)
+    try:
+        _ensure_feature_access("混剪成片")
+        preview_id, preview = _build_director_preview_for_direct_output(
+            task_id, payload, scope=scope,
+        )
+        recommended_count = len(list(preview.get("raw_clips") or []))
+        render_data = _payload_to_dict(payload)
+        render_data.update({
+            "preview_id": preview_id,
+            "selected_indices": list(range(recommended_count)),
+            "order": list(range(recommended_count)),
+        })
+        outputs = _run_mix_from_preview(
+            task_id,
+            MixPreviewCutPayload(**render_data),
+            finalize_task=False,
+            raise_errors=True,
+        )
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=outputs[0],
+            outputs=outputs,
+            result_count=len(outputs),
+            message="AI 导演混剪完成",
+        )
+        emit_log("success", f"AI 导演混剪完成：{len(outputs)} 个输出。", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"AI 导演混剪失败：{exc}", scope)
+
+
+def _run_commerce_director_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
+    """Batch Mix: isolate failures while each group uses one unified Director plan."""
+
+    scope = "mix"
+    _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备批量 AI 导演混剪")
+    outputs: list[str] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        _ensure_feature_access("混剪成片")
+        if not payload.groups:
+            raise ValueError("请至少保存 1 个混剪素材组。")
+        total = len(payload.groups)
+        base_data = _payload_to_dict(payload)
+        base_data.pop("groups", None)
+        _set_task(task_id, batch_total=total, batch_done=0, batch_succeeded=0, batch_current=1)
+        for index, group in enumerate(payload.groups, 1):
+            if _is_task_cancelled(task_id):
+                emit_log("warning", "批量混剪已停止。", scope)
+                return
+            group_name = str(group.name or "").strip() or f"第{index}组"
+            _set_task(
+                task_id,
+                status="running",
+                batch_current=index,
+                batch_done=index - 1,
+                batch_succeeded=index - 1 - len(failures),
+                batch_failed=len(failures),
+                batch_label=group_name,
+                message=f"导演编排 {index}/{total}: {group_name}",
+            )
+            try:
+                item_data = dict(base_data)
+                item_data["video_paths"] = list(group.video_paths)
+                item_payload = MixPayload(**item_data)
+                preview_id, preview = _build_director_preview_for_direct_output(
+                    task_id, item_payload, scope=scope,
+                )
+                recommended_count = len(list(preview.get("raw_clips") or []))
+                render_data = dict(item_data)
+                render_data.update({
+                    "preview_id": preview_id,
+                    "selected_indices": list(range(recommended_count)),
+                    "order": list(range(recommended_count)),
+                })
+                produced = _run_mix_from_preview(
+                    task_id,
+                    MixPreviewCutPayload(**render_data),
+                    finalize_task=False,
+                    raise_errors=True,
+                    output_extra_suffix=f"_g{index:02d}",
+                )
+                outputs.extend(produced)
+            except Exception as group_exc:
+                detail = _batch_failure_detail(group_name, group_exc)
+                failures.append(detail)
+                emit_log("warning", f"[{index}/{total}] 已跳过失败素材组：{group_name}，{group_exc}", scope)
+            _set_task(
+                task_id,
+                status="running",
+                batch_done=index,
+                batch_succeeded=index - len(failures),
+                batch_current=index + 1 if index < total else 0,
+                batch_failed=len(failures),
+                batch_failure_details=list(failures),
+            )
+        if not outputs:
+            detail = str((failures[0] if failures else {}).get("message") or "没有成功输出。")
+            raise RuntimeError(detail)
+        message = _batch_summary_message(
+            "批量 AI 导演混剪完成",
+            total - len(failures),
+            total,
+            failures,
+            "组",
+        )
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            output=outputs[0],
+            outputs=outputs,
+            result_count=len(outputs),
+            message=message,
+            batch_total=total,
+            batch_done=total,
+            batch_succeeded=total - len(failures),
+            batch_current=0,
+            batch_failed=len(failures),
+            batch_failure_details=list(failures),
+        )
+        emit_log("success" if not failures else "warning", message, scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"批量 AI 导演混剪失败：{exc}", scope)
 
 
 @app.get("/")
@@ -12982,7 +15971,25 @@ async def upload_videos(files: list[UploadFile] = File(default_factory=list)) ->
 
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
-    return _load_settings()
+    settings = _load_settings()
+    try:
+        from platform_config import list_installed_subtitle_fonts, resolve_subtitle_font
+
+        installed_fonts = list(list_installed_subtitle_fonts())
+        resolved_name, _resolved_path, fallback = resolve_subtitle_font(
+            settings.get("subtitle_font_family")
+        )
+    except Exception:
+        installed_fonts = []
+        resolved_name = "Microsoft YaHei Bold"
+        fallback = True
+    settings["subtitle_font_options"] = installed_fonts
+    settings["subtitle_font_resolution"] = {
+        "requested": str(settings.get("subtitle_font_family") or ""),
+        "resolved": str(resolved_name or ""),
+        "fallback": bool(fallback),
+    }
+    return settings
 
 
 @app.post("/api/settings")
@@ -13020,6 +16027,8 @@ def save_ai_selection_settings(payload: AiSelectionSettingsPayload) -> dict[str,
         data["style_profile_strength"] = str(payload.style_profile_strength or "auto")
     if payload.content_review_mode is not None:
         data["content_review_mode"] = str(payload.content_review_mode or "off")
+    if payload.m2_planner_mode is not None:
+        data["m2_planner_mode"] = str(payload.m2_planner_mode or "legacy")
 
     if payload.ai_rules is not None:
         incoming = dict(payload.ai_rules)
@@ -13609,23 +16618,492 @@ def start_smart_cut(payload: SmartCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
     payload.video_paths = video_paths
     task_id = _new_task("smart-cut", "智能成片")
-    thread = threading.Thread(target=_run_task_worker, args=(task_id, _run_smart_cut, task_id, payload), daemon=True)
+    thread = threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_smart_cut, task_id, payload),
+        daemon=True,
+    )
     thread.start()
     return {"ok": True, "task_id": task_id, "message": "任务已启动。"}
 
 
 @app.post("/api/smart-cut/preview/start")
 def start_smart_preview(payload: SmartCutPayload) -> dict[str, Any]:
-    _ensure_scope_idle("smart-cut", "AI选片预览")
+    _ensure_scope_idle("smart-cut", "AI导演预览")
     _raise_preflight_errors("smart-preview", payload)
     video_paths = [path.strip() for path in payload.video_paths if path.strip()]
     if not video_paths:
         raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
     payload.video_paths = video_paths
-    task_id = _new_task("smart-cut", "AI选片预览")
+    task_id = _new_task("smart-cut", "AI导演预览")
     preview_id = uuid.uuid4().hex
-    threading.Thread(target=_run_task_worker, args=(task_id, _run_smart_preview, task_id, preview_id, payload), daemon=True).start()
-    return {"ok": True, "task_id": task_id, "preview_id": preview_id, "message": "AI 选片预览已启动。"}
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_preview_auto_batch, task_id, preview_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": preview_id,
+        "message": f"AI 导演正在规划 {payload.target_duration} 秒故事，并从完整字幕选择真实短句。",
+    }
+
+
+@app.post("/api/smart-cut/commerce-director/preview/start")
+def start_commerce_director_preview(payload: SmartCutPayload) -> dict[str, Any]:
+    """Compatibility alias for the production AI Director preview."""
+    _ensure_scope_idle("smart-cut", "AI导演预览")
+    _raise_preflight_errors("smart-preview", payload)
+    video_paths = [path.strip() for path in payload.video_paths if path.strip()]
+    if not video_paths:
+        raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
+    payload.video_paths = video_paths
+    task_id = _new_task("smart-cut", "AI导演预览")
+    preview_id = uuid.uuid4().hex
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_preview_auto_batch, task_id, preview_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": preview_id,
+        "message": (
+            f"本次目标 {payload.target_duration} 秒：AI 正在确定故事章节，"
+            "随后从完整字幕选择真实短句。"
+        ),
+    }
+
+
+@app.post("/api/smart-cut/commerce-director/story/select")
+def select_commerce_director_story(payload: CommerceDirectorStorySelectionPayload) -> dict[str, Any]:
+    """Run M2/M3 for one operator-selected M1 story without rediscovering it."""
+    preview_id = payload.preview_id.strip()
+    story_id = payload.story_id.strip()
+    if not preview_id or not story_id:
+        raise HTTPException(status_code=400, detail="请先选择一条 M1 故事。")
+    _ensure_scope_idle("smart-cut", "商业导演故事方案")
+    previous = _get_preview(preview_id)
+    if not previous or not previous.get("commercial_director_experiment"):
+        raise HTTPException(status_code=409, detail="请先完成一次商业导演实验预览，再从其 M1 故事库中选择。")
+    review = dict(previous.get("director_review") or {})
+    library = dict(review.get("m1_story_library") or {})
+    story_rows = list(library.get("stories") or [])
+    if not any(str(item.get("story_id") or "") == story_id for item in story_rows if isinstance(item, Mapping)):
+        raise HTTPException(status_code=404, detail="所选故事不在当前 M1 故事库中。")
+    experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
+    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    try:
+        experiment_dir.relative_to(experiment_root)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="当前实验的 M1 审计目录无效，无法安全复用故事。")
+    brief_path = experiment_dir / "m1_story_brief.json"
+    if not brief_path.exists():
+        raise HTTPException(status_code=409, detail="未找到当前实验的 M1 原始故事，不能重新发现后替换。")
+    try:
+        brief = json.loads(brief_path.read_text(encoding="utf-8"))
+        strategies = list(dict(brief.get("m1_result") or {}).get("strategies") or [])
+        raw_strategy = next(
+            item for item in strategies
+            if isinstance(item, Mapping) and str(item.get("strategy_id") or "") == story_id
+        )
+    except (OSError, ValueError, StopIteration):
+        raise HTTPException(status_code=409, detail="当前故事库缺少可复用的 M1 原始策略。")
+    from commercial_analyzer import Strategy
+    strategy = Strategy.from_dict(raw_strategy, index=max(1, strategies.index(raw_strategy) + 1))
+    video = str(previous.get("video") or "").strip()
+    srt_path = str(previous.get("srt_path") or "").strip()
+    if not video or not srt_path:
+        raise HTTPException(status_code=409, detail="当前实验缺少同源视频或字幕，不能复用故事。")
+    selected_payload = SmartCutPayload(
+        video_paths=[video], srt_path=srt_path,
+        target_duration=max(10, int(previous.get("target_duration") or 60)),
+        duration_tolerance=previous.get("duration_tolerance"),
+    )
+    task_id = _new_task("smart-cut", f"商业导演故事方案：{story_id}")
+    selected_preview_id = uuid.uuid4().hex
+    threading.Thread(
+        target=_run_task_worker,
+        args=(
+            task_id, _run_commerce_director_preview, task_id, selected_preview_id, selected_payload,
+            strategy, library, None, {"sentence_preview_without_m3": True}, story_id,
+        ),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": selected_preview_id,
+        "message": f"已选择 {story_id}：复用 M1 故事，生成 M2 逐句可编辑预览；不运行 M3。",
+    }
+
+
+@app.post("/api/smart-cut/commerce-director/strategy/select")
+def select_commerce_director_strategy(payload: CommerceDirectorStrategySelectionPayload) -> dict[str, Any]:
+    """Compile one chosen sell-path option into the existing M2/M3 experiment."""
+    preview_id = payload.preview_id.strip()
+    proposal_id = payload.director_strategy_id.strip()
+    if not preview_id or not proposal_id:
+        raise HTTPException(status_code=400, detail="请先选择一个 AI 导演方案。")
+    _ensure_scope_idle("smart-cut", "AI导演方案")
+    previous = _get_preview(preview_id)
+    if not previous or not previous.get("commercial_director_experiment"):
+        raise HTTPException(status_code=409, detail="请先完成一次商业导演实验预览，建立商品故事地图。")
+    review = dict(previous.get("director_review") or {})
+    story_library = dict(review.get("m1_story_library") or {})
+    strategy_library = dict(review.get("director_strategy_library") or {})
+    proposal = next((item for item in list(strategy_library.get("proposals") or [])
+                     if isinstance(item, Mapping) and str(item.get("director_strategy_id") or "") == proposal_id), None)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="所选 AI 导演方案不在当前商品故事地图中。")
+    if not bool(proposal.get("available")):
+        raise HTTPException(status_code=409, detail=str(proposal.get("unavailable_reason") or "当前素材无法支撑此方案。"))
+    experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
+    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    try:
+        experiment_dir.relative_to(experiment_root)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="当前实验的 M1 审计目录无效，无法安全复用故事地图。")
+    try:
+        brief = json.loads((experiment_dir / "m1_story_brief.json").read_text(encoding="utf-8"))
+        raw_strategies = list(dict(brief.get("m1_result") or {}).get("strategies") or [])
+    except (OSError, ValueError):
+        raw_strategies = []
+    try:
+        source_info = json.loads((experiment_dir / "source_info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        source_info = {}
+    if not raw_strategies:
+        raise HTTPException(status_code=409, detail="当前实验没有完整的 M1 故事地图；请从首次发现结果选择方案。")
+    # Alternatives deliberately carried no source order in the initial
+    # response.  They can only become a preview after an explicit user
+    # confirmation of one new director call; no legacy M2 fallback is allowed.
+    if bool(proposal.get("requires_additional_ai_call")):
+        if not payload.confirm_additional_ai_call:
+            raise HTTPException(
+                status_code=409,
+                detail="该备选方向需要重新调用 2 次 AI（展开故事章节 + 短句 Casting）；请在界面确认后继续。",
+            )
+        raw_direction = next(
+            (
+                dict(item) for item in raw_strategies
+                if isinstance(item, Mapping)
+                and str(item.get("strategy_id") or "") == str(proposal.get("primary_story_id") or "")
+            ),
+            None,
+        )
+        if raw_direction is None:
+            raise HTTPException(status_code=409, detail="当前备选方向缺少原始导演摘要，不能安全重跑。")
+        video = str(previous.get("video") or "").strip()
+        srt_path = str(previous.get("srt_path") or "").strip()
+        if not video or not srt_path:
+            raise HTTPException(status_code=409, detail="当前实验缺少同源视频或字幕，不能生成所选方案。")
+        reused_controls = dict(source_info.get("director_controls") or {})
+        reused_controls["content_policy"] = dict(source_info.get("task_content_policy") or {})
+        selected_payload = SmartCutPayload(
+            video_paths=[video],
+            srt_path=srt_path,
+            target_duration=max(10, int(previous.get("target_duration") or 60)),
+            duration_tolerance=previous.get("duration_tolerance"),
+            ai_controls=reused_controls,
+        )
+        task_id = _new_task("smart-cut", f"AI导演备选方案：{proposal_id}")
+        selected_preview_id = uuid.uuid4().hex
+        focused_contract = {
+            "single_ai_director_packet": True,
+            "two_pass_director_packet": True,
+            "sentence_preview_without_m3": True,
+            "semantic_call_count": 2,
+            "packet_mode": "confirmed_alternative",
+            "requested_alternative_strategy_id": proposal_id,
+        }
+        threading.Thread(
+            target=_run_task_worker,
+            args=(
+                task_id, _run_commerce_director_preview, task_id, selected_preview_id, selected_payload,
+                None, story_library, strategy_library, focused_contract, proposal_id, False, raw_direction,
+            ),
+            daemon=True,
+        ).start()
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "preview_id": selected_preview_id,
+            "message": f"已确认 {proposal.get('name') or proposal_id}：将重新调用 2 次 AI（故事章节 + 短句 Casting），再生成逐句可编辑预览；不运行 M3。",
+            "additional_ai_calls": 2,
+        }
+    from commercial_analyzer import Strategy
+    from director_strategy import compile_director_strategy
+    strategies = tuple(Strategy.from_dict(item, index=index) for index, item in enumerate(raw_strategies, 1)
+                       if isinstance(item, Mapping))
+    try:
+        composite, contract = compile_director_strategy(proposal, strategies)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    contract = {**dict(contract or {}), "sentence_preview_without_m3": True}
+    video = str(previous.get("video") or "").strip()
+    srt_path = str(previous.get("srt_path") or "").strip()
+    if not video or not srt_path:
+        raise HTTPException(status_code=409, detail="当前实验缺少同源视频或字幕，不能生成所选方案。")
+    reused_controls = dict(source_info.get("director_controls") or {})
+    reused_controls["content_policy"] = dict(source_info.get("task_content_policy") or {})
+    selected_payload = SmartCutPayload(
+        video_paths=[video],
+        srt_path=srt_path,
+        target_duration=max(10, int(previous.get("target_duration") or 60)),
+        duration_tolerance=previous.get("duration_tolerance"),
+        ai_controls=reused_controls,
+    )
+    task_id = _new_task("smart-cut", f"AI导演方案：{proposal_id}")
+    selected_preview_id = uuid.uuid4().hex
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_preview, task_id, selected_preview_id, selected_payload,
+              composite, story_library, strategy_library, contract, proposal_id),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": selected_preview_id,
+        "message": f"已选择 {proposal.get('name') or proposal_id}：复用 M1 故事地图，生成逐句可编辑预览；不运行 M3。",
+    }
+
+
+@app.post("/api/mix/commerce-director/strategy/select")
+def select_mix_commerce_director_strategy(
+    payload: CommerceDirectorStrategySelectionPayload,
+) -> dict[str, Any]:
+    """Generate a confirmed alternative over the same complete mix sources."""
+    preview_id = payload.preview_id.strip()
+    proposal_id = payload.director_strategy_id.strip()
+    if not preview_id or not proposal_id:
+        raise HTTPException(status_code=400, detail="请先选择一个混剪 AI 导演方案。")
+    _ensure_scope_idle("mix", "混剪AI导演备选方案")
+    previous = _get_preview(preview_id)
+    if (
+        not previous
+        or previous.get("scope") != "mix"
+        or not previous.get("commercial_director_experiment")
+    ):
+        raise HTTPException(status_code=409, detail="请先完成一次混剪 AI 导演预览。")
+    review = dict(previous.get("director_review") or {})
+    strategy_library = dict(review.get("director_strategy_library") or {})
+    proposal = next(
+        (
+            dict(item) for item in list(strategy_library.get("proposals") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("director_strategy_id") or "") == proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="所选备选方向不在当前混剪导演方案中。")
+    if not bool(proposal.get("available")):
+        raise HTTPException(
+            status_code=409,
+            detail=str(proposal.get("unavailable_reason") or "当前素材无法支撑此方向。"),
+        )
+    if not bool(proposal.get("requires_additional_ai_call")):
+        raise HTTPException(status_code=409, detail="当前主方案已经显示，无需重复生成。")
+    if not payload.confirm_additional_ai_call:
+        raise HTTPException(status_code=409, detail="该备选方向需要重新调用 2 次 AI，请确认后继续。")
+
+    experiment_dir = Path(
+        str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")
+    ).resolve()
+    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    try:
+        experiment_dir.relative_to(experiment_root)
+        brief = json.loads((experiment_dir / "m1_story_brief.json").read_text(encoding="utf-8"))
+        source_info = json.loads((experiment_dir / "source_info.json").read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        raise HTTPException(status_code=409, detail="当前混剪预览缺少可复用的导演原始数据。")
+    raw_strategies = list(dict(brief.get("m1_result") or {}).get("strategies") or [])
+    raw_direction = next(
+        (
+            dict(item) for item in raw_strategies
+            if isinstance(item, Mapping)
+            and str(item.get("strategy_id") or "")
+            == str(proposal.get("primary_story_id") or "")
+        ),
+        None,
+    )
+    if raw_direction is None:
+        raise HTTPException(status_code=409, detail="当前备选方向缺少导演摘要，不能安全重跑。")
+    sources = [str(item).strip() for item in list(previous.get("sources") or []) if str(item).strip()]
+    if not sources:
+        raise HTTPException(status_code=409, detail="当前混剪预览缺少原始视频列表。")
+    reused_controls = dict(source_info.get("director_controls") or {})
+    reused_controls["content_policy"] = dict(source_info.get("task_content_policy") or {})
+    selected_payload = MixPayload(
+        video_paths=sources,
+        duration=max(10, int(previous.get("target_duration") or 60)),
+        duration_tolerance=previous.get("duration_tolerance"),
+        ai_controls=reused_controls,
+    )
+    task_id = _new_task("mix", f"混剪AI导演备选方案：{proposal_id}")
+    selected_preview_id = uuid.uuid4().hex
+    threading.Thread(
+        target=_run_task_worker,
+        args=(
+            task_id,
+            _run_commerce_director_mix_preview,
+            task_id,
+            selected_preview_id,
+            selected_payload,
+            raw_direction,
+        ),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": selected_preview_id,
+        "message": (
+            f"已确认 {proposal.get('name') or proposal_id}：复用全部混剪素材，"
+            "重新调用 2 次 AI 后生成逐句可编辑预览。"
+        ),
+        "additional_ai_calls": 2,
+    }
+
+
+@app.post("/api/smart-cut/commerce-director/strategies/generate")
+def generate_commerce_director_strategies(payload: CommerceDirectorStrategyBatchPayload) -> dict[str, Any]:
+    """Generate one-to-three selected Director paths for side-by-side review.
+
+    The endpoint does not discover again and does not create formal output.  A
+    batch always derives from the frozen M1 map belonging to ``preview_id``.
+    """
+    preview_id = payload.preview_id.strip()
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="请先完成一次 AI 导演方案发现。")
+    _ensure_scope_idle("smart-cut", "AI导演多方案实验")
+    previous = _get_preview(preview_id)
+    if not previous or not previous.get("commercial_director_experiment"):
+        raise HTTPException(status_code=409, detail="请先完成一次商业导演实验预览，建立商品故事地图。")
+    review = dict(previous.get("director_review") or {})
+    if str(review.get("kind") or "") != "m1_story_map_discovery":
+        raise HTTPException(status_code=409, detail="请从 M1 商品故事地图直接生成多方案，避免用已有 M2/M3 结果重新发现故事。")
+    story_library = dict(review.get("m1_story_library") or {})
+    strategy_library = dict(review.get("director_strategy_library") or {})
+    available = [
+        dict(item) for item in list(strategy_library.get("proposals") or [])
+        if isinstance(item, Mapping) and bool(item.get("available"))
+    ]
+    requested = []
+    seen: set[str] = set()
+    for raw_id in payload.director_strategy_ids:
+        strategy_id = str(raw_id or "").strip()
+        if strategy_id and strategy_id not in seen:
+            requested.append(strategy_id)
+            seen.add(strategy_id)
+    if requested:
+        by_id = {str(item.get("director_strategy_id") or ""): item for item in available}
+        missing = [item for item in requested if item not in by_id]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"所选 AI 导演方案不存在或当前不可用：{missing[0]}")
+        proposals = [by_id[item] for item in requested]
+    else:
+        proposals = available
+    if not proposals:
+        raise HTTPException(status_code=409, detail="当前素材没有可批量生成的 AI 导演方案。")
+    proposals = proposals[:3]
+
+    experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
+    experiment_root = (REPO_ROOT / "workspace" / "ui_commerce_director_experiment").resolve()
+    try:
+        experiment_dir.relative_to(experiment_root)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="当前实验的 M1 审计目录无效，无法安全复用故事地图。")
+    try:
+        brief = json.loads((experiment_dir / "m1_story_brief.json").read_text(encoding="utf-8"))
+        raw_strategies = list(dict(brief.get("m1_result") or {}).get("strategies") or [])
+    except (OSError, ValueError):
+        raw_strategies = []
+    if not raw_strategies:
+        raise HTTPException(status_code=409, detail="当前实验没有完整的 M1 原始故事，不能批量生成。")
+    video = str(previous.get("video") or "").strip()
+    srt_path = str(previous.get("srt_path") or "").strip()
+    if not video or not srt_path:
+        raise HTTPException(status_code=409, detail="当前实验缺少同源视频或字幕，不能批量生成。")
+    from commercial_analyzer import Strategy
+    from director_strategy import compile_director_strategy
+
+    strategies = tuple(
+        Strategy.from_dict(item, index=index)
+        for index, item in enumerate(raw_strategies, 1)
+        if isinstance(item, Mapping)
+    )
+    batch_task_id = _new_task("smart-cut", f"AI导演多方案实验（{len(proposals)} 条）")
+    batch_preview_id = uuid.uuid4().hex
+    entries: list[dict[str, Any]] = []
+    for proposal in proposals:
+        try:
+            composite, contract = compile_director_strategy(proposal, strategies)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        contract = {**dict(contract or {}), "sentence_preview_without_m3": True}
+        entries.append({
+            "proposal": proposal,
+            "composite": composite,
+            "contract": contract,
+            "task_id": _new_task("smart-cut", f"AI导演方案：{proposal.get('name') or proposal.get('director_strategy_id')}") ,
+            "preview_id": uuid.uuid4().hex,
+        })
+    threading.Thread(
+        target=_run_task_worker,
+        args=(
+            batch_task_id,
+            _run_commerce_director_strategy_batch,
+            batch_task_id,
+            batch_preview_id,
+            previous,
+            entries,
+            story_library,
+            strategy_library,
+        ),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": batch_task_id,
+        "preview_id": batch_preview_id,
+        "strategy_count": len(entries),
+        "message": f"已复用同一份 M1 故事地图，开始依次生成 {len(entries)} 条 M2→M3 审阅成片。",
+    }
+
+
+@app.post("/api/smart-cut/commerce-director/review-video")
+def commerce_director_review_video(payload: CommerceDirectorReviewPayload) -> dict[str, Any]:
+    if not payload.preview_id.strip():
+        raise HTTPException(status_code=400, detail="请先生成商业导演实验预览。")
+    path = _commerce_director_review_video(payload.preview_id.strip())
+    return {
+        "ok": True,
+        "url": f"/api/smart-cut/commerce-director/review-video/{payload.preview_id.strip()}?t={int(path.stat().st_mtime)}",
+        "message": "商业导演审阅视频已生成；它仅供人工审核，不能导出或发布。",
+    }
+
+
+@app.get("/api/smart-cut/commerce-director/review-video/{preview_id}")
+def get_commerce_director_review_video(preview_id: str) -> FileResponse:
+    path = _commerce_director_review_video(preview_id)
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)
+
+
+@app.get("/api/smart-cut/commerce-director/source-video/{preview_id}")
+def get_commerce_director_source_video(preview_id: str) -> FileResponse:
+    """Read-only source preview used by the M1 story-map workbench."""
+    preview = _get_preview(preview_id)
+    if not preview or not preview.get("commercial_director_experiment"):
+        raise HTTPException(status_code=404, detail="没有找到这次商业导演实验。")
+    source = Path(str(preview.get("video") or "")).expanduser()
+    if not source.exists() or not source.is_file():
+        raise HTTPException(status_code=404, detail="这次实验的源视频已不存在。")
+    return FileResponse(str(source), media_type="video/mp4", filename=source.name)
 
 
 @app.post("/api/preview/selection/save")
@@ -13676,6 +17154,11 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="没有找到这次 AI 选片预览，请重新生成。")
     if preview.get("status") != "ready":
         raise HTTPException(status_code=400, detail="AI 选片预览还没有完成，请稍后再试。")
+    if (
+        preview.get("commercial_director_experiment")
+        and not preview.get("commercial_director_sentence_preview")
+    ):
+        raise HTTPException(status_code=409, detail="商业导演实验预览仅供人工审核，不能进入正式成片。")
     if not _preview_selection_raw_clips(preview):
         raise HTTPException(status_code=400, detail="这次预览没有可用片段，请重新生成。")
     _merge_preview_draft_into_payload(payload, _preview_selection_draft(preview))
@@ -13752,7 +17235,11 @@ def start_mix(payload: MixPayload) -> dict[str, Any]:
     if not [path.strip() for path in payload.video_paths if path.strip()]:
         raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
     task_id = _new_task("mix", "混剪成片")
-    threading.Thread(target=_run_task_worker, args=(task_id, _run_mix, task_id, payload), daemon=True).start()
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_mix, task_id, payload),
+        daemon=True,
+    ).start()
     return {"ok": True, "task_id": task_id, "message": "混剪任务已启动。"}
 
 
@@ -13763,20 +17250,33 @@ def start_mix_batch(payload: MixBatchPayload) -> dict[str, Any]:
     if not payload.groups:
         raise HTTPException(status_code=400, detail="请至少保存 1 个混剪素材组。")
     task_id = _new_task("mix", "批量混剪")
-    threading.Thread(target=_run_task_worker, args=(task_id, _run_mix_batch, task_id, payload), daemon=True).start()
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_mix_batch, task_id, payload),
+        daemon=True,
+    ).start()
     return {"ok": True, "task_id": task_id, "message": f"批量混剪任务已启动，共 {len(payload.groups)} 组。"}
 
 
 @app.post("/api/mix/preview/start")
 def start_mix_preview(payload: MixPayload) -> dict[str, Any]:
-    _ensure_scope_idle("mix", "混剪AI选片预览")
+    _ensure_scope_idle("mix", "混剪AI导演预览")
     _raise_preflight_errors("mix-preview", payload)
     if not [path.strip() for path in payload.video_paths if path.strip()]:
         raise HTTPException(status_code=400, detail="请至少填写一个视频文件路径。")
-    task_id = _new_task("mix", "混剪AI选片预览")
+    task_id = _new_task("mix", "混剪AI导演预览")
     preview_id = uuid.uuid4().hex
-    threading.Thread(target=_run_task_worker, args=(task_id, _run_mix_preview, task_id, preview_id, payload), daemon=True).start()
-    return {"ok": True, "task_id": task_id, "preview_id": preview_id, "message": "混剪 AI 选片预览已启动。"}
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_commerce_director_mix_preview, task_id, preview_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "preview_id": preview_id,
+        "message": f"AI 导演正在统一分析 {len(payload.video_paths)} 条素材并规划混剪故事。",
+    }
 
 
 @app.get("/api/mix/preview/latest")

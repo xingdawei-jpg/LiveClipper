@@ -50,6 +50,20 @@ class LocalAsrReviewTests(unittest.TestCase):
         self.assertEqual(findings[0]["start"], 10.0)
         self.assertEqual(findings[0]["end"], 14.0)
 
+    def test_observed_caramel_asr_residue_is_flagged_for_review_not_rewritten(self) -> None:
+        source = [
+            _segment("你的视觉重心会延到这根线上，你会觉得这个人间一定是直角的。"),
+            _segment("木浆纤维可降解的A类母婴店，就是你小宝宝。", start=14.0, end=17.0),
+        ]
+
+        reviewed, report = review.review_segments(source, retry_enabled=False)
+
+        self.assertEqual(reviewed, source)
+        self.assertEqual(report["initial"]["flagged_count"], 2)
+        reasons = {reason for item in review.assess_segments(source) for reason in item["reasons"]}
+        self.assertIn("known_asr_semantic_confusion", reasons)
+        self.assertIn("known_asr_listener_reference", reasons)
+
     def test_valid_word_timed_retry_replaces_only_the_flagged_window(self) -> None:
         source = [
             _segment("这个料子非。", start=10.0, end=13.0),

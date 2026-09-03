@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260812-product-scan-layout-v1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260903-subtitle-system-font-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -116,10 +116,10 @@
             </div>
             <div class="panel-actions">
               <button class="button button-danger" data-action="stop-scope" data-scope="smart-cut">停止</button>
-              <button class="button button-secondary" data-action="start-smart-preview">AI选片预览</button>
-              <button class="button button-primary" data-action="start-smart-cut">
+              <button class="button button-secondary" data-action="start-smart-preview" title="先生成一个可逐句删改的 AI 导演方案">AI导演预览</button>
+              <button class="button button-primary" data-action="start-smart-cut" title="不等待预览，直接按当前参数批量成片">
                 <span class="button-icon">▶</span>
-                开始成片
+                直接成片
               </button>
             </div>
           </section>
@@ -311,10 +311,10 @@
 
           <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-collapse-group="sc-top" data-advanced-panel="sc-ai">
             <div class="panel-header">
-              <h2>AI参数</h2>
+              <h2>AI导演参数</h2>
             </div>
             <div class="field-row compact ai-preset-row">
-              <label for="sc-ai-preset">选片预设</label>
+              <label for="sc-ai-preset">导演预设</label>
               <div class="preset-control">
                 <select id="sc-ai-preset" data-ai-preset="sc">
                   <option value="custom" selected>自定义</option>
@@ -360,25 +360,17 @@
                 </select>
               </div>
               <div class="field-row compact">
-                  <label for="sc-focus">本次主方向</label>
-                <select id="sc-focus">
+                <label for="sc-goal">导演方向</label>
+                <select id="sc-goal">
                   <option>自动</option>
-                  <option>面料质感</option>
-                  <option>版型显瘦</option>
-                  <option>上身效果</option>
-                  <option>颜色氛围</option>
-                  <option>风格定位</option>
-                  <option>场景搭配</option>
-                  <option>情绪感染</option>
-                  <option>性价比</option>
-                  <option>紧迫稀缺</option>
-                  <option>流行趋势</option>
-                  <option>口感食欲</option>
-                  <option>新鲜品质</option>
-                  <option>产地溯源</option>
-                  <option>规格分量</option>
-                  <option>发货保鲜</option>
-                  <option>场景吃法</option>
+                  <option>爆款种草</option>
+                  <option>专业讲解</option>
+                  <option>显瘦转化</option>
+                  <option>质感高级</option>
+                  <option>快速促单</option>
+                  <option>食欲种草</option>
+                  <option>新鲜转化</option>
+                  <option>囤货转化</option>
                 </select>
               </div>
             </div>
@@ -395,21 +387,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                  <label for="sc-goal">成片取向</label>
-                <select id="sc-goal">
-                  <option>自动</option>
-                  <option>爆款种草</option>
-                  <option>专业讲解</option>
-                  <option>显瘦转化</option>
-                  <option>质感高级</option>
-                  <option>快速促单</option>
-                  <option>食欲种草</option>
-                  <option>新鲜转化</option>
-                  <option>囤货转化</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                  <label for="sc-hook-style">开头偏好</label>
+                <label for="sc-hook-style">开头偏好</label>
                 <select id="sc-hook-style">
                   <option>自动</option>
                   <option>痛点开头</option>
@@ -422,9 +400,23 @@
                   <option>不强制Hook</option>
                 </select>
               </div>
+              <div class="field-row compact">
+                <label for="sc-ending-style">收尾偏好</label>
+                <select id="sc-ending-style">
+                  <option>自动</option>
+                  <option>尺码引导</option>
+                  <option>信任背书</option>
+                  <option>场景收尾</option>
+                  <option>囤货收尾</option>
+                  <option>发货保鲜</option>
+                  <option>复购背书</option>
+                  <option>自然结束</option>
+                  <option>不要促单</option>
+                </select>
+              </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>本次覆盖卖点</label>
+              <label>本次优先讲</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="sc-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="上身效果"> 上身效果</label>
@@ -466,38 +458,15 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="保健功效"> 保健功效</label>
               </div>
             </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                  <label for="sc-ending-style">收尾偏好</label>
-                <select id="sc-ending-style">
-                  <option>自动</option>
-                  <option>尺码引导</option>
-                  <option>信任背书</option>
-                  <option>场景收尾</option>
-                  <option>囤货收尾</option>
-                  <option>发货保鲜</option>
-                  <option>复购背书</option>
-                  <option>自然结束</option>
-                  <option>不要促单</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                <label for="sc-strictness">严格度</label>
-                <select id="sc-strictness">
-                  <option>宽松</option>
-                  <option selected>标准</option>
-                  <option>严格</option>
-                </select>
-              </div>
-            </div>
+            <p class="panel-note director-controls-note">优先项会同时用于故事规划和短句选择，不要求全部覆盖。本次避选会进一步收紧内容边界；开头、收尾偏好不能放行被禁止的内容。</p>
           </section>
 
           <section class="panel panel-wide">
             <div class="panel-header">
-              <h2>AI 选片工作台</h2>
+              <h2>AI 导演工作台</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="smart-preview-count">0</span>
-                <button class="button button-muted button-small" data-action="clear-cache" title="清理 AI 选片预览缓存">清选片缓存</button>
+                <button class="button button-muted button-small" data-action="clear-cache" title="清理 AI 导演预览缓存">清预览缓存</button>
                 <button class="button button-muted button-small" data-action="clear-preview-workbench" data-preview-scope="smart">清空编排</button>
                 <button class="button button-primary button-small" data-action="start-smart-from-preview">按当前编排成片</button>
               </div>
@@ -510,7 +479,7 @@
               <video id="smart-preview-video" controls playsinline></video>
             </div>
             <div class="clip-preview empty" id="smart-preview">
-              <p>点击“AI选片预览”，先看 AI 会选哪些片段，再决定是否成片。</p>
+              <p>点击“AI导演预览”，AI 会先定故事和章节，再从完整字幕选择真实短句供你删改。</p>
             </div>
           </section>
 
@@ -616,8 +585,8 @@
                   </div>
                 </div>
                 <div class="panel-actions">
-                  <button class="button button-secondary" data-action="start-mix-preview">AI选片预览</button>
-                  <button class="button button-primary" data-action="feature-submit" data-feature="mix">开始混剪</button>
+                  <button class="button button-secondary" data-action="start-mix-preview" title="先生成一个可逐句删改的 AI 导演混剪方案">AI导演预览</button>
+                  <button class="button button-primary" data-action="feature-submit" data-feature="mix" title="不等待预览，直接执行单组或批量混剪">直接混剪</button>
                   <button class="button button-danger mix-stop-button" data-action="stop-scope" data-scope="mix">停止</button>
                 </div>
               </div>
@@ -811,10 +780,10 @@
 
           <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-collapse-group="mix-top" data-advanced-panel="mix-ai">
             <div class="panel-header">
-              <h2>AI参数</h2>
+              <h2>AI导演参数</h2>
             </div>
             <div class="field-row compact ai-preset-row">
-              <label for="mix-ai-preset">选片预设</label>
+              <label for="mix-ai-preset">导演预设</label>
               <div class="preset-control">
                 <select id="mix-ai-preset" data-ai-preset="mix">
                   <option value="custom" selected>自定义</option>
@@ -860,25 +829,17 @@
                 </select>
               </div>
               <div class="field-row compact">
-                  <label for="mix-focus">本次主方向</label>
-                <select id="mix-focus">
+                <label for="mix-goal">导演方向</label>
+                <select id="mix-goal">
                   <option>自动</option>
-                  <option>面料质感</option>
-                  <option>版型显瘦</option>
-                  <option>上身效果</option>
-                  <option>颜色氛围</option>
-                  <option>风格定位</option>
-                  <option>场景搭配</option>
-                  <option>情绪感染</option>
-                  <option>性价比</option>
-                  <option>紧迫稀缺</option>
-                  <option>流行趋势</option>
-                  <option>口感食欲</option>
-                  <option>新鲜品质</option>
-                  <option>产地溯源</option>
-                  <option>规格分量</option>
-                  <option>发货保鲜</option>
-                  <option>场景吃法</option>
+                  <option>爆款种草</option>
+                  <option>专业讲解</option>
+                  <option>显瘦转化</option>
+                  <option>质感高级</option>
+                  <option>快速促单</option>
+                  <option>食欲种草</option>
+                  <option>新鲜转化</option>
+                  <option>囤货转化</option>
                 </select>
               </div>
             </div>
@@ -895,21 +856,7 @@
             </div>
             <div class="field-pair advanced-param">
               <div class="field-row compact">
-                  <label for="mix-goal">成片取向</label>
-                <select id="mix-goal">
-                  <option>自动</option>
-                  <option>爆款种草</option>
-                  <option>专业讲解</option>
-                  <option>显瘦转化</option>
-                  <option>质感高级</option>
-                  <option>快速促单</option>
-                  <option>食欲种草</option>
-                  <option>新鲜转化</option>
-                  <option>囤货转化</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                  <label for="mix-hook-style">开头偏好</label>
+                <label for="mix-hook-style">开头偏好</label>
                 <select id="mix-hook-style">
                   <option>自动</option>
                   <option>痛点开头</option>
@@ -922,9 +869,23 @@
                   <option>不强制Hook</option>
                 </select>
               </div>
+              <div class="field-row compact">
+                <label for="mix-ending-style">收尾偏好</label>
+                <select id="mix-ending-style">
+                  <option>自动</option>
+                  <option>尺码引导</option>
+                  <option>信任背书</option>
+                  <option>场景收尾</option>
+                  <option>囤货收尾</option>
+                  <option>发货保鲜</option>
+                  <option>复购背书</option>
+                  <option>自然结束</option>
+                  <option>不要促单</option>
+                </select>
+              </div>
             </div>
             <div class="field-row field-row-stack advanced-param">
-              <label>本次覆盖卖点</label>
+              <label>本次优先讲</label>
               <div class="chip-grid chip-grid-14" data-ai-chip-group="mix-selling">
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="上身效果"> 上身效果</label>
@@ -966,38 +927,15 @@
                 <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="保健功效"> 保健功效</label>
               </div>
             </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                  <label for="mix-ending-style">收尾偏好</label>
-                <select id="mix-ending-style">
-                  <option>自动</option>
-                  <option>尺码引导</option>
-                  <option>信任背书</option>
-                  <option>场景收尾</option>
-                  <option>囤货收尾</option>
-                  <option>发货保鲜</option>
-                  <option>复购背书</option>
-                  <option>自然结束</option>
-                  <option>不要促单</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                <label for="mix-strictness">严格度</label>
-                <select id="mix-strictness">
-                  <option>宽松</option>
-                  <option selected>标准</option>
-                  <option>严格</option>
-                </select>
-              </div>
-            </div>
+            <p class="panel-note director-controls-note">优先项会同时用于故事规划和短句选择，不要求全部覆盖。本次避选会进一步收紧内容边界；开头、收尾偏好不能放行被禁止的内容。</p>
           </section>
 
           <section class="panel panel-wide">
             <div class="panel-header">
-              <h2>AI 选片工作台</h2>
+              <h2>AI 导演工作台</h2>
               <div class="log-header-actions">
                 <span class="log-count" id="mix-preview-count">0</span>
-                <button class="button button-muted button-small" data-action="clear-cache" title="清理混剪 AI 选片预览缓存">清选片缓存</button>
+                <button class="button button-muted button-small" data-action="clear-cache" title="清理混剪 AI 导演预览缓存">清预览缓存</button>
                 <button class="button button-muted button-small" data-action="clear-preview-workbench" data-preview-scope="mix">清空编排</button>
                 <button class="button button-primary button-small" data-action="start-mix-from-preview">按当前编排混剪</button>
               </div>
@@ -1010,7 +948,7 @@
               <video id="mix-preview-video" controls playsinline></video>
             </div>
             <div class="clip-preview empty" id="mix-preview">
-              <p>点击“AI选片预览”，先看混剪会从哪些素材里选哪些片段。</p>
+              <p>点击“AI导演预览”，AI 会先统一理解全部素材，再编排一条可逐句修改的混剪故事。</p>
             </div>
           </section>
 
@@ -1773,159 +1711,144 @@
               </div>
             </section>
 
-            <section class="settings-page" id="settings-selection">
-              <div class="panel">
-                <div class="panel-header">
-                  <h2>我的内容政策</h2>
+            <section class="settings-page selection-product-page" id="settings-selection">
+              <div class="panel selection-priority-card">
+                <div>
+                  <span class="settings-kicker">AI 选片原则</span>
+                  <h2>先守边界，再根据素材决定怎么讲</h2>
+                  <p>安全规则和真实素材优先；你的长期偏好只在多个候选都成立时帮助 AI 做取舍。</p>
+                </div>
+                <ol class="selection-priority-flow" aria-label="AI 选片优先级">
+                  <li><strong>内容安全</strong><span>硬性规则</span></li>
+                  <li><strong>素材证据</strong><span>当前素材成立</span></li>
+                  <li><strong>编导规则</strong><span>结构与节奏</span></li>
+                  <li><strong>个人偏好</strong><span>你的长期倾向</span></li>
+                  <li><strong>历史学习</strong><span>从你的行为中学习</span></li>
+                </ol>
+              </div>
+
+              <div class="panel settings-product-card selection-boundary-card">
+                <div class="settings-section-heading">
+                  <div><span>01</span><h2>内容边界</h2></div>
+                  <p>控制 AI 是否可以采用以下表达。“仅正文”表示不能作为开头或结尾。</p>
                 </div>
                 <div class="content-policy-grid">
                   <label class="content-policy-row"><span>价格与报价</span><select id="s-policy-price"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>促销与行动引导</span><select id="s-policy-cta"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
+                  <label class="content-policy-row"><span>库存与稀缺催促</span><select id="s-policy-inventory-pressure"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>来源与原厂背书</span><select id="s-policy-source-claim"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>社会证明</span><select id="s-policy-social-proof"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>售后承诺</span><select id="s-policy-after-sale"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>尺码与身材互动</span><select id="s-policy-size-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                   <label class="content-policy-row"><span>直播互动回复</span><select id="s-policy-live-interaction"><option value="block">禁止</option><option value="body_only">仅正文</option><option value="allow">可用</option><option value="prefer">优先</option></select></label>
                 </div>
-                <div class="field-row compact">
-                  <label for="s-content-review-mode">内容审稿</label>
-                  <select id="s-content-review-mode">
-                    <option value="off" selected>关闭（稳定链路）</option>
-                    <option value="shadow">影子审稿（只记录，不改片单）</option>
-                    <option value="on">审稿优先（安全候选补足时长）</option>
-                  </select>
-                </div>
-                <p class="panel-note">审稿只读取通过硬安全规则的候选；审稿池不足时会开放安全 reserve 补足时长，不能把短片单当作正常成片。</p>
                 <div class="content-policy-custom-head">
                   <label>自定义内容规则</label>
                   <button class="button button-secondary button-small" type="button" data-action="add-content-policy-rule">添加规则</button>
                 </div>
                 <div class="content-policy-custom-rules" id="content-policy-custom-rules"></div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-header">
-                  <h2>长期卖点偏向</h2>
-                </div>
-                <div class="slider-list">
-                  <label class="slider-row">
-                    <span>版型显瘦</span>
-                    <input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="版型显瘦">
-                    <strong data-pref-value="版型显瘦">2</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>上身效果</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="上身效果">
-                    <strong data-pref-value="上身效果">1.5</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>面料质感</span>
-                    <input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="面料质感">
-                    <strong data-pref-value="面料质感">2</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>颜色氛围</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="颜色氛围">
-                    <strong data-pref-value="颜色氛围">1.5</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>风格定位</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="风格定位">
-                    <strong data-pref-value="风格定位">1</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>场景搭配</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="场景搭配">
-                    <strong data-pref-value="场景搭配">1.5</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>情绪感染</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="情绪感染">
-                    <strong data-pref-value="情绪感染">1</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>性价比</span>
-                    <input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="性价比">
-                    <strong data-pref-value="性价比">1</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>流行趋势</span>
-                    <input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="流行趋势">
-                    <strong data-pref-value="流行趋势">0.5</strong>
-                  </label>
-                  <label class="slider-row">
-                    <span>紧迫稀缺</span>
-                    <input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="紧迫稀缺">
-                    <strong data-pref-value="紧迫稀缺">0.5</strong>
-                  </label>
-                </div>
-              </div>
-
-              <div class="panel">
-                <div class="panel-header">
-                  <h2>学习偏好</h2>
-                  <button class="button button-secondary" data-action="refresh-ai-feedback">刷新</button>
-                </div>
-                <p class="panel-note">根据你在 AI 预览里保留、删除、拖到开头或结尾的选择，逐渐形成专属选片风格。</p>
-                <div class="metric-row">
-                  <div>
-                    <span class="metric-label">学习次数</span>
-                    <strong id="ai-feedback-count">0</strong>
+                <details class="settings-inline-details">
+                  <summary>候选不足策略与兼容设置</summary>
+                  <div class="field-row compact">
+                    <label for="s-content-review-mode">候选不足时</label>
+                    <select id="s-content-review-mode">
+                      <option value="off" selected>优先保证内容质量</option>
+                      <option value="shadow">平衡质量与时长</option>
+                      <option value="on">优先接近目标时长</option>
+                    </select>
                   </div>
-                  <div>
-                    <span class="metric-label">文件大小</span>
-                    <strong id="ai-feedback-size">0KB</strong>
+                  <p class="panel-note">只会从通过硬安全规则的真实候选中补充，不会为了时长加入风险内容。</p>
+                  <div class="field-row compact" hidden>
+                    <label for="s-m2-planner-mode">兼容编导模式</label>
+                    <select id="s-m2-planner-mode">
+                      <option value="legacy" selected>旧版（默认）</option>
+                      <option value="heavy_director">Heavy Director（仅本地实验）</option>
+                      <option value="lite_director_experiment">Lite Director（仅本地实验）</option>
+                      <option value="lite_chapter_compression_experiment">Lite Chapter Compression（仅本地实验）</option>
+                      <option value="lite_final_editor_experiment">Lite Final Editor（仅本地实验）</option>
+                    </select>
                   </div>
-                </div>
-                <p class="panel-note" id="ai-feedback-path">保存位置：%APPDATA%\LiveClipper\ai_feedback</p>
-                <div class="panel-actions">
-                  <button class="button button-secondary" data-action="export-ai-feedback">导出画像数据</button>
-                  <button class="button button-primary" data-action="import-ai-feedback">导入合并</button>
-                  <button class="button button-muted" data-action="clear-ai-feedback">清空学习数据</button>
-                </div>
-                <div class="field-row compact">
-                  <label for="s-style-profile-strength">画像影响强度</label>
-                  <select id="s-style-profile-strength">
-                    <option value="auto" selected>自动推荐</option>
-                    <option value="off">关闭</option>
-                    <option value="light">轻度</option>
-                    <option value="standard">标准</option>
-                    <option value="strong">强</option>
-                  </select>
-                </div>
-                <p class="panel-note">选择关闭后，画像仍会继续学习和展示，但不会影响 AI 选片。自动推荐会根据样本数量调节影响强度；轻度仅在候选质量相当时参考。</p>
-                <div class="feedback-summary-box" id="ai-feedback-summary">
-                  <p class="panel-note">剪辑风格画像会在积累人工选择后自动生成。</p>
-                </div>
-                <div class="feedback-library-list" id="ai-feedback-samples">
-                  <p class="panel-note">暂无喜好样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>
-                </div>
+                </details>
               </div>
 
-              <div class="panel">
-                <div class="panel-header">
-                  <h2>高级编导规则</h2>
+              <div class="panel settings-product-card selection-tendency-card">
+                <div class="settings-section-heading">
+                  <div><span>02</span><h2>选片倾向</h2></div>
+                  <p>故事规划和短句选择都会参考这些长期偏好；不会为匹配偏好打乱故事或重复卖点。</p>
                 </div>
-                <div class="field-row textarea-row">
-                  <label for="s-rule-narrative">叙事结构</label>
-                  <textarea id="s-rule-narrative" rows="3" placeholder="默认: 开场圈人→提高预期→产品介绍→促单收尾"></textarea>
+                <div class="slider-list selection-slider-list">
+                  <label class="slider-row"><span>版型 / 显瘦</span><input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="版型显瘦"><strong data-pref-value="版型显瘦">优先</strong></label>
+                  <label class="slider-row"><span>上身效果</span><input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="上身效果"><strong data-pref-value="上身效果">较优先</strong></label>
+                  <label class="slider-row"><span>面料 / 质感</span><input type="range" min="0" max="3" step="0.5" value="2" data-pref-key="面料质感"><strong data-pref-value="面料质感">优先</strong></label>
+                  <label class="slider-row"><span>颜色 / 氛围</span><input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="颜色氛围"><strong data-pref-value="颜色氛围">较优先</strong></label>
+                  <label class="slider-row"><span>风格定位</span><input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="风格定位"><strong data-pref-value="风格定位">标准</strong></label>
+                  <label class="slider-row"><span>场景 / 搭配</span><input type="range" min="0" max="3" step="0.5" value="1.5" data-pref-key="场景搭配"><strong data-pref-value="场景搭配">较优先</strong></label>
+                  <label class="slider-row"><span>情绪 / 记忆点</span><input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="情绪感染"><strong data-pref-value="情绪感染">标准</strong></label>
+                  <label class="slider-row"><span>性价比</span><input type="range" min="0" max="3" step="0.5" value="1" data-pref-key="性价比"><strong data-pref-value="性价比">标准</strong></label>
+                  <label class="slider-row"><span>流行趋势</span><input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="流行趋势"><strong data-pref-value="流行趋势">较少</strong></label>
+                  <label class="slider-row"><span>紧迫 / 稀缺</span><input type="range" min="0" max="3" step="0.5" value="0.5" data-pref-key="紧迫稀缺"><strong data-pref-value="紧迫稀缺">较少</strong></label>
                 </div>
-                <div class="rule-grid">
-                  <label class="check-item"><input id="s-rule-category-filter" type="checkbox" checked> 强制同一品类</label>
+                <div class="settings-soft-note">本次导演参数优先于长期倾向；内容边界、真实证据和故事完整性始终优先。调低表示少讲，不等于禁止。</div>
+              </div>
+
+              <div class="panel settings-product-card selection-learning-card">
+                <div class="settings-section-heading is-actionable">
+                  <div><span>03</span><h2>AI 对你的理解</h2></div>
+                  <button class="button button-secondary button-small" data-action="refresh-ai-feedback">刷新理解</button>
                 </div>
-                <input id="s-rule-time-coherence" type="checkbox" checked hidden aria-hidden="true" tabindex="-1">
-                <div class="field-row compact">
-                  <label for="s-rule-hook-cap">Hook上限</label>
-                  <select id="s-rule-hook-cap">
-                    <option>3秒</option>
-                    <option selected>5秒</option>
-                    <option>8秒</option>
-                    <option>不限</option>
-                  </select>
+                <div class="selection-learning-summary">
+                  <div><span class="selection-learning-dot"></span><strong>自动学习已开启</strong></div>
+                  <p>已从 <strong id="ai-feedback-count">0</strong> 次人工调整中学习 · 学习库 <span id="ai-feedback-size">0KB</span></p>
                 </div>
-                <div class="field-row textarea-row">
-                  <label for="s-rule-custom-text">长期编导备注</label>
-                  <textarea id="s-rule-custom-text" rows="3" placeholder="例如: 优先选提到裙长、露脚踝的片段"></textarea>
+                <div class="selection-learning-layout">
+                  <div class="feedback-summary-box" id="ai-feedback-summary">
+                    <p class="panel-note">完成一次 AI 预览人工调整并成片后，这里会总结你的剪辑偏好。</p>
+                  </div>
+                  <aside class="selection-learning-control">
+                    <label for="s-style-profile-strength">选片时参考我的偏好</label>
+                    <select id="s-style-profile-strength">
+                      <option value="auto" selected>自动推荐</option>
+                      <option value="off">关闭影响，继续学习</option>
+                      <option value="light">轻微影响</option>
+                      <option value="standard">标准影响</option>
+                      <option value="strong">明显影响</option>
+                    </select>
+                    <p>关闭后仍会学习和展示，但不会影响 AI 选片。</p>
+                  </aside>
+                </div>
+                <details class="feedback-library-details">
+                  <summary>查看学习详情与管理数据</summary>
+                  <p class="panel-note" id="ai-feedback-path">保存位置：%APPDATA%\LiveClipper\ai_feedback</p>
+                  <div class="panel-actions">
+                    <button class="button button-secondary" data-action="export-ai-feedback">导出学习数据</button>
+                    <button class="button button-secondary" data-action="import-ai-feedback">导入合并</button>
+                    <button class="button button-muted" data-action="clear-ai-feedback">清空学习数据</button>
+                  </div>
+                  <div class="feedback-library-list" id="ai-feedback-samples">
+                    <p class="panel-note">暂无学习样本。完成一次 AI 预览人工调整并成片后，这里会显示常用开头、常删句子和常用结尾。</p>
+                  </div>
+                </details>
+              </div>
+
+              <div class="panel settings-product-card selection-director-card">
+                <div class="settings-section-heading">
+                  <div><span>04</span><h2>编导规则</h2></div>
+                  <p>告诉 AI 一条片应该怎样讲。底层导演会结合当前素材调整，不机械套模板。</p>
+                </div>
+                <div class="selection-director-grid">
+                  <div>
+                    <div class="field-row textarea-row">
+                      <label for="s-rule-narrative">成片结构</label>
+                      <textarea id="s-rule-narrative" rows="3" placeholder="默认：开场圈人→核心承诺→商品证据→上身效果→自然收束"></textarea>
+                    </div>
+                    <div class="selection-story-path" aria-label="默认成片结构"><span>Hook</span><i></i><span>核心承诺</span><i></i><span>商品证据</span><i></i><span>上身效果</span><i></i><span>收束</span></div>
+                  </div>
+                  <div class="selection-director-controls">
+                    <label class="check-item"><input id="s-rule-category-filter" type="checkbox" checked> 同一条成片保持同一品类</label>
+                    <input id="s-rule-time-coherence" type="checkbox" checked hidden aria-hidden="true" tabindex="-1">
+                    <div class="field-row compact"><label for="s-rule-hook-cap">Hook 数量上限</label><select id="s-rule-hook-cap"><option>3秒</option><option selected>5秒</option><option>8秒</option><option>不限</option></select></div>
+                    <div class="field-row textarea-row"><label for="s-rule-custom-text">给 AI 的长期备注</label><textarea id="s-rule-custom-text" rows="3" placeholder="例如：优先选择语义完整、画面稳定的片段"></textarea></div>
+                  </div>
                 </div>
               </div>
             </section>
@@ -2031,130 +1954,88 @@
               </div>
             </section>
 
-            <section class="settings-page" id="settings-system">
-              <div class="panel">
-                <div class="panel-header">
-                  <h2>系统</h2>
+            <section class="settings-page system-product-page" id="settings-system">
+              <div class="panel settings-product-card system-application-card">
+                <div class="settings-section-heading">
+                  <div><h2>应用</h2></div>
+                  <p>调整界面显示和本机处理性能。</p>
                 </div>
-                <div class="field-row">
-                  <label>用户数据</label>
-                  <input id="runtime-user-data" type="text" readonly>
+                <div class="system-application-grid">
+                  <div class="field-row compact"><label for="s-ui-theme">界面模式</label><select id="s-ui-theme"><option value="system">跟随系统</option><option value="light">浅色模式</option><option value="dark">深色模式</option></select></div>
+                  <label class="slider-row"><span>界面字号</span><input id="s-ui-font-size" type="range" min="12" max="18" step="1" value="14"><strong><b id="s-ui-font-size-value">14</b> px</strong></label>
+                  <label class="system-switch-row"><span><strong>硬件加速</strong><small>优先使用显卡导出，不可用时自动回退</small></span><input id="s-hardware-encoder" type="checkbox"></label>
                 </div>
-                <div class="field-row">
-                  <label for="user-data-dir">迁移目录</label>
-                  <div class="input-with-button">
-                    <input id="user-data-dir" type="text" placeholder="选择 D/E 盘中的 LiveClipperData 文件夹">
-                    <button class="button button-secondary" data-action="pick-directory" data-target="user-data-dir">浏览</button>
-                    <button class="button button-muted" data-action="open-path" data-target="user-data-dir">打开</button>
+              </div>
+
+              <div class="panel settings-product-card system-subtitle-card">
+                <div class="settings-section-heading is-actionable">
+                  <div><h2>字幕外观</h2></div>
+                  <span class="settings-section-tip">调整后保存即可用于正式成片</span>
+                </div>
+                <div class="subtitle-settings-grid">
+                  <div class="subtitle-settings-controls">
+                    <div class="field-row compact"><label for="s-subtitle-font-family">字幕字体</label><select id="s-subtitle-font-family"><option value="思源粗宋">正在读取本机字体…</option></select></div>
+                    <label class="slider-row"><span>字幕字号</span><input id="s-subtitle-font-size" type="range" min="32" max="96" step="2" value="52"><strong><b id="s-subtitle-font-size-value">52</b> px</strong></label>
+                    <label class="slider-row"><span>字幕高度</span><input id="s-subtitle-position-percent" type="range" min="8" max="70" step="1" value="24"><strong>距底部 <b id="s-subtitle-position-value">24</b>%</strong></label>
+                    <div class="field-row compact"><label for="s-subtitle-font-color">字幕颜色</label><select id="s-subtitle-font-color"><option value="white">白色</option><option value="yellow">黄色</option><option value="orange">橙色</option><option value="red">红色</option><option value="pink">粉色</option><option value="purple">紫色</option><option value="blue">蓝色</option><option value="green">绿色</option><option value="black">黑色</option></select></div>
+                    <div class="field-row compact"><label for="s-subtitle-text-effect">文字效果</label><select id="s-subtitle-text-effect"><option value="shadow">阴影</option><option value="outline">描边</option></select></div>
+                    <label class="slider-row"><span>不透明度</span><input id="s-subtitle-opacity" type="range" min="20" max="100" step="5" value="70"><strong id="s-subtitle-opacity-value">70%</strong></label>
+                    <label class="slider-row"><span>模糊强度</span><input id="s-subtitle-blur" type="range" min="0" max="20" step="1" value="10"><strong id="s-subtitle-blur-value">10</strong></label>
+                  </div>
+                  <div class="subtitle-style-preview" aria-label="字幕效果预览">
+                    <div class="subtitle-preview-heading"><span>9:16 实时预览</span><strong id="subtitle-preview-state">52px · 高度24%</strong></div>
+                    <div class="subtitle-preview-stage"><div class="subtitle-preview-subject" aria-hidden="true"></div><p id="subtitle-preview-text">这个衣服看着简单<br>实际很难做</p></div>
+                    <small id="subtitle-font-status">字体来自当前电脑；保存后用于正式成片。</small>
                   </div>
                 </div>
-                <p class="panel-note">迁移后，设置、词库、剪辑风格画像、预览缓存和拖拽缓存会写入新目录；授权和更新指针仍保留在系统默认位置。</p>
-                <div class="field-row">
-                  <label>源码目录</label>
-                  <input id="runtime-repo-root" type="text" readonly>
-                </div>
-                <div class="field-row">
-                  <label>在线更新</label>
-                  <input id="update-status" type="text" value="未检查" readonly>
-                </div>
-                <div class="field-row">
-                  <label for="s-ui-theme">界面颜色</label>
-                  <select id="s-ui-theme">
-                    <option value="system">跟随系统</option>
-                    <option value="light">浅色模式</option>
-                    <option value="dark">深色模式</option>
-                  </select>
-                </div>
-                <label class="slider-row">
-                  <span>界面字号</span>
-                  <input id="s-ui-font-size" type="range" min="12" max="18" step="1" value="14">
-                  <strong id="s-ui-font-size-value">14</strong>
-                </label>
-                <label class="slider-row">
-                  <span>成片字幕字号</span>
-                  <input id="s-subtitle-font-size" type="range" min="32" max="96" step="2" value="52">
-                  <strong id="s-subtitle-font-size-value">52</strong>
-                </label>
-                <div class="field-row">
-                  <label for="s-subtitle-font-family">字幕字体</label>
-                  <select id="s-subtitle-font-family">
-                    <option value="思源粗宋">思源粗宋</option>
-                    <option value="细体">细体</option>
-                    <option value="金陵体">金陵体</option>
-                    <option value="凌丝体">凌丝体</option>
-                    <option value="阳熙体">阳熙体</option>
-                    <option value="苍耳丰黑">苍耳丰黑</option>
-                    <option value="雅乐体">雅乐体</option>
-                  </select>
-                </div>
-                <div class="field-row">
-                  <label for="s-subtitle-font-color">字幕颜色</label>
-                  <select id="s-subtitle-font-color">
-                    <option value="white">白色</option>
-                    <option value="yellow">黄色</option>
-                    <option value="orange">橙色</option>
-                    <option value="red">红色</option>
-                    <option value="pink">粉色</option>
-                    <option value="purple">紫色</option>
-                    <option value="blue">蓝色</option>
-                    <option value="green">绿色</option>
-                    <option value="black">黑色</option>
-                  </select>
-                </div>
-                <div class="field-row">
-                  <label for="s-subtitle-text-effect">文字效果</label>
-                  <select id="s-subtitle-text-effect">
-                    <option value="shadow">阴影</option>
-                    <option value="outline">描边</option>
-                  </select>
-                </div>
-                <label class="slider-row">
-                  <span>字幕不透明度</span>
-                  <input id="s-subtitle-opacity" type="range" min="20" max="100" step="5" value="70">
-                  <strong id="s-subtitle-opacity-value">70%</strong>
-                </label>
-                <label class="slider-row">
-                  <span>字幕模糊度</span>
-                  <input id="s-subtitle-blur" type="range" min="0" max="20" step="1" value="10">
-                  <strong id="s-subtitle-blur-value">10</strong>
-                </label>
-                <p class="panel-note">默认白色、阴影、不透明度 70%、模糊度 10。字体需已安装在本机；未安装时成片会自动使用系统默认粗体。</p>
-                <label class="switch-row">
-                  <span>启用硬件加速</span>
-                  <input id="s-hardware-encoder" type="checkbox">
-                </label>
-                <p class="panel-note">实验选项：优先尝试显卡编码，不可用时会自动回退稳定编码。</p>
-                <div class="field-row">
-                  <label for="license-code">激活码</label>
-                  <input id="license-code" type="text" placeholder="输入激活码">
-                </div>
-                <div class="field-row">
-                  <label>剩余天数</label>
-                  <input id="license-days-left" type="text" readonly>
-                </div>
-                <div class="system-actions">
-                  <button class="button button-primary" data-action="activate-license">激活</button>
-                  <button class="button button-muted" data-action="unbind-device">解绑设备</button>
-                  <button class="button button-secondary" data-action="check-update">检查更新</button>
-                  <button class="button button-secondary" data-action="apply-update" disabled>安装更新</button>
-                  <button class="button button-secondary" data-action="feedback">反馈</button>
-                  <button class="button button-secondary" data-action="apply-user-data-dir">应用数据目录</button>
-                  <button class="button button-secondary" data-action="clear-cache">清理缓存</button>
+              </div>
+
+              <div class="panel settings-product-card system-storage-card">
+                <div class="settings-section-heading"><div><h2>存储</h2></div><p>素材不会移动；这里只管理 LiveClipper 的设置、缓存和学习数据。</p></div>
+                <div class="system-storage-rows">
+                  <div class="system-storage-row"><span><strong>当前数据目录</strong><small>设置、词库、剪辑风格画像和预览缓存</small></span><div class="input-with-button"><input id="runtime-user-data" type="text" readonly><button class="button button-secondary" data-action="open-path" data-target="runtime-user-data">打开</button></div></div>
+                  <div class="system-storage-row"><span><strong>迁移数据</strong><small>选择新位置后手动迁移，不会删除原目录</small></span><div class="input-with-button"><input id="user-data-dir" type="text" placeholder="选择新的 LiveClipperData 文件夹"><button class="button button-secondary" data-action="pick-directory" data-target="user-data-dir">选择目录</button><button class="button button-secondary" data-action="apply-user-data-dir">迁移数据…</button></div></div>
+                  <div class="system-storage-row is-compact"><span><strong>缓存文件</strong><small>预览、转码和临时文件；不会删除项目、设置、词库或授权</small></span><button class="button button-secondary" data-action="clear-cache">清理缓存</button></div>
                 </div>
               </div>
-              <div class="panel log-panel">
-                <div class="panel-header">
-                  <h2>诊断日志</h2>
-                  <span class="log-count" id="settings-log-count">0</span>
+
+              <div class="panel settings-product-card system-version-card">
+                <div class="settings-section-heading"><div><h2>版本与授权</h2></div><p>查看软件状态，必要时检查更新或管理当前设备授权。</p></div>
+                <div class="system-version-grid">
+                  <section>
+                    <span class="system-card-label">LiveClipper</span>
+                    <strong class="system-version-number" id="runtime-settings-version">当前版本</strong>
+                    <input class="system-status-field" id="update-status" type="text" value="未检查" readonly aria-label="在线更新状态">
+                    <div class="system-card-actions"><button class="button button-secondary" data-action="check-update">检查更新</button><button class="button button-secondary" data-action="apply-update" disabled>安装更新</button></div>
+                  </section>
+                  <section>
+                    <span class="system-card-label">授权状态</span>
+                    <strong class="system-license-status" id="system-license-status"><i></i>正在读取</strong>
+                    <input class="system-status-field" id="license-days-left" type="text" value="正在读取" readonly aria-label="授权有效期">
+                    <details class="system-license-details"><summary>管理授权</summary><div class="field-row compact"><label for="license-code">激活码</label><input id="license-code" type="text" placeholder="输入激活码"></div><div class="system-card-actions"><button class="button button-primary" data-action="activate-license">激活或更换授权</button><button class="button button-muted" data-action="unbind-device">解绑设备</button></div></details>
+                  </section>
                 </div>
-                <div class="log-view" id="log-settings"></div>
               </div>
+
+              <details class="panel settings-product-card system-diagnostics-card">
+                <summary><span><strong>高级诊断</strong><small>日志、运行位置和问题反馈</small></span><em>展开</em></summary>
+                <div class="system-diagnostics-body">
+                  <div class="field-row"><label>源码与运行目录</label><input id="runtime-repo-root" type="text" readonly></div>
+                  <div class="system-actions"><button class="button button-secondary" data-action="feedback">反馈问题</button><button class="button button-secondary" data-action="open-path" data-target="runtime-user-data">打开数据目录</button></div>
+                  <div class="panel-header"><h2>运行日志</h2><span class="log-count" id="settings-log-count">0</span></div>
+                  <div class="log-view" id="log-settings"></div>
+                </div>
+              </details>
             </section>
           </div>
         </div>
       </section>
     </main>
   </div>
+
+  <section class="commerce-director-studio-page is-hidden" id="commerce-director-studio-page" aria-label="AI 导演实验工作台">
+    <div class="commerce-director-studio-shell" id="commerce-director-studio-content"></div>
+  </section>
 
   <div class="keyword-modal is-hidden" id="keyword-editor-modal" aria-hidden="true">
     <div class="keyword-modal-backdrop" data-action="close-keyword-editor"></div>
@@ -2189,6 +2070,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260812-product-scan-layout-v1" defer></script>
+  <script src="/assets/app.js?v=20260903-subtitle-system-font-v1" defer></script>
 </body>
 </html>

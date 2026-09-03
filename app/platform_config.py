@@ -5,6 +5,7 @@
 import os
 import sys
 import platform
+from functools import lru_cache
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
@@ -34,6 +35,74 @@ else:
     DRAWTEXT_FONT_PATH = FONT_BOLD_PATH.replace("\\", "/").replace(":", "\\:")
 
 
+def _registered_windows_fonts():
+    """Return installed font aliases and files from both Windows font hives."""
+    if not IS_WIN:
+        return ()
+    records = []
+    try:
+        import winreg
+
+        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                key = winreg.OpenKey(hive, key_path)
+            except OSError:
+                continue
+            with key:
+                index = 0
+                while True:
+                    try:
+                        registered_name, filename, _kind = winreg.EnumValue(key, index)
+                    except OSError:
+                        break
+                    index += 1
+                    candidate = os.path.expandvars(str(filename or ""))
+                    if not os.path.isabs(candidate):
+                        candidate = os.path.join(FONT_DIR, candidate)
+                    if not os.path.isfile(candidate):
+                        continue
+                    family = str(registered_name or "").strip()
+                    family = family.rsplit("(", 1)[0].strip()
+                    aliases = [item.strip() for item in family.split(" & ") if item.strip()]
+                    for alias in aliases or [family]:
+                        records.append((alias, candidate))
+    except Exception:
+        return ()
+    unique = {}
+    for family, path in records:
+        unique.setdefault(family.casefold(), (family, path))
+    return tuple(unique.values())
+
+
+@lru_cache(maxsize=1)
+def list_installed_subtitle_fonts():
+    """List installed families likely to render Chinese commerce subtitles."""
+    if IS_WIN:
+        names = [
+            family for family, _path in _registered_windows_fonts()
+            if _is_cjk_subtitle_font_name(family)
+        ]
+    elif IS_MAC:
+        names = [FONT_NAME, FONT_BOLD_NAME]
+    else:
+        names = [FONT_NAME, FONT_BOLD_NAME]
+    return tuple(sorted(set(filter(None, names)), key=lambda value: value.casefold()))
+
+
+def _is_cjk_subtitle_font_name(name):
+    text = str(name or "").strip()
+    folded = text.casefold()
+    if any("\u4e00" <= char <= "\u9fff" for char in text):
+        return True
+    return any(token in folded for token in (
+        "yahei", "dengxian", "simhei", "simsun", "nsimsun", "kaiti", "fangsong",
+        "noto sans sc", "noto serif sc", "source han", "harmonyos", "jhenghei",
+        "mingliu", "pmingliu", "meiryo", "yu gothic", "yu mincho", "ms gothic",
+        "ms mincho", "biz ud", "arial unicode ms", "kingsoft", "yyb sans",
+    ))
+
+
 def resolve_subtitle_font(preferred_name):
     """Return a usable subtitle font name/path, falling back safely when needed.
 
@@ -45,36 +114,15 @@ def resolve_subtitle_font(preferred_name):
     if not preferred:
         return FONT_BOLD_NAME, FONT_BOLD_PATH, True
     if IS_WIN:
-        try:
-            import winreg
-
-            key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-                try:
-                    key = winreg.OpenKey(hive, key_path)
-                except OSError:
-                    continue
-                with key:
-                    index = 0
-                    while True:
-                        try:
-                            registered_name, filename, _kind = winreg.EnumValue(key, index)
-                        except OSError:
-                            break
-                        index += 1
-                        if preferred.casefold() not in str(registered_name).casefold():
-                            continue
-                        candidate = os.path.expandvars(str(filename or ""))
-                        if not os.path.isabs(candidate):
-                            candidate = os.path.join(FONT_DIR, candidate)
-                        if os.path.isfile(candidate):
-                            # The registry name is generally closer to libass's
-                            # family name than a font-file name, and exact matching
-                            # works for the common Chinese installed fonts.
-                            family = str(registered_name).split("(", 1)[0].strip() or preferred
-                            return family, candidate, False
-        except Exception:
-            pass
+        records = _registered_windows_fonts()
+        for family, candidate in records:
+            if family.casefold() == preferred.casefold():
+                return family, candidate, False
+        # Keep compatibility with earlier saved display-font names that may be
+        # a shorter alias of the registered family.
+        for family, candidate in records:
+            if preferred.casefold() in family.casefold():
+                return family, candidate, False
     return FONT_BOLD_NAME, FONT_BOLD_PATH, True
 
 # ============================================================

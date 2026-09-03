@@ -215,7 +215,7 @@ class PreviewWordEditingTests(unittest.TestCase):
 
     def test_selected_preview_rows_expose_pointer_drag_only_order_controls(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
-        start = script.rfind("function renderPreviewSelectedRows")
+        start = script.rfind("function renderPreviewSelectedRow(")
         end = script.find("// [AI_WORKBENCH_LIBRARY_END]", start)
         rendered_rows = script[start:end]
 
@@ -287,6 +287,58 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertIn('previewReady(state.smartPreview, "smart")', actions)
         self.assertIn('previewReady(state.mixPreview, "mix")', actions)
 
+    def test_direct_batch_actions_do_not_require_a_preview(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        actions_start = script.index("function syncFlowActionState")
+        actions_end = script.index("function bindVideoRowDrag", actions_start)
+        actions = script[actions_start:actions_end]
+        smart_start = script.index("async function startSmartCut")
+        smart_end = script.index("async function startSmartFromPreview", smart_start)
+        smart = script[smart_start:smart_end]
+
+        self.assertIn("smartHasVideos && !mediaPipelineBusy", actions)
+        self.assertIn("mixHasVideos && !mediaPipelineBusy", actions)
+        self.assertIn('api("/api/smart-cut/start"', smart)
+        self.assertNotIn("previewReady", smart)
+
+    def test_director_alternative_cards_are_direction_only_and_collapsed_by_default(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        start = script.index("function renderCommerceDirectorRecommendationCard")
+        end = script.index("function togglePreviewOverviewDetails", start)
+        rendered = script[start:end]
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("const unavailable = item?.available === false", rendered)
+        self.assertNotIn('String(alternativeStory?.duration_feasibility', rendered)
+        self.assertIn("commerce-director-alternatives-toggle", rendered)
+        self.assertIn("commerce-director-alternative-popover", rendered)
+        self.assertIn("preview-director-alternatives-toggle", rendered)
+        self.assertIn("commerce-director-alt-card", rendered)
+        self.assertIn("核心购买理由", rendered)
+        self.assertIn("开场方向", rendered)
+        self.assertIn("需 2 次 AI", rendered)
+        self.assertIn("position: absolute;", styles)
+
+    def test_director_workbench_exposes_story_path_candidate_views_and_chapter_script(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        card_start = script.index("function renderCommerceDirectorRecommendationCard")
+        card_end = script.index("function togglePreviewOverviewDetails", card_start)
+        card = script[card_start:card_end]
+        filters_start = script.index("function renderPreviewCandidateFilterBar")
+        filters_end = script.index("function previewDirectorCandidateSuggestion", filters_start)
+        filters = script[filters_start:filters_end]
+        rows_start = script.index("function renderPreviewSelectedRow(")
+        rows_end = script.index("// [AI_WORKBENCH_LIBRARY_END]", rows_start)
+        rows = script[rows_start:rows_end]
+
+        self.assertIn("preview-director-chapter-focus", card)
+        self.assertIn("commerce-director-status-row", card)
+        self.assertIn("recommended", filters)
+        self.assertIn("chapter", filters)
+        self.assertIn("all", filters)
+        self.assertIn("preview-story-chapter", rows)
+        self.assertIn("data-preview-selected-chapter", rows)
+
     def test_word_editor_uses_lexical_groups_without_changing_ctc_word_indices(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
         start = script.rfind("const previewEditorWordLexicon")
@@ -332,6 +384,56 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertIn("finishPreviewWordRangeGesture", binding)
         self.assertIn("event.shiftKey && applyPreviewWordRangeFromAnchor", binding)
         self.assertIn("preview-word-audition", binding)
+
+    def test_backup_candidate_can_be_dragged_into_selected_story_without_ai(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        drag_start = script.index("function bindPreviewCandidateDrag")
+        drag_end = script.index("function previewInlineVideoKey", drag_start)
+        drag = script[drag_start:drag_end]
+        insert_start = script.rfind("function insertPreviewWorkbenchCandidate")
+        insert_end = script.find("function previewCurrentWorkbenchClip", insert_start)
+        insertion = script[insert_start:insert_end]
+        candidate_start = script.rfind("function renderPreviewCandidateGroups")
+        candidate_end = script.find("// SenseVoice supplies", candidate_start)
+        candidates = script[candidate_start:candidate_end]
+        workbench_start = script.rfind("function renderPreviewWorkbench")
+        workbench_end = script.find("function toast", workbench_start)
+        workbench = script[workbench_start:workbench_end]
+        smart_render_start = script.index("function renderSmartPreview")
+        smart_render_end = script.index("function renderMixPreview", smart_render_start)
+        smart_render = script[smart_render_start:smart_render_end]
+        mix_render_start = smart_render_end
+        mix_render_end = script.index("function renderClipMeta", mix_render_start)
+        mix_render = script[mix_render_start:mix_render_end]
+        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("data-preview-candidate-drag-handle", candidates)
+        self.assertIn("data-preview-candidate-row", candidates)
+        self.assertIn("data-preview-candidate-drop-zone", workbench)
+        self.assertIn("insertPreviewWorkbenchCandidate", drag)
+        self.assertIn("targetRow.dataset.previewIndex", drag)
+        self.assertIn("previewAssemblyOrder(scope, preview)", insertion)
+        self.assertIn("order.splice(insertAt, 0, clipIndex)", insertion)
+        self.assertIn("commitPreviewDraft(scope)", insertion)
+        self.assertNotIn("api(", insertion)
+        self.assertIn('bindPreviewCandidateDrag(box, "smart")', smart_render)
+        self.assertIn('bindPreviewCandidateDrag(box, "mix")', mix_render)
+        self.assertIn("overflow-wrap: anywhere", styles)
+        self.assertIn(".preview-selected-list.is-candidate-drop-target", styles)
+
+    def test_unselected_director_candidate_shows_its_source_sentence(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        text_start = script.rfind("function previewWorkbenchCandidateText")
+        text_end = script.find("function isPreviewWorkbenchHardWasteCandidate", text_start)
+        candidate_text = script[text_start:text_end]
+        render_start = script.rfind("function renderPreviewCandidateGroups")
+        render_end = script.find("// SenseVoice supplies", render_start)
+        render = script[render_start:render_end]
+
+        self.assertIn('selected !== "未选择句子"', candidate_text)
+        self.assertIn('String(clip?.text || "").trim()', candidate_text)
+        self.assertIn("previewWorkbenchCandidateText(clip)", render)
+        self.assertIn("完整句库", render)
 
     def test_compact_workbench_uses_the_editor_as_the_only_full_text_surface(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
@@ -436,6 +538,49 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertEqual(report["source_count"], 1)
         self.assertEqual(report["continuity_break_count"], 0)
         self.assertAlmostEqual(report["projected_final_duration"], 19.5)
+
+    def test_preview_cleanup_rebuilds_manifest_from_renderable_segments(self):
+        raw_clips = [
+            ("hook", "[V1] 肩线向内收，视觉更利落。", 0.0, 4.0, 50, 4.0, "", "C:/v1.mp4"),
+            ("product", "[V2] 会稍微亮一点点", 4.0, 7.0, 50, 3.0, "", "C:/v2.mp4"),
+        ]
+        public_clips = [
+            {
+                "index": 0,
+                "selected": True,
+                "source": "C:/v1.mp4",
+                "segments": [{"index": 0, "start": 0.0, "end": 4.0, "text": "肩线向内收，视觉更利落。", "selected": True}],
+            },
+            {
+                "index": 1,
+                "selected": False,
+                "source": "C:/v2.mp4",
+                "segments": [{"index": 0, "start": 4.0, "end": 7.0, "text": "会稍微亮一点点", "selected": False}],
+            },
+        ]
+        manifest = ai_clipper.SelectionManifest.from_clips(
+            raw_clips,
+            candidate_digest="candidate-contract",
+            duration_contract={"final_target": 60, "speed_factor": 1.15},
+        ).to_dict()
+        dedup_summary = {
+            "selection_manifest": manifest,
+            "selection_result": {"status": "success", "manifest": manifest},
+            "source_contract": {"required_counts": {"[V1]": 1, "[V2]": 1}},
+            "plan_quality_report": {"selected_clip_count": 2, "duration": {"source_total": 7.0}},
+        }
+
+        server._sync_preview_final_selection_metadata(raw_clips, public_clips, dedup_summary)
+
+        final_manifest = dedup_summary["selection_manifest"]
+        self.assertEqual(final_manifest["selected_count"], 1)
+        self.assertEqual(final_manifest["selected_row_count"], 1)
+        self.assertEqual(final_manifest["director_initial_selected_count"], 2)
+        self.assertEqual(dedup_summary["selection_result"]["manifest"]["selected_count"], 1)
+        self.assertEqual(dedup_summary["selection_result"]["status"], "partial_insufficient")
+        self.assertFalse(dedup_summary["selection_result"]["ok"])
+        self.assertEqual(dedup_summary["source_contract"]["selected_counts"], {"[V1]": 1})
+        self.assertEqual(dedup_summary["plan_quality_report"]["selected_clip_count"], 1)
 
     def test_both_preview_workers_apply_the_saved_assembly_order(self):
         smart_source = server._run_smart_cut_from_preview.__code__.co_names
@@ -700,7 +845,53 @@ class PreviewWordEditingTests(unittest.TestCase):
             "text": "\u800c\u4e14\u662f\u6709\u70b9\u5c0f\u886c\u886b\u611f\u7684",
             "words": [],
         }
-        self.assertEqual(server._preview_segment_selection_units(orphan, {}), [])
+        orphan_units = server._preview_segment_selection_units(orphan, {})
+        self.assertEqual(len(orphan_units), 1)
+        self.assertTrue(orphan_units[0]["boundary_deferred"])
+        self.assertEqual(
+            server._merge_selected_segments(
+                {"source": "V1", "segments": [orphan]},
+                ("product", "[V1] 而且是有点小衬衫感的", 15.1, 17.0, 50.0, 1.9),
+                [0],
+            ),
+            [],
+        )
+
+    def test_adjacent_full_segments_merge_before_boundary_validation(self):
+        raw_clip = (
+            "product",
+            "[V1] 等到八九月份穿没有问题因为它是单薄的长袖而且是有点小衬衫感的",
+            10.0,
+            17.0,
+            50.0,
+            7.0,
+            "面料质感",
+        )
+        public = {
+            "source": "V1",
+            "segments": [
+                {
+                    "index": 0,
+                    "start": 10.0,
+                    "end": 14.8,
+                    "text": "等到八九月份穿没有问题因为它是单薄的长袖",
+                    "words": [],
+                },
+                {
+                    "index": 1,
+                    "start": 15.1,
+                    "end": 17.0,
+                    "text": "而且是有点小衬衫感的",
+                    "words": [],
+                },
+            ],
+        }
+
+        parts = server._merge_selected_segments(public, raw_clip, [0, 1])
+
+        self.assertEqual(len(parts), 1)
+        self.assertIn("而且是有点小衬衫感的", parts[0][1])
+        self.assertEqual((round(parts[0][2], 1), round(parts[0][3], 1)), (10.0, 17.0))
 
     def test_legacy_duplicate_word_indices_are_resolved_by_sentence_position(self):
         segment = {

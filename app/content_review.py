@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
 
 from ai_model_config import ai_chat_completions_url
+from ai_cost_ledger import record_ai_call
 from candidate_quality import candidate_quality_flags, hook_candidate_quality_flags
 from content_policy import (
     blocks_role,
@@ -33,7 +34,7 @@ from marketing_intent import (
 from selection_safety import hook_ineligible_reason, live_interaction_or_size_response_reason
 
 
-CONTENT_REVIEW_VERSION = "content-review-v37"
+CONTENT_REVIEW_VERSION = "content-review-v40"
 CONTENT_REVIEW_ENV = "LIVECLIPPER_CONTENT_REVIEW_MODE"
 CONTENT_REVIEW_DEFAULT_MODE = "off"
 CONTENT_REVIEW_MAX_CARDS = 80
@@ -402,6 +403,7 @@ def _hook_promise_family(text: Any) -> str:
         ("social", r"(?:人手一件|全公司|我自己留|我买了|回购|大家都买)"),
         ("price", r"(?:一万|零头|值这个价|性价比|价格)"),
         ("after_sale", r"(?:不满意.*退|包退|退换|售后)"),
+        ("coverage", r"(?:长度|裙长|衣长|走光|露(?:腿|底)|遮(?:住|到|腿)|覆盖|安全)"),
         ("material", r"(?:面料|材质|手感|羊毛|亚麻|莱赛尔|全棉|透气|不扎)"),
         ("comfort", r"(?:舒服|好穿|不闷|轻薄|亲肤|弹力)"),
         ("color", r"(?:颜色|色|显白|黄皮|粉色|藏青|灰调)"),
@@ -444,6 +446,7 @@ def _proof_relation_is_grounded(hook_text: Any, proof_text: Any, relation: str) 
         "social": {"social_proof"},
         "price": {"price_value"},
         "after_sale": {"after_sale_confidence"},
+        "coverage": {"visual_result", "design_reason"},
         "material": {"material_evidence", "wearing_experience"},
         "comfort": {"material_evidence", "wearing_experience"},
         "color": {"visual_result", "scene_projection"},
@@ -452,6 +455,8 @@ def _proof_relation_is_grounded(hook_text: Any, proof_text: Any, relation: str) 
         "scene": {"scene_projection", "visual_result", "identity_projection"},
     }
     family = _hook_promise_family(hook_text)
+    if family == "coverage":
+        return bool(re.search(r"(?:长度|裙|衣长|走光|内衬|遮|覆盖|安全)", compact_proof))
     return not family or relation in allowed_relations.get(family, set())
 
 
@@ -547,6 +552,37 @@ class HookPackage:
 
 
 @dataclass(frozen=True)
+class NarrativeOpportunity:
+    """A reviewed opening chapter the director may build on.
+
+    This is deliberately narrower than a full-video story template.  It only
+    locks the proven Hook -> proof opening, then exposes a few supporting
+    cards and possible next themes.  The director still decides whether a
+    later chapter belongs in this particular duration and sequence.
+    """
+    narrative_id: str
+    hook_id: int
+    followup_id: int
+    topic: str
+    hook_promise: str
+    proof_relation: str
+    opening_support_ids: tuple[int, ...] = ()
+    next_topics: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "narrative_id": self.narrative_id,
+            "hook_id": self.hook_id,
+            "followup_id": self.followup_id,
+            "topic": self.topic,
+            "hook_promise": self.hook_promise,
+            "proof_relation": self.proof_relation,
+            "opening_support_ids": list(self.opening_support_ids),
+            "next_topics": list(self.next_topics),
+        }
+
+
+@dataclass(frozen=True)
 class ContentReviewBundle:
     cache_key: str
     candidate_digest: str
@@ -580,11 +616,83 @@ class ContentReviewBundle:
     @property
     def director_hook_packages(self) -> tuple[HookPackage, ...]:
         """Return only complete opening packages strong enough to constrain AI."""
+        cards_by_id = self.card_map()
         return tuple(
             package for package in self.hook_packages
             if package.package_complete
             and package.opening_tier in _DIRECTOR_HOOK_PACKAGE_TIERS
+            # Reserve material remains available for a later evidence chapter
+            # or duration/source coverage.  It must not displace a reviewed
+            # main choice in the first three seconds or its immediate proof.
+            and (hook_card := cards_by_id.get(package.hook_id)) is not None
+            and (followup_card := cards_by_id.get(package.followup_id)) is not None
+            and hook_card.tier == "main"
+            and followup_card.tier == "main"
+            and _card_hook_eligible(hook_card)
+            and followup_card.dependency == "independent"
+            and followup_card.target_relation != "other"
         )
+
+    @property
+    def narrative_opportunities(self) -> tuple[NarrativeOpportunity, ...]:
+        """Derive small, grounded opening chapters from executable packages.
+
+        A Hook Package proves the first handoff.  We extend it only with
+        reviewed main cards of the same topic, then advertise possible later
+        themes without imposing a whole-video single-theme prison.
+        """
+        cards_by_id = self.card_map()
+        main_cards = [
+            card for card in self.cards
+            if card.tier == "main"
+            and card.dependency == "independent"
+            and card.target_relation != "other"
+        ]
+        opportunities: list[NarrativeOpportunity] = []
+        seen: set[tuple[int, int]] = set()
+        for package in self.director_hook_packages:
+            key = (package.hook_id, package.followup_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            hook_card = cards_by_id.get(package.hook_id)
+            proof_card = cards_by_id.get(package.followup_id)
+            if hook_card is None or proof_card is None:
+                continue
+            topic = _normalize_topic(hook_card.topic) or _normalize_topic(package.topic)
+            if not topic or topic == "其他":
+                continue
+            opening_support_ids = tuple(
+                card.candidate_id
+                for card in sorted(main_cards, key=_content_card_priority, reverse=True)
+                if card.candidate_id not in key
+                and _normalize_topic(card.topic) == topic
+            )[:3]
+            next_topics: list[str] = []
+            for card in sorted(main_cards, key=_content_card_priority, reverse=True):
+                next_topic = _normalize_topic(card.topic)
+                if (
+                    not next_topic
+                    or next_topic in {"其他", topic}
+                    or next_topic in next_topics
+                ):
+                    continue
+                next_topics.append(next_topic)
+                if len(next_topics) >= 3:
+                    break
+            opportunities.append(NarrativeOpportunity(
+                narrative_id=f"ARC-{len(opportunities) + 1:02d}",
+                hook_id=package.hook_id,
+                followup_id=package.followup_id,
+                topic=topic,
+                hook_promise=package.hook_promise,
+                proof_relation=package.proof_relation,
+                opening_support_ids=opening_support_ids,
+                next_topics=tuple(next_topics),
+            ))
+            if len(opportunities) >= 4:
+                break
+        return tuple(opportunities)
 
     def card_map(self) -> dict[int, ContentCard]:
         return {card.candidate_id: card for card in self.cards}
@@ -609,6 +717,8 @@ class ContentReviewBundle:
                 hook_card is None
                 or followup_card is None
                 or not _card_hook_eligible(hook_card)
+                or hook_card.tier != "main"
+                or followup_card.tier != "main"
                 or followup_card.dependency != "independent"
                 or followup_card.target_relation == "other"
             ):
@@ -735,6 +845,7 @@ class ContentReviewBundle:
                 1 for package in self.hook_packages if package.opening_tier == "C"
             ),
             "hook_thread_count": len(self.director_hook_contract()[1]),
+            "narrative_opportunity_count": len(self.narrative_opportunities),
             "director_hook_contract": self.director_hook_contract()[2],
             "director_hook_package_count": len(self.director_hook_packages),
             "hook_pair_reviewed": bool(self.hook_pair_reviewed),
@@ -813,6 +924,7 @@ class ContentReviewBundle:
                 f"已验证承接:{seed_ids}；第二段可从同主题安全候选中选择:{allowed_ids}。"
                 "允许跨原始时间，但必须延续同一商品/主题的解释、证明或展开。"
             )
+
         return "\n".join(lines) + "\n"
 
     def topic_support(self, inventory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
@@ -944,8 +1056,48 @@ def _write_cache(bundle: ContentReviewBundle) -> None:
 def _extract_json_object(content: str) -> dict[str, Any]:
     cleaned = re.sub(r"^```(?:json)?\s*", "", str(content or "").strip(), flags=re.I)
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    data = json.loads(match.group(0) if match else cleaned)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as direct_error:
+        data = None
+        for start, char in enumerate(cleaned):
+            if char != "{":
+                continue
+            closers: list[str] = []
+            in_string = False
+            escaped = False
+            for end in range(start, len(cleaned)):
+                current = cleaned[end]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == '"':
+                        in_string = False
+                    continue
+                if current == '"':
+                    in_string = True
+                elif current == "{":
+                    closers.append("}")
+                elif current == "[":
+                    closers.append("]")
+                elif current in "}]":
+                    if not closers or current != closers[-1]:
+                        break
+                    closers.pop()
+                    if not closers:
+                        try:
+                            candidate = json.loads(cleaned[start:end + 1])
+                        except json.JSONDecodeError:
+                            break
+                        if isinstance(candidate, dict):
+                            data = candidate
+                            break
+            if isinstance(data, dict):
+                break
+        if data is None:
+            raise direct_error
     if not isinstance(data, dict):
         raise ContentReviewError("\u5ba1\u7a3f\u54cd\u5e94\u4e0d\u662fJSON\u5bf9\u8c61")
     return data
@@ -1466,6 +1618,86 @@ def _normalize_hook_pair(
     )
 
 
+def _infer_hook_proof_relation(hook_text: Any, proof_text: Any) -> str:
+    """Infer a narrow, executable proof relation for a reviewed HookPair.
+
+    This only fills structural fields the broad review occasionally omits. It
+    never creates a Hook from arbitrary Product cards.
+    """
+    family = _hook_promise_family(hook_text)
+    preferred_relations = {
+        "fit": ("visual_result", "design_reason", "wearing_experience"),
+        "style": (
+            "identity_projection", "visual_result", "design_reason",
+            "scene_projection",
+        ),
+        "material": ("material_evidence", "wearing_experience"),
+        "comfort": ("wearing_experience", "material_evidence"),
+        "color": ("visual_result", "scene_projection"),
+        "scene": ("scene_projection", "visual_result", "identity_projection"),
+        "source": ("source_value",),
+        "social": ("social_proof",),
+        "price": ("price_value",),
+        "after_sale": ("after_sale_confidence",),
+    }
+    for relation in preferred_relations.get(family, ()):
+        if _proof_relation_is_grounded(hook_text, proof_text, relation):
+            return relation
+    return ""
+
+
+def _hook_promise_excerpt(hook_text: Any) -> str:
+    """Keep a literal, compact promise quote for a synthesized package."""
+    text = re.sub(r"^\s*\[V\d+\]\s*", "", str(hook_text or ""), flags=re.I).strip()
+    if not text:
+        return ""
+    first_sentence = re.split(r"[。！？!?]", text, maxsplit=1)[0].strip("，、；;：: ")
+    return (first_sentence or text)[:80]
+
+
+def _synthesize_hook_package_from_pair(
+    pair: HookPair,
+    *,
+    card_ids: set[int],
+    candidates: Mapping[int, Mapping[str, Any]],
+    cards_by_id: Mapping[int, ContentCard] | None = None,
+    content_policy: Any = None,
+) -> HookPackage | None:
+    """Recover a package only when an existing reviewed pair proves it.
+
+    DeepSeek occasionally returns a valid HookPair but omits the newer package
+    fields. The pair is evidence, not a license to weaken the Hook gate: a
+    typed proof relation and the original spoken promise still go through the
+    normal package validator.
+    """
+    hook_text = str(candidates.get(pair.hook_id, {}).get("text") or "")
+    proof_text = str(candidates.get(pair.followup_id, {}).get("text") or "")
+    relation = _infer_hook_proof_relation(hook_text, proof_text)
+    promise = _hook_promise_excerpt(hook_text)
+    if not relation or not promise:
+        return None
+    signals = _inferred_hook_semantic_signals(hook_text, pair.topic)
+    if not _has_director_grade_hook_mechanism(signals):
+        return None
+    return _normalize_hook_package(
+        {
+            "hook_id": pair.hook_id,
+            "followup_id": pair.followup_id,
+            "topic": pair.topic,
+            "reason": pair.reason,
+            "hook_promise": promise,
+            "proof_relation": relation,
+            "package_complete": True,
+            "semantic_signals": list(signals),
+            "opening_tier": "A" if _textual_delivery_signal(hook_text) == "textual_high" else "B",
+        },
+        card_ids=card_ids,
+        candidates=candidates,
+        cards_by_id=cards_by_id,
+        content_policy=content_policy,
+    )
+
+
 def _rebalance_card_tiers(
     cards: Sequence[ContentCard], candidates: Mapping[int, Mapping[str, Any]]
 ) -> list[ContentCard]:
@@ -1673,6 +1905,10 @@ def _review_prompts(
         "\u4e2a\u4eba\u8eab\u9ad8\u4f53\u91cd\u6216\u62a5\u5c3a\u7801\u3001\u4ef7\u683c\u6216\u6210\u672c\u6216\u6bcf\u7c73\u62a5\u4ef7\u3001\u5e93\u5b58\u6216CTA\uff0c\u5373\u4f7f\u4f60\u80fd\u731c\u51fa\u60f3\u8868\u8fbe\u4ec0\u4e48\uff0c\u4e5f\u4e0d\u5f97\u8f93\u51fa\u5185\u5bb9\u5361\u3002"
         "\u53ea\u8f93\u51fa\u5355\u884c\u7d27\u51d1JSON\u5bf9\u8c61\uff0c\u4e0d\u8981Markdown\u3001\u89e3\u91ca\u6216\u7f29\u8fdb\u3002"
     )
+    system_prompt += (
+        "\u53ea\u8981\u5019\u9009\u5185\u4efb\u4e00\u5173\u952e\u5206\u53e5\u542b\u660e\u663e\u9519\u8bcd\u3001\u75c5\u53e5\u3001\u8df3\u53d8\u8bdd\u9898\u6216\u76f4\u64ad\u6b8b\u7559\uff0c\u5373\u4f7f\u4e2d\u95f4\u5939\u7740\u4e00\u4e2a\u5356\u70b9\u77ed\u8bed\uff0c\u4e5f\u6574\u6bb5\u4e0d\u5f97\u8f93\u51fa\u5185\u5bb9\u5361\uff1b"
+        "\u4e0d\u5f97\u628a\u574f\u53e5\u5f53\u4f5c\u597d\u53e5\u7684\u5bb9\u5668\u3002"
+    )
     source_rule = ""
     if required_sources:
         source_rule = "\u6df7\u526a\u6765\u6e90\u4e0d\u5f97\u9057\u6f0f:" + "\u3001".join(
@@ -1688,7 +1924,12 @@ def _review_prompts(
         "\n\u672c\u6b21\u5185\u5bb9\u4f7f\u7528\u653f\u7b56\u662f\u6700\u7ec8\u89c4\u5219\uff0c\u4f18\u5148\u4e8e\u4e0a\u6587\u5bf9\u4ef7\u683c/CTA/\u5c3a\u7801/\u4e92\u52a8\u7684\u6cdb\u5316\u63cf\u8ff0\u3002\n"
         + content_policy_rule
     )
-    retry_rule = "\u4e0a\u6b21\u54cd\u5e94\u683c\u5f0f\u65e0\u6548\uff0c\u8fd9\u6b21\u4e25\u683c\u6309schema\u8f93\u51fa\u3002" if format_retry else ""
+    retry_rule = (
+        "Previous response format was invalid. Return strict JSON only. "
+        "Keep 18-28 representative cards, every short field under 24 Chinese characters, "
+        "at most two quality tags per card, and at most four hook packages."
+        if format_retry else ""
+    )
     marketing_contract = marketing_intent_prompt_contract() if include_marketing_intent else ""
     schema_example = {
         "cards": [[1, "\u7248\u578b\u663e\u7626", "\u80a9\u5bbd\u4fee\u9970", "\u8bf4\u6e05\u80a9\u7ebf\u5982\u4f55\u5411\u5185\u6536", "\u539f\u56e0\u89e3\u91ca", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536", ["effect", "evidence"], "independent", ["\u5177\u4f53\u6548\u679c", "\u539f\u56e0\u89e3\u91ca"], "main", "\u8fd9\u4ef6\u4e0a\u8863", "primary", "\u80a9\u7ebf\u4f1a\u5f80\u91cc\u6536"]],
@@ -1786,6 +2027,7 @@ def _post_review_request(
     model: str,
     system_prompt: str,
     user_prompt: str,
+    stage: str = "candidate_analysis",
 ) -> str:
     body: dict[str, Any] = {
         "model": model,
@@ -1809,8 +2051,19 @@ def _post_review_request(
         method="POST",
     )
     context = create_ssl_context()
-    with urllib.request.urlopen(request, timeout=180, context=context) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=180, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as error:
+        record_ai_call(
+            module="content_review", stage=stage, model=model, request_payload=body,
+            success=False, error_type=type(error).__name__,
+        )
+        raise
+    record_ai_call(
+        module="content_review", stage=stage, model=model, request_payload=body,
+        response_payload=result, success=True,
+    )
     content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
     if not content:
         raise ContentReviewError("\u5ba1\u7a3fAI\u8fd4\u56de\u7a7a\u5185\u5bb9")
@@ -1860,6 +2113,16 @@ def review_candidates(
         include_marketing_intent=include_marketing_intent,
     )
     cached = _load_cache(cache_key)
+    # The key already carries the version, but old installations or manually
+    # restored cache files can still put an earlier bundle at this path.  Never
+    # let such a result silently exercise an older review contract.
+    if cached and str(cached.get("version") or "") != CONTENT_REVIEW_VERSION:
+        log("AI内容审稿: 忽略旧版缓存，重新审稿")
+        try:
+            _cache_path(cache_key).unlink(missing_ok=True)
+        except OSError:
+            _LOG.warning("unable to remove stale content review cache", exc_info=True)
+        cached = None
     if cached:
         try:
             bundle = _validate_bundle(
@@ -1894,7 +2157,9 @@ def review_candidates(
             include_marketing_intent=include_marketing_intent,
         )
         log("AI\u5185\u5bb9\u5ba1\u7a3f: \u8c03\u7528\u6a21\u578b..." if not attempt else "AI\u5185\u5bb9\u5ba1\u7a3f: \u683c\u5f0f\u91cd\u8bd5...")
-        content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
+        content = _post_review_request(
+            api_key, base_url, model, system_prompt, user_prompt, stage="candidate_analysis"
+        )
         try:
             data = _extract_json_object(content)
         except (json.JSONDecodeError, ContentReviewError, ValueError) as exc:
@@ -1982,10 +2247,11 @@ def _hook_pair_repair_prompts(
     user_prompt = (
         f"品类:{category or '通用'}\n"
         f"主商品:{main_product or '未指定'}\n"
-        "任务: 广审已经保留内容卡，但没有返回可验证的开头组合。请只做一次严格复核。\n"
+        "任务: 广审已经保留内容卡，但尚未形成可执行的A/B级HookPackage；普通HookPair只能作为候选依据，不能直接当作完整开场。请只做一次严格复核。\n"
         "Hook必须是一句脱离直播上下文也完整成立的、具体的购买价值陈述，明确说出商品属性、效果、痛点、人群或使用场景中的至少一项。"
         "强情绪评价也允许作为Hook，但它必须有真实商品、风格或结果指向，且下一段立刻证明它。"
         "承接示例必须解释、证明或兑现同一项购买价值，不能只是换一个卖点；它用于建立主题线程，不会锁死导演的第二句编号。\n"
+        "只有tier=main的Hook和承接示例才可形成可执行的Hook组合；reserve只能留给后续证据、时长或混剪来源补足。\n"
         "绝对排除: target_relation=other、报尺码、个人身高体重试穿、问答互动、库存对话、上新预告、展示铺垫、连接词开头、泛泛夸赞、"
         "只说气场/高级/女总裁等空泛身份想象、半句、口头重复或没有商品购买信息的聊天。\n"
         "价格/CTA是否可作Hook必须遵守下方内容政策；仅正文或禁止的内容均不可作Hook。\n"
@@ -2039,7 +2305,10 @@ def repair_hook_pairs(
             log_fn(message)
 
     content_policy = normalize_content_policy(content_policy)
-    if bundle.hook_pairs or bundle.hook_pair_reviewed:
+    # The broad reviewer can find a valid HookPair but omit the newer
+    # HookPackage fields. In that case run this small package-only pass once.
+    # A completed pass, including a real "none found", is cached.
+    if bundle.director_hook_packages or bundle.hook_pair_reviewed:
         return bundle
 
     candidates = _candidate_map(inventory)
@@ -2064,7 +2333,7 @@ def repair_hook_pairs(
     for attempt in range(2):
         try:
             log(
-                "AI内容审稿: 未找到Hook组合，启动Hook语义复核..."
+                "AI内容审稿: 尚未形成A/B HookPackage，启动Hook语义复核..."
                 if attempt == 0 else "AI内容审稿: Hook语义复核格式重试..."
             )
             content = _post_review_request(
@@ -2075,13 +2344,16 @@ def repair_hook_pairs(
                 user_prompt + (
                     "\n上次响应格式无效。这次只能返回指定JSON对象。" if attempt else ""
                 ),
+                stage="content_review_hook_repair",
             )
             data = _extract_json_object(content)
             raw_pairs = data.get("hook_pairs")
             if not isinstance(raw_pairs, list):
                 raise ContentReviewError("Hook语义复核缺少hook_pairs数组")
-            pairs: list[HookPair] = []
-            seen: set[tuple[int, int]] = set()
+            pairs: list[HookPair] = list(bundle.hook_pairs)
+            seen: set[tuple[int, int]] = {
+                (pair.hook_id, pair.followup_id) for pair in pairs
+            }
             for raw_pair in raw_pairs:
                 pair = _normalize_hook_pair(
                     raw_pair,
@@ -2099,8 +2371,10 @@ def repair_hook_pairs(
                 pairs.append(pair)
                 if len(pairs) >= 3:
                     break
-            packages: list[HookPackage] = []
-            seen_packages: set[tuple[int, int]] = set()
+            packages: list[HookPackage] = list(bundle.hook_packages)
+            seen_packages: set[tuple[int, int]] = {
+                (package.hook_id, package.followup_id) for package in packages
+            }
             raw_packages = data.get("hook_packages")
             if isinstance(raw_packages, list):
                 for raw_package in raw_packages:
@@ -2120,6 +2394,26 @@ def repair_hook_pairs(
                     packages.append(package)
                     if len(packages) >= 3:
                         break
+            synthesized = 0
+            if not packages:
+                for pair in pairs:
+                    package = _synthesize_hook_package_from_pair(
+                        pair,
+                        card_ids=card_ids,
+                        candidates=candidates,
+                        cards_by_id=bundle.card_map(),
+                        content_policy=content_policy,
+                    )
+                    if package is None:
+                        continue
+                    signature = (package.hook_id, package.followup_id)
+                    if signature in seen_packages:
+                        continue
+                    seen_packages.add(signature)
+                    packages.append(package)
+                    synthesized += 1
+                    if len(packages) >= 3:
+                        break
             resolved = replace(
                 bundle,
                 hook_pairs=tuple(pairs),
@@ -2128,7 +2422,9 @@ def repair_hook_pairs(
             )
             _write_cache(resolved)
             log(
-                f"AI内容审稿: Hook语义复核完成，验证组合{len(resolved.hook_pairs)}组"
+                f"AI内容审稿: Hook语义复核完成，验证组合{len(resolved.hook_pairs)}组，"
+                f"完整HookPackage{len(resolved.director_hook_packages)}组"
+                + (f"（由已验证HookPair补全{synthesized}组）" if synthesized else "")
             )
             return resolved
         except Exception as exc:
@@ -2470,7 +2766,9 @@ def audit_final_sequence(
         "and after-sale commitments are issues only when the policy says block or body_only."
     )
     user_prompt += "\nContent policy:\n" + "\n".join(policy_prompt_lines(content_policy))
-    content = _post_review_request(api_key, base_url, model, system_prompt, user_prompt)
+    content = _post_review_request(
+        api_key, base_url, model, system_prompt, user_prompt, stage="content_review_final_audit"
+    )
     data = _extract_json_object(content)
     status = _clean_text(data.get("status"), 16).lower()
     if status not in {"pass", "flag"}:
@@ -2682,6 +2980,7 @@ def review_final_sequence(
             model,
             system_prompt,
             user_prompt + correction,
+            stage="content_review_final_repair",
         )
         try:
             data = _extract_json_object(content)

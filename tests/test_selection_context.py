@@ -11,7 +11,7 @@ if APP not in sys.path:
     sys.path.insert(0, APP)
 
 import ai_clipper
-from selection_context import build_selection_context
+from selection_context import build_narrative_chapters, build_selection_context
 from selection_contracts import DurationContract, SelectionCandidate
 
 
@@ -74,6 +74,56 @@ class SelectionContextTests(unittest.TestCase):
         self.assertEqual(payload["story_block_id"], "SB-V1-001")
         self.assertEqual(payload["continuity_group_id"], "CG-V1-001")
 
+    def test_narrative_chapters_keep_every_safe_candidate_and_do_not_split_on_topic(self) -> None:
+        inventory = [
+            {"srt_index": 7, "source": "[V1]", "start": 0.0, "end": 2.5, "text": "肩线往里收"},
+            {"srt_index": 9, "source": "[V1]", "start": 2.8, "end": 5.5, "text": "所以显肩窄"},
+            {"srt_index": 11, "source": "[V1]", "start": 7.2, "end": 10.0, "text": "通勤穿也利落"},
+            {"srt_index": 15, "source": "[V1]", "start": 20.0, "end": 23.0, "text": "面料不扎"},
+            {"srt_index": 21, "source": "[V2]", "start": 0.0, "end": 3.0, "text": "上身很有型"},
+        ]
+        cards = [
+            {"candidate_id": 7, "topic": "版型显瘦", "subtopic": "肩线", "roles": ["effect"], "tier": "main"},
+            {"candidate_id": 9, "topic": "工艺细节", "subtopic": "肩线结构", "roles": ["evidence"], "tier": "main"},
+            {"candidate_id": 11, "topic": "场景搭配", "subtopic": "通勤", "roles": ["scene"], "tier": "reserve"},
+        ]
+        original = json.loads(json.dumps(inventory, ensure_ascii=False))
+
+        chapters = build_narrative_chapters(inventory, cards)
+
+        self.assertEqual(inventory, original)
+        self.assertEqual(chapters[0].candidate_ids, (7, 9, 11))
+        self.assertEqual(chapters[0].topics, ("版型显瘦", "工艺细节", "场景搭配"))
+        self.assertEqual(chapters[0].main_count, 2)
+        self.assertEqual(chapters[1].candidate_ids, (15,))
+        self.assertEqual(chapters[2].candidate_ids, (21,))
+        self.assertEqual({candidate_id for chapter in chapters for candidate_id in chapter.candidate_ids}, {7, 9, 11, 15, 21})
+
+    def test_layered_contract_exposes_narrative_chapters_without_filtering_candidates(self) -> None:
+        context = build_selection_context([
+            {"candidate_id": 1, "source_id": "[V1]", "start": 0.0, "end": 3.0},
+            {"candidate_id": 2, "source_id": "[V1]", "start": 3.2, "end": 6.0},
+        ])
+        raw = ai_clipper._layered_selection_prompt_contract(
+            selection_context=context,
+            narrative_chapters=[{
+                "chapter_id": "NC-001",
+                "source_id": "[V1]",
+                "candidate_ids": [1, 2],
+                "topics": ["版型显瘦"],
+                "roles": ["effect", "evidence"],
+                "start": 0.0,
+                "end": 6.0,
+                "reviewed_count": 2,
+                "main_count": 1,
+            }],
+        )
+        contract = json.loads(raw)
+
+        self.assertEqual(contract["narrative_chapter_summary"]["role"], "advisory_not_candidate_filter")
+        self.assertEqual(contract["narrative_chapters"][0]["candidate_ids"], [1, 2])
+        self.assertIn("selected_narrative_chapter_ids", contract["output_schema"]["plan_report"])
+
     def test_layered_contract_separates_hard_constraints_and_preferences(self) -> None:
         entries = [
             (0.0, 3.0, "[V1] 这件衬衫肩线向内收"),
@@ -135,6 +185,7 @@ class SelectionContextTests(unittest.TestCase):
             "plan_report": {
                 "selected_product": "白色防晒衬衫",
                 "selected_story_block_ids": ["SB-SINGLE-001", "SB-FAKE-999"],
+                "selected_narrative_chapter_ids": ["NC-001", "NC-FAKE"],
                 "missing_roles": ["scene"],
                 "warnings": ["缺少场景片段"],
             },
@@ -145,12 +196,14 @@ class SelectionContextTests(unittest.TestCase):
             None,
             entries,
             require_srt_indices=True,
+            valid_narrative_chapter_ids={"NC-001"},
         )
         report = ai_clipper.get_last_analysis_metadata()["ai_plan_report"]
 
         self.assertEqual(len(clips), 1)
         self.assertEqual(report["selected_product"], "白色防晒衬衫")
         self.assertEqual(report["selected_story_block_ids"], ["SB-SINGLE-001"])
+        self.assertEqual(report["selected_narrative_chapter_ids"], ["NC-001"])
         self.assertEqual(report["missing_roles"], ["scene"])
 
     def test_director_request_contains_layered_contract_and_candidate_context(self) -> None:
@@ -207,6 +260,17 @@ class SelectionContextTests(unittest.TestCase):
                 main_category="上衣",
                 duration_contract=DurationContract.create(60, 1.0, tolerance=15),
                 required_sources={"[V1]": 1},
+                review_story_chapters=[{
+                    "chapter_id": "NC-001",
+                    "source_id": "[V1]",
+                    "candidate_ids": [1, 2],
+                    "topics": ["版型显瘦"],
+                    "roles": ["effect", "evidence"],
+                    "start": 0.0,
+                    "end": 7.0,
+                    "reviewed_count": 2,
+                    "main_count": 1,
+                }],
             )
 
         self.assertEqual(len(clips), 1)
@@ -215,6 +279,8 @@ class SelectionContextTests(unittest.TestCase):
         self.assertIn("layered-selection-v1", user_prompt)
         self.assertIn("story=SB-V1-001", user_prompt)
         self.assertIn("continuity=CG-V1-001", user_prompt)
+        self.assertIn("NC-001", user_prompt)
+        self.assertIn("advisory_not_candidate_filter", user_prompt)
         self.assertIn("白色防晒衬衫", user_prompt)
         self.assertNotIn("test-key", json.dumps(captured["body"], ensure_ascii=False))
 
@@ -247,6 +313,46 @@ class SelectionContextTests(unittest.TestCase):
         self.assertEqual(report["missing_roles"], ["evidence"])
         self.assertEqual(report["duplicate_candidate_count"], 0)
         self.assertGreaterEqual(report["continuity_break_count"], 1)
+
+    def test_plan_quality_marks_dense_unhooked_selling_point_pile_for_review(self) -> None:
+        entries = [
+            (0.0, 9.0, "[V1] 肩线向内收，视觉更利落。"),
+            (22.0, 31.0, "[V1] 面料薄透，夏天穿不会闷。"),
+            (45.0, 54.0, "[V1] 腰线位置更高，比例更好看。"),
+            (68.0, 77.0, "[V1] 裙摆垂下来不会贴腿。"),
+            (90.0, 99.0, "[V1] 领口做得更显脸小。"),
+            (112.0, 121.0, "[V1] 通勤穿也会很利落。"),
+        ]
+        clips = [
+            ("product", text, start, end, 0.0, end - start, "卖点")
+            for start, end, text in entries
+        ]
+
+        report = ai_clipper._build_plan_quality_report(
+            clips,
+            entries,
+            ai_plan_report={"missing_roles": ["hook"]},
+        )
+
+        self.assertEqual(report["status"], "warning")
+        self.assertEqual(report["quality_state"], "needs_review")
+        self.assertTrue(any("未找到已验证Hook" in item for item in report["soft_quality_issues"]))
+        self.assertTrue(any("叙事切换过密" in item for item in report["soft_quality_issues"]))
+
+    def test_plan_time_reverse_is_metadata_not_a_quality_warning(self) -> None:
+        entries = [
+            (0.0, 4.0, "[V1] 肩线向内收，视觉更利落。"),
+            (12.0, 16.0, "[V1] 你看这个版型不会横向撑开。"),
+        ]
+        clips = [
+            ("product", entries[1][2], 12.0, 16.0, 0.0, 4.0, "版型显瘦"),
+            ("product", entries[0][2], 0.0, 4.0, 0.0, 4.0, "版型显瘦"),
+        ]
+
+        report = ai_clipper._build_plan_quality_report(clips, entries)
+
+        self.assertEqual(report["same_source_time_reverse_count"], 1)
+        self.assertFalse(any("时间倒序" in warning for warning in report["warnings"]))
 
 
 if __name__ == "__main__":

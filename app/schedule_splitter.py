@@ -385,6 +385,32 @@ def normalize_clock_schedule_to_live_offsets(schedule, live_start, log_fn=None):
     return schedule
 
 
+def _locate_explain_time_range(header):
+    """在表头中定位“讲解时段1..N”列的起止范围。
+
+    返回 (起始列下标, 结束列下标+1)。飞书导出的排品表模板并不固定 ——
+    有的含“封面”图片列、有的不含，讲解时段列会整体左右偏移；因此不能
+    写死成第 7 列。找不到任何“讲解时段/讲解时间”列时返回 (None, None)。
+    """
+    texts = [str(h or "").strip().replace(" ", "") for h in (header or [])]
+    matched = []
+    for idx, text in enumerate(texts):
+        if not text or "次数" in text:
+            continue
+        if text.startswith("讲解时段") or text.startswith("讲解时间"):
+            matched.append(idx)
+        elif text.startswith("讲解") and text[-1:].isdigit():
+            matched.append(idx)
+    if not matched:
+        return None, None
+    start = min(matched)
+    # 时段列逐格有严格内容校验，窗口放宽后靠校验过滤无关列
+    end = min(max(matched) + 1, start + 16, len(texts))
+    if end <= start:
+        end = min(start + 1, len(texts))
+    return start, end
+
+
 def read_excel(filepath: str, log_fn=None, time_basis="relative"):
     """读取时间表Excel，支持旧格式和新格式自动检测。"""
     time_basis = "clock" if str(time_basis or "").strip().lower() == "clock" else "relative"
@@ -418,13 +444,18 @@ def read_excel(filepath: str, log_fn=None, time_basis="relative"):
         live_start = _parse_datetime_from_name(filepath)
         if live_start and log_fn:
             log_fn("从文件名识别直播开始时间: %s" % live_start.strftime("%Y-%m-%d %H:%M:%S"))
-        # 自动匹配: 商品名称在第0列或第1列, 讲解时段从含"讲解"的列开始
-        # 确定商品名称列和讲解时段列
+        # 自动匹配: 商品名称在第0列或第1列; 讲解时段列按表头动态定位,
+        # 不写死列号 —— 部分导出表会少“封面”等列, 导致时段整体左移一列
         _name_col = 0
-        _time_start = 4
-        if len(header) > 1 and header[1] and ("商品标题" in str(header[1]) or "商品名称" in str(header[1])):
-            _name_col = 1
-            _time_start = 6
+        for _hi in range(min(3, len(header))):
+            if "商品标题" in str(header[_hi] or "") or "商品名称" in str(header[_hi] or ""):
+                _name_col = _hi
+                break
+        _time_start, _time_end = _locate_explain_time_range(header)
+        if _time_start is None:
+            # 兜底: 表头未标明“讲解时段”列时, 沿用历史固定位置
+            _time_start = 6 if _name_col == 1 else 4
+            _time_end = min(_time_start + 7, len(header))
         for row in rows[1:]:
             if len(row) <= _time_start:
                 continue
@@ -432,7 +463,7 @@ def read_excel(filepath: str, log_fn=None, time_basis="relative"):
             if not name or name in ("None", "商品标题", "商品封面", ""):
                 continue
             pid = str(row[1]).strip() if len(row) > 1 and row[1] and "商品ID" in str(header[1] if len(header) > 1 else "") else (str(row[2]).strip() if len(row) > 2 and row[2] else "")
-            for ci in range(_time_start, min(_time_start + 7, len(row))):
+            for ci in range(_time_start, _time_end):
                 tv = row[ci]
                 if tv is None:
                     continue

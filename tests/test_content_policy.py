@@ -29,11 +29,34 @@ class ContentPolicyTests(unittest.TestCase):
 
         self.assertEqual(policy["price"], "block")
         self.assertEqual(policy["cta"], "block")
+        self.assertEqual(policy["inventory_pressure"], "block")
         self.assertEqual(policy["source_claim"], "block")
         self.assertEqual(policy["social_proof"], "block")
         self.assertEqual(policy["after_sale"], "block")
         self.assertEqual(policy["size_interaction"], "block")
         self.assertEqual(policy["live_interaction"], "block")
+
+    def test_run_avoid_is_a_restrictive_snapshot_not_a_saved_setting_change(self) -> None:
+        saved = _policy(price="allow", inventory_pressure="allow")
+
+        snapshot = content_policy.apply_run_avoid_overrides(saved, ["价格", "库存"])
+
+        self.assertEqual(snapshot["price"], "block")
+        self.assertEqual(snapshot["inventory_pressure"], "block")
+        self.assertEqual(saved["price"], "allow")
+        self.assertEqual(saved["inventory_pressure"], "allow")
+
+    def test_inventory_pressure_is_independent_from_cta_policy(self) -> None:
+        clip = ("product", "这批库存不多，喜欢的尽快看。", 0.0, 3.0, 0, 3.0)
+
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta([clip], content_policy=_policy(cta="allow", inventory_pressure="block")),
+            [],
+        )
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta([clip], content_policy=_policy(cta="block", inventory_pressure="allow")),
+            [clip],
+        )
 
     def test_price_and_cta_can_be_retained_when_explicitly_allowed(self) -> None:
         clips = [
@@ -65,6 +88,40 @@ class ContentPolicyTests(unittest.TestCase):
         self.assertFalse(candidate_quality.candidate_quality_flags(clip[1], content_policy=allowed))
         self.assertEqual(ai_clipper._filter_price_and_cta([clip], content_policy=blocked), [])
         self.assertEqual(ai_clipper._filter_price_and_cta([clip], content_policy=allowed), [clip])
+
+    def test_isolated_bare_price_sentence_honors_price_policy(self) -> None:
+        clip = (
+            "product",
+            "你看这个上身正面也显瘦。179。",
+            0.0,
+            4.0,
+            0,
+            4.0,
+        )
+
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta([clip], content_policy=_policy(price="block")),
+            [],
+        )
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta([clip], content_policy=_policy(price="allow")),
+            [clip],
+        )
+
+    def test_measurement_number_is_not_an_isolated_price_sentence(self) -> None:
+        clip = (
+            "product",
+            "模特身高179cm，穿起来长度刚好到脚踝。",
+            0.0,
+            4.0,
+            0,
+            4.0,
+        )
+
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta([clip], content_policy=_policy(price="block")),
+            [clip],
+        )
 
     def test_source_social_proof_and_after_sale_follow_task_policy(self) -> None:
         clips = [

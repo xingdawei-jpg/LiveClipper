@@ -209,6 +209,27 @@ class LiveInteractionSafetyTests(unittest.TestCase):
         self.assertEqual(selection_safety.hook_ineligible_reason(text), "直播互动回复")
         self.assertTrue(ai_clipper._is_bad_hook_candidate_text(text))
 
+    def test_live_stock_top_up_is_policy_aware_and_never_a_hook(self) -> None:
+        text = "来，我们上衣再加一波。"
+        source = (
+            "1\n00:00:00,000 --> 00:00:03,000\n" + text + "\n\n"
+            "2\n00:00:03,100 --> 00:00:06,100\n"
+            "正肩蝙蝠袖穿起来很慵懒，腰线又不会显得臃肿。\n"
+        )
+
+        self.assertEqual(
+            selection_safety.live_interaction_or_size_response_reason(text),
+            "直播互动回复",
+        )
+        self.assertEqual(selection_safety.hook_ineligible_reason(text), "直播互动回复")
+        self.assertNotIn(text, ai_clipper._freeze_director_candidates(source))
+
+        allowed = ai_clipper._filter_live_interaction_or_size_responses(
+            [("product", text, 0.0, 3.0, 50, 3.0)],
+            content_policy={"live_interaction": "allow"},
+        )
+        self.assertEqual(len(allowed), 1)
+
     def test_plan_quality_fails_closed_for_invalid_hook(self) -> None:
         clips = [
             ("hook", "4号衬量搭配，你想小只，我等会儿穿给你看可以不？", 0.0, 3.0, 50, 3.0),

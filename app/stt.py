@@ -554,12 +554,19 @@ def generate_srt(
     asr_engine: str = "sensevoice",
     cancel_event: _CancelEvent | None = None,
 ) -> str | None:
-    """Generate an SRT sidecar with SenseVoice, or return ``None`` on failure."""
+    """Generate a reusable source-side SRT with SenseVoice.
+
+    Only the extracted WAV is temporary.  The transcript and its word-level
+    sidecars are source assets: keeping them beside the video lets preview,
+    Director and M3 reuse the exact same recognition result until that source
+    is replaced or the user explicitly asks to recognise it again.
+    """
+    source_video = Path(video_path).resolve()
     temp_dir = os.path.join(tempfile.gettempdir(), "live_cutter_stt")
     os.makedirs(temp_dir, exist_ok=True)
-    video_hash = hashlib.md5(video_path.encode("utf-8")).hexdigest()[:8]
+    video_hash = hashlib.md5(str(source_video).encode("utf-8")).hexdigest()[:8]
     wav_path = os.path.join(temp_dir, f"audio_{video_hash}.wav")
-    srt_path = os.path.join(temp_dir, f"sub_{video_hash}.srt")
+    srt_path = str(source_video.with_suffix(".srt"))
 
     try:
         if not extract_audio(video_path, wav_path, log_fn, cancel_event=cancel_event):
@@ -572,6 +579,21 @@ def generate_srt(
             cancel_event=cancel_event,
         ):
             return None
+        try:
+            from asr_cache import write_metadata
+
+            write_metadata(
+                source_video,
+                srt_path,
+                provider="sensevoice",
+                model="iic/SenseVoiceSmall",
+                timing_precision=(
+                    "word" if Path(srt_path).with_suffix(".words.json").is_file() else "segment"
+                ),
+            )
+        except Exception as exc:
+            if log_fn:
+                log_fn(f"本地字幕缓存身份记录失败：{type(exc).__name__}")
         return srt_path if os.path.exists(srt_path) else None
     finally:
         try:
@@ -582,9 +604,22 @@ def generate_srt(
 
 
 def cleanup_srt(srt_path: str | None) -> None:
+    """Remove only legacy task-temporary ASR outputs.
+
+    Source-side transcripts are deliberately persistent and must disappear
+    only with their source material (or an explicit re-recognition action).
+    Historical callers still invoke this helper after a successful cut, so a
+    strict directory boundary prevents them from deleting reusable assets.
+    """
     if not srt_path:
         return
-    path = Path(srt_path)
+    path = Path(srt_path).resolve()
+    legacy_temp_root = (Path(tempfile.gettempdir()) / "live_cutter_stt").resolve()
+    try:
+        if path.parent != legacy_temp_root:
+            return
+    except OSError:
+        return
     for target in (
         path,
         path.with_suffix(".words.json"),

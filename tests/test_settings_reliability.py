@@ -66,6 +66,21 @@ class SettingsReliabilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 500)
         self.assertEqual(raised.exception.detail, "设置保存失败：用户数据目录不可写")
 
+    def test_planner_mode_save_is_experimental_only_for_lite_and_legacy_is_fail_closed(self) -> None:
+        values = {"m2_planner_mode": "lite_director_experiment"}
+        with mock.patch.object(ai_clipper, "save_settings", return_value=True) as save:
+            self.assertTrue(server._save_settings(values))
+        saved = save.call_args.args[0]
+        self.assertEqual(saved["m2_planner_mode"], "lite_director_experiment")
+        self.assertEqual(saved["ai_director_mode"], "experimental")
+
+        values = {"m2_planner_mode": "not-a-mode"}
+        with mock.patch.object(ai_clipper, "save_settings", return_value=True) as save:
+            self.assertTrue(server._save_settings(values))
+        saved = save.call_args.args[0]
+        self.assertEqual(saved["m2_planner_mode"], "legacy")
+        self.assertEqual(saved["ai_director_mode"], "legacy")
+
 
 if __name__ == "__main__":
     unittest.main()

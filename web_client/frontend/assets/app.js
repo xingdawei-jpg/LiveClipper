@@ -4,6 +4,9 @@ const state = {
   previewWorkbenchFilters: { smart: "all", mix: "all" },
   previewCandidateCategoryFilters: { smart: "all", mix: "all" },
   previewCandidateSourceFilters: { smart: "recommended", mix: "recommended" },
+  previewDirectorCandidateViews: { smart: "recommended", mix: "recommended" },
+  previewDirectorChapterFocus: { smart: "", mix: "" },
+  previewDirectorAlternativesOpen: { smart: false, mix: false },
   previewWorkbenchStages: { smart: "triage", mix: "triage" },
   previewTriageSessions: {},
   previewAssemblyOrders: {},
@@ -63,6 +66,18 @@ const state = {
   },
   runtime: null,
   backgroundRefreshStarted: false,
+  commerceDirectorActiveResultId: "",
+  commerceDirectorActiveStrategyId: "",
+  commerceDirectorEvidenceFilter: "recommended",
+  commerceDirectorFocusedEvidenceId: "",
+  commerceDirectorFocusedDraftKey: "",
+  commerceDirectorFocusedDraftIndex: -1,
+  commerceDirectorLibraryCollapsed: false,
+  commerceDirectorPlanDrafts: {},
+  commerceDirectorStudioOpen: false,
+  commerceDirectorStudioDismissedPreviewId: "",
+  commerceDirectorAutoBatchRequestedPreviewId: "",
+  commerceDirectorLastServerRenderKey: "",
   liveRoomActivity: {},
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
@@ -180,7 +195,7 @@ const categoryAiProfiles = {
     preset_keys: ["viral", "slim", "quality", "commute", "fast", "gentle"],
     focus: ["自动", "版型显瘦", "上身效果", "面料质感", "尺寸长度", "穿着体验", "品质细节", "工艺细节", "颜色氛围", "风格定位", "场景搭配", "性价比", "对比优势", "情绪感染", "流行趋势", "紧迫稀缺"],
     secondary: ["自动识别", "女装", "男装", "内衣", "女鞋", "箱包", "钟表配饰"],
-    goal: ["自动", "爆款种草", "专业讲解", "显瘦转化", "质感高级", "快速促单"],
+    goal: ["自动", "爆款种草", "场景种草", "专业讲解", "显瘦转化", "质感高级", "快速促单"],
     hook: ["自动", "痛点开头", "上身效果开头", "爆点金句开头", "主播强推荐开头", "细节近景开头", "不强制Hook"],
     ending: ["自动", "尺码引导", "信任背书", "场景收尾", "自然结束", "不要促单"],
     selling: ["版型显瘦", "上身效果", "面料质感", "品质细节", "颜色氛围", "风格定位", "场景搭配", "穿着体验", "性价比", "情绪感染", "流行趋势", "紧迫稀缺", "尺寸长度", "工艺细节", "对比优势"],
@@ -655,7 +670,6 @@ function refreshCategoryAiControls(prefix, options = {}) {
   const { profile } = currentCategoryAiProfile(prefix);
   if (!profile) return;
   const preferDefaults = Boolean(options.preferDefaults);
-  replaceSelectOptions(`${prefix}-focus`, profile.focus, options.preferredFocus ?? (preferDefaults ? profile.default_focus : undefined));
   replaceSelectOptions(`${prefix}-secondary-category`, profile.secondary, options.preferredSecondary ?? (preferDefaults ? "自动识别" : undefined));
   replaceSelectOptions(`${prefix}-goal`, profile.goal, options.preferredGoal ?? (preferDefaults ? profile.default_goal : undefined));
   replaceSelectOptions(`${prefix}-hook-style`, profile.hook, options.preferredHook ?? (preferDefaults ? profile.default_hook : undefined));
@@ -737,9 +751,11 @@ const settingFields = {
   subtitle_text_effect: "s-subtitle-text-effect",
   subtitle_opacity: "s-subtitle-opacity",
   subtitle_blur: "s-subtitle-blur",
+  subtitle_position_percent: "s-subtitle-position-percent",
   ui_font_size: "s-ui-font-size",
   style_profile_strength: "s-style-profile-strength",
   content_review_mode: "s-content-review-mode",
+  m2_planner_mode: "s-m2-planner-mode",
 };
 
 const keywordFields = {
@@ -814,7 +830,6 @@ const featurePreferenceGroups = {
       "sc-pip-pos",
       "sc-primary-category",
       "sc-ai-preset",
-      "sc-focus",
       "sc-secondary-category",
       "sc-leaf-category",
       "sc-main-product",
@@ -822,7 +837,6 @@ const featurePreferenceGroups = {
       "sc-hook-style",
       "sc-selling-custom",
       "sc-ending-style",
-      "sc-strictness",
     ],
   },
   mix: {
@@ -864,7 +878,6 @@ const featurePreferenceGroups = {
       "mix-pip-pos",
       "mix-primary-category",
       "mix-ai-preset",
-      "mix-focus",
       "mix-secondary-category",
       "mix-leaf-category",
       "mix-main-product",
@@ -872,7 +885,6 @@ const featurePreferenceGroups = {
       "mix-hook-style",
       "mix-selling-custom",
       "mix-ending-style",
-      "mix-strictness",
     ],
   },
   dedup: {
@@ -1022,7 +1034,7 @@ const aiPresets = {
   },
   commute: {
     label: "通勤场景",
-    goal: "专业讲解",
+    goal: "场景种草",
     focus: "场景搭配",
     hook: "上身效果开头",
     ending: "场景收尾",
@@ -1797,8 +1809,35 @@ function bindActions() {
       if (action === "preview-duration-fit") autoFitPreviewDuration(target.dataset.previewScope || "smart");
       if (action === "preview-overview-toggle") togglePreviewOverviewDetails(target.dataset.previewScope || "smart");
       if (action === "preview-overview-locate") locatePreviewOverviewIssue(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
+      if (action === "preview-director-chapter-focus") focusPreviewDirectorChapter(target.dataset.previewScope || "smart", target.dataset.chapterId || "");
+      if (action === "preview-director-alternatives-toggle") togglePreviewDirectorAlternatives(target.dataset.previewScope || "smart");
+      if (action === "preview-director-alternatives-close") togglePreviewDirectorAlternatives(target.dataset.previewScope || "smart", false);
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
       if (action === "start-smart-preview") await startSmartPreview();
+      if (action === "start-commerce-director-preview") await startCommerceDirectorPreview();
+      if (action === "select-commerce-director-story") await selectCommerceDirectorStory(target.dataset.storyId || "");
+      if (action === "select-commerce-director-strategy") await selectCommerceDirectorStrategy(
+        target.dataset.directorStrategyId || "",
+        target.dataset.additionalAiCall === "true",
+        target.dataset.previewScope || "smart",
+      );
+      if (action === "select-commerce-director-proposal") selectCommerceDirectorProposal(target.dataset.directorStrategyId || "");
+      if (action === "generate-commerce-director-strategies") await generateCommerceDirectorStrategies();
+      if (action === "play-commerce-director-review") await playCommerceDirectorReview(target.dataset.directorPreviewId || "");
+      if (action === "select-commerce-director-result") selectCommerceDirectorResult(target.dataset.directorPreviewId || "");
+      if (action === "close-commerce-director-studio") closeCommerceDirectorStudio();
+      if (action === "restart-commerce-director-preview") await startCommerceDirectorPreview();
+      if (action === "filter-commerce-director-evidence") setCommerceDirectorEvidenceFilter(target.dataset.evidenceFilter || "all");
+      if (action === "toggle-commerce-director-library") toggleCommerceDirectorLibrary();
+      if (action === "focus-commerce-director-evidence") focusCommerceDirectorEvidence(target.dataset.evidenceId || "");
+      if (action === "director-plan-focus-row") focusCommerceDirectorDraftRow(target.dataset.draftKey || "", Number(target.dataset.draftIndex));
+      if (action === "director-plan-replace") openCommerceDirectorReplacement(target.dataset.draftKey || "", Number(target.dataset.draftIndex));
+      if (action === "director-plan-move") moveCommerceDirectorDraft(target.dataset.draftKey || "", Number(target.dataset.draftIndex), Number(target.dataset.direction));
+      if (action === "director-plan-remove") removeCommerceDirectorDraftItem(target.dataset.draftKey || "", Number(target.dataset.draftIndex));
+      if (action === "director-plan-add-evidence") addCommerceDirectorDraftEvidence(target.dataset.draftKey || "", target.dataset.evidenceId || "");
+      if (action === "director-plan-place-evidence") placeCommerceDirectorDraftEvidence(target.dataset.draftKey || "", target.dataset.evidenceId || "", target.dataset.evidencePlacement || "end");
+      if (action === "director-plan-save") saveCommerceDirectorDraft(target.dataset.draftKey || "");
+      if (action === "director-plan-return-list") returnCommerceDirectorPlanList();
       if (action === "start-smart-from-preview") await startSmartFromPreview();
       if (action === "start-mix-preview") await startMixPreview();
       if (action === "start-mix-from-preview") await startMixFromPreview();
@@ -1872,6 +1911,8 @@ function bindActions() {
   document.body.addEventListener("input", (event) => {
     const target = event.target.closest("[data-preview-triage-search]");
     if (target) setPreviewTriageSearch(target.dataset.previewTriageSearch || "smart", target.value);
+    const planText = event.target.closest("[data-director-plan-text]");
+    if (planText) updateCommerceDirectorDraftText(planText.dataset.draftKey || "", Number(planText.dataset.draftIndex), planText.value);
   });
 
   document.querySelectorAll(".path-entry input").forEach((input) => {
@@ -1891,6 +1932,10 @@ function bindActions() {
   $("s-subtitle-font-size")?.addEventListener("input", syncSubtitleFontSize);
   $("s-subtitle-opacity")?.addEventListener("input", syncSubtitleStyleValues);
   $("s-subtitle-blur")?.addEventListener("input", syncSubtitleStyleValues);
+  $("s-subtitle-position-percent")?.addEventListener("input", syncSubtitleStyleValues);
+  $("s-subtitle-font-family")?.addEventListener("change", syncSubtitleStyleValues);
+  $("s-subtitle-font-color")?.addEventListener("change", syncSubtitleStyleValues);
+  $("s-subtitle-text-effect")?.addEventListener("change", syncSubtitleStyleValues);
   $("s-ui-theme")?.addEventListener("change", (event) => {
     applyTheme(event.target.value);
   });
@@ -1994,7 +2039,7 @@ function bindAiPresetControls() {
   });
 
   ["sc", "mix"].forEach((prefix) => {
-    [`${prefix}-primary-category`, `${prefix}-focus`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-strictness`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
+    [`${prefix}-primary-category`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
       $(id)?.addEventListener("change", () => markAiPresetCustom(prefix));
     });
     document.body.addEventListener("change", (event) => {
@@ -2054,7 +2099,6 @@ function applyAiPreset(prefix, presetKey) {
   setSelectIfPresent(`${prefix}-primary-category`, preset.primary_category);
   syncPrimaryCategory(prefix);
   refreshCategoryAiControls(prefix, {
-    preferredFocus: preset.focus,
     preferredSecondary: preset.secondary_category,
     preferredLeaf: preset.leaf_category,
     preferredGoal: preset.goal,
@@ -2063,7 +2107,6 @@ function applyAiPreset(prefix, presetKey) {
     selectedSelling: preset.selling,
     selectedAvoid: preset.avoid,
   });
-  setSelectIfPresent(`${prefix}-focus`, preset.focus);
   setSelectIfPresent(`${prefix}-secondary-category`, preset.secondary_category);
   const leafInput = $(`${prefix}-leaf-category`);
   if (leafInput && preset.leaf_category !== undefined) leafInput.value = preset.leaf_category || "";
@@ -2072,14 +2115,13 @@ function applyAiPreset(prefix, presetKey) {
   setSelectIfPresent(`${prefix}-goal`, preset.goal);
   setSelectIfPresent(`${prefix}-hook-style`, preset.hook);
   setSelectIfPresent(`${prefix}-ending-style`, preset.ending);
-  setSelectIfPresent(`${prefix}-strictness`, preset.strictness);
-  setCheckedValues(`${prefix}-selling`, preset.selling);
+  setCheckedValues(`${prefix}-selling`, sellingWithLegacyFocus(preset.selling, preset.focus));
   setCheckedValues(`${prefix}-avoid`, preset.avoid);
   const customInput = $(`${prefix}-selling-custom`);
   if (customInput) customInput.value = (preset.selling_custom || []).join("，");
   const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
   if (panel) updatePanelSummary(panel);
-  toast(`已套用「${preset.label}」选片预设`, "success");
+  toast(`已套用「${preset.label}」导演预设`, "success");
 }
 
 function customSellingValues(prefix) {
@@ -2091,6 +2133,13 @@ function customSellingValues(prefix) {
     .filter(Boolean);
 }
 
+function sellingWithLegacyFocus(values, focus) {
+  const result = Array.isArray(values) ? [...values] : [];
+  const legacy = String(focus || "").trim();
+  if (legacy && !["自动", "默认", "auto"].includes(legacy) && !result.includes(legacy)) result.push(legacy);
+  return result;
+}
+
 function collectCurrentAiPreset(prefix, label) {
   return {
     label,
@@ -2100,10 +2149,8 @@ function collectCurrentAiPreset(prefix, label) {
     leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
-    focus: $(`${prefix}-focus`)?.value || "自动",
     hook: $(`${prefix}-hook-style`)?.value || "自动",
     ending: $(`${prefix}-ending-style`)?.value || "自动",
-    strictness: $(`${prefix}-strictness`)?.value || "标准",
     selling: checkedControlValues(`${prefix}-selling`),
     selling_custom: customSellingValues(prefix),
     avoid: checkedControlValues(`${prefix}-avoid`),
@@ -2112,7 +2159,7 @@ function collectCurrentAiPreset(prefix, label) {
 
 function saveCurrentAiPreset(prefix) {
   if (!prefix) return;
-  const label = prompt("给这套 AI 参数起个名字：", "我的选片预设");
+  const label = prompt("给这套 AI 导演参数起个名字：", "我的导演预设");
   if (!label || !label.trim()) return;
   const custom = readCustomAiPresets();
   const key = `custom-${Date.now()}`;
@@ -2211,7 +2258,9 @@ function applyControlGroup(group, saved) {
   group.ids.forEach((id) => setControlValue(id, values[id]));
   const ai = saved.ai || {};
   (group.prefixes || []).forEach((prefix) => {
-    if (Array.isArray(ai[`${prefix}-selling`])) setCheckedValues(`${prefix}-selling`, ai[`${prefix}-selling`]);
+    if (Array.isArray(ai[`${prefix}-selling`]) || values[`${prefix}-focus`]) {
+      setCheckedValues(`${prefix}-selling`, sellingWithLegacyFocus(ai[`${prefix}-selling`], values[`${prefix}-focus`]));
+    }
     if (Array.isArray(ai[`${prefix}-avoid`])) setCheckedValues(`${prefix}-avoid`, ai[`${prefix}-avoid`]);
   });
 }
@@ -2785,7 +2834,7 @@ function taskHasOutput(task) {
 
 function isAiSelectionPreviewTask(task) {
   const text = taskSummaryText(task);
-  return /AI\s*选片预览|AI选片预览|混剪\s*AI\s*选片预览|混剪AI选片预览/.test(text);
+  return /AI\s*选片预览|AI选片预览|AI\s*导演预览|AI导演预览|商业导演实验预览|混剪\s*AI\s*(?:选片|导演)预览|混剪AI(?:选片|导演)预览/.test(text);
 }
 
 function isPreviewOutputTask(task) {
@@ -3252,7 +3301,6 @@ function updatePanelSummary(panel) {
     const primary = fieldText(`${prefix}-primary-category`, "");
     const secondary = fieldText(`${prefix}-secondary-category`, "自动识别");
     const leaf = fieldText(`${prefix}-leaf-category`, "");
-    const focus = fieldText(`${prefix}-focus`, "自动");
     const goal = fieldText(`${prefix}-goal`, "自动");
     const selling = selectedAiValues(`${prefix}-selling`);
     const avoid = selectedAiValues(`${prefix}-avoid`);
@@ -3261,7 +3309,7 @@ function updatePanelSummary(panel) {
       avoid.length ? `排除${avoid.slice(0, 2).join("、")}` : "",
     ].filter(Boolean).join(" · ");
     const categoryPath = [primary, secondary, leaf].filter(Boolean).join(" / ");
-    text = `${preset} · ${categoryPath || "自动识别"} · ${focus} · ${goal}${ruleText ? ` · ${ruleText}` : ""}`;
+    text = `${preset} · ${categoryPath || "自动识别"} · 导演方向${goal}${ruleText ? ` · ${ruleText}` : ""}`;
   }
   summary.textContent = text;
   button.textContent = panel.classList.contains("is-collapsed") ? "展开" : "收起";
@@ -3298,6 +3346,7 @@ async function loadRuntime() {
     const data = await api("/api/runtime");
     state.runtime = data;
     $("app-version").textContent = `v${data.version}`;
+    if ($("runtime-settings-version")) $("runtime-settings-version").textContent = `v${data.version || ""}`;
     renderZeroCopyTestMarker(data);
     $("runtime-user-data").value = data.user_data_dir || "";
     if ($("user-data-dir")) $("user-data-dir").value = data.user_data_dir || "";
@@ -3348,6 +3397,11 @@ function normalizeVolcRegion(value) {
 
 async function loadSettings(showToast = false) {
   const data = await api("/api/settings");
+  populateSubtitleFontOptions(
+    data.subtitle_font_options,
+    data.subtitle_font_family,
+    data.subtitle_font_resolution,
+  );
   Object.entries(settingFields).forEach(([key, id]) => {
     const element = $(id);
     if (!element) return;
@@ -3384,7 +3438,8 @@ function collectSettings() {
   data.volc_access_token = "";
   data.subtitle_font_size = Math.max(32, Math.min(96, Number(data.subtitle_font_size || 52)));
   data.subtitle_opacity = Math.max(20, Math.min(100, Number(data.subtitle_opacity || 70)));
-  data.subtitle_blur = Math.max(0, Math.min(20, Number(data.subtitle_blur || 10)));
+  data.subtitle_blur = Math.max(0, Math.min(100, Number(data.subtitle_blur || 10)));
+  data.subtitle_position_percent = Math.max(8, Math.min(70, Number(data.subtitle_position_percent || 24)));
   data.ui_font_size = normalizeUiFontSize(data.ui_font_size);
   data.style_profile_strength = normalizeStyleProfileStrength(data.style_profile_strength);
   data.preference_weights = collectPreferenceWeights();
@@ -3402,6 +3457,7 @@ function collectAiSelectionSettings() {
     preference_weights: collectPreferenceWeights(),
     style_profile_strength: normalizeStyleProfileStrength($("s-style-profile-strength")?.value),
     content_review_mode: $("s-content-review-mode")?.value || "off",
+    m2_planner_mode: $("s-m2-planner-mode")?.value || "legacy",
     ai_rules: collectAiRules(),
   };
 }
@@ -3457,6 +3513,7 @@ function bindAiSelectionAutoSave() {
     "#s-policy-size-interaction",
     "#s-policy-live-interaction",
     "#s-content-review-mode",
+    "#s-m2-planner-mode",
     "#s-style-profile-strength",
     "#s-rule-category-filter",
     "#s-rule-hook-cap",
@@ -3470,6 +3527,9 @@ function bindAiSelectionAutoSave() {
 
   root.addEventListener("change", (event) => {
     const target = event.target;
+    if (target?.matches(".content-policy-row select, .content-policy-rule-action")) {
+      syncContentPolicyTone(target);
+    }
     if (target?.matches(choiceSelector) || target?.matches("[data-pref-key]")) {
       queueAiSelectionSave(0);
     }
@@ -3638,47 +3698,31 @@ function renderStyleProfilePills(items = [], emptyText = "继续积累样本") {
 function renderStyleProfile(profile = {}) {
   const metrics = profile.metrics || {};
   const summary = Array.isArray(profile.summary) ? profile.summary : [];
-  const latest = Number(profile.latest_at || 0);
-  const latestText = latest ? new Date(latest * 1000).toLocaleDateString() : "暂无";
   return `
     <div class="style-profile-card">
       <div class="style-profile-head">
         <div>
-          <strong>${escapeHtml(profile.name || "剪辑风格画像")}</strong>
-          <span>学习状态：${escapeHtml(profile.status || "观察中")} · 当前影响：${escapeHtml(profile.impact || "只读")} · 设置：${escapeHtml(profile.configured_strength || "auto")}</span>
-        </div>
-        <div class="style-profile-stats">
-          <span>成片调整 ${Number(profile.learned_records || 0)}</span>
-          <span>样本 ${Number(profile.sample_count || 0)}</span>
-          <span>更新 ${escapeHtml(latestText)}</span>
+          <strong>AI 已学到的剪辑风格</strong>
+          <span>${escapeHtml(profile.status || "观察中")} · 分析 ${Number(profile.sample_count || 0)} 个片段选择</span>
         </div>
       </div>
-      ${summary.length ? `<div class="style-profile-summary">${summary.slice(0, 4).map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
       <div class="style-profile-grid">
         <section>
-          <h3>常保留卖点</h3>
+          <h3>你通常喜欢</h3>
           <div>${renderStyleProfilePills(profile.selling_preferences, "暂无稳定卖点")}</div>
         </section>
         <section>
-          <h3>常删除内容</h3>
+          <h3>你通常避免</h3>
           <div>${renderStyleProfilePills(profile.avoid_preferences, "暂无稳定删除方向")}</div>
-        </section>
-        <section>
-          <h3>开头偏好</h3>
-          <div>${renderStyleProfilePills(profile.hook_preferences, "继续观察开头选择")}</div>
-        </section>
-        <section>
-          <h3>结尾偏好</h3>
-          <div>${renderStyleProfilePills(profile.ending_preferences, "继续观察结尾选择")}</div>
         </section>
       </div>
       <div class="style-profile-metrics">
         <span>卖点密度 <strong>${escapeHtml(metrics.selling_density || "观察中")}</strong></span>
-        <span>剪辑节奏 <strong>${escapeHtml(metrics.rhythm || "观察中")}</strong></span>
+        <span>节奏 <strong>${escapeHtml(metrics.rhythm || "观察中")}</strong></span>
         <span>上下文 <strong>${escapeHtml(metrics.context_length || "观察中")}</strong></span>
-        <span>情绪强度 <strong>${escapeHtml(metrics.emotion_strength || "观察中")}</strong></span>
         <span>CTA <strong>${escapeHtml(metrics.cta_strength || "观察中")}</strong></span>
       </div>
+      ${summary.length ? `<div class="style-profile-summary">${summary.slice(0, 2).map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
     </div>
   `;
 }
@@ -3810,8 +3854,6 @@ function renderAiFeedbackSummary(summary = {}) {
   const positive = Array.isArray(summary.positive) ? summary.positive : [];
   const negative = Array.isArray(summary.negative) ? summary.negative : [];
   const conflicts = Array.isArray(summary.conflicts) ? summary.conflicts : [];
-  const brief = Array.isArray(summary.brief) ? summary.brief : [];
-  const notes = Array.isArray(summary.notes) ? summary.notes : [];
   if (!positive.length && !negative.length && !conflicts.length) {
     box.innerHTML = `
       ${renderStyleProfile(profile)}
@@ -3824,23 +3866,8 @@ function renderAiFeedbackSummary(summary = {}) {
   `).join("");
   box.innerHTML = `
     ${renderStyleProfile(profile)}
-    <div class="feedback-summary-head">
-      <strong>取舍依据</strong>
-      <span>摘要 · ${escapeHtml(summary.confidence || "观察中")} · ${Number(summary.sample_count || 0)} 条样本</span>
-    </div>
-    ${brief.length ? `<div class="preference-brief">${brief.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</div>` : ""}
-    <div class="preference-summary-grid">
-      <section>
-        <h3>倾向保留</h3>
-        ${renderPreferenceSignalList(positive, "positive")}
-      </section>
-      <section>
-        <h3>倾向删除</h3>
-        ${renderPreferenceSignalList(negative, "negative")}
-      </section>
-    </div>
-    ${conflictRows ? `<div class="preference-conflicts"><strong>歧义样本</strong>${conflictRows}</div>` : ""}
-    ${notes.length ? `<p class="panel-note">${notes.map(escapeHtml).join(" ")}</p>` : ""}
+    ${conflictRows ? `<div class="preference-conflicts"><strong>需要结合上下文判断</strong>${conflictRows}</div>` : ""}
+    <p class="panel-note">历史偏好只做软参考；当前素材的语义完整性和商品证据始终优先。</p>
   `;
 }
 
@@ -4148,7 +4175,75 @@ function syncPreferenceSlider(input) {
   const key = input.dataset.prefKey;
   const value = input.value;
   const label = document.querySelector(`[data-pref-value="${key}"]`);
-  if (label) label.textContent = value;
+  if (label) {
+    label.textContent = preferenceWeightLabel(value);
+    label.title = `当前偏好权重 ${value}`;
+  }
+}
+
+function preferenceWeightLabel(value) {
+  const weight = Number(value || 0);
+  if (weight <= 0) return "弱化";
+  if (weight <= 0.5) return "较少";
+  if (weight <= 1) return "标准";
+  if (weight <= 1.5) return "较优先";
+  if (weight <= 2) return "优先";
+  return "强优先";
+}
+
+function populateSubtitleFontOptions(fonts, currentValue, resolution = {}) {
+  const select = $("s-subtitle-font-family");
+  if (!select) return;
+  const installed = Array.from(new Set((Array.isArray(fonts) ? fonts : [])
+    .map((name) => String(name || "").trim())
+    .filter(Boolean)));
+  const current = String(currentValue || "").trim();
+  const commonNames = [
+    "Microsoft YaHei", "Microsoft YaHei Bold", "DengXian", "DengXian Bold",
+    "SimHei", "SimSun", "KaiTi", "FangSong", "Noto Sans SC",
+    "Noto Sans SC Medium", "Noto Sans SC Bold", "Source Han Serif SC Heavy",
+  ];
+  const byFold = new Map(installed.map((name) => [name.toLocaleLowerCase(), name]));
+  const common = commonNames.map((name) => byFold.get(name.toLocaleLowerCase())).filter(Boolean);
+  const commonSet = new Set(common.map((name) => name.toLocaleLowerCase()));
+  const remaining = installed.filter((name) => !commonSet.has(name.toLocaleLowerCase()));
+  select.innerHTML = "";
+
+  function appendGroup(label, names) {
+    if (!names.length) return;
+    const group = document.createElement("optgroup");
+    group.label = label;
+    names.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      option.dataset.installed = "true";
+      group.appendChild(option);
+    });
+    select.appendChild(group);
+  }
+
+  if (current && !byFold.has(current.toLocaleLowerCase())) {
+    const group = document.createElement("optgroup");
+    group.label = "当前设置";
+    const option = document.createElement("option");
+    option.value = current;
+    option.textContent = `${current}（未检测到，将自动回退）`;
+    option.dataset.installed = "false";
+    group.appendChild(option);
+    select.appendChild(group);
+  }
+  appendGroup("常用字幕字体", common);
+  appendGroup("本机已安装字体", remaining);
+  if (!select.options.length) {
+    const option = document.createElement("option");
+    option.value = current || "Microsoft YaHei Bold";
+    option.textContent = current || "Microsoft YaHei Bold";
+    select.appendChild(option);
+  }
+  select.value = byFold.get(current.toLocaleLowerCase()) || current || select.options[0].value;
+  select.dataset.resolvedFont = String(resolution?.resolved || "");
+  select.dataset.fontFallback = resolution?.fallback ? "true" : "false";
 }
 
 function syncSubtitleFontSize() {
@@ -4156,6 +4251,7 @@ function syncSubtitleFontSize() {
   const label = $("s-subtitle-font-size-value");
   if (!input || !label) return;
   label.textContent = input.value;
+  syncSubtitlePreview();
 }
 
 function syncSubtitleStyleValues() {
@@ -4165,6 +4261,42 @@ function syncSubtitleStyleValues() {
   const blur = $("s-subtitle-blur");
   const blurLabel = $("s-subtitle-blur-value");
   if (blur && blurLabel) blurLabel.textContent = blur.value;
+  const position = $("s-subtitle-position-percent");
+  const positionLabel = $("s-subtitle-position-value");
+  if (position && positionLabel) positionLabel.textContent = position.value;
+  syncSubtitlePreview();
+}
+
+function syncSubtitlePreview() {
+  const preview = $("subtitle-preview-text");
+  if (!preview) return;
+  const rawFontSize = Number($("s-subtitle-font-size")?.value || 52);
+  const fontSize = Math.max(11, Math.min(30, rawFontSize * 0.32));
+  const opacity = Math.max(0.2, Math.min(1, Number($("s-subtitle-opacity")?.value || 70) / 100));
+  const blur = Math.max(0, Math.min(4, Number($("s-subtitle-blur")?.value || 10) / 25));
+  const position = Math.max(8, Math.min(70, Number($("s-subtitle-position-percent")?.value || 24)));
+  const family = String($("s-subtitle-font-family")?.value || "Microsoft YaHei UI");
+  const colorMap = { white: "#ffffff", yellow: "#ffe066", orange: "#ffad4d", red: "#ff6868", pink: "#ff8fbd", purple: "#c4a1ff", blue: "#78b7ff", green: "#7ad9a5", black: "#111827" };
+  const color = colorMap[String($("s-subtitle-font-color")?.value || "white")] || "#ffffff";
+  const effect = String($("s-subtitle-text-effect")?.value || "shadow");
+  preview.style.fontFamily = `"${family}", "Microsoft YaHei UI", sans-serif`;
+  preview.style.fontSize = `${fontSize}px`;
+  preview.style.color = color;
+  preview.style.opacity = String(opacity);
+  preview.style.bottom = `${position}%`;
+  preview.style.filter = blur ? `blur(${blur.toFixed(2)}px)` : "none";
+  preview.style.textShadow = effect === "outline"
+    ? "-2px -2px 0 #111827, 2px -2px 0 #111827, -2px 2px 0 #111827, 2px 2px 0 #111827"
+    : "0 3px 8px rgba(0, 0, 0, .95), 0 1px 2px rgba(0, 0, 0, .95)";
+  const stateLabel = $("subtitle-preview-state");
+  if (stateLabel) stateLabel.textContent = `${rawFontSize}px · 高度${position}% · 不透明度${Math.round(opacity * 100)}%`;
+  const fontStatus = $("subtitle-font-status");
+  const selectedOption = $("s-subtitle-font-family")?.selectedOptions?.[0];
+  if (fontStatus) {
+    fontStatus.textContent = selectedOption?.dataset?.installed === "false"
+      ? `未检测到“${family}”，正式成片将自动使用系统默认粗体。`
+      : `当前使用本机字体“${family}”；保存后用于正式成片。`;
+  }
 }
 
 function applyPreferenceWeights(weights) {
@@ -4188,6 +4320,7 @@ function collectPreferenceWeights() {
 const contentPolicyDefaults = Object.freeze({
   price: "block",
   cta: "block",
+  inventory_pressure: "block",
   source_claim: "block",
   social_proof: "block",
   after_sale: "block",
@@ -4203,6 +4336,7 @@ function normalizeContentPolicy(policy = {}) {
   const normalized = {
     price: contentPolicyActions.has(source.price) ? source.price : contentPolicyDefaults.price,
     cta: contentPolicyActions.has(source.cta) ? source.cta : contentPolicyDefaults.cta,
+    inventory_pressure: contentPolicyActions.has(source.inventory_pressure) ? source.inventory_pressure : contentPolicyDefaults.inventory_pressure,
     source_claim: contentPolicyActions.has(source.source_claim) ? source.source_claim : contentPolicyDefaults.source_claim,
     social_proof: contentPolicyActions.has(source.social_proof) ? source.social_proof : contentPolicyDefaults.social_proof,
     after_sale: contentPolicyActions.has(source.after_sale) ? source.after_sale : contentPolicyDefaults.after_sale,
@@ -4249,6 +4383,7 @@ function contentPolicyRuleRow(rule = {}) {
     select.append(option);
   });
   select.value = contentPolicyActions.has(rule.action) ? rule.action : "block";
+  syncContentPolicyTone(select);
 
   const remove = document.createElement("button");
   remove.type = "button";
@@ -4266,6 +4401,13 @@ function renderContentPolicyRules(rules = []) {
   const root = $("content-policy-custom-rules");
   if (!root) return;
   root.replaceChildren(...rules.map((rule) => contentPolicyRuleRow(rule)));
+}
+
+function syncContentPolicyTone(control) {
+  if (!control) return;
+  ["block", "body_only", "allow", "prefer"].forEach((value) => control.classList.remove(`is-policy-${value}`));
+  const value = contentPolicyActions.has(control.value) ? control.value : "block";
+  control.classList.add(`is-policy-${value}`);
 }
 
 function addContentPolicyRule() {
@@ -4286,6 +4428,7 @@ function applyContentPolicy(policy) {
   const controls = {
     price: "s-policy-price",
     cta: "s-policy-cta",
+    inventory_pressure: "s-policy-inventory-pressure",
     source_claim: "s-policy-source-claim",
     social_proof: "s-policy-social-proof",
     after_sale: "s-policy-after-sale",
@@ -4294,7 +4437,10 @@ function applyContentPolicy(policy) {
   };
   Object.entries(controls).forEach(([key, id]) => {
     const control = $(id);
-    if (control) control.value = normalized[key];
+    if (control) {
+      control.value = normalized[key];
+      syncContentPolicyTone(control);
+    }
   });
   renderContentPolicyRules(normalized.custom_rules);
 }
@@ -4303,6 +4449,7 @@ function collectContentPolicy() {
   const policy = normalizeContentPolicy({
     price: $("s-policy-price")?.value,
     cta: $("s-policy-cta")?.value,
+    inventory_pressure: $("s-policy-inventory-pressure")?.value,
     source_claim: $("s-policy-source-claim")?.value,
     social_proof: $("s-policy-social-proof")?.value,
     after_sale: $("s-policy-after-sale")?.value,
@@ -4345,8 +4492,20 @@ async function loadLicense() {
     $("license-days-left").value = data.activated
       ? `${data.days_left ?? 0} 天，到期 ${data.expires_date || ""}`
       : data.reason || "未激活";
+    const status = $("system-license-status");
+    if (status) {
+      status.classList.toggle("is-active", Boolean(data.activated));
+      status.classList.toggle("is-inactive", !data.activated);
+      status.lastChild.textContent = data.activated ? "已激活" : "未激活";
+    }
   } catch (error) {
     $("license-days-left").value = "读取失败";
+    const status = $("system-license-status");
+    if (status) {
+      status.classList.remove("is-active");
+      status.classList.add("is-inactive");
+      status.lastChild.textContent = "读取失败";
+    }
   }
 }
 
@@ -5369,6 +5528,11 @@ function setButtonsEnabled(selector, enabled, reason = "") {
 
 function previewReady(preview, scope = "smart") {
   if (!preview?.id || preview.status !== "ready") return false;
+  if (
+    scope === "smart"
+    && preview.commercial_director_experiment
+    && !preview.commercial_director_sentence_preview
+  ) return false;
   return previewWorkbenchSelectedClips(scope, preview).some((clip) => effectiveClipDuration(clip) > 0.05);
 }
 
@@ -5643,11 +5807,8 @@ function checkedControlValues(controlName) {
 }
 
 function collectAiControls(prefix) {
-  var selling = checkedControlValues(`${prefix}-selling`);
-  var customWords = customSellingValues(prefix);
-  if (customWords.length) {
-    selling = selling.concat(customWords);
-  }
+  const selling = checkedControlValues(`${prefix}-selling`);
+  const customWords = customSellingValues(prefix);
   return {
     primary_category: primaryCategoryValue(prefix),
     secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
@@ -5655,10 +5816,11 @@ function collectAiControls(prefix) {
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
     selling_points: selling,
+    priority_terms: customWords,
+    preference_weights: collectPreferenceWeights(),
     avoid: checkedControlValues(`${prefix}-avoid`),
     hook_style: $(`${prefix}-hook-style`)?.value || "自动",
     ending_style: $(`${prefix}-ending-style`)?.value || "自动",
-    strictness: $(`${prefix}-strictness`)?.value || "标准",
     // Carry the currently visible policy with every run. Saving remains useful
     // for future runs, but a preview must never silently use stale settings.
     content_policy: collectContentPolicy(),
@@ -5774,7 +5936,7 @@ function collectSmartPayload(options = {}) {
     output_naming_mode: $("sc-output-naming")?.value || "source_timestamp",
     primary_category: primaryCategory,
     category: backendCategoryForPrimary(primaryCategory),
-    focus_hint: $("sc-focus").value,
+    focus_hint: "自动",
     ai_controls: collectAiControls("sc"),
     target_duration: Number($("sc-duration").value || 60),
     duration_tolerance: selectedDurationTolerance("sc"),
@@ -5803,13 +5965,756 @@ async function startSmartPreview() {
   state.smartPreview = {
     id: result.preview_id,
     status: "running",
-    message: "正在生成 AI 选片预览。",
+    message: `本次目标 ${payload.target_duration} 秒：AI 正在先定故事，再从完整字幕选择真实短句。`,
+    target_duration: payload.target_duration,
+    duration_tolerance: payload.duration_tolerance,
     clips: [],
+    commercial_director_experiment: true,
+    commercial_director_preview: true,
   };
   renderSmartPreview(state.smartPreview);
-  toast(result.message || "AI选片预览已启动", "success");
+  toast(result.message || "AI 导演预览已启动", "success");
   refreshTasks();
   pollSmartPreview(result.preview_id);
+}
+
+async function startCommerceDirectorPreview() {
+  await saveFeaturePreferences();
+  const payload = collectSmartPayload();
+  await runPreflight("smart-preview", payload, "smart-cut");
+  const result = await api("/api/smart-cut/commerce-director/preview/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  state.smartPreview = {
+    id: result.preview_id,
+    status: "running",
+    message: `本次目标 ${payload.target_duration} 秒：AI 先确定故事章节，再从完整字幕一次性选择真实短句。`,
+    target_duration: payload.target_duration,
+    duration_tolerance: payload.duration_tolerance,
+    clips: [],
+    commercial_director_experiment: true,
+  };
+  state.commerceDirectorActiveResultId = "";
+  state.commerceDirectorActiveStrategyId = "";
+  state.commerceDirectorEvidenceFilter = "recommended";
+  state.commerceDirectorFocusedEvidenceId = "";
+  state.commerceDirectorFocusedDraftKey = "";
+  state.commerceDirectorFocusedDraftIndex = -1;
+  state.commerceDirectorAutoBatchRequestedPreviewId = "";
+  state.commerceDirectorLastServerRenderKey = "";
+  openCommerceDirectorStudio(state.smartPreview);
+  renderSmartPreview(state.smartPreview);
+    toast(result.message || "AI 商业导演预览已启动", "success");
+  refreshTasks();
+  pollSmartPreview(result.preview_id);
+}
+
+async function selectCommerceDirectorStory(storyId) {
+  const preview = state.smartPreview;
+  if (!preview?.id || !storyId) {
+    toast("请先完成一次商业导演实验，并从故事库选择方向", "warning");
+    return;
+  }
+  const result = await api("/api/smart-cut/commerce-director/story/select", {
+    method: "POST",
+    body: JSON.stringify({ preview_id: preview.id, story_id: storyId }),
+  });
+  state.smartPreview = {
+    id: result.preview_id,
+    status: "running",
+    message: `正在按 ${storyId} 生成商业导演实验方案（复用 M1 故事）。`,
+    clips: [],
+    commercial_director_experiment: true,
+  };
+  renderSmartPreview(state.smartPreview);
+  toast(result.message || "所选故事方案已启动", "success");
+  refreshTasks();
+  pollSmartPreview(result.preview_id);
+}
+
+async function selectCommerceDirectorStrategy(directorStrategyId, requiresAdditionalAiCall = false, scope = "smart") {
+  const isMix = scope === "mix";
+  const preview = isMix ? state.mixPreview : state.smartPreview;
+  if (!preview?.id || !directorStrategyId) {
+    toast("请先完成一次商业导演实验，并从 AI 导演方案中选择", "warning");
+    return;
+  }
+  if (requiresAdditionalAiCall && !window.confirm("生成这个备选方向会重新调用 2 次 AI（故事章节、短句 Casting），并产生新的模型费用；原始视频和字幕会复用。继续吗？")) {
+    return;
+  }
+  const result = await api(isMix ? "/api/mix/commerce-director/strategy/select" : "/api/smart-cut/commerce-director/strategy/select", {
+    method: "POST",
+    body: JSON.stringify({
+      preview_id: preview.id,
+      director_strategy_id: directorStrategyId,
+      confirm_additional_ai_call: Boolean(requiresAdditionalAiCall),
+    }),
+  });
+  const nextPreview = {
+    id: result.preview_id,
+    status: "running",
+    message: requiresAdditionalAiCall ? "正在为所选备选方向确定故事章节并选择真实短句。" : "正在按所选 AI 导演方案生成真实口播预览。",
+    clips: [],
+    commercial_director_experiment: true,
+  };
+  if (isMix) {
+    state.mixPreview = nextPreview;
+    renderMixPreview(state.mixPreview);
+  } else {
+    state.smartPreview = nextPreview;
+    openCommerceDirectorStudio(state.smartPreview);
+    renderSmartPreview(state.smartPreview);
+  }
+  toast(result.message || "AI 导演方案已启动", "success");
+  refreshTasks();
+  if (isMix) pollMixPreview(result.preview_id);
+  else pollSmartPreview(result.preview_id);
+}
+
+function selectCommerceDirectorProposal(directorStrategyId) {
+  const id = String(directorStrategyId || "").trim();
+  if (!id || !state.smartPreview?.commercial_director_experiment) return;
+  state.commerceDirectorActiveStrategyId = id;
+  state.commerceDirectorFocusedEvidenceId = "";
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+async function generateCommerceDirectorStrategies() {
+  const preview = state.smartPreview;
+  if (!preview?.id) {
+    toast("请先完成一次 AI 导演方案发现", "warning");
+    return;
+  }
+  const result = await api("/api/smart-cut/commerce-director/strategies/generate", {
+    method: "POST",
+    body: JSON.stringify({ preview_id: preview.id }),
+  });
+  state.smartPreview = {
+    id: result.preview_id,
+    status: "running",
+    message: `正在复用 M1 故事地图，依次生成 ${Number(result.strategy_count || 0)} 条 M2→M3 审阅成片。`,
+    clips: [],
+    commercial_director_experiment: true,
+  };
+  state.commerceDirectorActiveResultId = "";
+  state.commerceDirectorFocusedEvidenceId = "";
+  openCommerceDirectorStudio(state.smartPreview);
+  renderSmartPreview(state.smartPreview);
+  toast(result.message || "多方案实验已启动", "success");
+  refreshTasks();
+  pollSmartPreview(result.preview_id);
+}
+
+function autoGenerateCommerceDirectorStrategies(preview) {
+  const previewId = String(preview?.id || "").trim();
+  if (!previewId || state.commerceDirectorAutoBatchRequestedPreviewId === previewId) return;
+  state.commerceDirectorAutoBatchRequestedPreviewId = previewId;
+  window.setTimeout(() => {
+    // Compatibility path for runs created before one-click M1→M2→M3 batching.
+    // The M1 map remains internal; the user never has to choose a generation step.
+    generateCommerceDirectorStrategies().catch((error) => {
+      state.commerceDirectorAutoBatchRequestedPreviewId = "";
+      toast(error?.message || "无法自动生成导演方案", "error");
+      renderCommerceDirectorStudio(state.smartPreview);
+    });
+  }, 0);
+}
+
+function selectCommerceDirectorResult(previewId) {
+  const id = String(previewId || "").trim();
+  if (!id || !state.smartPreview?.commercial_director_experiment) return;
+  state.commerceDirectorActiveResultId = id;
+  state.commerceDirectorEvidenceFilter = "recommended";
+  state.commerceDirectorFocusedDraftKey = "";
+  state.commerceDirectorFocusedDraftIndex = -1;
+  renderSmartPreview(state.smartPreview);
+}
+
+function commerceDirectorStudioActiveResult(preview) {
+  const review = preview?.director_review || {};
+  const results = Array.isArray(review.batch_results) ? review.batch_results : [];
+  if (results.length) {
+    const activeId = results.some((item) => String(item?.preview_id || "") === state.commerceDirectorActiveResultId)
+      ? state.commerceDirectorActiveResultId
+      : String(results[0]?.preview_id || "");
+    return {
+      results,
+      activeId,
+      result: results.find((item) => String(item?.preview_id || "") === activeId) || results[0],
+    };
+  }
+  const draft = review.m2_draft || {};
+  const timeline = Array.isArray(review.m2_candidate_timeline) && review.m2_candidate_timeline.length
+    ? review.m2_candidate_timeline.map((item, index) => ({ ...item, position: index + 1 }))
+    : (preview?.clips || []).map((clip, index) => ({
+      position: index + 1,
+      chapter_id: clip?.clip_type || "",
+      candidate_id: clip?.candidate_id || clip?.director_candidate_id || "",
+      source_lineage: clip?.source_lineage || null,
+      text: clip?.text || "",
+      duration: Number(clip?.duration || 0),
+      word_materialization_status: "not_verified",
+    }));
+  const outline = Array.isArray(review.m2_outline) && review.m2_outline.length
+    ? review.m2_outline
+    : (draft.chapters || []).map((chapter, index) => ({
+      position: Number(chapter?.position || index + 1),
+      chapter_id: chapter?.chapter_id || "",
+      narrative_role: chapter?.narrative_role || "",
+      goal: chapter?.goal || "",
+      purchase_value: chapter?.purchase_value || chapter?.goal || "",
+      seconds: Number(chapter?.seconds || 0),
+    }));
+  return {
+    results: [], activeId: String(preview?.id || ""),
+    result: {
+      preview_id: preview?.id || "",
+      name: review.headline || "商业导演审阅",
+      icon: "",
+      state: review.kind === "m3_materialized_review" ? "m3_materialized" : review.kind === "m2_draft_review_only" ? "m2_draft_review_only" : "pending",
+      selected_seconds: timeline.reduce((sum, item) => sum + Number(item.duration || 0), 0),
+      clip_count: timeline.length,
+      opening_promise: review?.m1_story?.payoff || review?.m1_story?.thesis || "未标注",
+      commercial_goal: review?.m1_story?.core_commercial_idea || "未标注",
+      timeline,
+      m2_outline: outline,
+      review_video_available: review.kind === "m3_materialized_review" || review.kind === "m2_draft_review_only",
+      error: preview?.error || "",
+    },
+  };
+}
+
+function commerceDirectorEvidenceLibrary(review) {
+  const stories = Array.isArray(review?.m1_story_library?.stories) ? review.m1_story_library.stories : [];
+  const seen = new Set();
+  const rows = [];
+  stories.forEach((story) => (story?.assets || []).forEach((asset) => (asset?.candidate_lineage || []).forEach((lineage) => {
+    const id = String(lineage?.candidate_id || "").trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const start = Number(lineage?.start || 0);
+    const end = Number(lineage?.end || start);
+    const seconds = Number(lineage?.duration_seconds || 0);
+    const text = String(lineage?.text || asset?.claim || "").trim();
+    rows.push({
+      candidateId: id,
+      text,
+      seconds,
+      tier: String(asset?.asset_tier || "supporting"),
+      role: String(asset?.role || "evidence").trim(),
+      story: String(story?.story_id || "素材"),
+      storyId: String(story?.story_id || "").trim(),
+      purchaseQuestionId: String(lineage?.purchase_question_id || asset?.purchase_question_id || "").trim(),
+      purchaseQuestion: String(lineage?.purchase_question || asset?.purchase_question || "").trim(),
+      answerRole: String(lineage?.answer_role || asset?.answer_role || asset?.role || "evidence").trim(),
+      eligible: Boolean(id && text && seconds > 0 && end > start),
+      sourceLineage: {
+        candidate_id: id,
+        start,
+        end,
+        duration_seconds: seconds,
+        text,
+        lineage_policy: "recorded_subtitle_to_frozen_candidate_only",
+      },
+      // M1 exposes a frozen safe candidate. A newly hand-added sentence is
+      // still only a human-review draft until the existing M3 gate runs again.
+      wordMaterializationStatus: "requires_m3_recheck",
+    });
+  })));
+  return rows;
+}
+
+function commerceDirectorFocusedDraftContext(review, items, outline, draftKey) {
+  const index = state.commerceDirectorFocusedDraftKey === String(draftKey || "")
+    ? Number(state.commerceDirectorFocusedDraftIndex)
+    : -1;
+  const item = Number.isInteger(index) && index >= 0 && index < items.length ? items[index] : null;
+  const chapter = item ? (commerceDirectorOutlineByChapter(outline).get(String(item?.chapter_id || "")) || {}) : {};
+  const role = String(item?.answer_role || chapter?.narrative_role || item?.chapter_id || "").trim();
+  const question = String(item?.purchase_question || chapter?.purchase_question || chapter?.purchase_value || chapter?.goal || "").trim();
+  const questionId = String(item?.purchase_question_id || chapter?.purchase_question_id || "").trim();
+  const library = commerceDirectorEvidenceLibrary(review);
+  const selectedSource = item
+    ? library.find((source) => String(source.candidateId) === String(item?.candidate_id || item?.candidateId || "")) || null
+    : null;
+  return {
+    index,
+    item,
+    role,
+    roleMeta: commerceDirectorRoleMeta(role),
+    question,
+    questionId,
+    selectedSource,
+    selectedIds: new Set(items.map((row) => String(row?.candidate_id || row?.candidateId || "")).filter(Boolean)),
+  };
+}
+
+function commerceDirectorEvidenceRelevance(item, context) {
+  const itemTone = commerceDirectorRoleMeta(item?.answerRole || item?.role).tone;
+  const sameQuestion = Boolean(
+    context.questionId && item.purchaseQuestionId && context.questionId === item.purchaseQuestionId,
+  ) || Boolean(
+    !context.questionId && context.question && item.purchaseQuestion
+      && context.question === item.purchaseQuestion,
+  );
+  const sameStory = Boolean(context.selectedSource?.storyId && context.selectedSource.storyId === item.storyId);
+  const sameRole = Boolean(context.item && context.roleMeta.tone === itemTone);
+  const score = (sameQuestion ? 12 : 0) + (sameStory ? 7 : 0) + (sameRole ? 4 : 0) + (item.tier === "core" ? 2 : 0);
+  const label = sameQuestion
+    ? "同一购买问题"
+    : sameStory && sameRole
+      ? "同一故事 · 结构相近"
+      : sameStory
+        ? "同一故事的补充证据"
+        : sameRole
+          ? "同类结构证据"
+          : item.tier === "core" ? "高相关冻结证据" : "可补充的新证据";
+  return { sameQuestion, sameStory, sameRole, score, label };
+}
+
+function commerceDirectorStudioEvidencePanel(review, options = {}) {
+  const rows = commerceDirectorEvidenceLibrary(review);
+  const items = Array.isArray(options.items) ? options.items : [];
+  const outline = Array.isArray(options.outline) ? options.outline : [];
+  const context = commerceDirectorFocusedDraftContext(review, items, outline, options.draftKey);
+  const allowedFilters = ["all", "current-question", "current-story", "recommended"];
+  const filter = allowedFilters.includes(state.commerceDirectorEvidenceFilter)
+    ? state.commerceDirectorEvidenceFilter
+    : "recommended";
+  const unselected = rows.filter((item) => !context.selectedIds.has(String(item.candidateId)));
+  const ranked = unselected
+    .map((item) => ({ ...item, relevance: commerceDirectorEvidenceRelevance(item, context) }))
+    .sort((left, right) => right.relevance.score - left.relevance.score || Number(right.seconds) - Number(left.seconds));
+  const questionRows = ranked.filter((item) => item.relevance.sameQuestion || item.relevance.sameRole);
+  const storyRows = ranked.filter((item) => item.relevance.sameStory);
+  const visible = (filter === "current-question"
+    ? questionRows
+    : filter === "current-story"
+      ? storyRows
+      : filter === "recommended"
+        ? ranked.filter((item) => item.relevance.score > 0)
+        : ranked
+  ).slice(0, 8);
+  const filters = [
+    ["recommended", "推荐"], ["current-question", "当前购买问题"], ["current-story", "当前 Story"], ["all", "全部"],
+  ];
+  const filterButtons = filters.map(([value, label]) => `<button type="button" class="commerce-director-studio-filter ${filter === value ? "is-active" : ""}" data-action="filter-commerce-director-evidence" data-evidence-filter="${value}">${label}</button>`).join("");
+  const recommendationCopy = !context.item
+    ? "先点中一条口播，系统会按购买问题、故事和证据角色推荐替换句。"
+    : filter === "current-question" && !ranked.some((item) => item.relevance.sameQuestion)
+      ? "当前备用候选没有标注同一购买问题，已按相同结构角色推荐。"
+      : `正在围绕第 ${context.index + 1} 句：${escapeHtml(context.question || "当前购买问题")} 推荐。`;
+  const cards = visible.length ? visible.map((item) => {
+    const canPlace = options.editable && options.draftKey && item.eligible;
+    const replaceDisabled = !canPlace || !context.item ? "disabled" : "";
+    const placementActions = canPlace
+      ? `<div class="commerce-director-evidence-actions"><button type="button" data-action="director-plan-place-evidence" data-draft-key="${escapeHtml(options.draftKey)}" data-evidence-id="${escapeHtml(item.candidateId)}" data-evidence-placement="replace" ${replaceDisabled}>替换当前句</button><button type="button" data-action="director-plan-place-evidence" data-draft-key="${escapeHtml(options.draftKey)}" data-evidence-id="${escapeHtml(item.candidateId)}" data-evidence-placement="before">插入当前句前</button><button type="button" data-action="director-plan-place-evidence" data-draft-key="${escapeHtml(options.draftKey)}" data-evidence-id="${escapeHtml(item.candidateId)}" data-evidence-placement="after">插入当前句后</button><button type="button" data-action="director-plan-place-evidence" data-draft-key="${escapeHtml(options.draftKey)}" data-evidence-id="${escapeHtml(item.candidateId)}" data-evidence-placement="end">加入方案</button></div>`
+      : '<small class="commerce-director-evidence-blocked">冻结候选信息不完整，不能加入草稿。</small>';
+    const purchaseQuestion = item.purchaseQuestion || (item.relevance.sameQuestion ? context.question : "未标注（按相关度推荐）");
+    const answerRole = commerceDirectorRoleMeta(item.answerRole || item.role).label;
+    return `<article class="commerce-director-evidence-card"><header><span class="is-${escapeHtml(item.tier)}">${escapeHtml(item.relevance.label)}</span><small>${escapeHtml(item.story)} · ${escapeHtml(answerRole)}</small></header><p>${escapeHtml(item.text)}</p><dl><div><dt>购买问题</dt><dd>${escapeHtml(purchaseQuestion)}</dd></div><div><dt>回答角色</dt><dd>${escapeHtml(answerRole)}</dd></div></dl><footer><span>${Number(item.seconds || 0).toFixed(1)}s · 冻结候选 #${escapeHtml(item.candidateId)}</span>${placementActions}</footer><small class="commerce-director-evidence-status">加入后仅保存为人工草稿，必须重新通过 M3 词级物化。</small></article>`;
+  }).join("") : '<p class="commerce-director-studio-empty">当前筛选下没有可加入的冻结候选。</p>';
+  const collapsed = Boolean(state.commerceDirectorLibraryCollapsed);
+  return `<aside class="commerce-director-studio-library ${collapsed ? "is-collapsed" : ""}"><div class="commerce-director-studio-library-head"><div><strong>备用句库</strong><span>${collapsed ? "展开候选" : `${rows.length} 条冻结候选`}</span></div><button type="button" class="commerce-director-library-toggle" data-action="toggle-commerce-director-library" aria-expanded="${collapsed ? "false" : "true"}">${collapsed ? "展开" : "收起"}</button></div>${collapsed ? "" : `<div class="commerce-director-studio-tabs">${filterButtons}</div><div class="commerce-director-studio-library-tools"><span>${recommendationCopy}</span></div><div class="commerce-director-evidence-list">${cards}</div>`}</aside>`;
+}
+
+function commerceDirectorFocusedEvidence(review) {
+  const id = String(state.commerceDirectorFocusedEvidenceId || "").trim();
+  if (!id) return null;
+  return commerceDirectorEvidenceLibrary(review).find((item) => String(item.candidateId) === id) || null;
+}
+
+function commerceDirectorEvidenceInspector(review) {
+  const item = commerceDirectorFocusedEvidence(review);
+  if (!item) return "";
+  return `<section class="commerce-director-evidence-inspector"><header><div><strong>当前查看素材</strong><span>仅查看冻结候选，不改变 M3 已物化片单</span></div><em>${Number(item.seconds || 0).toFixed(1)}s</em></header><p>${escapeHtml(item.text)}</p><dl><div><dt>故事关系</dt><dd>${escapeHtml(item.story)}</dd></div><div><dt>素材角色</dt><dd>${escapeHtml(item.role)}</dd></div><div><dt>候选编号</dt><dd>#${escapeHtml(item.candidateId)}</dd></div></dl></section>`;
+}
+
+function commerceDirectorStudioSolutionCards(results, activeId, activeResult) {
+  const cards = results.length ? results : [activeResult];
+  return `<div class="commerce-director-studio-solutions">${cards.map((item, index) => {
+    const id = String(item?.preview_id || "");
+    const active = id === activeId || (!id && index === 0);
+    const state = String(item?.state || "pending");
+    const stateLabel = state === "m3_materialized" ? "M3 已完成" : state === "m2_draft_review_only" ? "M2 草案" : state === "blocked" ? "本方案失败" : "生成中";
+    const journey = commerceDirectorJourneySummary(item?.m2_outline || []);
+    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""} is-${escapeHtml(state)}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(id)}" aria-pressed="${active ? "true" : "false"}"><header><strong>${escapeHtml(item?.icon || "")}${escapeHtml(item?.name || `方案 ${index + 1}`)}</strong><em>${active ? "当前方案" : stateLabel}</em></header><span class="commerce-director-solution-metrics">${Number(item?.selected_seconds || 0).toFixed(1)}s · ${Number(item?.clip_count || 0)} 段 · ${escapeHtml(stateLabel)}</span><p>${escapeHtml(item?.commercial_goal || item?.opening_promise || item?.error || "等待导演方案")}</p><small>购买路径：${escapeHtml(journey || "等待 M2 编排")}</small></button>`;
+  }).join("")}</div>`;
+}
+
+function commerceDirectorJourneySummary(outline) {
+  const labels = (Array.isArray(outline) ? outline : []).map((item) => commerceDirectorRoleMeta(item?.narrative_role || item?.chapter_id).label);
+  return [...new Set(labels.filter(Boolean))].join(" → ");
+}
+
+function commerceDirectorRiskLabels(result, review) {
+  const issues = Array.isArray(result?.issues) ? result.issues : [];
+  const labels = [];
+  issues.forEach((issue) => {
+    const value = String(issue || "").toLowerCase();
+    if (/opening/.test(value)) labels.push("开场吸引需要复核");
+    else if (/asr|subtitle/.test(value)) labels.push("ASR 疑似异常");
+    else if (/total_|duration|below/.test(value)) labels.push("时长不足");
+    else if (/bridge|journey|purchase_path/.test(value)) labels.push("购买路径不完整");
+    else if (/word|materializ|selector/.test(value)) labels.push("M3 词级物化未通过");
+    else labels.push("方案存在待复核项");
+  });
+  if (String(result?.state || "") === "m2_draft_review_only") labels.push("仅 M2 草案，不能正式生成");
+  if (String(result?.state || "") === "blocked") labels.push("当前方案被合同阻断");
+  if (/selector_blocked|not_exact_bound/.test(String(result?.m3_status || review?.m3_status || ""))) labels.push("M3 词级物化未通过");
+  return [...new Set(labels)].slice(0, 5);
+}
+
+function commerceDirectorRiskPanel(result, review) {
+  const risks = commerceDirectorRiskLabels(result, review);
+  if (!risks.length) return '<div class="commerce-director-risk-panel"><span>当前风险</span><em>仍为实验审阅，正式导出保持禁用。</em></div>';
+  return `<div class="commerce-director-risk-panel"><span>当前风险</span><div>${risks.map((risk) => `<b>${escapeHtml(risk)}</b>`).join("")}</div></div>`;
+}
+
+function commerceDirectorDiscoveryProposalCards(proposals, activeId) {
+  return `<div class="commerce-director-studio-solutions">${proposals.map((proposal, index) => {
+    const id = String(proposal?.director_strategy_id || "");
+    const active = id === activeId || (!activeId && index === 0);
+    const available = Boolean(proposal?.available);
+    const extraAi = Boolean(proposal?.requires_additional_ai_call);
+    const actionLabel = extraAi ? "生成此方向（需 1 次 AI）" : "主方案已生成";
+    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""}" ${extraAi ? 'data-action="select-commerce-director-strategy"' : "disabled"} data-director-strategy-id="${escapeHtml(id)}" data-additional-ai-call="${extraAi ? "true" : "false"}" aria-pressed="${active ? "true" : "false"}" ${available ? "" : "disabled"}><strong>${escapeHtml(proposal?.icon || "")}${escapeHtml(proposal?.name || `方案 ${index + 1}`)}</strong><span>${escapeHtml(proposal?.opening_promise || proposal?.headline || "当前素材支持的导演方向")}</span><em>${extraAi ? actionLabel : "主方案预览已生成"}</em></button>`;
+  }).join("")}</div>`;
+}
+
+function commerceDirectorDiscoveryOutline(proposal, stories) {
+  const storyById = new Map((stories || []).map((story) => [String(story?.story_id || ""), story]));
+  return (proposal?.story_mix || []).map((mix, index) => {
+    const story = storyById.get(String(mix?.story_id || "")) || {};
+    return {
+      position: index + 1,
+      chapter_id: String(mix?.role || "story"),
+      narrative_role: String(mix?.role || "story"),
+      purchase_value: String(story?.title || story?.thesis || mix?.story_id || "待生成购买路径"),
+      goal: String(story?.commercial_value || proposal?.commercial_goal || ""),
+      seconds: Number(mix?.budget_seconds || story?.natural_duration || 0),
+    };
+  });
+}
+
+function renderCommerceDirectorStudio(preview) {
+  const page = $("commerce-director-studio-page");
+  const root = $("smart-preview");
+  if (!page || !root) return;
+  const review = preview?.director_review || {};
+  const videoName = String(preview?.video_name || preview?.video || "当前商品素材").split(/[\\/]/).filter(Boolean).pop() || "当前商品素材";
+  // The director workbench now lives in the existing preview panel.  Keep the
+  // former full-screen container hidden so clicking preview never feels like a
+  // page jump or a separate route.
+  page.classList.add("is-hidden");
+  page.setAttribute("aria-hidden", "true");
+  if (!state.commerceDirectorStudioOpen || !preview?.commercial_director_experiment) {
+    root.innerHTML = "";
+    return;
+  }
+  if (preview.status === "running" || preview.status === "queued") {
+  root.innerHTML = `<header class="commerce-director-studio-topbar"><div><strong>AI 商业导演</strong><span>预览</span></div><p>商品：${escapeHtml(videoName)}</p></header><main class="commerce-director-studio-loading"><strong>正在生成 ${Number(preview?.target_duration || 60)} 秒主方案</strong><span>第一遍只确定核心故事和章节；第二遍从完整字幕一次性选择 1–5 秒短句，并按章节连读检查。其他卖法只作为备选方向卡展示。</span></main>`;
+    return;
+  }
+  if (preview.status === "failed" || !review?.m1_story) {
+    root.innerHTML = `<header class="commerce-director-studio-topbar"><div><strong>AI 选片工作台</strong><span>导演实验</span></div><p>商品：${escapeHtml(videoName)}</p></header><main class="commerce-director-studio-loading is-error"><strong>本次导演实验没有生成可审阅方案</strong><span>${escapeHtml(preview.error || preview.message || "请检查模型调用后重新生成")}</span></main>`;
+    return;
+  }
+  if (review.kind === "m1_story_map_discovery") {
+    root.innerHTML = `<header class="commerce-director-studio-topbar"><div><strong>AI 选片工作台</strong><span>导演实验</span></div><p>商品：${escapeHtml(videoName)}</p></header><main class="commerce-director-studio-loading"><strong>已完成故事发现，正在自动生成可审阅成片</strong><span>M1 的不同卖法正在批量交给 M2 → M3；完成后直接显示方案卡、成片预览和逐句口播，不需要再选择或跳转。</span></main>`;
+    autoGenerateCommerceDirectorStrategies(preview);
+    return;
+  }
+  const active = commerceDirectorStudioActiveResult(preview);
+  const result = active.result || {};
+  const outline = result.m2_outline || [];
+  const draft = commerceDirectorDraftItems(result);
+  const timeline = draft.items;
+  ensureCommerceDirectorFocusedDraft(draft.key, timeline);
+  const story = review.m1_story || {};
+  const stateCopy = { m3_materialized: "M3 词级物化完成", m2_draft_review_only: "仅 M2 草案审阅", blocked: "方案被合同阻断", pending: "仍在生成" };
+  const stateText = stateCopy[String(result.state || "pending")] || stateCopy.pending;
+  const video = result.review_video_available ? commerceDirectorPreviewPanel(result.preview_id, `${result.name || "商业导演"}审阅视频`) : '<div class="commerce-director-video-unavailable">此方案暂无可播放审阅视频</div>';
+  const failureNote = result.state === "blocked" && result.error
+    ? `<div class="commerce-director-result-error"><strong>本方案未生成可审阅片单</strong><span>${escapeHtml(result.error)}</span></div>` : "";
+  root.innerHTML = `<header class="commerce-director-studio-topbar"><div><strong>AI 导演方案评审台</strong><span>实验审阅</span></div><p>商品：${escapeHtml(videoName)}</p><nav><button type="button" class="commerce-director-studio-quiet" data-action="restart-commerce-director-preview">重新生成方案</button><span class="commerce-director-studio-state">${escapeHtml(stateText)}</span></nav></header><main class="commerce-director-studio-main ${state.commerceDirectorLibraryCollapsed ? "is-library-collapsed" : ""}"><section class="commerce-director-studio-work">${commerceDirectorStudioSolutionCards(active.results, active.activeId, result)}${failureNote}<section class="commerce-director-studio-stage"><div class="commerce-director-studio-video-column"><header><strong>成片预览</strong><span>${escapeHtml(stateText)} · 仅供实验审阅</span></header><div class="commerce-director-studio-player">${video}</div></div><aside class="commerce-director-studio-core"><div class="commerce-director-studio-core-head"><span>导演意图</span><em>${escapeHtml(stateText)}</em></div><div class="commerce-director-intent-field"><span>核心承诺</span><strong>${escapeHtml(result.opening_promise || story.payoff || story.thesis || "未标注")}</strong></div><dl><div><dt>目标人群</dt><dd>${escapeHtml(story.audience_tension || "未标注")}</dd></div><div><dt>导演目标</dt><dd>${escapeHtml(result.commercial_goal || story.core_commercial_idea || "未标注")}</dd></div></dl>${commerceDirectorM2Outline(outline)}${commerceDirectorRiskPanel(result, review)}</aside></section><section class="commerce-director-studio-script"><header><div><strong>方案口播与编排</strong><span>点中一句即可在右侧获取替换建议；编辑只保存为人工审阅草稿。</span></div><div class="commerce-director-script-actions"><em>${timeline.length} 句 · ${timeline.reduce((sum, item) => sum + Number(item?.duration || 0), 0).toFixed(1)}s</em><button type="button" class="commerce-director-studio-quiet" data-action="director-plan-save" data-draft-key="${escapeHtml(draft.key)}">保存草稿</button></div></header>${commerceDirectorEditableTimelineRows(timeline, outline, draft.key)}</section></section>${commerceDirectorStudioEvidencePanel(review, { editable: true, draftKey: draft.key, items: timeline, outline })}</main><footer class="commerce-director-studio-footer"><span>人工修改只作用于本地实验草稿；原 ASR、冻结候选与既有 M3 审阅成片保持不变。</span><nav><button type="button" class="commerce-director-studio-quiet" data-action="director-plan-save" data-draft-key="${escapeHtml(draft.key)}">保存当前修改</button><button type="button" class="commerce-director-formal-blocked" disabled title="商业导演实验仅供人工审核，不能进入正式预览或导出">确认进入正式预览 / 生成成片</button><button type="button" class="commerce-director-studio-quiet" data-action="director-plan-return-list">返回方案列表</button></nav></footer>`;
+  bindCommerceDirectorDraftRowDrag(root);
+}
+
+function openCommerceDirectorStudio(preview) {
+  state.commerceDirectorStudioOpen = true;
+  state.commerceDirectorStudioDismissedPreviewId = "";
+  renderCommerceDirectorStudio(preview || state.smartPreview);
+}
+
+function closeCommerceDirectorStudio() {
+  state.commerceDirectorStudioDismissedPreviewId = String(state.smartPreview?.id || "");
+  state.commerceDirectorStudioOpen = false;
+  renderCommerceDirectorStudio(null);
+}
+
+function setCommerceDirectorEvidenceFilter(filter) {
+  state.commerceDirectorEvidenceFilter = ["all", "current-question", "current-story", "recommended"].includes(filter)
+    ? filter
+    : "recommended";
+  refreshCommerceDirectorEvidenceDrawer();
+}
+
+function toggleCommerceDirectorLibrary() {
+  state.commerceDirectorLibraryCollapsed = !state.commerceDirectorLibraryCollapsed;
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+function focusCommerceDirectorEvidence(candidateId) {
+  state.commerceDirectorFocusedEvidenceId = String(candidateId || "").trim();
+  refreshCommerceDirectorEvidenceDrawer();
+}
+
+function commerceDirectorDraftKey(result) {
+  return `commerce-director:${String(result?.preview_id || "")}`;
+}
+
+function normalizeCommerceDirectorDraftItems(items) {
+  return (Array.isArray(items) ? items : []).map((item, index) => ({
+    ...item,
+    position: index + 1,
+    source_text: String(item?.source_text ?? item?.text ?? ""),
+    manual_added: Boolean(item?.manual_added || item?.manual),
+    manual_edited: Boolean(item?.manual_edited || item?.edited),
+  }));
+}
+
+function commerceDirectorDraftItems(result) {
+  const key = commerceDirectorDraftKey(result);
+  if (!key || key.endsWith(":")) return { key, items: [] };
+  if (!Array.isArray(state.commerceDirectorPlanDrafts[key])) {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(key) || "null"); } catch (_) { saved = null; }
+    const savedItems = Array.isArray(saved) ? saved : Array.isArray(saved?.items) ? saved.items : null;
+    state.commerceDirectorPlanDrafts[key] = normalizeCommerceDirectorDraftItems(
+      savedItems || (result?.timeline || []).map((item) => ({ ...item, manual_added: false, manual_edited: false })),
+    );
+  }
+  return { key, items: state.commerceDirectorPlanDrafts[key] };
+}
+
+function ensureCommerceDirectorFocusedDraft(key, items) {
+  const valid = state.commerceDirectorFocusedDraftKey === String(key || "")
+    && Number.isInteger(state.commerceDirectorFocusedDraftIndex)
+    && state.commerceDirectorFocusedDraftIndex >= 0
+    && state.commerceDirectorFocusedDraftIndex < items.length;
+  if (valid) return;
+  state.commerceDirectorFocusedDraftKey = String(key || "");
+  state.commerceDirectorFocusedDraftIndex = items.length ? 0 : -1;
+}
+
+function refreshCommerceDirectorEvidenceDrawer() {
+  const root = $("smart-preview");
+  const preview = state.smartPreview;
+  const drawer = root?.querySelector(".commerce-director-studio-library");
+  if (!root || !drawer || !preview?.commercial_director_experiment) return;
+  const active = commerceDirectorStudioActiveResult(preview);
+  const result = active.result || {};
+  const draft = commerceDirectorDraftItems(result);
+  ensureCommerceDirectorFocusedDraft(draft.key, draft.items);
+  drawer.outerHTML = commerceDirectorStudioEvidencePanel(preview.director_review || {}, {
+    editable: true,
+    draftKey: draft.key,
+    items: draft.items,
+    outline: result.m2_outline || [],
+  });
+}
+
+function focusCommerceDirectorDraftRow(key, index) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  if (!Array.isArray(items) || !Number.isInteger(index) || index < 0 || index >= items.length) return;
+  state.commerceDirectorFocusedDraftKey = String(key || "");
+  state.commerceDirectorFocusedDraftIndex = index;
+  const root = $("smart-preview");
+  root?.querySelectorAll("[data-director-plan-row]").forEach((row) => {
+    row.classList.toggle("is-selected", row.dataset.draftKey === String(key || "") && Number(row.dataset.draftIndex) === index);
+  });
+  refreshCommerceDirectorEvidenceDrawer();
+}
+
+function openCommerceDirectorReplacement(key, index) {
+  focusCommerceDirectorDraftRow(key, index);
+  state.commerceDirectorEvidenceFilter = "recommended";
+  refreshCommerceDirectorEvidenceDrawer();
+  $("smart-preview")?.querySelector(".commerce-director-studio-library")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function updateCommerceDirectorDraftText(key, index, text) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  if (!Array.isArray(items) || !Number.isInteger(index) || !items[index]) return;
+  const item = items[index];
+  item.source_text = String(item.source_text ?? item.text ?? "");
+  item.text = String(text || "");
+  item.manual_text_override = item.text;
+  item.manual_edited = true;
+  item.edited = true;
+}
+
+function moveCommerceDirectorDraft(key, index, direction) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  const next = index + direction;
+  if (!Array.isArray(items) || index < 0 || next < 0 || index >= items.length || next >= items.length) return;
+  [items[index], items[next]] = [items[next], items[index]];
+  items.forEach((item, position) => { item.position = position + 1; item.edited = true; });
+  if (state.commerceDirectorFocusedDraftKey === String(key || "")) {
+    if (state.commerceDirectorFocusedDraftIndex === index) state.commerceDirectorFocusedDraftIndex = next;
+    else if (state.commerceDirectorFocusedDraftIndex === next) state.commerceDirectorFocusedDraftIndex = index;
+  }
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+function reorderCommerceDirectorDraft(key, fromIndex, targetIndex, placeAfter) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  if (!Array.isArray(items) || fromIndex < 0 || targetIndex < 0 || fromIndex >= items.length || targetIndex >= items.length || fromIndex === targetIndex) return;
+  const [moved] = items.splice(fromIndex, 1);
+  let insertAt = targetIndex + (placeAfter ? 1 : 0);
+  if (fromIndex < targetIndex) insertAt -= 1;
+  items.splice(Math.max(0, Math.min(insertAt, items.length)), 0, moved);
+  items.forEach((item, position) => { item.position = position + 1; item.edited = true; });
+  if (state.commerceDirectorFocusedDraftKey === String(key || "")) {
+    const focusId = state.commerceDirectorFocusedDraftIndex === fromIndex ? moved : null;
+    if (focusId) state.commerceDirectorFocusedDraftIndex = items.indexOf(focusId);
+  }
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+function removeCommerceDirectorDraftItem(key, index) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  if (!Array.isArray(items) || index < 0 || index >= items.length) return;
+  items.splice(index, 1);
+  items.forEach((item, position) => { item.position = position + 1; item.edited = true; });
+  if (state.commerceDirectorFocusedDraftKey === String(key || "")) {
+    state.commerceDirectorFocusedDraftIndex = Math.min(index, items.length - 1);
+  }
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+function addCommerceDirectorDraftEvidence(key, candidateId) {
+  placeCommerceDirectorDraftEvidence(key, candidateId, "end");
+}
+
+function commerceDirectorEvidenceCanJoinDraft(source) {
+  if (!source?.eligible || !source?.candidateId || !source?.text || Number(source?.seconds || 0) <= 0) {
+    toast("这条备用句缺少冻结候选、原始口播或有效时长，不能加入草稿。", "warning");
+    return false;
+  }
+  const lineage = source.sourceLineage || {};
+  if (Number(lineage.end || 0) <= Number(lineage.start || 0)) {
+    toast("这条备用句没有可验证的原始时间范围，不能加入草稿。", "warning");
+    return false;
+  }
+  return true;
+}
+
+function placeCommerceDirectorDraftEvidence(key, candidateId, placement = "end") {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  const source = commerceDirectorEvidenceLibrary(state.smartPreview?.director_review || {}).find((item) => String(item.candidateId) === String(candidateId));
+  if (!Array.isArray(items) || !source || !commerceDirectorEvidenceCanJoinDraft(source)) return;
+  const focusIndex = state.commerceDirectorFocusedDraftKey === String(key || "")
+    ? Number(state.commerceDirectorFocusedDraftIndex)
+    : -1;
+  const current = Number.isInteger(focusIndex) && focusIndex >= 0 && focusIndex < items.length ? items[focusIndex] : null;
+  if (placement === "replace" && !current) {
+    toast("请先点中一条口播，再替换当前句。", "warning");
+    return;
+  }
+  if (items.some((item) => String(item.candidate_id || item.candidateId || "") === String(source.candidateId))) {
+    toast("该候选已经在当前草稿中", "warning");
+    return;
+  }
+  const chapterId = current?.chapter_id || "manual_added";
+  const item = {
+    position: 0,
+    candidate_id: source.candidateId,
+    chapter_id: chapterId,
+    text: source.text,
+    source_text: source.text,
+    duration: Number(source.seconds || 0),
+    source_lineage: { ...source.sourceLineage },
+    story_id: source.storyId,
+    purchase_question_id: current?.purchase_question_id || "",
+    purchase_question: current?.purchase_question || "",
+    answer_role: source.answerRole || source.role,
+    word_materialization_status: source.wordMaterializationStatus,
+    manual_added: true,
+    manual: true,
+    manual_insert_placement: placement,
+    edited: true,
+  };
+  let insertedIndex = items.length;
+  if (placement === "replace") {
+    item.replaces_candidate_id = current?.candidate_id || current?.candidateId || "";
+    item.replaces_source_lineage = current?.source_lineage || current?.sourceLineage || null;
+    items.splice(focusIndex, 1, item);
+    insertedIndex = focusIndex;
+  } else if (placement === "before" && current) {
+    items.splice(focusIndex, 0, item);
+    insertedIndex = focusIndex;
+  } else if (placement === "after" && current) {
+    items.splice(focusIndex + 1, 0, item);
+    insertedIndex = focusIndex + 1;
+  } else {
+    items.push(item);
+  }
+  items.forEach((row, position) => { row.position = position + 1; row.edited = true; });
+  state.commerceDirectorFocusedDraftKey = String(key || "");
+  state.commerceDirectorFocusedDraftIndex = insertedIndex;
+  toast("已加入人工审阅草稿；总时长已更新，仍需重新通过 M3 词级物化。", "success");
+  renderCommerceDirectorStudio(state.smartPreview);
+}
+
+function saveCommerceDirectorDraft(key) {
+  const items = state.commerceDirectorPlanDrafts[String(key || "")];
+  if (!Array.isArray(items)) return;
+  try {
+    localStorage.setItem(String(key), JSON.stringify({ version: "commerce-director-draft-v2", items }));
+    toast("已保存当前人工审阅草稿；未改动原 ASR、冻结候选或已生成的 M3 审阅成片", "success");
+  } catch (_) {
+    toast("当前浏览器无法保存草稿", "warning");
+  }
+}
+
+function returnCommerceDirectorPlanList() {
+  $("smart-preview")?.querySelector(".commerce-director-studio-solutions")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function playCommerceDirectorReview(targetPreviewId = "") {
+  const preview = state.smartPreview;
+  const previewId = targetPreviewId || preview?.id || "";
+  const isDraft = preview?.director_review?.kind === "m2_draft_review_only";
+  const isM3Review = preview?.director_review?.kind === "m3_materialized_review";
+  if (!previewId || (!targetPreviewId && !isDraft && !isM3Review)) {
+    toast("当前没有可播放的商业导演草案审阅视频", "warning");
+    return;
+  }
+  const player = $("smart-preview-player");
+  const video = $("smart-preview-video");
+  const title = $("smart-preview-player-title");
+  if (!player || !video) return;
+  if (title) title.textContent = isDraft ? "M2 草案审阅视频（非 M3 成片）" : "M3 词级审阅视频（仅人工审核）";
+  player.classList.remove("is-hidden");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  try {
+    const result = await api("/api/smart-cut/commerce-director/review-video", {
+      method: "POST",
+      body: JSON.stringify({ preview_id: previewId }),
+    });
+    video.src = result.url;
+    video.load();
+    video.play().catch(() => {});
+    toast(result.message || "草案审阅视频已生成", "info");
+  } catch (error) {
+    player.classList.add("is-hidden");
+    toast(error.message || "草案审阅视频生成失败", "error");
+  }
 }
 
 async function startMixPreview() {
@@ -5823,11 +6728,15 @@ async function startMixPreview() {
   state.mixPreview = {
     id: result.preview_id,
     status: "running",
-    message: "正在生成混剪 AI 选片预览。",
+    message: `本次目标 ${payload.duration} 秒：AI 正在统一分析全部素材并规划混剪故事。`,
+    target_duration: payload.duration,
+    duration_tolerance: payload.duration_tolerance,
     clips: [],
+    commercial_director_experiment: true,
+    commercial_director_preview: true,
   };
   renderMixPreview(state.mixPreview);
-  toast(result.message || "混剪 AI 选片预览已启动", "success");
+  toast(result.message || "混剪 AI 导演预览已启动", "success");
   refreshTasks();
   pollMixPreview(result.preview_id);
 }
@@ -7261,17 +8170,52 @@ async function loadLatestMixPreview() {
 const previewPollMaxAttempts = 1800;
 
 function previewWorkbenchNeedsRender(scope, preview) {
+  // Commercial-director reviews use their own read-only workspace.  They do
+  // not contain the legacy editable workbench marker, so treating that marker
+  // as missing caused the background 5s poll to recreate videos repeatedly.
+  if (preview?.commercial_director_experiment && !preview?.commercial_director_preview && !preview?.commercial_director_sentence_preview) {
+    if (preview?.status !== "ready") return false;
+    const box = previewBox(scope);
+    return Boolean(box && !box.querySelector(".commerce-director-studio-main"));
+  }
   if (preview?.status !== "ready" || !Array.isArray(preview.clips) || !preview.clips.length) return false;
   const box = previewBox(scope);
   return Boolean(box && !box.querySelector(`[data-preview-workbench="${scope}"]`));
+}
+
+function commerceDirectorServerRenderKey(preview) {
+  if (!preview?.commercial_director_experiment) return "";
+  const review = preview?.director_review || {};
+  const batch = Array.isArray(review?.batch_results) ? review.batch_results.map((item) => ({
+    id: item?.preview_id || "",
+    state: item?.state || "",
+    seconds: Number(item?.selected_seconds || 0),
+    clips: Number(item?.clip_count || 0),
+    error: item?.error || "",
+  })) : [];
+  return JSON.stringify({
+    id: preview?.id || "",
+    status: preview?.status || "",
+    message: preview?.message || "",
+    error: preview?.error || "",
+    kind: review?.kind || "",
+    batch,
+  });
 }
 
 async function pollSmartPreview(previewId, attempt = 0) {
   if (!previewId || attempt > previewPollMaxAttempts) return;
   try {
     const preview = await api(`/api/smart-cut/preview/${encodeURIComponent(previewId)}`);
+    const nextRenderKey = commerceDirectorServerRenderKey(preview);
+    const shouldRender = !preview?.commercial_director_experiment
+      || preview?.commercial_director_sentence_preview
+      || nextRenderKey !== state.commerceDirectorLastServerRenderKey;
     state.smartPreview = preview;
-    renderSmartPreview(preview);
+    if (shouldRender) {
+      state.commerceDirectorLastServerRenderKey = nextRenderKey;
+      renderSmartPreview(preview);
+    }
     if (preview.status === "ready" || preview.status === "failed") return;
   } catch (error) {
     if (attempt > 3) toast(error.message || "读取选片预览失败", "error");
@@ -7562,10 +8506,27 @@ function previewWorkbenchRoleKey(clip) {
 }
 
 function previewWorkbenchRoleLabel(clip) {
+  const directorFunction = String(clip?.director_beat_function || "").trim().toLowerCase();
+  if (directorFunction) {
+    return ({
+      result: "结果",
+      mechanism: "原因机制",
+      proof: "证明",
+      experience: "穿着体验",
+      risk_remove: "顾虑解除",
+      styling: "搭配",
+      scene: "使用场景",
+      trust: "品质信任",
+      transition: "自然承接",
+      payoff: "兑现",
+    })[directorFunction] || String(clip?.director_beat_function || "导演短句");
+  }
   return ({ hook: "开头钩子", product: "核心卖点", proof: "证据解释", scene: "场景与顾虑", close: "收尾", weak: "补充内容" })[previewWorkbenchRoleKey(clip)] || "核心卖点";
 }
 
 function previewWorkbenchTopicLabel(clip) {
+  const directorTitle = String(clip?.director_chapter_title || "").trim();
+  if (directorTitle) return directorTitle;
   const explicit = String(clip?.focus_block || clip?.focus || "").trim();
   if (explicit && explicit !== "其他") return explicit;
   return String(classifyFinalClipTopic({ ...clip, segments: [] }) || explicit || "其他").trim();
@@ -7920,7 +8881,7 @@ function autoFitPreviewDuration(scope = "smart") {
           inside: nextTotal >= before.sourceLow - 0.01 && nextTotal <= before.sourceHigh + 0.01,
           sourceNeed: source && (sources.get(source) || 0) <= minSourceCount,
           newTopic: !topics.has(previewWorkbenchTopicLabel(clip)),
-          extraCandidate: clip.recommended === false || clip.candidate_origin === "director",
+          extraCandidate: clip.recommended === false || (clip.candidate_origin && clip.candidate_origin !== "recommended"),
           distance: Math.abs(nextTotal - before.sourceTarget),
         };
       })
@@ -7960,7 +8921,7 @@ function autoFitPreviewDuration(scope = "smart") {
           duration,
           nextTotal,
           inside: nextTotal >= before.sourceLow - 0.01 && nextTotal <= before.sourceHigh + 0.01,
-          supplement: item.clip?.recommended === false || item.clip?.candidate_origin === "director",
+          supplement: item.clip?.recommended === false || (item.clip?.candidate_origin && item.clip.candidate_origin !== "recommended"),
           weak: previewWorkbenchRoleKey(item.clip) === "weak",
           score: Number(item.clip?.score || 0),
           distance: Math.abs(nextTotal - before.sourceTarget),
@@ -8027,7 +8988,7 @@ function renderPreviewTriageQueueCard(clip, scope, analysis, isActive = false) {
   const selected = isPreviewWorkbenchSelected(clip);
   const topic = previewWorkbenchTopicLabel(clip);
   const role = previewWorkbenchRoleLabel(clip);
-  const origin = clip?.recommended === false || clip?.candidate_origin === "director" ? "补充候选" : "AI 初选";
+  const origin = clip?.recommended === false || (clip?.candidate_origin && clip.candidate_origin !== "recommended") ? "备用候选" : "AI 推荐";
   const reason = previewClipReasonParts({ ...clip, selected: true }, analysis, { includeRisk: false })[0] || "可用候选";
   return '<button class="preview-triage-queue-card ' + (isActive ? "is-active" : "") + (selected ? " is-kept" : "") + '" data-action="preview-triage-focus" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><span class="preview-triage-queue-meta">' + escapeHtml(origin) + ' · ' + escapeHtml(role) + ' · ' + previewWorkbenchCandidateDuration(clip).toFixed(1) + 's</span><strong>' + escapeHtml(topic) + '</strong><small>' + escapeHtml(String(clip.text || "").trim()) + '</small><em>' + escapeHtml(reason) + '</em></button>';
 }
@@ -8046,7 +9007,7 @@ function renderPreviewTriage(scope, preview, analysis, targetId) {
     ["skipped", "已跳过"],
   ].map(([value, label]) => '<button class="' + (session.filter === value ? "is-active" : "") + '" data-action="preview-triage-filter" data-preview-scope="' + scope + '" data-value="' + value + '" aria-pressed="' + (session.filter === value ? "true" : "false") + '">' + label + '</button>').join("");
   const queue = clip ? candidates.slice(position + 1, position + 4).map((item) => renderPreviewTriageQueueCard(item, scope, analysis)).join("") : "";
-  const origin = clip?.recommended === false || clip?.candidate_origin === "director" ? "补充候选" : "AI 初选";
+  const origin = clip?.recommended === false || (clip?.candidate_origin && clip.candidate_origin !== "recommended") ? "备用候选" : "AI 推荐";
   const activeReason = clip ? (previewClipReasonParts({ ...clip, selected: true }, analysis, { includeRisk: false })[0] || "可用候选") : "";
   const activeSelected = clip && isPreviewWorkbenchSelected(clip);
   const activeCard = clip ? '<article class="preview-triage-active-card"><div class="preview-triage-card-top"><span>第 ' + (position + 1) + ' / ' + candidates.length + ' 条</span><span>' + escapeHtml(origin) + ' · ' + previewWorkbenchCandidateDuration(clip).toFixed(1) + 's</span></div><div class="preview-card-tags"><span>' + escapeHtml(previewWorkbenchRoleLabel(clip)) + '</span><span>' + escapeHtml(previewWorkbenchTopicLabel(clip)) + '</span><em>' + (activeSelected ? "已在片篮" : "待决定") + '</em></div><p>' + escapeHtml(String(clip.text || "").trim()) + '</p><small>' + escapeHtml(activeReason) + '</small><div class="preview-triage-actions"><button class="button button-muted button-small" data-action="preview-triage-prev" data-preview-scope="' + scope + '" title="上一条（左方向键）">← 上一条</button><button class="button button-muted button-small" data-action="preview-clip-video" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="预览视频（P）">预览 P</button><button class="button button-muted button-small" data-action="preview-triage-skip" data-preview-scope="' + scope + '" title="跳过（X）">跳过 X</button><button class="button button-secondary button-small" data-action="preview-triage-keep" data-preview-scope="' + scope + '" title="保留（A）">' + (activeSelected ? "确认保留 A" : "保留 A") + '</button><button class="button button-muted button-small" data-action="preview-triage-next" data-preview-scope="' + scope + '" title="下一条（右方向键）">下一条 →</button></div></article>' : '<div class="preview-triage-empty"><strong>这个筛选下没有待选片段</strong><span>切换成“全部”或清空关键词，再继续挑选。</span></div>';
@@ -8122,6 +9083,358 @@ function bindPreviewWorkbenchKeyboard(box, scope = "smart") {
     }
   });
 }
+function renderCommerceDirectorStoryLibrary(review) {
+  const library = review?.m1_story_library || {};
+  const stories = Array.isArray(library.stories) ? library.stories : [];
+  if (!stories.length) return "";
+  const cards = stories.map((story) => {
+    const assets = Array.isArray(story.assets) ? story.assets : [];
+    const candidateCount = new Set(assets.flatMap((asset) => (asset.candidate_lineage || []).map((item) => item.candidate_id))).size;
+    const hook = story.hook?.claim || "未发现独立 Hook 证据";
+    return `<li><strong>${escapeHtml(story.story_id || "故事")}</strong> · ${escapeHtml(story.angle || "未命名方向")}`
+      + ` · 自然 ${Number(story.natural_duration_seconds || 0).toFixed(1)}s<br>`
+      + `<span>人群：${escapeHtml(story.target_audience || "未标注")}；购买理由：${escapeHtml(story.purchase_reason || "未标注")}</span><br>`
+      + `<span>Hook 证据：${escapeHtml(hook)}；已关联 ${candidateCount} 个冻结候选</span></li>`;
+  }).join("");
+  return `<details class="preview-overview-details" open><summary>M1 商品故事库（仅发现，不自动组合）</summary><p class="preview-notice">每条故事保留各自的自然时长和候选血缘；选择导演方案后，只有卡片明确声明的 Story Mix 会交给 M2。M2 不会重新发现第四个故事。</p><ol>${cards}</ol></details>`;
+}
+
+function renderDirectorStrategyLibrary(review) {
+  const library = review?.director_strategy_library || {};
+  const proposals = Array.isArray(library.proposals) ? library.proposals : [];
+  if (!proposals.length) return "";
+  const cards = proposals.map((proposal) => {
+    const available = Boolean(proposal.available);
+    const mix = (proposal.story_mix || []).map((item) => `${item.story_id || "故事"} · ${item.role || ""}`).join(" + ");
+    const structure = proposal.video_structure || {};
+    const structureName = structure.name || proposal.narrative_archetype || "导演自定义结构";
+    const extraAi = Boolean(proposal.requires_additional_ai_call);
+    const action = available
+      ? (extraAi
+        ? `<button class="button button-primary button-small" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(proposal.director_strategy_id || "")}" data-additional-ai-call="true">生成此方向（需 1 次 AI）</button>`
+        : `<span class="preview-notice">主方案已生成真实口播预览</span>`)
+      : `<span class="preview-notice">${escapeHtml(proposal.unavailable_reason || "当前素材暂不支持")}</span>`;
+    return `<article class="commerce-director-strategy-card ${available ? "is-available" : "is-unavailable"}"><div class="commerce-director-strategy-card-head"><div><strong>${escapeHtml(proposal.icon || "")}${escapeHtml(proposal.name || "AI 导演方案")}</strong><span>${escapeHtml(proposal.commercial_goal || proposal.goal || "")}</span></div><em>${Number(proposal.estimated_natural_duration || 0).toFixed(1)}s</em></div><p>${escapeHtml(proposal.headline || "")}</p><dl><div><dt>视频结构</dt><dd>${escapeHtml(structureName)}</dd></div><div><dt>开场承诺</dt><dd>${escapeHtml(proposal.opening_promise || "未形成可验证承诺")}</dd></div><div><dt>故事组合</dt><dd>${escapeHtml(mix || "当前无可验证故事")}</dd></div></dl><footer>${action}</footer></article>`;
+  }).join("");
+  return `<section class="commerce-director-strategies"><div class="commerce-director-section-head"><div><strong>AI 发现的 ${proposals.length} 种卖法</strong><span>本次只生成主方案；选择备选方向会明确重新调用 2 次 AI（展开故事章节 + 短句 Casting），再按真实原话生成预览。</span></div></div><div class="commerce-director-strategy-grid">${cards}</div></section>`;
+}
+
+function commerceDirectorReviewVideoUrl(previewId) {
+  const id = String(previewId || "").trim();
+  return id ? `/api/smart-cut/commerce-director/review-video/${encodeURIComponent(id)}` : "";
+}
+
+function commerceDirectorRoleMeta(role) {
+  const value = String(role || "").trim().toLowerCase();
+  if (/hook|opening|attention/.test(value)) return { label: "开场吸引", tone: "hook" };
+  if (/result|payoff|outcome/.test(value)) return { label: "结果兑现", tone: "proof" };
+  if (/proof|mechanism/.test(value)) return { label: "为什么有效", tone: "proof" };
+  if (/risk|objection|comfort|fit|coverage|security/.test(value)) return { label: "顾虑解除", tone: "value" };
+  if (/scene|styling|ending|close/.test(value)) return { label: "场景收尾", tone: "ending" };
+  if (/new_value|value|benefit|trust/.test(value)) return { label: "新购买理由", tone: "value" };
+  return { label: "购买证据", tone: "value" };
+}
+
+function commerceDirectorOutlineByChapter(items) {
+  return new Map((Array.isArray(items) ? items : []).map((item) => [
+    String(item?.chapter_id || "").trim(), item || {},
+  ]));
+}
+
+function commerceDirectorTimelineRows(items, outline = []) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return '<p class="commerce-director-empty-script">这版没有可审阅的逐句内容。</p>';
+  const chapterMap = commerceDirectorOutlineByChapter(outline);
+  return `<div class="commerce-director-script-table"><div class="commerce-director-script-table-head"><span>#</span><span>结构 / 完整口播文案</span><span>时长</span><span>购买问题</span></div><ol class="commerce-director-script">${rows.map((item, index) => {
+    const text = String(item?.text || "").trim();
+    const chapterId = String(item?.chapter_id || item?.clip_type || "").trim();
+    const chapter = chapterMap.get(chapterId) || {};
+    const role = String(chapter?.narrative_role || chapterId || "").trim();
+    const roleMeta = commerceDirectorRoleMeta(role);
+    const duration = Number(item?.duration || 0);
+    const question = String(chapter?.purchase_value || chapter?.goal || "未标注购买问题").trim();
+    return `<li><span class="commerce-director-script-index">${Number(item?.position || index + 1)}</span><div class="commerce-director-script-copy"><span class="commerce-director-role-pill is-${escapeHtml(roleMeta.tone)}">${escapeHtml(roleMeta.label)}</span><p>${escapeHtml(text)}</p><small>${escapeHtml(role || "审阅片段")}</small></div><em>${duration.toFixed(1)}s</em><small class="commerce-director-script-question">${escapeHtml(question)}</small></li>`;
+  }).join("")}</ol></div>`;
+}
+
+function commerceDirectorEditableTimelineRows(items, outline = [], draftKey = "") {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return '<p class="commerce-director-empty-script">这版暂时没有已选片内容。</p>';
+  const chapterMap = commerceDirectorOutlineByChapter(outline);
+  return `<div class="commerce-director-script-table commerce-director-editable-script"><div class="commerce-director-script-table-head"><span></span><span>#</span><span>结构角色</span><span>购买问题</span><span>时长</span><span>完整原始口播（可编辑）</span><span>操作</span></div><ol class="commerce-director-script">${rows.map((item, index) => {
+    const chapterId = String(item?.chapter_id || item?.clip_type || "").trim();
+    const chapter = chapterMap.get(chapterId) || {};
+    const role = String(item?.answer_role || chapter?.narrative_role || chapterId || "manual_support").trim();
+    const roleMeta = commerceDirectorRoleMeta(role);
+    const duration = Number(item?.duration || 0);
+    const question = String(item?.purchase_question || chapter?.purchase_question || chapter?.purchase_value || chapter?.goal || (item?.manual_added || item?.manual ? "人工补充购买证据" : "未标注购买问题")).trim();
+    const selected = state.commerceDirectorFocusedDraftKey === String(draftKey || "") && state.commerceDirectorFocusedDraftIndex === index;
+    return `<li class="${selected ? "is-selected" : ""}" data-action="director-plan-focus-row" data-director-plan-row data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}"><button type="button" class="commerce-director-drag-handle" data-director-plan-drag-handle data-draft-key="${escapeHtml(draftKey)}" title="按住拖拽调整顺序" aria-label="按住拖拽调整第 ${index + 1} 条口播顺序">⠿</button><span class="commerce-director-script-index">${index + 1}</span><div class="commerce-director-row-role"><span class="commerce-director-role-pill is-${escapeHtml(roleMeta.tone)}">${escapeHtml(roleMeta.label)}</span><small>${item?.manual_added ? "人工补句" : "M2 已选"}</small></div><small class="commerce-director-script-question">${escapeHtml(question)}</small><em>${duration.toFixed(1)}s</em><div class="commerce-director-script-copy"><textarea rows="2" data-director-plan-text data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}" aria-label="第 ${index + 1} 条完整口播文案">${escapeHtml(String(item?.text || ""))}</textarea></div><nav class="commerce-director-row-actions"><button type="button" data-action="director-plan-move" data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}" data-direction="-1" ${index === 0 ? "disabled" : ""}>上移</button><button type="button" data-action="director-plan-move" data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}" data-direction="1" ${index === rows.length - 1 ? "disabled" : ""}>下移</button><button type="button" data-action="director-plan-replace" data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}">替换</button><button type="button" data-action="director-plan-remove" data-draft-key="${escapeHtml(draftKey)}" data-draft-index="${index}">删除</button></nav></li>`;
+  }).join("")}</ol></div>`;
+}
+
+function bindCommerceDirectorDraftRowDrag(root) {
+  const rowSelector = "[data-director-plan-row]";
+  let active = null;
+  const clear = () => root.querySelectorAll(`${rowSelector}.is-dragging, ${rowSelector}.is-drop-target`).forEach((row) => {
+    row.classList.remove("is-dragging", "is-drop-target", "is-drop-after");
+  });
+  const targetAt = (clientX, clientY) => {
+    const row = document.elementFromPoint(clientX, clientY)?.closest?.(rowSelector);
+    return row && root.contains(row) ? row : null;
+  };
+  const update = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    if (!active.started && Math.hypot(event.clientX - active.startX, event.clientY - active.startY) < 5) return;
+    active.started = true;
+    active.source.classList.add("is-dragging");
+    const target = targetAt(event.clientX, event.clientY);
+    if (active.target && active.target !== target) active.target.classList.remove("is-drop-target", "is-drop-after");
+    active.target = target && target !== active.source && target.dataset.draftKey === active.key ? target : null;
+    if (!active.target) return;
+    const bounds = active.target.getBoundingClientRect();
+    active.after = event.clientY >= bounds.top + bounds.height / 2;
+    active.target.classList.add("is-drop-target");
+    active.target.classList.toggle("is-drop-after", active.after);
+  };
+  const finish = (event, cancelled = false) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    if (!cancelled) update(event);
+    const drag = active;
+    active = null;
+    try { if (drag.handle.hasPointerCapture?.(event.pointerId)) drag.handle.releasePointerCapture(event.pointerId); } catch (_) { /* WebView may release capture first. */ }
+    clear();
+    if (cancelled || !drag.started || !drag.target) return;
+    reorderCommerceDirectorDraft(drag.key, Number(drag.source.dataset.draftIndex), Number(drag.target.dataset.draftIndex), drag.after);
+  };
+  root.querySelectorAll("[data-director-plan-drag-handle]").forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || active) return;
+      const source = handle.closest(rowSelector);
+      if (!source) return;
+      event.preventDefault();
+      active = { handle, source, target: null, key: String(source.dataset.draftKey || ""), pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, started: false, after: false };
+      try { handle.setPointerCapture(event.pointerId); } catch (_) { /* Pointer events still bubble without capture. */ }
+    });
+    handle.addEventListener("pointermove", (event) => { update(event); if (active?.started) event.preventDefault(); });
+    handle.addEventListener("pointerup", (event) => finish(event));
+    handle.addEventListener("pointercancel", (event) => finish(event, true));
+  });
+
+}
+
+function bindPreviewCandidateDrag(box, scope = "smart") {
+  const handleSelector = `[data-preview-candidate-drag-handle][data-preview-scope="${scope}"]`;
+  const candidateRowSelector = `[data-preview-candidate-row][data-preview-scope="${scope}"]`;
+  const selectedRowSelector = `[data-preview-row][data-preview-scope="${scope}"]`;
+  let active = null;
+
+  const clearDragState = () => {
+    box.querySelectorAll(`${candidateRowSelector}.is-dragging`).forEach((row) => row.classList.remove("is-dragging"));
+    box.querySelectorAll(`${selectedRowSelector}.is-drop-target`).forEach((row) => row.classList.remove("is-drop-target", "is-drop-after"));
+    box.querySelectorAll(".preview-selected-list.is-candidate-drop-target").forEach((list) => list.classList.remove("is-candidate-drop-target"));
+  };
+
+  const targetAt = (clientX, clientY) => {
+    const element = document.elementFromPoint(clientX, clientY);
+    const list = element?.closest?.(".preview-selected-list");
+    if (!list || !box.contains(list)) return { list: null, row: null };
+    const row = element?.closest?.(selectedRowSelector);
+    return { list, row: row && list.contains(row) ? row : null };
+  };
+
+  const updateTarget = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const moved = Math.hypot(event.clientX - active.startX, event.clientY - active.startY) >= 5;
+    if (!active.started && !moved) return;
+    active.started = true;
+    active.sourceRow.classList.add("is-dragging");
+
+    const target = targetAt(event.clientX, event.clientY);
+    if (active.targetRow && active.targetRow !== target.row) {
+      active.targetRow.classList.remove("is-drop-target", "is-drop-after");
+    }
+    if (active.targetList && active.targetList !== target.list) {
+      active.targetList.classList.remove("is-candidate-drop-target");
+    }
+    active.targetList = target.list;
+    active.targetRow = target.row;
+    active.placeAfter = false;
+    if (!active.targetList) return;
+
+    active.targetList.classList.add("is-candidate-drop-target");
+    if (active.targetRow) {
+      const bounds = active.targetRow.getBoundingClientRect();
+      active.placeAfter = event.clientY >= bounds.top + (bounds.height / 2);
+      active.targetRow.classList.add("is-drop-target");
+      active.targetRow.classList.toggle("is-drop-after", active.placeAfter);
+    }
+  };
+
+  const finish = (event, cancelled = false) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    if (!cancelled) updateTarget(event);
+    const drag = active;
+    active = null;
+    try {
+      if (drag.handle.hasPointerCapture?.(event.pointerId)) drag.handle.releasePointerCapture(event.pointerId);
+    } catch (_error) {
+      // WebView2 may release capture when the pointer crosses scroll regions.
+    }
+    clearDragState();
+    if (cancelled || !drag.started || !drag.targetList) return;
+    insertPreviewWorkbenchCandidate(
+      Number(drag.sourceRow.dataset.previewIndex),
+      scope,
+      drag.targetRow ? Number(drag.targetRow.dataset.previewIndex) : null,
+      drag.placeAfter,
+    );
+  };
+
+  box.querySelectorAll(handleSelector).forEach((handle) => {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || active) return;
+      const sourceRow = handle.closest(candidateRowSelector);
+      if (!sourceRow) return;
+      event.preventDefault();
+      active = {
+        handle,
+        pointerId: event.pointerId,
+        sourceRow,
+        targetList: null,
+        targetRow: null,
+        startX: event.clientX,
+        startY: event.clientY,
+        started: false,
+        placeAfter: false,
+      };
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch (_error) {
+        // Pointer events still bubble on older WebView2 runtimes without capture.
+      }
+    });
+    handle.addEventListener("pointermove", (event) => {
+      updateTarget(event);
+      if (active?.started) event.preventDefault();
+    });
+    handle.addEventListener("pointerup", (event) => finish(event));
+    handle.addEventListener("pointercancel", (event) => finish(event, true));
+  });
+}
+
+function commerceDirectorM2Outline(items) {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return "";
+  return `<section class="commerce-director-outline"><div class="commerce-director-section-head"><div><strong>购买路径</strong><span>按普通用户能理解的顺序回答购买问题</span></div></div><ol>${rows.map((item, index) => { const meta = commerceDirectorRoleMeta(item?.narrative_role || item?.chapter_id); return `<li><span>${Number(item?.position || index + 1)}</span><div><b>${escapeHtml(item?.purchase_question || item?.purchase_value || item?.goal || "未标注购买问题")}</b><p><i class="commerce-director-role-pill is-${escapeHtml(meta.tone)}">${escapeHtml(meta.label)}</i></p></div><small>${Number(item?.seconds || 0).toFixed(1)}s</small></li>`; }).join("")}</ol></section>`;
+}
+
+function commerceDirectorPreviewPanel(previewId, label) {
+  const url = commerceDirectorReviewVideoUrl(previewId);
+  if (!url) return '<div class="commerce-director-video-unavailable">暂无可播放审阅视频</div>';
+  return `<div class="commerce-director-video-wrap"><video controls muted playsinline preload="metadata" src="${escapeHtml(url)}" aria-label="${escapeHtml(label || "商业导演审阅视频")}"></video></div>`;
+}
+
+function commerceDirectorSourcePreviewPanel(previewId) {
+  const id = String(previewId || "").trim();
+  if (!id) return '<div class="commerce-director-video-unavailable">当前没有可播放的源素材</div>';
+  return `<div class="commerce-director-video-wrap"><video controls muted playsinline preload="metadata" src="/api/smart-cut/commerce-director/source-video/${encodeURIComponent(id)}" aria-label="当前商品源视频"></video></div>`;
+}
+
+function renderCommerceDirectorBatch(review) {
+  const results = Array.isArray(review?.batch_results) ? review.batch_results : [];
+  if (!results.length) return "";
+  const stateCopy = {
+    m3_materialized: "M3 词级物化完成",
+    m2_sentence_preview: "M2 逐句可编辑预览",
+    m2_draft_review_only: "仅 M2 草案审阅",
+    blocked: "本方案被合同阻断",
+    pending: "仍在生成",
+  };
+  const activeId = results.some((item) => String(item?.preview_id || "") === state.commerceDirectorActiveResultId)
+    ? state.commerceDirectorActiveResultId
+    : String(results[0]?.preview_id || "");
+  const activeResult = results.find((item) => String(item?.preview_id || "") === activeId) || results[0];
+  const renderResult = (result) => {
+    const state = String(result.state || "pending");
+    const playable = state === "m3_materialized" || state === "m2_draft_review_only" || state === "m2_sentence_preview";
+    const outcome = state === "blocked" ? (result.error || result.message || "没有得到可审阅结果") : "";
+    const outline = result.m2_outline || [];
+    const timeline = commerceDirectorTimelineRows(result.timeline || [], outline);
+    const video = playable && result.review_video_available
+      ? commerceDirectorPreviewPanel(result.preview_id, `${result.name || "AI 导演方案"}审阅视频`)
+      : '<div class="commerce-director-video-unavailable">本方案没有可播放审阅视频</div>';
+    return `<article class="commerce-director-result-card" id="commerce-director-result-${escapeHtml(result.director_strategy_id || result.preview_id || "plan")}"><header><div><strong>${escapeHtml(result.icon || "")}${escapeHtml(result.name || "AI 导演方案")}</strong><span>${escapeHtml(stateCopy[state] || stateCopy.pending)}</span></div><em>${Number(result.selected_seconds || 0).toFixed(1)}s · ${Number(result.clip_count || 0)} 段</em></header><div class="commerce-director-plan-summary"><div><span>开场承诺</span><strong>${escapeHtml(result.opening_promise || "未标注")}</strong></div><div><span>商业目标</span><strong>${escapeHtml(result.commercial_goal || "未标注")}</strong></div></div><div class="commerce-director-studio-stage"><div class="commerce-director-studio-video">${video}</div><aside class="commerce-director-studio-path">${commerceDirectorM2Outline(outline)}</aside></div><div class="commerce-director-script-head"><strong>方案口播编排</strong><span>完整文本已展开，无需再查看日志</span></div>${timeline}${outcome ? `<p class="preview-notice">${escapeHtml(outcome)}</p>` : ""}<p class="commerce-director-experiment-note">实验审阅结果，不进入正式预览、导出或发布。</p></article>`;
+  };
+  const jumpCards = results.map((result) => {
+    const selected = String(result?.preview_id || "") === activeId;
+    return `<button type="button" class="commerce-director-result-jump ${selected ? "is-active" : ""}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(result.preview_id || "")}" aria-pressed="${selected ? "true" : "false"}"><strong>${escapeHtml(result.icon || "")}${escapeHtml(result.name || "AI 导演方案")}</strong><span>${escapeHtml(result.opening_promise || "未标注开场")}</span><em>${Number(result.selected_seconds || 0).toFixed(1)}s</em></button>`;
+  }).join("");
+  return `<section class="commerce-director-batch"><div class="commerce-director-section-head"><div><strong>直接比较 ${results.length} 条导演方案</strong><span>先选择一种卖法；视频、购买路径和完整口播在下方同屏审阅。</span></div></div><nav class="commerce-director-result-jumps" aria-label="审阅方案">${jumpCards}</nav><div class="commerce-director-result-grid">${renderResult(activeResult)}</div></section>`;
+}
+
+function renderCommerceDirectorReview(preview) {
+  const review = preview?.director_review;
+  if (!preview?.commercial_director_experiment || !review?.m1_story) return "";
+  const story = review.m1_story || {};
+  const draft = review.m2_draft || {};
+  const storyRows = [
+    ["M1 主线", story.thesis],
+    ["用户顾虑", story.audience_tension],
+    ["购买主张", story.core_commercial_idea],
+    ["承诺结果", story.payoff],
+  ].filter(([, value]) => String(value || "").trim());
+  const chapters = (draft.chapters || []).map((chapter) =>
+    `<li><strong>${escapeHtml(chapter.chapter_id || "章节")}</strong> · ${escapeHtml(chapter.narrative_role || "")}`
+      + ` · ${Number(chapter.seconds || 0).toFixed(1)}s<br><span>${escapeHtml(chapter.goal || "")}</span></li>`
+  ).join("");
+  const issues = (draft.issues || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  const isDraft = review.kind === "m2_draft_review_only";
+  const isDiscovery = review.kind === "m1_story_map_discovery";
+  const isBatch = review.kind === "m1_m2_m3_batch_review";
+  const headline = review.headline || (isDraft ? "草案审阅" : "M1 主线审阅");
+  const stateLabel = isDiscovery ? "M1 已完成，等待选择方案" : isBatch ? "多方案审阅完成" : isDraft ? "M2 草案，M3 未执行" : "M3 词级物化已通过";
+  const isPlayableReview = !isDiscovery && !isBatch && (isDraft || review.kind === "m3_materialized_review");
+  const timeline = (preview?.clips || []).map((clip, index) => ({
+    position: index + 1,
+    chapter_id: clip?.clip_type || "",
+    text: clip?.text || "",
+    duration: clip?.duration || 0,
+  }));
+  // Older saved draft reviews predate m2_outline.  Reconstruct the same
+  // readable purchase-path rows from their persisted chapter summary so the
+  // studio never shows an empty planning panel for historical runs.
+  const directOutline = Array.isArray(review.m2_outline) && review.m2_outline.length
+    ? review.m2_outline
+    : (draft.chapters || []).map((chapter, index) => ({
+      position: Number(chapter?.position || index + 1),
+      chapter_id: chapter?.chapter_id || "",
+      narrative_role: chapter?.narrative_role || "",
+      goal: chapter?.goal || "",
+      purchase_value: chapter?.purchase_value || chapter?.goal || "",
+      seconds: Number(chapter?.seconds || 0),
+    }));
+  const directResult = isPlayableReview
+    ? `<section class="commerce-director-single-result"><div class="commerce-director-plan-summary"><div><span>开场承诺</span><strong>${escapeHtml(story.payoff || story.thesis || "未标注")}</strong></div><div><span>当前状态</span><strong>${escapeHtml(stateLabel)}</strong></div></div><div class="commerce-director-studio-stage"><div class="commerce-director-single-video">${commerceDirectorPreviewPanel(preview.id, isDraft ? "M2 草案审阅视频" : "M3 词级审阅视频")}</div><aside class="commerce-director-single-script">${commerceDirectorM2Outline(directOutline)}</aside></div><div class="commerce-director-script-head"><strong>${isDraft ? "M2 草案口播编排" : "M3 词级口播编排"}</strong><span>${timeline.length} 段 · ${timeline.reduce((sum, item) => sum + Number(item.duration || 0), 0).toFixed(1)}s</span></div>${commerceDirectorTimelineRows(timeline, directOutline)}</section>`
+    : "";
+  const draftSummary = draft.candidate_count
+    ? `<p><strong>M2 草案：</strong>${Number(draft.selected_seconds || 0).toFixed(1)}s / 目标 ${Number(draft.target_seconds || 0).toFixed(0)}s，${Number(draft.chapter_count || 0)} 章、${Number(draft.candidate_count || 0)} 段。</p>`
+    : "";
+  const warning = isDiscovery
+    ? '<p class="preview-notice">这里先完成 M1 商品故事发现与 AI 导演方案生成。尚未调用 M2/M3；请选择一个版本后才会进行词级成片实验。</p>'
+    : isBatch
+    ? '<p class="preview-notice">以下是同一份 M1 商品故事地图下的多条 M2→M3 审阅结果。即使某条完成词级物化，也仅供人工比较，不能正式导出或发布。</p>'
+    : isDraft
+    ? '<p class="preview-notice">这是一条用于判断叙事方向的 M2 草案审阅视频：候选顺序和词级时间均保持原样，但 M3 已拒绝物化。它不能进入正式预览、导出或发布。</p>'
+    : '<p class="preview-notice">以下是 M1 主线及 M3 词级片段，仅供人工审核；不能进入正式成片或发布。</p>';
+  // The primary plan now materializes immediately, so alternative direction
+  // cards must remain visible on the resulting preview as well as on the
+  // legacy discovery screen.
+  const strategySection = renderDirectorStrategyLibrary(review)
+    + (isDiscovery ? renderCommerceDirectorStoryLibrary(review) : "");
+  return `<section class="preview-overview-card commerce-director-review"><div class="commerce-director-workspace-head"><div><span>AI 导演实验工作台</span><strong>${escapeHtml(headline)}</strong></div><em>${escapeHtml(stateLabel)}</em></div><p class="commerce-director-experiment-note">${warning.replace(/^<p class="preview-notice">|<\/p>$/g, "")}</p><div class="preview-overview-grid">${storyRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>${directResult}${isBatch ? renderCommerceDirectorBatch(review) : strategySection}${draftSummary}${chapters ? `<div class="commerce-director-chapter-summary"><strong>M2 章节摘要</strong><ol>${chapters}</ol></div>` : ""}${issues ? `<div class="commerce-director-issues"><strong>当前问题</strong><ul>${issues}</ul></div>` : ""}</section>`;
+}
+
 function renderSmartPreview(preview) {
   preview = hydratePreviewCandidatePool(preview);
   const box = $("smart-preview");
@@ -8130,15 +9443,23 @@ function renderSmartPreview(preview) {
   const clips = preview?.clips || [];
   if (count) count.textContent = String(clips.length || 0);
   box.classList.toggle("empty", !clips.length);
+  box.classList.remove("commerce-director-inline-host");
   setPreviewLayoutState("smart", preview);
   syncFlowActionState();
+  if (preview?.commercial_director_experiment && !preview?.commercial_director_preview && !preview?.commercial_director_sentence_preview) {
+    state.commerceDirectorStudioOpen = true;
+    box.classList.add("commerce-director-inline-host");
+    renderCommerceDirectorStudio(preview);
+    closePreviewVideo();
+    return;
+  }
   if (!preview?.id) {
-    box.innerHTML = "<p>点击“AI选片预览”，先看 AI 会选哪些片段，再决定是否成片。</p>";
+    box.innerHTML = "<p>点击“AI导演预览”，AI 会先确定故事和章节，再从完整字幕选择真实短句；结果可逐句试听、删改和调序。</p>";
     closePreviewVideo();
     return;
   }
   if (preview.status === "running") {
-    box.innerHTML = "<p>正在生成 AI 选片预览，请稍等...</p>";
+    box.innerHTML = `<p>${escapeHtml(preview.message || "AI 正在规划故事并选择真实短句，请稍等...")}</p>`;
     closePreviewVideo();
     return;
   }
@@ -8154,6 +9475,7 @@ function renderSmartPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("smart", preview, "sc-duration");
   updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
+  bindPreviewCandidateDrag(box, "smart");
   bindPreviewWorkbenchKeyboard(box, "smart");
   if (state.previewWorkbenchStages.smart === "assembly") ensureInlinePreviewVideo("smart", state.previewDetailSelection.smart);
 }
@@ -8169,7 +9491,7 @@ function renderMixPreview(preview) {
   setPreviewLayoutState("mix", preview);
   syncFlowActionState();
   if (!preview?.id) {
-    box.innerHTML = "<p>点击“AI选片预览”，先看混剪会从哪些素材里选哪些片段。</p>";
+    box.innerHTML = "<p>点击“AI导演预览”，AI 会先统一理解全部素材，再编排一条可逐句修改的混剪故事。</p>";
     closePreviewVideo("mix");
     return;
   }
@@ -8190,6 +9512,7 @@ function renderMixPreview(preview) {
   box.innerHTML = renderPreviewWorkbench("mix", preview, "mix-duration");
   updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
+  bindPreviewCandidateDrag(box, "mix");
   bindPreviewWorkbenchKeyboard(box, "mix");
   if (state.previewWorkbenchStages.mix === "assembly") ensureInlinePreviewVideo("mix", state.previewDetailSelection.mix);
 }
@@ -8604,6 +9927,13 @@ function analyzeSmartPreview(preview, targetId = "sc-duration") {
   const selectionResult = dedupSummary.selection_result || {};
   const planQualityReport = dedupSummary.plan_quality_report || {};
   const contentReviewSummary = dedupSummary.content_review_summary || {};
+  if (planQualityReport.status === "warning") {
+    const qualityIssues = Array.isArray(planQualityReport.soft_quality_issues)
+      ? planQualityReport.soft_quality_issues
+      : (Array.isArray(planQualityReport.warnings) ? planQualityReport.warnings : []);
+    const firstIssue = qualityIssues.map((item) => String(item || "").trim()).find(Boolean);
+    if (firstIssue) warnings.push(`AI片单提示：${firstIssue}`);
+  }
   if (selectionResult.status === "partial_insufficient") {
     const projected = Number(selectionResult?.details?.projected_final_duration || total);
     warnings.push(`安全内容不足，本次仅生成${projected.toFixed(1)}s人工预览；确认片段后才能成片。`);
@@ -8984,7 +10314,7 @@ function collectFeaturePayload(feature) {
       versions: Number($("mix-versions").value || 1),
       duration: Number($("mix-duration").value || 60),
       duration_tolerance: selectedDurationTolerance("mix"),
-      focus_hint: $("mix-focus").value,
+      focus_hint: "自动",
       ai_controls: collectAiControls("mix"),
       dedup_preset: normalizeDedupPresetValue($("mix-dedup").value),
       mirror_enabled: $("mix-mirror").checked,
@@ -10441,8 +11771,58 @@ function previewWorkbenchCandidateCategory(clip) {
 }
 
 function previewWorkbenchCategoryLabel(clip, scope = "smart") {
+  if (String(clip?.director_beat_function || "").trim()) {
+    return previewDirectorBeatRoleMeta(clip).label;
+  }
   const key = previewWorkbenchCandidateCategory(clip, scope);
   return directPreviewWorkbenchCandidateCategories.find(([item]) => item === key)?.[1] || "\u5546\u54c1\u4eae\u70b9";
+}
+
+function previewDirectorBeatRoleMeta(clip) {
+  const key = String(clip?.director_beat_function || clip?.director_chapter_kind || "").trim().toLowerCase();
+  return ({
+    hook: { label: "开场吸引", tone: "hook" },
+    result: { label: "结果兑现", tone: "result" },
+    mechanism: { label: "为什么有效", tone: "mechanism" },
+    proof: { label: "证据补强", tone: "proof" },
+    comfort: { label: "穿着体验", tone: "comfort" },
+    fit: { label: "身材适配", tone: "fit" },
+    risk: { label: "顾虑解除", tone: "risk" },
+    risk_remove: { label: "顾虑解除", tone: "risk" },
+    styling: { label: "日常搭配", tone: "scene" },
+    scene: { label: "使用场景", tone: "scene" },
+    trust: { label: "品质信任", tone: "trust" },
+    close: { label: "自然收尾", tone: "close" },
+  })[key] || { label: "购买推进", tone: "value" };
+}
+
+function previewDirectorOutline(preview) {
+  return Array.isArray(preview?.director_review?.m2_outline) ? preview.director_review.m2_outline : [];
+}
+
+function previewDirectorActiveChapterId(scope = "smart", preview = getPreviewState(scope)) {
+  if (!preview?.commercial_director_experiment) return "";
+  const outline = previewDirectorOutline(preview);
+  const validIds = new Set(outline.map(function (item) { return String(item?.chapter_id || "").trim(); }).filter(Boolean));
+  (preview?.clips || []).forEach(function (clip) {
+    const id = String(clip?.director_chapter_id || "").trim();
+    if (id) validIds.add(id);
+  });
+  let id = String(state.previewDirectorChapterFocus?.[scope] || "").trim();
+  if (id && validIds.has(id)) return id;
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const currentIndex = Number(state.previewDetailSelection?.[scope]);
+  const current = selected.find(function (clip) { return Number(clip?.index) === currentIndex; }) || selected[0];
+  id = String(current?.director_chapter_id || outline[0]?.chapter_id || "").trim();
+  if (!state.previewDirectorChapterFocus) state.previewDirectorChapterFocus = { smart: "", mix: "" };
+  state.previewDirectorChapterFocus[scope] = id;
+  return id;
+}
+
+function previewDirectorCandidateView(scope = "smart", preview = getPreviewState(scope)) {
+  if (!preview?.commercial_director_experiment) return "";
+  const value = String(state.previewDirectorCandidateViews?.[scope] || "recommended");
+  return ["recommended", "chapter", "all"].includes(value) ? value : "recommended";
 }
 
 function previewWorkbenchSelectedClips(scope, preview) {
@@ -10487,19 +11867,32 @@ function selectPreviewWorkbenchCandidate(index, scope = "smart") {
   ensureInlinePreviewVideo(scope, Number(index), { inspectOnly: true });
 }
 
-function addPreviewWorkbenchCandidate(index, scope = "smart") {
+function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = null, placeAfter = false) {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
   if (isPreviewWorkbenchSelected(clip)) return setPreviewDetailSelection(scope, Number(index));
+  syncPreviewClipSelections(scope);
+  const clipIndex = Number(index);
+  const order = previewAssemblyOrder(scope, preview).filter((item) => Number(item) !== clipIndex);
+  let insertAt = order.length;
+  if (targetIndex !== null && targetIndex !== undefined) {
+    const targetAt = order.indexOf(Number(targetIndex));
+    if (targetAt >= 0) insertAt = targetAt + (placeAfter ? 1 : 0);
+  }
   clip.selected = true;
   previewSegments(clip).forEach((segment) => { segment.selected = segment.selection_locked !== true; resetPreviewSegmentWords(segment); });
-  setPreviewAssemblyMembership(scope, Number(index), true);
+  order.splice(insertAt, 0, clipIndex);
+  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = order;
   state.previewCandidateSelections[scope] = null;
-  state.previewDetailSelection[scope] = Number(index);
+  state.previewDetailSelection[scope] = clipIndex;
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
-  ensureInlinePreviewVideo(scope, Number(index));
+  ensureInlinePreviewVideo(scope, clipIndex);
+}
+
+function addPreviewWorkbenchCandidate(index, scope = "smart") {
+  insertPreviewWorkbenchCandidate(index, scope);
 }
 
 function previewCurrentWorkbenchClip(scope = "smart") {
@@ -10524,12 +11917,56 @@ function renderPreviewCandidateGroups(scope, preview) {
   }).join("") || `<div class="preview-sequence-empty"><strong>\u6ca1\u6709\u53ef\u7528\u5019\u9009</strong><span>\u91cd\u65b0\u751f\u6210 AI \u9009\u7247\u9884\u89c8\u540e\u518d\u8bd5\u3002</span></div>`;
 }
 
+function previewDirectorChapterStageLabel(clip, groupIndex = 0) {
+  if (groupIndex === 0) return "开场";
+  const kind = String(clip?.director_chapter_kind || clip?.director_beat_function || "").trim().toLowerCase();
+  return ({
+    result: "结果兑现",
+    mechanism: "为什么有效",
+    proof: "证据补强",
+    fit: "身材适配",
+    comfort: "穿着体验",
+    risk: "顾虑解除",
+    risk_remove: "顾虑解除",
+    styling: "日常搭配",
+    scene: "使用场景",
+    trust: "品质信任",
+    close: "自然收尾",
+  })[kind] || "购买推进";
+}
+
+function renderPreviewSelectedRow(scope, clip, position, activeIndex, options = {}) {
+  const text = selectedPreviewText(clip) || String(clip.text || "");
+  const role = previewDirectorBeatRoleMeta(clip);
+  const label = options.director ? role.label : previewWorkbenchCategoryLabel(clip, scope);
+  return '<article class="preview-selected-row ' + (options.director ? 'is-director ' : '') + (Number(clip.index) === activeIndex ? 'is-active' : '') + '" data-preview-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><div class="clip-drag-handle" data-preview-drag-handle data-preview-scope="' + scope + '" title="按住拖拽调整顺序" aria-label="按住拖拽调整顺序">拖</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '"><span><em>' + (position + 1) + '</em><strong class="' + (options.director ? 'is-' + escapeHtml(role.tone) : '') + '">' + escapeHtml(label) + '</strong><i>' + effectiveClipDuration(clip).toFixed(1) + 's</i></span><small>' + escapeHtml(text) + '</small></button><button type="button" class="preview-selected-remove" title="移出已选" aria-label="移出已选" data-action="preview-assembly-remove" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">移除</button></article>';
+}
+
 function renderPreviewSelectedRows(scope, selected) {
-  if (!selected.length) return `<div class="preview-sequence-empty"><strong>\u8fd8\u6ca1\u6709\u5df2\u9009\u7247\u6bb5</strong><span>\u5728\u5de6\u4fa7\u770b\u89c6\u9891\uff0c\u786e\u8ba4\u540e\u70b9\u51fb\u201c\u52a0\u5165\u201d\u3002</span></div>`;
+  if (!selected.length) return `<div class="preview-sequence-empty"><strong>\u62d6\u5019\u9009\u53e5\u5230\u8fd9\u91cc</strong><span>\u4e5f\u53ef\u5728\u5de6\u4fa7\u70b9\u51fb\u201c\u52a0\u5165\u201d\uff0c\u5168\u7a0b\u4e0d\u8c03\u7528 AI\u3002</span></div>`;
   const activeIndex = Number(state.previewDetailSelection?.[scope]);
-  return selected.map((clip, position) => {
-    const text = selectedPreviewText(clip) || String(clip.text || "");
-    return `<article class="preview-selected-row ${Number(clip.index) === activeIndex ? "is-active" : ""}" data-preview-row data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><div class="clip-drag-handle" data-preview-drag-handle data-preview-scope="${scope}" title="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f" aria-label="\u6309\u4f4f\u62d6\u62fd\u8c03\u6574\u987a\u5e8f">&#9776;</div><button class="preview-selected-main" data-action="preview-workbench-inspect-clip" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}"><span><em>${position + 1}</em><strong>${escapeHtml(previewWorkbenchCategoryLabel(clip, scope))}</strong></span><small>${escapeHtml(text)}</small></button><button type="button" class="preview-selected-remove" title="\u79fb\u51fa\u5df2\u9009" aria-label="\u79fb\u51fa\u5df2\u9009" data-action="preview-assembly-remove" data-preview-scope="${scope}" data-preview-index="${Number(clip.index)}">\u00d7</button></article>`;
+  const preview = getPreviewState(scope);
+  if (!preview?.commercial_director_experiment) {
+    return selected.map(function (clip, position) { return renderPreviewSelectedRow(scope, clip, position, activeIndex); }).join("");
+  }
+  const groups = [];
+  let elapsed = 0;
+  selected.forEach(function (clip, position) {
+    const chapterId = String(clip?.director_chapter_id || `chapter-${position + 1}`).trim();
+    let group = groups[groups.length - 1];
+    if (!group || group.chapterId !== chapterId) {
+      group = { chapterId, start: elapsed, end: elapsed, first: clip, items: [] };
+      groups.push(group);
+    }
+    group.items.push({ clip, position });
+    elapsed += effectiveClipDuration(clip);
+    group.end = elapsed;
+  });
+  return groups.map(function (group, groupIndex) {
+    const title = String(group.first?.director_chapter_title || "当前购买章节").trim();
+    const stage = previewDirectorChapterStageLabel(group.first, groupIndex);
+    const rows = group.items.map(function (item) { return renderPreviewSelectedRow(scope, item.clip, item.position, activeIndex, { director: true }); }).join("");
+    return '<section class="preview-story-chapter" data-preview-selected-chapter="' + escapeHtml(group.chapterId) + '"><button type="button" class="preview-story-chapter-head" data-action="preview-director-chapter-focus" data-preview-scope="' + scope + '" data-chapter-id="' + escapeHtml(group.chapterId) + '"><strong>' + escapeHtml(stage) + '：' + escapeHtml(title) + '</strong><span>' + group.start.toFixed(0) + '–' + group.end.toFixed(0) + 's</span></button>' + rows + '</section>';
   }).join("");
 }
 
@@ -10667,6 +12104,14 @@ function bindDirectPreviewWorkbenchActions() {
   document.body.addEventListener('pointercancel', () => clearPreviewWordRangeGesture());
 
   document.body.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      const openScope = ['smart', 'mix'].find(function (scope) { return state.previewDirectorAlternativesOpen?.[scope]; });
+      if (openScope) {
+        event.preventDefault();
+        togglePreviewDirectorAlternatives(openScope, false);
+        return;
+      }
+    }
     const insideWorkbench = event.target?.closest?.('[data-preview-workbench]');
     const isUndo = (event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'z';
     if (!insideWorkbench || !isUndo || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
@@ -10876,6 +12321,8 @@ function previewWorkbenchPreferenceCategory(text, domain = "general") {
 }
 
 function previewWorkbenchCandidateCategory(clip, scope = "smart") {
+  const directorChapterId = String(clip?.director_chapter_id || "").trim();
+  if (directorChapterId) return `director:${directorChapterId}`;
   const role = previewWorkbenchRoleKey(clip);
   const text = (String(clip?.focus || "") + " " + String(clip?.focus_block || "") + " " + String(clip?.text || "")).toLowerCase();
   const spokenText = String(clip?.text || "").toLowerCase();
@@ -10906,7 +12353,9 @@ function previewWorkbenchCandidateCategory(clip, scope = "smart") {
 }
 
 function previewWorkbenchCandidateText(clip) {
-  return String(selectedPreviewText(clip) || clip?.text || "").trim();
+  const selected = String(selectedPreviewText(clip) || "").trim();
+  if (selected && selected !== "未选择句子") return selected;
+  return String(clip?.text || "").trim();
 }
 
 function isPreviewWorkbenchHardWasteCandidate(clip) {
@@ -10951,7 +12400,7 @@ function isPreviewWorkbenchUsefulCandidate(clip, scope = "smart") {
 }
 
 function previewWorkbenchCandidateOrigin(clip) {
-  if (clip?.candidate_origin === "director" || clip?.recommended === false) return "extra";
+  if ((clip?.candidate_origin && clip.candidate_origin !== "recommended") || clip?.recommended === false) return "extra";
   return "recommended";
 }
 
@@ -10984,6 +12433,20 @@ function previewWorkbenchSourceCandidatesFor(scope, preview, source) {
 }
 
 function previewWorkbenchSourceCandidates(scope, preview) {
+  if (preview?.commercial_director_experiment) {
+    const view = previewDirectorCandidateView(scope, preview);
+    const activeChapterId = previewDirectorActiveChapterId(scope, preview);
+    const all = (preview?.clips || []).filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
+    if (view === "recommended") {
+      return all.filter(function (clip) {
+        return previewWorkbenchCandidateOrigin(clip) === "extra" && !isPreviewWorkbenchSelected(clip);
+      });
+    }
+    if (view === "chapter") {
+      return all.filter(function (clip) { return String(clip?.director_chapter_id || "") === activeChapterId; });
+    }
+    return all;
+  }
   return previewWorkbenchSourceCandidatesFor(scope, preview, previewWorkbenchCandidateSourceFilter(scope));
 }
 
@@ -10995,6 +12458,23 @@ function previewWorkbenchFilteredCandidates(scope, preview) {
 }
 
 function previewWorkbenchCandidateFilterStats(scope, preview) {
+  if (preview?.commercial_director_experiment) {
+    const all = (preview?.clips || []).filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
+    const activeChapterId = previewDirectorActiveChapterId(scope, preview);
+    const recommended = all.filter(function (clip) {
+      return previewWorkbenchCandidateOrigin(clip) === "extra" && !isPreviewWorkbenchSelected(clip);
+    });
+    const chapter = all.filter(function (clip) { return String(clip?.director_chapter_id || "") === activeChapterId; });
+    return {
+      recommended: recommended.length,
+      extra: recommended.length,
+      chapter: chapter.length,
+      all: all.length,
+      source: previewWorkbenchSourceCandidates(scope, preview).length,
+      filtered: previewWorkbenchFilteredCandidates(scope, preview).length,
+      duration: all.reduce(function (sum, clip) { return sum + effectiveClipDuration(clip); }, 0),
+    };
+  }
   const recommended = previewWorkbenchSourceCandidatesFor(scope, preview, "recommended").length;
   const extra = previewWorkbenchSourceCandidatesFor(scope, preview, "extra").length;
   const sourceCandidates = previewWorkbenchSourceCandidates(scope, preview);
@@ -11007,6 +12487,15 @@ function previewWorkbenchCandidateFilterStats(scope, preview) {
 }
 
 function setPreviewCandidateSourceFilter(scope = "smart", value = "recommended") {
+  const preview = getPreviewState(scope);
+  if (preview?.commercial_director_experiment) {
+    if (!state.previewDirectorCandidateViews) state.previewDirectorCandidateViews = { smart: "recommended", mix: "recommended" };
+    state.previewDirectorCandidateViews[scope] = ["recommended", "chapter", "all"].includes(value) ? value : "recommended";
+    state.previewCandidateCategoryFilters[scope] = "all";
+    state.previewCandidateSelections[scope] = null;
+    renderPreviewStateKeepStoryScroll(scope);
+    return;
+  }
   if (!state.previewCandidateSourceFilters) state.previewCandidateSourceFilters = { smart: "recommended", mix: "recommended" };
   state.previewCandidateSourceFilters[scope] = value === "extra" ? "extra" : "recommended";
   state.previewCandidateSelections[scope] = null;
@@ -11022,6 +12511,24 @@ function setPreviewCandidateCategoryFilter(scope = "smart", value = "all") {
 
 function renderPreviewCandidateFilterBar(scope, preview) {
   const labels = new Map(directPreviewWorkbenchCandidateCategories);
+  if (preview?.commercial_director_experiment) {
+    const view = previewDirectorCandidateView(scope, preview);
+    const stats = previewWorkbenchCandidateFilterStats(scope, preview);
+    const chapterId = previewDirectorActiveChapterId(scope, preview);
+    const chapter = previewDirectorOutline(preview).find(function (item) { return String(item?.chapter_id || "") === chapterId; }) || {};
+    const chapterLabel = String(chapter?.goal || chapter?.purchase_value || "当前章节").trim();
+    const buttons = [
+      ["recommended", "AI 备用", stats.recommended],
+      ["chapter", "当前章节", stats.chapter],
+      ["all", "完整句库", stats.all],
+    ].map(function ([value, label, count]) {
+      return '<button type="button" class="' + (view === value ? 'is-active' : '') + '" data-action="preview-candidate-source-filter" data-preview-scope="' + scope + '" data-value="' + value + '" aria-pressed="' + (view === value ? 'true' : 'false') + '"><span>' + label + '</span><em>' + count + '</em></button>';
+    }).join("");
+    const hint = view === "recommended"
+      ? `AI 同次返回 ${stats.recommended} 条备用；更多原句请切换“完整句库”`
+      : (view === "chapter" ? `正在查看：${chapterLabel}` : `当前公开候选约 ${stats.duration.toFixed(1)} 秒`);
+    return '<div class="preview-candidate-filterbar is-director"><div class="preview-candidate-source-filter" role="tablist" aria-label="候选片段范围">' + buttons + '</div><small>' + escapeHtml(hint) + '</small></div>';
+  }
   const source = previewWorkbenchCandidateSourceFilter(scope);
   const category = previewWorkbenchCategoryFilter(scope);
   const stats = previewWorkbenchCandidateFilterStats(scope, preview);
@@ -11035,9 +12542,17 @@ function renderPreviewCandidateFilterBar(scope, preview) {
   previewWorkbenchSourceCandidates(scope, preview).forEach(function (clip) {
     const key = previewWorkbenchCandidateCategory(clip, scope);
     present.set(key, (present.get(key) || 0) + 1);
+    if (key.startsWith("director:") && !labels.has(key)) {
+      labels.set(key, previewWorkbenchTopicLabel(clip));
+    }
   });
-  const categoryButtons = ['<button type="button" class="' + (category === 'all' ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="all"><span>\u5168\u90e8\u54c1\u7c7b</span><em>' + stats.source + '</em></button>'];
-  directPreviewWorkbenchCandidateCategories.forEach(function ([key, label]) {
+  const directorKeys = Array.from(present.keys()).filter(function (key) { return key.startsWith("director:"); });
+  const categoryRows = directorKeys.length
+    ? directorKeys.map(function (key) { return [key, labels.get(key) || "导演章节"]; })
+    : directPreviewWorkbenchCandidateCategories;
+  const allLabel = directorKeys.length ? "全部章节" : "全部品类";
+  const categoryButtons = ['<button type="button" class="' + (category === 'all' ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="all"><span>' + allLabel + '</span><em>' + stats.source + '</em></button>'];
+  categoryRows.forEach(function ([key, label]) {
     const count = present.get(key) || 0;
     if (!count) return;
     categoryButtons.push('<button type="button" class="' + (category === key ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="' + key + '"><span>' + escapeHtml(label) + '</span><em>' + count + '</em></button>');
@@ -11045,16 +12560,47 @@ function renderPreviewCandidateFilterBar(scope, preview) {
   return '<div class="preview-candidate-filterbar"><div class="preview-candidate-source-filter">' + sourceButtons + '</div><div class="preview-candidate-category-filter">' + categoryButtons.join("") + '</div><small>\u5f53\u524d\u663e\u793a ' + stats.filtered + ' / ' + stats.source + ' \u6bb5</small></div>';
 }
 
+function previewDirectorCandidateSuggestion(scope, preview, clip) {
+  const replaces = String(clip?.director_replaces_beat_id || "").trim();
+  if (replaces) {
+    const selected = previewWorkbenchSelectedClips(scope, preview);
+    const position = selected.findIndex(function (item) { return String(item?.director_beat_id || "") === replaces; });
+    if (position >= 0) return `可替换第 ${position + 1} 句`;
+  }
+  const chapter = String(clip?.director_chapter_title || "").trim();
+  return chapter ? `可补强：${chapter}` : "可作为当前故事的补充短句";
+}
+
 function renderPreviewCandidateGroups(scope, preview) {
   const activeCandidate = state.previewCandidateSelections?.[scope];
   const hasActiveCandidate = activeCandidate !== null && activeCandidate !== undefined;
   const labels = new Map(directPreviewWorkbenchCandidateCategories);
   const candidates = previewWorkbenchFilteredCandidates(scope, preview);
+  if (preview?.commercial_director_experiment) {
+    const rows = candidates.map(function (clip) {
+      const selected = isPreviewWorkbenchSelected(clip);
+      const active = Number(activeCandidate) === Number(clip.index) || (!hasActiveCandidate && Number(state.previewDetailSelection?.[scope]) === Number(clip.index));
+      const clipText = String(previewWorkbenchCandidateText(clip) || "未识别口播").trim();
+      const bounds = effectiveClipBounds(clip);
+      const seconds = effectiveClipDuration(clip) || previewWorkbenchCandidateDuration(clip);
+      const role = previewDirectorBeatRoleMeta(clip);
+      const inspectButton = '<button class="preview-candidate-add is-added" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">已选</button>';
+      const addButton = '<button class="preview-candidate-add" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">加入</button>';
+      const dragHandle = selected
+        ? '<span class="preview-candidate-drag-handle is-disabled" title="已在右侧">已</span>'
+        : '<span class="preview-candidate-drag-handle" data-preview-candidate-drag-handle data-preview-scope="' + scope + '" title="拖到右侧已选片段" aria-label="拖到右侧已选片段">拖</span>';
+      return '<article class="preview-candidate-row is-director ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '" data-preview-candidate-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">' + dragHandle
+        + '<button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span class="preview-candidate-time">' + escapeHtml(formatSeconds(bounds.start)) + '–' + escapeHtml(formatSeconds(bounds.end)) + '<em>' + seconds.toFixed(1) + 's</em></span><strong>' + escapeHtml(clipText) + '</strong><small class="is-' + escapeHtml(role.tone) + '">' + escapeHtml(previewDirectorCandidateSuggestion(scope, preview, clip)) + '</small></button>'
+        + (selected ? inspectButton : addButton) + '</article>';
+    }).join("");
+    return rows || '<div class="preview-sequence-empty"><strong>当前范围没有补充短句</strong><span>可以切换“当前章节”或“完整句库”继续查看，不会重新调用 AI。</span></div>';
+  }
   const groups = [];
   candidates.forEach(function (clip) {
     const key = previewWorkbenchCandidateCategory(clip, scope);
     const last = groups[groups.length - 1];
-    if (!last || last.key !== key) groups.push({ key: key, label: labels.get(key) || "\u5f85\u786e\u8ba4", clips: [] });
+    const directorLabel = String(clip?.director_chapter_title || "").trim();
+    if (!last || last.key !== key) groups.push({ key: key, label: directorLabel || labels.get(key) || "\u5f85\u786e\u8ba4", clips: [] });
     groups[groups.length - 1].clips.push(clip);
   });
   return groups.map(function (group) {
@@ -11067,7 +12613,10 @@ function renderPreviewCandidateGroups(scope, preview) {
       const clipText = String(clip.text || selectedPreviewText(clip) || "\u672a\u8bc6\u522b\u53e3\u64ad").trim();
       const inspectButton = '<button class="preview-candidate-add is-added" data-action="preview-workbench-inspect-clip" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u5df2\u9009</button>';
       const addButton = '<button class="preview-candidate-add" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165</button>';
-      return '<article class="preview-candidate-row ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '"><button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span>' + escapeHtml(clipText) + '</span></button>' + (selected ? inspectButton : addButton) + '</article>';
+      const dragHandle = selected
+        ? '<span class="preview-candidate-drag-handle is-disabled" title="\u5df2\u5728\u53f3\u4fa7">\u5df2</span>'
+        : '<span class="preview-candidate-drag-handle" data-preview-candidate-drag-handle data-preview-scope="' + scope + '" title="\u62d6\u5230\u53f3\u4fa7\u5df2\u9009\u7247\u6bb5" aria-label="\u62d6\u5230\u53f3\u4fa7\u5df2\u9009\u7247\u6bb5">\u62d6</span>';
+      return '<article class="preview-candidate-row ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '" data-preview-candidate-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">' + dragHandle + '<button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span>' + escapeHtml(clipText) + '</span></button>' + (selected ? inspectButton : addButton) + '</article>';
     }).join("");
     const secondary = key === "live" || key === "unclear";
     return '<details class="preview-candidate-group ' + (secondary ? 'is-secondary' : '') + '" data-preview-candidate-group="' + key + '"' + (secondary ? '' : ' open') + '><summary class="preview-candidate-group-head" title="\u70b9\u51fb\u5c55\u5f00\u6216\u6536\u8d77"><strong>' + label + '</strong><span>' + clips.length + '</span></summary><div class="preview-candidate-group-rows">' + rows + '</div></details>';
@@ -11609,7 +13158,12 @@ function renderPreviewFilmOverview(scope, preview, targetId, selected, duration)
   const lowPercent = Math.min(100, Math.max(0, duration.low / maxDuration * 100));
   const highPercent = Math.min(100, Math.max(lowPercent, duration.high / maxDuration * 100));
   const targetPercent = Math.min(100, Math.max(0, duration.target / maxDuration * 100));
-  const structureText = `\u5f00\u573a${overview.roleCounts.hook} \u00b7 \u5356\u70b9${overview.sellingCount} \u00b7 \u6536\u5c3e${overview.roleCounts.close}`;
+  const directorChapterCount = Array.isArray(preview?.director_review?.m2_outline)
+    ? preview.director_review.m2_outline.length
+    : 0;
+  const structureText = preview?.commercial_director_experiment && directorChapterCount
+    ? `${directorChapterCount}\u7ae0 \u00b7 ${selected.length}\u53e5`
+    : `\u5f00\u573a${overview.roleCounts.hook} \u00b7 \u5356\u70b9${overview.sellingCount} \u00b7 \u6536\u5c3e${overview.roleCounts.close}`;
   const sourceText = scope === "mix"
     ? `\u7d20\u6750 ${overview.sourceStats.length}/${overview.expectedSourceCount || overview.sourceStats.length}`
     : (overview.sourceStats[0]?.label || "\u7d20\u6750\u5f85\u786e\u8ba4");
@@ -11654,6 +13208,159 @@ function renderPreviewFilmOverview(scope, preview, targetId, selected, duration)
   </section>`;
 }
 
+function previewDirectorHasManualEdits(scope, preview) {
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const initial = (preview?.clips || []).filter(function (clip) {
+    return previewWorkbenchCandidateOrigin(clip) === "recommended" && !isPreviewWorkbenchHardWasteCandidate(clip);
+  });
+  const initialOrder = initial.map(function (clip) { return Number(clip.index); });
+  const currentOrder = selected.map(function (clip) { return Number(clip.index); });
+  const membershipChanged = selected.some(function (clip) { return previewWorkbenchCandidateOrigin(clip) === "extra"; })
+    || initial.some(function (clip) { return !isPreviewWorkbenchSelected(clip); });
+  const wordsChanged = selected.some(function (clip) {
+    return previewSegments(clip).some(function (segment) { return segment?.wordSelectionExplicit === true; });
+  });
+  return membershipChanged || wordsChanged || String(initialOrder) !== String(currentOrder);
+}
+
+function previewDirectorCurrentStatus(scope, preview, targetId, selected, duration) {
+  const overview = buildPreviewFilmOverview(scope, preview, targetId, selected, duration);
+  const review = preview?.director_review || {};
+  const fidelity = review.export_fidelity?.status === "warning"
+    ? review.export_fidelity : (review.preview_fidelity || preview?.dedup_summary?.director_preview_fidelity || {});
+  const boundaryWarning = fidelity.status === "warning";
+  const currentStatus = overview.status === "block" ? "block" : (boundaryWarning ? "warn" : overview.status);
+  const duplicates = overview.issues.filter(function (item) { return item.kind === "duplicate"; }).length;
+  const firstFunction = String(selected[0]?.director_beat_function || selected[0]?.director_chapter_kind || "").toLowerCase();
+  const lastFunction = String(selected[selected.length - 1]?.director_beat_function || selected[selected.length - 1]?.director_chapter_kind || "").toLowerCase();
+  const openingReady = Boolean(selected.length && ["hook", "result", "scene", "comfort"].includes(firstFunction));
+  const endingReady = Boolean(selected.length && ["close", "scene", "styling", "risk", "risk_remove", "comfort", "trust"].includes(lastFunction));
+  return {
+    ...overview,
+    status: currentStatus,
+    boundaryMessage: boundaryWarning ? String(fidelity.message || "内容边界影响了部分短句，请连读复核") : "",
+    duplicates,
+    openingLabel: fidelity.opening_affected ? "开场受内容边界影响" : (openingReady ? "开场已设置" : "开场待复核"),
+    progressionLabel: duplicates ? `重复提示 ${duplicates}` : "未见完全重复",
+    endingLabel: endingReady ? "结尾可连读" : "结尾待复核",
+    overallLabel: currentStatus === "block" ? "暂不可成片" : (boundaryWarning ? "边界删减待复核" : (currentStatus === "warn" ? "建议调整" : "可继续审核")),
+  };
+}
+
+function focusPreviewDirectorChapter(scope = "smart", chapterId = "") {
+  const preview = getPreviewState(scope);
+  if (!preview?.commercial_director_experiment || !chapterId) return;
+  if (!state.previewDirectorChapterFocus) state.previewDirectorChapterFocus = { smart: "", mix: "" };
+  if (!state.previewDirectorCandidateViews) state.previewDirectorCandidateViews = { smart: "recommended", mix: "recommended" };
+  state.previewDirectorChapterFocus[scope] = String(chapterId);
+  state.previewDirectorCandidateViews[scope] = "chapter";
+  state.previewCandidateCategoryFilters[scope] = "all";
+  state.previewCandidateSelections[scope] = null;
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const first = selected.find(function (clip) { return String(clip?.director_chapter_id || "") === String(chapterId); });
+  if (first) state.previewDetailSelection[scope] = Number(first.index);
+  renderPreviewStateKeepStoryScroll(scope);
+  setTimeout(function () {
+    const box = previewBox(scope);
+    const chapter = Array.from(box?.querySelectorAll("[data-preview-selected-chapter]") || []).find(function (item) { return item.dataset.previewSelectedChapter === String(chapterId); });
+    chapter?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (first) ensureInlinePreviewVideo(scope, Number(first.index));
+  }, 0);
+}
+
+function togglePreviewDirectorAlternatives(scope = "smart", force = null) {
+  if (!state.previewDirectorAlternativesOpen) state.previewDirectorAlternativesOpen = { smart: false, mix: false };
+  state.previewDirectorAlternativesOpen[scope] = typeof force === "boolean" ? force : !state.previewDirectorAlternativesOpen[scope];
+  renderPreviewStateKeepStoryScroll(scope);
+  if (state.previewDirectorAlternativesOpen[scope]) {
+    setTimeout(function () { previewBox(scope)?.querySelector(".commerce-director-alternative-popover button")?.focus(); }, 0);
+  }
+}
+
+function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope = "smart") {
+  if (!preview?.commercial_director_experiment && !preview?.commercial_director_preview) return "";
+  const review = preview?.director_review || {};
+  const proposals = Array.isArray(review?.director_strategy_library?.proposals)
+    ? review.director_strategy_library.proposals
+    : [];
+  const stories = Array.isArray(review?.m1_story_library?.stories)
+    ? review.m1_story_library.stories
+    : [];
+  const primary = proposals.find((item) => String(item?.director_plan_role || "") === "primary")
+    || proposals.find((item) => !item?.requires_additional_ai_call)
+    || proposals[0]
+    || null;
+  const story = review?.m1_story || {};
+  if (!primary && !String(story?.thesis || story?.core_commercial_idea || "").trim()) return "";
+
+  const primaryStory = stories.find((item) => String(item?.story_id || "") === String(primary?.primary_story_id || story?.strategy_id || "")) || {};
+  const title = String(primary?.name || primaryStory?.angle || review?.headline || "AI \u63a8\u8350\u65b9\u6848").trim();
+  const promise = String(primary?.why_this_plan || primaryStory?.purchase_reason || story?.core_commercial_idea || story?.thesis || "").trim();
+  const openingPromise = String(primary?.opening_promise || primaryStory?.payoff || story?.payoff || "").trim();
+  const structure = primary?.video_structure || {};
+  const structureName = String(structure?.name || primary?.narrative_archetype || "AI 导演结构").trim();
+  const outline = previewDirectorOutline(preview);
+  const selected = previewWorkbenchSelectedClips(scope, preview);
+  const status = previewDirectorCurrentStatus(scope, preview, `${scope}-target-duration`, selected, duration);
+  const activeChapterId = previewDirectorActiveChapterId(scope, preview);
+  const manual = previewDirectorHasManualEdits(scope, preview);
+  const candidateStats = previewWorkbenchCandidateFilterStats(scope, preview);
+  const targetSeconds = Number(preview?.target_duration || duration?.target || 0);
+  const initialSeconds = Number(primary?.estimated_natural_duration || primaryStory?.natural_duration_seconds || duration?.rawTotal || duration?.projected || 0);
+  const currentSeconds = Number(duration?.projected || 0);
+  const durationCopy = currentSeconds > 0 ? `当前成片 ${currentSeconds.toFixed(1)}s` : "按真实原话计算";
+  const targetCopy = targetSeconds > 0 ? `目标 ${targetSeconds.toFixed(0)}s` : "自然成片";
+  const initialCopy = initialSeconds > 0 ? `AI 初稿 ${initialSeconds.toFixed(1)}s` : "";
+
+  const chapterRows = outline.slice(0, 6).map((chapter, index) => {
+    const id = String(chapter?.chapter_id || `chapter-${index + 1}`).trim();
+    const goal = String(chapter?.goal || chapter?.purchase_value || `第 ${index + 1} 章`).trim();
+    const detail = String(chapter?.purchase_value || chapter?.purchase_question || goal).trim();
+    const active = id === activeChapterId;
+    return `<li><button type="button" class="${active ? "is-active" : ""}" data-action="preview-director-chapter-focus" data-preview-scope="${scope}" data-chapter-id="${escapeHtml(id)}" aria-current="${active ? "step" : "false"}" title="${escapeHtml(detail)}"><span>${index + 1}</span><strong>${escapeHtml(goal)}</strong></button></li>`;
+  }).join("");
+  const moreChapters = outline.length > 6 ? `<span class="commerce-director-path-more">更多 ${outline.length - 6}</span>` : "";
+
+  const alternatives = proposals.filter((item) => item !== primary && String(item?.director_plan_role || "") !== "primary");
+  const alternativeRows = alternatives.map((item, index) => {
+    const alternativeStory = stories.find((entry) => String(entry?.story_id || "") === String(item?.primary_story_id || "")) || {};
+    // Alternative cards are direction-only by contract.  They intentionally
+    // have no selected chapters or source assets until the user confirms a
+    // fresh Story + Casting run, so an empty M1 asset view is not a failure.
+    const unavailable = item?.available === false;
+    const name = String(item?.name || alternativeStory?.angle || "\u5176\u4ed6\u5356\u6cd5").trim();
+    const desire = String(item?.core_desire || item?.commercial_goal || alternativeStory?.purchase_reason || "").trim();
+    const alternativeOpening = String(item?.opening_promise || alternativeStory?.payoff || "").trim();
+    const alternativeStructure = String(item?.video_structure?.name || item?.narrative_archetype || "导演自定义结构").trim();
+    const unavailableReason = String(item?.unavailable_reason || "当前素材无法支撑这个方向").trim();
+    const action = unavailable
+      ? `<span class="commerce-director-alt-state" title="${escapeHtml(unavailableReason)}">此方向不可用</span>`
+      : `<button type="button" class="commerce-director-alt-action" data-action="select-commerce-director-strategy" data-preview-scope="${scope}" data-director-strategy-id="${escapeHtml(item?.director_strategy_id || "")}" data-additional-ai-call="true">生成此方向 <small>需 2 次 AI</small></button>`;
+    return `<article class="commerce-director-alt-card ${unavailable ? "is-unavailable" : ""}">
+      <header><span>备选 ${index + 1}</span><em>${escapeHtml(alternativeStructure)}</em></header>
+      <strong>${escapeHtml(name)}</strong>
+      ${desire ? `<p><b>核心购买理由</b>${escapeHtml(desire)}</p>` : ""}
+      ${alternativeOpening ? `<p><b>开场方向</b>${escapeHtml(alternativeOpening)}</p>` : ""}
+      <footer>${action}</footer>
+    </article>`;
+  }).join("");
+  const alternativesOpen = Boolean(state.previewDirectorAlternativesOpen?.[scope]);
+  const statusSource = manual ? "当前编排检查" : "AI 初稿评价";
+  const statusTone = status.status === "block" ? "block" : (status.status === "warn" ? "warn" : "ok");
+
+  return `<section class="commerce-director-recommendation is-${statusTone}" aria-label="AI 推荐方案">
+    <div class="commerce-director-thesis-row">
+      <div class="commerce-director-thesis-copy"><span class="commerce-director-recommendation-badge">AI 导演推荐</span><h3>${escapeHtml(title)}</h3><span class="commerce-director-structure-pill">${escapeHtml(structureName)}</span><p>${escapeHtml(promise || title)}</p></div>
+      <div class="commerce-director-thesis-actions"><span><strong>${escapeHtml(durationCopy)}</strong><small>${escapeHtml([targetCopy, initialCopy].filter(Boolean).join(" · "))}</small></span>${alternativeRows ? `<button type="button" class="commerce-director-alternatives-toggle" data-action="preview-director-alternatives-toggle" data-preview-scope="${scope}" aria-expanded="${alternativesOpen ? "true" : "false"}">其他导演方向 ${alternatives.length}</button>` : ""}</div>
+    </div>
+    ${chapterRows ? `<nav class="commerce-director-recommendation-path" aria-label="说服路径"><span>说服路径</span><ol>${chapterRows}</ol>${moreChapters}</nav>` : ""}
+    <div class="commerce-director-status-row" role="status"><span class="commerce-director-opening"><b>开场承诺</b>${escapeHtml(openingPromise || "尚未形成明确开场承诺")}</span><div class="commerce-director-status-metrics"><span>可编辑候选约 ${Number(candidateStats.duration || 0).toFixed(1)}s</span><span>已选 ${selected.length} 段</span><span>${escapeHtml(status.progressionLabel)}</span><span>${escapeHtml(status.openingLabel)}</span><span>${escapeHtml(status.endingLabel)}</span></div><span class="commerce-director-status-badge is-${statusTone}"><small>${escapeHtml(statusSource)}</small>${escapeHtml(status.overallLabel)}</span></div>
+    ${status.boundaryMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.boundaryMessage)}</p>` : ""}
+    <span class="visually-hidden" aria-live="polite">当前查看 ${escapeHtml(outline.find(function (item) { return String(item?.chapter_id || "") === activeChapterId; })?.goal || "导演方案")}</span>
+    ${alternativesOpen && alternativeRows ? `<aside class="commerce-director-alternative-popover" role="dialog" aria-label="其他导演方向"><header><div><strong>其他导演方向</strong><small>仅展示方向摘要；选择后才会重新调用 AI</small></div><button type="button" data-action="preview-director-alternatives-close" data-preview-scope="${scope}" aria-label="关闭其他导演方向">关闭</button></header><div>${alternativeRows}</div></aside>` : ""}
+  </section>`;
+}
+
 function togglePreviewOverviewDetails(scope = "smart") {
   const box = $(scope === "mix" ? "mix-preview" : "smart-preview");
   const details = box?.querySelector(`[data-preview-film-details="${scope}"]`);
@@ -11678,10 +13385,16 @@ function renderPreviewWorkbench(scope, preview, targetId) {
   const current = previewWorkbenchCurrentClip(scope, preview, selected);
   const duration = previewDurationFitState(scope, preview, targetId);
   const candidateStats = previewWorkbenchCandidateFilterStats(scope, preview);
-  const candidateHead = '<div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>\u5148\u770b AI \u7c97\u7b5b\uff0c\u518d\u6309\u54c1\u7c7b\u7b5b\u9009</span></div><small>' + candidateStats.filtered + ' / ' + candidateStats.source + ' \u6bb5</small></div>';
+  const isDirectorPreview = Boolean(preview?.commercial_director_experiment);
+  const candidateGuide = isDirectorPreview ? "完整显示原句；可点加入，或按住左侧拖到右边" : "\u5b8c\u6574\u663e\u793a\u539f\u53e5\uff1b\u53ef\u70b9\u52a0\u5165\uff0c\u6216\u6309\u4f4f\u5de6\u4fa7\u62d6\u5230\u53f3\u8fb9";
+  const selectedGuide = isDirectorPreview ? "按导演章节审阅，可拖拽调整顺序" : "\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb";
+  const candidateHead = '<div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>' + candidateGuide + '</span></div><small>' + (isDirectorPreview ? candidateStats.all : candidateStats.filtered + ' / ' + candidateStats.source) + ' \u6bb5</small></div>';
   const durationClass = duration.accepted ? "is-ok" : "is-warn";
-  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>\u5df2\u9009\u7247\u6bb5</strong><span>\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb</span></div><div class="preview-duration-control"><small class="' + durationClass + '" title="\u539f\u7247\u5408\u8ba1 ' + duration.rawTotal.toFixed(1) + 's\uff0c\u6309 ' + duration.speed.toFixed(2) + 'x \u9884\u8ba1\u53d8\u901f\u6298\u7b97">' + selected.length + ' \u6bb5 \u00b7 \u9884\u8ba1 ' + duration.projected.toFixed(1) + 's<br>\u5141\u8bb8 ' + duration.low.toFixed(0) + '-' + duration.high.toFixed(0) + 's</small><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="' + scope + '">\u9002\u914d\u65f6\u957f</button></div></div>';
-  return renderPreviewFilmOverview(scope, preview, targetId, selected, duration) + '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
+  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>' + (isDirectorPreview ? '已选片段（故事脚本）' : '\u5df2\u9009\u7247\u6bb5') + '</strong><span>' + selectedGuide + '</span></div><div class="preview-duration-control"><small class="' + durationClass + '" title="\u539f\u7247\u5408\u8ba1 ' + duration.rawTotal.toFixed(1) + 's\uff0c\u6309 ' + duration.speed.toFixed(2) + 'x \u9884\u8ba1\u53d8\u901f\u6298\u7b97">' + selected.length + ' \u6bb5 \u00b7 \u9884\u8ba1 ' + duration.projected.toFixed(1) + 's<br>\u5141\u8bb8 ' + duration.low.toFixed(0) + '-' + duration.high.toFixed(0) + 's</small><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="' + scope + '">\u9002\u914d\u65f6\u957f</button></div></div>';
+  const overview = isDirectorPreview
+    ? renderCommerceDirectorRecommendationCard(preview, duration, scope)
+    : renderPreviewFilmOverview(scope, preview, targetId, selected, duration);
+  return overview + '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list" data-preview-candidate-drop-zone data-preview-scope="' + scope + '">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
 }
 
 function toast(message, type = "success") {

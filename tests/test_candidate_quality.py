@@ -20,6 +20,75 @@ def _tokens(text: str, step: float = 0.1) -> list[dict[str, object]]:
 
 
 class CandidateQualityTests(unittest.TestCase):
+
+    @staticmethod
+    def _timed_segment(text: str, timings: list[tuple[float, float]]) -> dict[str, object]:
+        spoken = [char for char in text if char not in "，。！？!?；;：:、 "]
+        assert len(spoken) == len(timings)
+        return {
+            "start": timings[0][0],
+            "end": timings[-1][1],
+            "text": text,
+            "semantic_unit": True,
+            "words": [
+                {"text": char, "start": start, "end": end}
+                for char, (start, end) in zip(spoken, timings)
+            ],
+        }
+
+    def test_short_form_refinement_splits_only_at_exact_source_boundaries(self) -> None:
+        text = "所以你的肩围看起来很瘦。去草原我觉得也很可以，它自带一点民族风。"
+        spoken = [char for char in text if char not in "，。！？!?；;：:、 "]
+        timings = []
+        cursor = 0.0
+        for index, _char in enumerate(spoken):
+            step = 0.10 if index < len("所以你的肩围看起来很瘦") else 0.30
+            timings.append((cursor, cursor + step))
+            cursor += step
+            if index == len("所以你的肩围看起来很瘦") - 1:
+                cursor += 0.25
+            if index == len("所以你的肩围看起来很瘦去草原我觉得也很可以") - 1:
+                cursor += 0.35
+        segment = self._timed_segment(text, timings)
+
+        refined, metrics = candidate_quality.refine_short_form_semantic_segments([segment])
+
+        self.assertEqual(metrics["split_segments"], 1)
+        self.assertEqual(
+            [item["text"] for item in refined],
+            ["所以你的肩围看起来很瘦。", "去草原我觉得也很可以，", "它自带一点民族风。"],
+        )
+        self.assertEqual(
+            [(item["start"], item["end"]) for item in refined],
+            [
+                (round(timings[0][0], 3), round(timings[len("所以你的肩围看起来很瘦") - 1][1], 3)),
+                (
+                    round(timings[len("所以你的肩围看起来很瘦")][0], 3),
+                    round(timings[len("所以你的肩围看起来很瘦去草原我觉得也很可以") - 1][1], 3),
+                ),
+                (round(timings[len("所以你的肩围看起来很瘦去草原我觉得也很可以")][0], 3), round(cursor, 3)),
+            ],
+        )
+        rebuilt_words = [
+            word["text"] for item in refined for word in item["words"]
+        ]
+        self.assertEqual(rebuilt_words, spoken)
+
+    def test_short_form_refinement_keeps_long_text_without_a_reliable_boundary(self) -> None:
+        text = "这个面料穿起来轻轻薄薄夏天出门不会闷而且垂感也很自然"
+        timings = [(index * 0.25, (index + 1) * 0.25) for index, _ in enumerate(text)]
+        segment = self._timed_segment(text, timings)
+
+        refined, metrics = candidate_quality.refine_short_form_semantic_segments([segment])
+
+        self.assertEqual(len(refined), 1)
+        self.assertEqual(refined[0]["text"], text)
+        self.assertEqual(metrics["long_unsplit_segments"], 1)
+
+    def test_short_form_scene_clause_can_end_before_a_new_subject(self) -> None:
+        self.assertTrue(candidate_quality.short_form_independent_clause("去草原我觉得也很可以，"))
+        self.assertTrue(candidate_quality.short_form_independent_clause("上班穿也很合适。"))
+        self.assertFalse(candidate_quality.short_form_independent_clause("这个料子很轻，而且"))
     def test_word_exact_trim_removes_dangling_clause_before_complete_question(self) -> None:
         text = "而且亚麻的哎你们有没有发现今年大衣都有亚麻"
 
@@ -60,6 +129,41 @@ class CandidateQualityTests(unittest.TestCase):
         )
         self.assertEqual(filtered[0], clips[0])
 
+    def test_observed_caramel_asr_residue_cannot_enter_safe_candidate_inventory(self) -> None:
+        for text in (
+            "下0天40度了，你以为杭州不热呀。",
+            "人间一定是直角的。",
+            "木浆纤维可降解的A类母婴店，就是你小宝宝。",
+            "好的，来一拉开160斤，一收上看起来像100斤葡萄。",
+        ):
+            with self.subTest(text=text):
+                self.assertIn("明显ASR错词", candidate_quality.candidate_quality_flags(text))
+
+    def test_caramel_unclosed_delivery_and_obfuscated_price_are_rejected(self) -> None:
+        unusable = (
+            "直到3到5厘米的一个挖尖挖进来会显得我们的肩干嘛？",
+            "是但是你的视觉重心会落在这个线上。",
+            "它是很很凉爽的一个面料，而且上身完全不。",
+            "它是大是显瘦。",
+        )
+        for text in unusable:
+            with self.subTest(text=text):
+                self.assertTrue(candidate_quality.candidate_quality_flags(text))
+
+        policy = {"price": "block"}
+        for text in (
+            "V4五0百啊，你们要400多买都是贵的。",
+            "来388388对吧？",
+            "对，3881整套。",
+        ):
+            with self.subTest(text=text):
+                self.assertIn("价格/成本报价", candidate_quality.candidate_quality_flags(text, content_policy=policy))
+
+        # A comma in SRT is transport punctuation, not a reason to kill a
+        # complete spoken buyer benefit.
+        self.assertFalse(candidate_quality.candidate_quality_flags("整个把你的肉全部藏在了这个马甲一样的形状里，"))
+        self.assertFalse(candidate_quality.candidate_quality_flags("你的两边拜拜肉全部藏在了这个大网纱里面，"))
+
     def test_unusable_transcript_residue_and_cost_quotes_are_filtered(self) -> None:
         clips = [
             ("product", "\u8fd9\u4e2a\u9762\u6599\u7a7f\u8d77\u6765\u5f88\u67d4\u8f6f", 0.0, 3.0, 0, 3.0),
@@ -96,6 +200,19 @@ class CandidateQualityTests(unittest.TestCase):
                 self.assertTrue(candidate_quality.candidate_quality_flags(text))
 
         self.assertFalse(candidate_quality.candidate_quality_flags("高克重粗织亚麻，纹理更立体。"))
+
+    def test_embedded_material_selling_point_cannot_launder_clear_asr_miswords(self) -> None:
+        broken = (
+            "非常的高会热吗？你看料子都是那种薄薄透透的，"
+            "会不被面儿热，我真的想把它防风。"
+        )
+
+        self.assertIn("疑似ASR错词", candidate_quality.candidate_quality_flags(broken))
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags(
+                "料子薄薄透透的，夏天穿不会闷，风一吹会更凉快。"
+            )
+        )
 
     def test_orphaned_adjective_tail_is_not_a_candidate(self) -> None:
         self.assertTrue(candidate_quality.candidate_quality_flags("吸引的。但这件我特别喜欢。"))
@@ -149,6 +266,39 @@ class CandidateQualityTests(unittest.TestCase):
 
         self.assertFalse(
             candidate_quality.candidate_quality_flags("棉和人丝混纺，贴身穿会更柔软。")
+        )
+
+    def test_observed_orphaned_effect_and_styling_tails_are_not_candidates(self) -> None:
+        unusable = [
+            "呢还遮肚子前短后长前衣长58。",
+            "会稍微亮一点点。",
+            "单穿早秋秋高气爽的季节。",
+            "再加上它立体的。",
+            "出去玩的时候，棒球帽一戴。",
+        ]
+        for text in unusable:
+            with self.subTest(text=text):
+                self.assertTrue(candidate_quality.candidate_quality_flags(text))
+
+        for text in (
+            "它会稍微显白一点，黄黑皮自然光下穿也更提气色。",
+            "早秋秋高气爽的季节单穿很舒服，不会觉得厚重。",
+            "再加上它立体的肩线，整个人会更显精神。",
+            "棒球帽一戴，整套立刻更休闲年轻。",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(candidate_quality.candidate_quality_flags(text))
+
+    def test_orphaned_material_and_structure_word_tails_are_not_candidates(self) -> None:
+        self.assertTrue(candidate_quality.candidate_quality_flags("酯纤维的面料"))
+        self.assertTrue(candidate_quality.candidate_quality_flags("侧面是做了一个三角的立"))
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags("聚酯纤维的面料不显廉价")
+        )
+        self.assertFalse(
+            candidate_quality.candidate_quality_flags(
+                "侧面做了一个三角的立体捏褶，腰线更利落。"
+            )
         )
 
     def test_malformed_audience_opening_is_hook_only_defect(self) -> None:

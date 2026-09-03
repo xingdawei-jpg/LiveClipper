@@ -43,6 +43,27 @@ class LocalAsrObservedCorrectionTests(unittest.TestCase):
         self.assertAlmostEqual(clothing_token["start"], app_start)
         self.assertAlmostEqual(clothing_token["end"], app_end)
 
+    def test_observed_caramel_corrections_are_context_bound_and_keep_time_ranges(self) -> None:
+        text = "下0天40度了，溜肩原肩大斜方间了"
+        spoken = text.replace("，", "")
+        words = [
+            {"text": char, "start": index * 0.1, "end": (index + 1) * 0.1}
+            for index, char in enumerate(spoken)
+        ]
+
+        corrected, count = local_asr_quality.apply_domain_corrections([{
+            "text": text,
+            "start": 0.0,
+            "end": len(spoken) * 0.1,
+            "words": words,
+        }])
+
+        self.assertEqual(count, 3)
+        self.assertEqual(corrected[0]["text"], "夏天40度了，溜肩圆肩大斜方肩了")
+        summer_token = next(word for word in corrected[0]["words"] if word["text"] == "夏天")
+        self.assertEqual(summer_token["start"], words[0]["start"])
+        self.assertEqual(summer_token["end"], words[2]["end"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,10 +44,10 @@ class LocalAsrChunkingTests(unittest.TestCase):
             )
             chunks = chunking.build_pause_aware_audio_chunks(audio)
 
-            self.assertEqual(len(chunks), 3)
+            self.assertGreaterEqual(len(chunks), 3)
             self.assertEqual(chunks[0].start, 0.0)
             self.assertAlmostEqual(chunks[-1].end, 24.0, places=3)
-            self.assertTrue(all(chunk.duration <= 12.001 for chunk in chunks))
+            self.assertTrue(all(chunk.duration <= 10.001 for chunk in chunks))
             self.assertTrue(all(right.start == left.end for left, right in zip(chunks, chunks[1:])))
             self.assertTrue(all(chunk.boundary_reason != "hard_limit" for chunk in chunks[:-1]))
 
@@ -65,8 +65,29 @@ class LocalAsrChunkingTests(unittest.TestCase):
             _write_pcm_wave(audio, 25.0, [(0.0, 25.0)])
             chunks = chunking.build_pause_aware_audio_chunks(audio)
 
-        self.assertEqual([(chunk.start, chunk.end) for chunk in chunks], [(0.0, 9.0), (9.0, 18.0), (18.0, 25.0)])
-        self.assertEqual([chunk.boundary_reason for chunk in chunks], ["hard_limit", "hard_limit", "source_end"])
+        self.assertEqual(
+            [(chunk.start, chunk.end) for chunk in chunks],
+            [(0.0, 7.0), (7.0, 14.0), (14.0, 21.0), (21.0, 25.0)],
+        )
+        self.assertEqual(
+            [chunk.boundary_reason for chunk in chunks],
+            ["hard_limit", "hard_limit", "hard_limit", "source_end"],
+        )
+
+    def test_standard_profile_remains_available_for_offline_ab_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "continuous-standard.wav"
+            _write_pcm_wave(audio, 25.0, [(0.0, 25.0)])
+            chunks = chunking.build_pause_aware_audio_chunks(
+                audio,
+                target_seconds=chunking.STANDARD_TARGET_CHUNK_SECONDS,
+                max_seconds=chunking.STANDARD_MAX_CHUNK_SECONDS,
+            )
+
+        self.assertEqual(
+            [(chunk.start, chunk.end) for chunk in chunks],
+            [(0.0, 9.0), (9.0, 18.0), (18.0, 25.0)],
+        )
 
     def test_chunked_inference_offsets_words_back_to_source_timeline(self) -> None:
         chunks = [
