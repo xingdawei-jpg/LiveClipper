@@ -13,8 +13,9 @@
     "post_update_business_validation": "pass",
     "rollback": "pass: corrupted 2026.9.3.2 business entry restored 2026.8.12.2",
     "core_and_user_data_preservation": "pass",
-    "remote_upload_and_download": "pending",
-    "ready_channel": "pending",
+    "remote_upload_and_download": "pass: OSS public ZIP sha256 verified",
+    "ready_channel": "pass: OSS public stable.json signature and 2026.8.12.2 update route verified",
+    "fallback_endpoint_parity": "not_pass: jsDelivr and pages.dev stable endpoints return 404",
     "second_clean_machine_gui": "not_run: user authorized early business release"
   }
 }
