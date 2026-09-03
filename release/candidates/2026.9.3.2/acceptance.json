@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "version": "2026.9.3.2",
+  "release_type": "runtime_v4_business",
+  "source_commit": "a31c0496041fe23815eb5f3ea7d49d6da36e883c",
+  "checks": {
+    "scoped_freeze": "pass",
+    "version_manifest": "pass",
+    "clean_appdata_full_regression": "pass: 1033 tests, 2 skipped",
+    "deterministic_signed_bundle": "pass",
+    "bundle_signature_and_core_compatibility": "pass",
+    "isolated_upgrade": "pass: 2026.8.5.2 -> 2026.8.12.2 -> 2026.9.3.2",
+    "post_update_business_validation": "pass",
+    "rollback": "pass: corrupted 2026.9.3.2 business entry restored 2026.8.12.2",
+    "core_and_user_data_preservation": "pass",
+    "remote_upload_and_download": "pending",
+    "ready_channel": "pending",
+    "second_clean_machine_gui": "not_run: user authorized early business release"
+  }
+}
