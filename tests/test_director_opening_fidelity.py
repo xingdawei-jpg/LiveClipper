@@ -49,7 +49,9 @@ class DirectorOpeningFidelityTests(unittest.TestCase):
         self.assertIn("continuity_warning", preview["clips"][1]["segments"][0])
         final = server._clips_from_preview_selection(preview, list(range(len(texts))))
         self.assertEqual([c[1] for c in final], texts)
-        self.assertTrue(all(c[5] <= 3.01 for c in final))
+        # The spoken beat stays at three seconds; the media range includes a
+        # bounded 100ms acoustic release tail.
+        self.assertTrue(all(c[5] <= 3.11 for c in final))
         self.assertEqual(server._director_preview_fidelity_audit(preview["clips"])["status"], "preserved")
 
     def test_legacy_prefix_selection_is_unchanged(self):
@@ -67,6 +69,45 @@ class DirectorOpeningFidelityTests(unittest.TestCase):
         kept = server._clips_from_preview_selection(preview, [0], selected_words={"0": {"0": list(range(2, 9))}})
         self.assertEqual([c[1] for c in kept], ["这个袖子用料足"])
         self.assertAlmostEqual(kept[0][2], 0.667, places=3)
+
+    def test_complete_selected_sentence_gets_bounded_audio_tail(self):
+        preview = self.preview(["这件衣服显得肩很窄"])
+        raw_end = preview["clips"][0]["segments"][0]["end"]
+        kept = server._clips_from_preview_selection(preview, [0])
+        self.assertAlmostEqual(kept[0][3], raw_end + 0.10, places=3)
+        self.assertEqual(kept[0][1], "这件衣服显得肩很窄")
+        metadata = next(item for item in kept[0] if isinstance(item, dict) and item.get("preview_exact"))
+        self.assertAlmostEqual(metadata["audio_tail_guard_seconds"], 0.10, places=3)
+
+    def test_deleting_trailing_words_does_not_restore_their_audio(self):
+        preview = self.preview(["这件衣服显得肩很窄"])
+        segment = preview["clips"][0]["segments"][0]
+        kept_indices = list(range(len(segment["words"]) - 2))
+        expected_end = segment["words"][kept_indices[-1]]["end"]
+        kept = server._clips_from_preview_selection(
+            preview, [0], selected_words={"0": {"0": kept_indices}},
+        )
+        self.assertAlmostEqual(kept[0][3], expected_end, places=3)
+        metadata = next(item for item in kept[0] if isinstance(item, dict) and item.get("preview_exact"))
+        self.assertEqual(metadata["audio_tail_guard_seconds"], 0.0)
+        self.assertEqual(metadata["audio_tail_guard"], "exact_word_edit")
+
+    def test_audio_tail_stops_before_unselected_following_segment(self):
+        preview = self.preview(["这件衣服显得肩很窄"])
+        clip = preview["clips"][0]
+        clip["segments"] = [
+            {**clip["segments"][0], "index": 0, "start": 0.0, "end": 1.0,
+             "text": "肩很窄", "words": [
+                 {"text": "肩", "start": 0.6, "end": 0.8, "index": 0},
+                 {"text": "很", "start": 0.8, "end": 0.9, "index": 1},
+                 {"text": "窄", "start": 0.9, "end": 1.0, "index": 2},
+             ]},
+            {"index": 1, "start": 1.06, "end": 1.8, "duration": 0.74,
+             "text": "下一句话", "selected": True, "word_timed": True,
+             "words": [{"text": "下", "start": 1.06, "end": 1.16, "index": 0}]},
+        ]
+        kept = server._clips_from_preview_selection(preview, [0], selected_segments={"0": [0]})
+        self.assertAlmostEqual(kept[0][3], 1.03, places=3)
 
     def test_dangling_piece_is_not_programmatically_removed_for_director(self):
         preview = self.preview(["整套穿搭会更加的"], word_timed=False)

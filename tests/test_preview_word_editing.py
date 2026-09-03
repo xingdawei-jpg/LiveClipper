@@ -796,7 +796,9 @@ class PreviewWordEditingTests(unittest.TestCase):
             [0],
             {"0": [0, 1, 2, 3, 4]},
         )
-        self.assertEqual([(round(part[2], 2), round(part[3], 2)) for part in parts], [(10.0, 10.35), (10.82, 12.0)])
+        # The internal deletion boundary remains exact; only the final kept
+        # word receives the bounded acoustic release tail.
+        self.assertEqual([(round(part[2], 2), round(part[3], 2)) for part in parts], [(10.0, 10.35), (10.82, 12.1)])
         self.assertEqual([part[1] for part in parts], ["[V2] \u597d\u770b", "[V2] \u7a7f\u8d77\u6765\u5f88\u663e\u7626"])
         self.assertTrue(all("\u8fdd\u7981" not in part[1] and "\u8bcd" not in part[1] for part in parts))
 
@@ -891,7 +893,7 @@ class PreviewWordEditingTests(unittest.TestCase):
 
         self.assertEqual(len(parts), 1)
         self.assertIn("而且是有点小衬衫感的", parts[0][1])
-        self.assertEqual((round(parts[0][2], 1), round(parts[0][3], 1)), (10.0, 17.0))
+        self.assertEqual((round(parts[0][2], 1), round(parts[0][3], 1)), (10.0, 17.1))
 
     def test_legacy_duplicate_word_indices_are_resolved_by_sentence_position(self):
         segment = {

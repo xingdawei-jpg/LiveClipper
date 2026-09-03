@@ -3434,7 +3434,14 @@ def process_video(video_path, srt_path=None, output_path=None,
                 end = min(video_duration, end + 0.0)
                 if end > old_end + 0.01:
                     _log(f"尾音保护: 最后一段延长 {old_end:.2f}s→{end:.2f}s，避免末字被截")
-            _actual_clip_text = _srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or "")
+            # Exact preview ranges may include a small acoustic tail after the
+            # final selected word. Keep the reviewed text authoritative so the
+            # tail cannot reintroduce source words into the edit contract.
+            _actual_clip_text = (
+                str(text or "")
+                if _range_locked
+                else (_srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or ""))
+            )
             if abs(start - _orig_start) > 0.01 or abs(end - _orig_end) > 0.01:
                 _log(f"实际切割 [{clip_idx+1}/{total_clips}] {_orig_start:.1f}-{_orig_end:.1f}s -> {start:.1f}-{end:.1f}s | {_actual_clip_text[:120]}")
 

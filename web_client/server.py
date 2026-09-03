@@ -6716,6 +6716,46 @@ def _merge_selected_segments(
     result: list[tuple[Any, ...]] = []
     source_marker = _preview_expected_source_marker(public_clip)
     for group_index, (start, end, text, group) in enumerate(renderable_groups):
+        # SenseVoice's CTC timestamps mark an aligned character window, not a
+        # guaranteed acoustic release point. Ending the media at that exact
+        # timestamp can show the final character while cutting its audible
+        # tail. Add a small playback-only tail only when this group really
+        # reaches the end of every selected semantic segment.
+        #
+        # A deliberate word edit that drops trailing words stays exact: an
+        # extension there could make deleted speech audible again. Text and
+        # selected-word lineage are never expanded by this guard.
+        group_segment_indices = sorted({int(unit["segment_index"]) for unit in group})
+        group_reaches_selected_tail = True
+        for unit in group:
+            selected_word_indices = list(unit.get("selected_word_indices") or [])
+            if not selected_word_indices:
+                continue
+            matching_segment = next(
+                (segment for segment in selected if _preview_segment_index(segment) == int(unit["segment_index"])),
+                None,
+            )
+            word_count = len(list((matching_segment or {}).get("words") or []))
+            if word_count and max(selected_word_indices) != word_count - 1:
+                group_reaches_selected_tail = False
+                break
+
+        audio_tail_added = 0.0
+        if group_reaches_selected_tail:
+            original_end = end
+            padded_end = end + 0.10
+            # Do not run into another semantic segment left out of this group.
+            # Keep 30ms of air before its boundary.
+            future_starts = [
+                _preview_segment_start(segment)
+                for segment in segments
+                if _preview_segment_index(segment) not in group_segment_indices
+                and _preview_segment_start(segment) >= end - 0.001
+            ]
+            if future_starts:
+                padded_end = min(padded_end, max(end, min(future_starts) - 0.03))
+            end = round(max(end, padded_end), 3)
+            audio_tail_added = round(max(0.0, end - original_end), 3)
         if source_marker:
             text = f"[{source_marker}] {text}"
         values = list(base)
@@ -6735,12 +6775,14 @@ def _merge_selected_segments(
             "preview_parent_index": int(public_clip.get("index", -1)),
             "preview_group_index": group_index,
             "preview_group_count": len(renderable_groups),
-            "selected_segment_indices": sorted({int(unit["segment_index"]) for unit in group}),
+            "selected_segment_indices": group_segment_indices,
             "selected_word_indices": {
                 str(unit["segment_index"]): list(unit.get("selected_word_indices") or [])
                 for unit in group
                 if unit.get("selected_word_indices")
             },
+            "audio_tail_guard_seconds": audio_tail_added,
+            "audio_tail_guard": "ctc_release_padding" if audio_tail_added else "exact_word_edit",
         })
         result.append(tuple(values))
     return result
@@ -8390,7 +8432,8 @@ def _preview_clip_parts_for_video(
 
 
 def _preview_clip_cache_signature(preview_parts: list[Any], source_sig: str) -> str:
-    pieces = [source_sig, "render-pretrim-v2"]
+    # v3 invalidates cached clips created before CTC tail protection.
+    pieces = [source_sig, "render-pretrim-v3-ctc-tail"]
     for part in preview_parts:
         info = _clip_public(0, part)
         pieces.append(
