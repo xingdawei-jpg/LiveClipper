@@ -27,6 +27,12 @@
 - V4 包、通道、下载、切换、错误包拒绝和启动回退回归：`46` 项通过，`1` 项因 Windows 未授予符号链接权限跳过。
 - 商业导演/M3/业务包定向回归：`61` 项通过，`1` 项同样因符号链接权限跳过。
 
+## OSS 候选资产
+
+- ZIP 已上传并从公网重新下载：`https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/LiveClipperBusiness_2026.9.3.3.zip`。
+- 公网 ZIP SHA-256 与本地一致：`5e446e912d801bcbd61cc6672c45b6711b5973e6ab55baec3a0168646aaa8b20`；签名、85 个业务文件和 Core `4.0.0` 兼容性再次验证通过。
+- 正式 `stable.json` 仍为 `2026.9.3.2 / hold`，不引用该候选资产；因此当前没有客户端会自动安装 `2026.9.3.3`。
+
 ## 完整发现测试的已知基线问题
 
 - 干净提交执行 `python -m unittest discover -s tests -q` 共运行 `1012` 项，`13` 项错误、`4` 项跳过。

@@ -16,7 +16,7 @@
     "failure_rollback": "pass: tampered 2026.9.3.3 selection restored 2026.9.3.2",
     "user_data_preserved": "pass: sentinel unchanged through update and rollback",
     "full_clean_discovery": "not_pass: 1012 tests; 13 pre-existing imports need untracked experiment scripts or missing deploy/aliyun_fc_license_auth files",
-    "remote_upload_and_download": "pending",
+    "remote_upload_and_download": "pass: OSS public ZIP sha256 and signature verified",
     "ready_channel": "pending",
     "second_clean_machine_gui": "not_run"
   }
