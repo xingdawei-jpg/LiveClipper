@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "version": "2026.9.6.1",
+  "release_type": "runtime_v4_business",
+  "source_commit": "9c4a8f73ba48cfe5266e15a0b612050664eff93c",
+  "release_authorization": "User requested version bump and update publication on 2026-09-06.",
+  "checks": {
+    "cross_window_sync": "pass: 33 scoped runtime/test files committed; unrelated work excluded",
+    "python_and_frontend_syntax": "pass",
+    "full_source_regressions": "pass: 1133 tests, 2 skipped",
+    "clean_commit_bundle_regressions": "pass: 55 tests",
+    "deterministic_build": "pass: two clean-commit builds byte-identical",
+    "signature_and_compatibility": "pass: 87 business files; Core 4.0.0",
+    "remote_bundle_roundtrip": "pass: 1542290 bytes; a1d2f3befa99f4105e3fa71f025baaf416de372e82bff837704df7d1e6d2f7fd",
+    "isolated_941_update": "pass: signed remote download, atomic activation, previous retained, bundle-only imports, user data preserved",
+    "rollback_and_failure_paths": "pass: complete source suite; real 9.4.1 rollback source retained",
+    "full_core_validation": "not_applicable: Core unchanged and excluded; historical delivered-Core mismatch remains unresolved",
+    "second_clean_machine_gui": "not_run",
+    "real_paid_model_media_review": "not_run",
+    "ready_public_channel": "pending"
+  }
+}
