@@ -7,6 +7,7 @@ const state = {
   previewDirectorCandidateViews: { smart: "recommended", mix: "recommended" },
   previewDirectorChapterFocus: { smart: "", mix: "" },
   previewDirectorAlternativesOpen: { smart: false, mix: false },
+  previewDirectorRenderSelections: { smart: {}, mix: {} },
   previewWorkbenchStages: { smart: "triage", mix: "triage" },
   previewTriageSessions: {},
   previewAssemblyOrders: {},
@@ -82,6 +83,7 @@ const state = {
   featurePreferencesLoading: false,
   featurePreferencesSaveTimer: null,
   productScan: {
+    videoOffsets: {},
     status: "idle",
     validationKey: "",
     selectionKey: "",
@@ -425,8 +427,8 @@ const primaryCategoryTaxonomy = {
     profile_key: "服饰内衣",
     secondary: ["自动识别", "女装", "男装", "内衣"],
     leaf_categories: {
-      "女装": ["套装", "西装", "大码女装", "女士T恤", "半身裙", "衬衫", "连衣裙", "裤子"],
-      "男装": ["Polo衫", "男士T恤", "牛仔裤", "衬衫", "套装", "卫裤", "短裤", "休闲裤"],
+      "女装": ["上衣", "衬衫", "T恤", "针织衫", "针织罩衫", "毛衣", "开衫", "卫衣", "背心/吊带", "马甲", "外套", "西装", "风衣", "大衣", "羽绒服", "棉服", "防晒衣", "半身裙", "连衣裙", "裤子", "牛仔裤", "阔腿裤", "短裤", "套装"],
+      "男装": ["上衣", "衬衫", "T恤", "Polo衫", "针织衫", "毛衣", "卫衣", "马甲", "外套", "夹克", "西装", "风衣", "大衣", "羽绒服", "棉服", "裤子", "牛仔裤", "休闲裤", "卫裤", "短裤", "套装"],
       "内衣": ["文胸", "内裤", "家居服", "保暖内衣", "塑身衣", "睡衣", "袜子"],
     },
   },
@@ -649,7 +651,11 @@ function refreshCategoryLeafSuggestions(prefix, profile, options = {}) {
   const input = $(`${prefix}-leaf-category`);
   const list = $(`${prefix}-leaf-category-list`);
   const secondary = $(`${prefix}-secondary-category`)?.value || "自动识别";
-  const values = profile?.leaf_categories?.[secondary] || [];
+  const leaves = profile?.leaf_categories || {};
+  // Auto gender must still offer concrete garment types; 大码/风格不是单品类型。
+  const values = isAutoCategoryValue(secondary)
+    ? [...new Set(Object.values(leaves).flat())]
+    : (leaves[secondary] || []);
   if (list) {
     list.textContent = "";
     values.forEach((value) => {
@@ -662,8 +668,149 @@ function refreshCategoryLeafSuggestions(prefix, profile, options = {}) {
   if (options.resetValue) input.value = "";
   if (options.preferredValue !== undefined) input.value = options.preferredValue || "";
   input.placeholder = values.length
-    ? `自动识别，可填${values.slice(0, 3).join("/")}`
+    ? `留空自动识别；可选${values.slice(0, 3).join("/")}`
     : "自动识别，可填写具体商品";
+  const mainInput = $(`${prefix}-main-product`);
+  if (mainInput) mainInput.placeholder = currentCategoryAiProfile(prefix).key === "服饰内衣"
+    ? "可填白色抽褶衬衫/款号，不要只填衣服"
+    : "可填具体商品名/款号；优先于细分类目";
+}
+
+function directorDirectionOptions(prefix) {
+  return primaryCategoryValue(prefix) === "服饰内衣"
+    ? ["自动", "上身效果", "穿着体验", "搭配场景", "面料工艺"]
+    : ["自动", "使用效果", "使用体验", "使用场景", "品质细节"];
+}
+
+function normalizeDirectorDirection(value, choices) {
+  const text = String(value || "").trim();
+  if (choices.includes(text)) return text;
+  if (/场景|通勤|搭配/.test(text)) return choices[3];
+  if (/质感|工艺|面料|品质|专业/.test(text)) return choices[4];
+  if (/体验|舒适/.test(text)) return choices[2];
+  if (/显瘦|上身|效果/.test(text)) return choices[1];
+  return "自动";
+}
+
+function directorContentChoices(prefix) {
+  return Object.fromEntries(["price", "inventory", "size", "styling"].map((key) => {
+    const fallback = key === "styling" ? "allow" : "inherit";
+    const value = $(`${prefix}-content-${key}`)?.value || fallback;
+    const allowed = key === "styling" ? ["allow", "block"] : ["inherit", "allow", "block", "body_only"];
+    return [key, allowed.includes(value) ? value : fallback];
+  }));
+}
+
+function directorContentPolicy(base, choices) {
+  // Override only these task-level kinds, retaining all other rules, including
+  // custom forbidden phrases. Never mutate the saved global settings.
+  const policy = { ...base };
+  const groups = { price: ["price", "cta"], inventory: ["inventory_pressure"], size: ["size_interaction"] };
+  Object.entries(groups).forEach(([key, kinds]) => {
+    if (["allow", "block", "body_only"].includes(choices[key])) {
+      kinds.forEach((kind) => { policy[kind] = choices[key]; });
+    }
+  });
+  return policy;
+}
+
+function refreshDirectorCardPresentation(prefix, basePolicy = collectContentPolicy()) {
+  const primary = fieldText(`${prefix}-primary-category`, "服饰内衣");
+  const secondary = fieldText(`${prefix}-secondary-category`, "自动识别");
+  const leaf = fieldText(`${prefix}-leaf-category`, "");
+  const main = fieldText(`${prefix}-main-product`, "");
+  const goal = fieldText(`${prefix}-goal`, "AI 自动推荐");
+  const hasLockedProduct = Boolean(main || leaf);
+  const title = main || leaf || "等待 AI 识别";
+  const path = [
+    primary,
+    !isAutoCategoryValue(secondary) ? secondary : "",
+    leaf || (main ? main : "自动识别"),
+  ].filter(Boolean);
+
+  const primaryValue = $(`${prefix}-director-primary-value`);
+  const titleValue = $(`${prefix}-director-product-title`);
+  const breadcrumb = $(`${prefix}-director-product-breadcrumb`);
+  const recognition = $(`${prefix}-director-recognition-status`);
+  const strategy = $(`${prefix}-director-strategy-summary`);
+  if (primaryValue) primaryValue.textContent = primary;
+  if (titleValue) titleValue.textContent = title;
+  if (breadcrumb) breadcrumb.textContent = path.join(" > ");
+  if (recognition) {
+    recognition.textContent = hasLockedProduct ? "商品已锁定" : "AI 自动识别";
+    recognition.dataset.state = hasLockedProduct ? "locked" : "auto";
+  }
+  if (strategy) strategy.textContent = `${goal} · 开头 / 卖点 / 结构 / 收尾由 AI 编排`;
+
+  const choices = directorContentChoices(prefix);
+  const effective = directorContentPolicy(basePolicy, choices);
+  const policyStates = {
+    price: effective.price === effective.cta ? effective.price : "mixed",
+    inventory: effective.inventory_pressure,
+    size: effective.size_interaction,
+    styling: choices.styling,
+  };
+  Object.entries(policyStates).forEach(([key, value]) => {
+    const row = $(`${prefix}-content-${key}`)?.closest(".director-content-choice");
+    if (row) row.dataset.policyState = ["allow", "block", "body_only"].includes(value) ? value : "mixed";
+  });
+}
+
+function refreshDirectorContentLabels(prefix) {
+  const base = collectContentPolicy();
+  const labels = { allow: "允许", block: "排除", body_only: "仅正文", prefer: "优先可用" };
+  const groups = { price: ["price", "cta"], inventory: ["inventory_pressure"], size: ["size_interaction"] };
+  Object.entries(groups).forEach(([key, kinds]) => {
+    const option = $(`${prefix}-content-${key}`)?.querySelector('option[value="inherit"]');
+    if (!option) return;
+    const states = kinds.map((kind) => labels[base[kind]] || "排除");
+    const state = new Set(states).size === 1 ? states[0] : `价格${states[0]} / 促销${states[1]}`;
+    option.textContent = `跟随设置：${state}`;
+  });
+  const scope = $(`${prefix}-product-scope-note`);
+  const main = $(`${prefix}-main-product`)?.value.trim();
+  const leaf = $(`${prefix}-leaf-category`)?.value.trim();
+  const locked = main || leaf;
+  if (scope) scope.textContent = locked
+    ? `已指定：${locked}${main && leaf ? `（商品类型：${leaf}）` : ""}。${directorContentChoices(prefix).styling === "block" ? "本次排除其他商品搭配。" : "其他商品仅可作搭配，不混入独立卖点。"}`
+    : "留空由 AI 自动识别商品；开头、卖点顺序和收尾由导演策略编排。";
+  const status = $(`${prefix}-director-more-status`);
+  if (status) {
+    const notes = [locked ? "已指定商品" : "", $(`${prefix}-extra-instruction`)?.value.trim() ? "有补充要求" : ""];
+    status.textContent = notes.filter(Boolean).join(" · ");
+  }
+  refreshDirectorCardPresentation(prefix, base);
+}
+
+function migrateDirectorPreset(preset, choices) {
+  const modern = preset.controls_version === "director-controls-v2";
+  const avoid = Array.isArray(preset.avoid) ? preset.avoid : [];
+  const content = modern ? { ...(preset.content_choices || {}) } : {
+    price: avoid.some((v) => /价格|报价|促销|促单/.test(v)) ? "block" : "inherit",
+    inventory: avoid.some((v) => /库存|稀缺/.test(v)) ? "block" : "inherit",
+    size: avoid.some((v) => /尺码|身高体重/.test(v)) ? "block" : "inherit",
+    styling: avoid.includes("搭配其他品") ? "block" : "allow",
+  };
+  const legacyWords = Array.isArray(preset.selling_custom) ? preset.selling_custom.join("、") : String(preset.selling_custom || "");
+  return {
+    ...preset,
+    controls_version: "director-controls-v2",
+    goal: normalizeDirectorDirection(preset.goal || preset.focus, choices),
+    content_choices: content,
+    extra_instruction: String(modern ? preset.extra_instruction || "" : legacyWords ? `可优先参考：${legacyWords}` : "").slice(0, 300),
+    migration_note: modern ? preset.migration_note || "" : "旧参数已迁移：保留商品、内容取舍和补充要求；多选卖点、开头与收尾偏好不再生效，请核对导演侧重。",
+  };
+}
+
+function applyCompactDirectorValues(prefix, preset) {
+  const migrated = migrateDirectorPreset(preset, directorDirectionOptions(prefix));
+  setSelectIfPresent(`${prefix}-goal`, migrated.goal);
+  Object.entries(migrated.content_choices).forEach(([key, value]) => setSelectIfPresent(`${prefix}-content-${key}`, value));
+  const extra = $(`${prefix}-extra-instruction`);
+  if (extra) extra.value = migrated.extra_instruction;
+  const note = $(`${prefix}-director-migration-note`);
+  if (note) { note.textContent = migrated.migration_note; note.hidden = !migrated.migration_note; }
+  refreshDirectorContentLabels(prefix);
 }
 
 function refreshCategoryAiControls(prefix, options = {}) {
@@ -671,14 +818,12 @@ function refreshCategoryAiControls(prefix, options = {}) {
   if (!profile) return;
   const preferDefaults = Boolean(options.preferDefaults);
   replaceSelectOptions(`${prefix}-secondary-category`, profile.secondary, options.preferredSecondary ?? (preferDefaults ? "自动识别" : undefined));
-  replaceSelectOptions(`${prefix}-goal`, profile.goal, options.preferredGoal ?? (preferDefaults ? profile.default_goal : undefined));
-  replaceSelectOptions(`${prefix}-hook-style`, profile.hook, options.preferredHook ?? (preferDefaults ? profile.default_hook : undefined));
-  replaceSelectOptions(`${prefix}-ending-style`, profile.ending, options.preferredEnding ?? (preferDefaults ? profile.default_ending : undefined));
-  renderAiChipGroup(prefix, "selling", profile.selling, options.selectedSelling ?? (preferDefaults ? profile.default_selling : undefined));
-  renderAiChipGroup(prefix, "avoid", profile.avoid, options.selectedAvoid ?? (preferDefaults ? profile.default_avoid : undefined));
-  const customInput = $(`${prefix}-selling-custom`);
-  if (customInput && profile.custom_placeholder) {
-    customInput.placeholder = profile.custom_placeholder;
+  const directions = directorDirectionOptions(prefix);
+  replaceSelectOptions(`${prefix}-goal`, directions, normalizeDirectorDirection(options.preferredGoal ?? (preferDefaults ? "自动" : $(`${prefix}-goal`)?.value), directions));
+  const autoOption = $(`${prefix}-goal`)?.querySelector('option[value="自动"]');
+  if (autoOption) autoOption.textContent = "AI 自动推荐";
+  const customInput = $(`${prefix}-extra-instruction`);
+  if (customInput) {
     if (options.resetCustomSelling) customInput.value = "";
   }
   refreshCategoryLeafSuggestions(prefix, profile, {
@@ -690,6 +835,7 @@ function refreshCategoryAiControls(prefix, options = {}) {
     if (mainProduct) mainProduct.value = "";
   }
   refreshAiPresetVisibility(prefix, profile);
+  refreshDirectorContentLabels(prefix);
   const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
   if (panel) updatePanelSummary(panel);
 }
@@ -721,8 +867,7 @@ function bindCategoryControls() {
     $(`${prefix}-secondary-category`)?.addEventListener("change", () => {
       const { profile } = currentCategoryAiProfile(prefix);
       refreshCategoryLeafSuggestions(prefix, profile, { resetValue: true });
-      const mainProduct = $(`${prefix}-main-product`);
-      if (mainProduct) mainProduct.value = "";
+      // Changing 女装/男装 must not silently erase an explicitly named SKU.
       const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
       if (panel) updatePanelSummary(panel);
     });
@@ -834,9 +979,11 @@ const featurePreferenceGroups = {
       "sc-leaf-category",
       "sc-main-product",
       "sc-goal",
-      "sc-hook-style",
-      "sc-selling-custom",
-      "sc-ending-style",
+      "sc-extra-instruction",
+      "sc-content-price",
+      "sc-content-inventory",
+      "sc-content-size",
+      "sc-content-styling",
     ],
   },
   mix: {
@@ -882,9 +1029,11 @@ const featurePreferenceGroups = {
       "mix-leaf-category",
       "mix-main-product",
       "mix-goal",
-      "mix-hook-style",
-      "mix-selling-custom",
-      "mix-ending-style",
+      "mix-extra-instruction",
+      "mix-content-price",
+      "mix-content-inventory",
+      "mix-content-size",
+      "mix-content-styling",
     ],
   },
   dedup: {
@@ -924,10 +1073,6 @@ const featurePreferenceGroups = {
       "ps-output-dir",
       "ps-advance",
       "ps-fast-cut",
-      "ps-video-start-offset",
-      "ps-live-start-time",
-      "ps-time-basis-relative",
-      "ps-time-basis-clock",
     ],
   },
   video_split: {
@@ -1211,6 +1356,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindPreviewControls();
   bindFeaturePreferenceAutoSave();
   bindDedupCustomControls();
+  refreshVersionCostNotes();
   setupLogProgressBars();
   bindPreviewModalShortcuts();
   loadLiveRooms();
@@ -1242,11 +1388,26 @@ function $(id) {
 }
 
 function bindProductScanFlow() {
-  document.querySelectorAll('input[name="ps-align-mode"]').forEach((input) => {
-    input.addEventListener("change", syncProductScanFlow);
+  $("ps-use-first-time")?.addEventListener("click", () => {
+    const stamps = getLines("ps-video-paths").map(productScanFilenameStamp).filter(Boolean).sort((a, b) => a.time - b.time);
+    if (!stamps.length) return;
+    $("ps-live-start-time").value = stamps[0].text;
+    syncProductScanFlow();
   });
-  document.querySelectorAll('input[name="ps-time-basis"]').forEach((input) => {
-    input.addEventListener("change", syncProductScanFlow);
+  document.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.dataset.psVideoOffset === undefined) return;
+    const path = getLines("ps-video-paths")[Number(input.dataset.psVideoOffset)];
+    if (!path) return;
+    state.productScan.videoOffsets[normalizeVideoPath(path)] = input.value.trim();
+    syncProductScanFlow();
+  });
+  document.addEventListener("click", (event) => {
+    const reset = event.target.closest("[data-ps-reset-offset]");
+    if (!reset) return;
+    const path = getLines("ps-video-paths")[Number(reset.dataset.psResetOffset)];
+    if (path) delete state.productScan.videoOffsets[normalizeVideoPath(path)];
+    syncProductScanFlow();
   });
   document.querySelectorAll("#page-product-scan input, #page-product-scan textarea").forEach((input) => {
     input.addEventListener("input", syncProductScanFlow);
@@ -1279,33 +1440,77 @@ function bindProductScanFlow() {
   syncProductScanFlow();
 }
 
-function productScanAlignmentMode() {
-  return document.querySelector('input[name="ps-align-mode"]:checked')?.value === "auto" ? "auto" : "manual";
-}
-
-function productScanTimeBasis() {
-  return document.querySelector('input[name="ps-time-basis"]:checked')?.value === "clock" ? "clock" : "relative";
-}
-
-function productScanNeedsLiveStart() {
-  return productScanAlignmentMode() === "auto" || productScanTimeBasis() === "clock";
-}
-
-function productScanLiveStartValue() {
-  return $("ps-live-start-time")?.value.trim() || "";
-}
-
 function parseProductScanOffset(value) {
   const text = String(value || "").trim().replace(/：/g, ":");
   if (!text) return null;
   if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+  if (!/^\d+:\d{2}(?::\d{2})?$/.test(text)) return null;
   const parts = text.split(":");
   if (![2, 3].includes(parts.length)) return null;
   const values = parts.map((part) => Number(part.trim()));
   if (values.some((part) => !Number.isInteger(part) || part < 0)) return null;
   const [hours, minutes, seconds] = parts.length === 3 ? values : [0, values[0], values[1]];
-  if (minutes > 59 || seconds > 59) return null;
+  if ((parts.length === 3 && minutes > 59) || seconds > 59) return null;
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+function productScanDateStamp(text) {
+  const compact = String(text || "").trim().match(/^(20\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?$/);
+  const date = compact || String(text || "").trim().match(/^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!date) return null;
+  const fields = date.slice(1).map(value => Number(value || 0));
+  const [year, month, day, hour, minute, second] = fields;
+  const time = Date.UTC(year, month - 1, day, hour, minute, second);
+  const check = new Date(time);
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day
+    || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute || check.getUTCSeconds() !== second) return null;
+  return { time, text: date[0], minutePrecision: !date[6] };
+}
+
+function productScanFilenameStamp(path) {
+  const name = String(path || "").split(/[\\/]/).pop();
+  const match = name.match(/(?:^|\D)(20\d{12}|20\d{10})(?!\d)/);
+  return match ? productScanDateStamp(match[1]) : null;
+}
+
+function productScanVideoAnchor(path) {
+  const manual = state.productScan.videoOffsets[normalizeVideoPath(path)] || "";
+  if (manual) {
+    const value = parseProductScanOffset(manual);
+    return { value, text: manual, manual: true, hint: value === null ? "格式有误，如 01:28:13" : "手动设置" };
+  }
+  const stamp = productScanFilenameStamp(path);
+  if (!stamp) return { value: null, hint: "无时间戳 · 请填写" };
+  const duplicates = getLines("ps-video-paths").filter(video => productScanFilenameStamp(video)?.time === stamp.time);
+  if (duplicates.length > 1) return { value: null, hint: "时间重复 · 请分别填写" };
+  const live = productScanDateStamp($("ps-live-start-time")?.value);
+  if (!live) return { value: null, hint: "先填开播时间，或手填此段" };
+  const value = (stamp.time - live.time) / 1000;
+  if (value < 0) return { value: null, hint: "早于开播 · 请核对" };
+  const text = [Math.floor(value / 3600), Math.floor(value % 3600 / 60), value % 60]
+    .map(number => String(number).padStart(2, "0")).join(":");
+  return { value, text, manual: false, hint: stamp.minutePrecision ? "文件名建议 · 分钟精度" : "文件名建议 · 秒精度" };
+}
+
+function productScanVideoOverrides() {
+  return Object.fromEntries(getLines("ps-video-paths").map(path => [path, state.productScan.videoOffsets[normalizeVideoPath(path)] || ""]).filter(([, value]) => value));
+}
+
+function updateProductScanAnchors() {
+  const paths = getLines("ps-video-paths");
+  document.querySelectorAll("[data-ps-video-offset]").forEach(input => {
+    const path = paths[Number(input.dataset.psVideoOffset)];
+    if (!path) return;
+    const anchor = productScanVideoAnchor(path);
+    if (document.activeElement !== input) input.value = anchor.text || "";
+    input.setAttribute("aria-invalid", String(anchor.value === null));
+    const row = input.closest(".ps-video-anchor");
+    row.classList.toggle("is-pending", anchor.value === null);
+    row.querySelector(".ps-anchor-status").textContent = anchor.hint;
+    row.querySelector("[data-ps-reset-offset]").hidden = !anchor.manual;
+  });
+  const firstButton = $("ps-use-first-time");
+  if (firstButton) firstButton.disabled = !paths.some(productScanFilenameStamp);
 }
 
 function formatProductScanTime(value) {
@@ -1322,15 +1527,11 @@ function formatProductScanTime(value) {
 }
 
 function productScanFormKey() {
-  const mode = productScanAlignmentMode();
-  const timeBasis = productScanTimeBasis();
   return JSON.stringify({
     excel: $("ps-excel-path")?.value.trim() || "",
     videos: getLines("ps-video-paths"),
-    mode,
-    timeBasis,
-    videoStart: mode === "manual" ? $("ps-video-start-offset")?.value.trim() || "" : "",
-    liveStart: productScanNeedsLiveStart() ? productScanLiveStartValue() : "",
+    liveStart: $("ps-live-start-time")?.value.trim() || "",
+    videoOffsets: productScanVideoOverrides(),
     advance: Number($("ps-advance")?.value || 0),
   });
 }
@@ -1341,9 +1542,9 @@ function productScanHasSource() {
 
 function productScanCanValidate() {
   if (!productScanHasSource()) return false;
-  if (productScanNeedsLiveStart() && !productScanLiveStartValue()) return false;
-  return productScanAlignmentMode() === "auto"
-    || parseProductScanOffset($("ps-video-start-offset")?.value) !== null;
+  const liveText = $("ps-live-start-time")?.value.trim();
+  if (liveText && !productScanDateStamp(liveText)) return false;
+  return getLines("ps-video-paths").every(path => productScanVideoAnchor(path).value !== null);
 }
 
 function productScanIsReady() {
@@ -1403,44 +1604,16 @@ function productScanHasSelectedRanges() {
 }
 
 function productScanStatusMessage() {
-  const mode = productScanAlignmentMode();
-  const timeBasis = productScanTimeBasis();
-  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
   if (state.productScan.status === "working") return { text: "正在读取时间表并校验可分割范围…", tone: "working" };
   if (productScanIsReady() && !productScanHasSelectedRanges()) return { text: "请在右侧勾选至少一个可切割的商品或时段。", tone: "invalid" };
   if (productScanIsReady()) return { text: `时间已校验，已选 ${productScanSelectedRangeKeys().length} 个时段，可以开始分割。`, tone: "ready" };
   if (!productScanHasSource()) return { text: "先选择排品表和至少一个直播视频。", tone: "invalid" };
-  if (timeBasis === "clock" && !productScanLiveStartValue()) return { text: "表格已选“时钟时间”，请填写整场直播开播时间作为换算基准。", tone: "invalid" };
-  if (mode === "manual" && offset === null) return { text: "填写本段视频从直播第几秒开始，再读取并校验。", tone: "invalid" };
-  if (mode === "auto" && !productScanLiveStartValue()) return { text: "填写整场直播开播时间；视频文件名会自动识别时间戳。", tone: "invalid" };
+  if (!productScanCanValidate()) return { text: "请核对开播时间，并补齐列表中待填写的直播起点。", tone: "invalid" };
   return { text: "素材已就绪，读取并校验后会显示文件内切分时间。", tone: "" };
 }
 
 function syncProductScanFlow() {
-  const mode = productScanAlignmentMode();
-  const timeBasis = productScanTimeBasis();
-  document.querySelectorAll("[data-ps-align-choice]").forEach((choice) => {
-    choice.classList.toggle("is-active", choice.dataset.psAlignChoice === mode);
-  });
-  document.querySelectorAll("[data-ps-align-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.psAlignPanel !== mode;
-  });
-  document.querySelectorAll("[data-ps-time-basis-choice]").forEach((choice) => {
-    choice.classList.toggle("is-active", choice.dataset.psTimeBasisChoice === timeBasis);
-  });
-  document.querySelectorAll("[data-ps-live-start]").forEach((panel) => {
-    panel.hidden = !productScanNeedsLiveStart();
-  });
-  const liveStartLabel = document.querySelector("[data-ps-live-start-label]");
-  const liveStartHelp = document.querySelector("[data-ps-live-start-help]");
-  if (liveStartLabel) liveStartLabel.textContent = "整场直播开播时间";
-  if (liveStartHelp) {
-    liveStartHelp.innerHTML = mode === "auto" && timeBasis === "clock"
-      ? "系统会自动读取文件名时间戳，并用这里的开播时间把表格钟表时间换算为直播进度。"
-      : mode === "auto"
-        ? "这不是视频起点；系统会自动读取文件名时间戳。可填 <strong>202608051219</strong> 或 <strong>2026-08-05 12:19</strong>。"
-        : "用来把表格中的钟表时间换算为直播进度；可填 <strong>202608051219</strong> 或 <strong>2026-08-05 12:19</strong>。";
-  }
+  updateProductScanAnchors();
 
   if (state.productScan.status === "ready" && state.productScan.validationKey !== productScanFormKey()) {
     state.productScan.status = "idle";
@@ -1449,6 +1622,11 @@ function syncProductScanFlow() {
     state.productScan.groups = [];
     state.productScan.timeline = [];
     state.productScan.feedback = [];
+    const preview = $("product-preview");
+    if (preview) {
+      preview.classList.add("empty");
+      preview.textContent = "时间或素材已改变，请重新读取并校验。";
+    }
   }
 
   const status = productScanStatusMessage();
@@ -1476,36 +1654,24 @@ function productScanCoverageLabel(status) {
 
 function productScanSourceLabel(value) {
   const name = String(value || "");
-  const match = name.match(/20\d{6}(\d{2})(\d{2})(?:\d{2})?/);
-  if (match) return `${match[1]}:${match[2]}:${match[3]}`;
+  const match = name.match(/20\d{6}(\d{2})(\d{2})(\d{2})?(?!\d)/);
+  if (match) return match[3] ? `${match[1]}:${match[2]}:${match[3]}` : `${match[1]}:${match[2]}`;
   return name.replace(/\.[^.]+$/, "").slice(-22) || "源视频";
 }
 
 function productScanScheduleRange(range) {
-  const mode = productScanAlignmentMode();
-  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
   const start = Number(range.start || 0);
   const end = Number(range.end || 0);
-  if (mode === "manual" && offset !== null) {
-    return `直播 ${formatProductScanTime(start + offset)}–${formatProductScanTime(end + offset)}`;
-  }
-  return `本批 ${formatProductScanTime(start)}–${formatProductScanTime(end)}`;
+  return `直播 ${formatProductScanTime(start)}–${formatProductScanTime(end)}`;
 }
 
 function renderProductScanInspector(groups, timeline = [], feedback = []) {
   const summary = $("ps-alignment-summary");
   if (!summary) return;
-  const mode = productScanAlignmentMode();
-  const timeBasis = productScanTimeBasis();
-  const offset = parseProductScanOffset($("ps-video-start-offset")?.value);
   const ready = productScanIsReady();
   if (!ready || !groups.length) {
     summary.classList.add("is-empty");
-    summary.innerHTML = mode === "manual" && offset !== null
-      ? `<strong>将按片段起点 ${formatProductScanTime(offset)} 对齐</strong><p>读取时间表后，会把排品表中的直播时间换算为当前文件内的切分时间。</p>`
-      : mode === "auto"
-        ? "<strong>等待文件名自动对齐</strong><p>填写直播开播时间后，系统会从视频文件名识别片段开始时刻并进行换算。</p>"
-        : "<strong>尚未校验时间表</strong><p>选择视频后，填写片段在整场直播中的开始位置；结果会显示在这里。</p>";
+    summary.innerHTML = "<strong>逐段对齐，保留缺失时段</strong><p>核对左侧各段直播起点，再读取并校验。这里会显示每个商品对应的文件内时间。</p>";
     return;
   }
   const records = groups.flatMap((group) => Array.isArray(group.ranges) ? group.ranges : []);
@@ -1522,7 +1688,7 @@ function renderProductScanInspector(groups, timeline = [], feedback = []) {
   summary.classList.remove("is-empty");
   summary.innerHTML = `
     <strong>已确认文件范围</strong>
-    <p>${timeBasis === "clock" ? "时钟时间已换算为直播进度" : "表格按开播后时长识别"} · ${mode === "manual" ? `本批从直播第 ${formatProductScanTime(offset || 0)} 开始` : "已按文件名时间戳自动对齐"} · 仅切割已勾选的时段。</p>
+    <p>各段独立定位 · 缺失时段不导出 · 跨文件分别输出。</p>
     <div class="alignment-summary-metrics"><span>${exportGroups} 个可导出商品</span><span class="is-selected">已选 ${selectedRangeCount}/${selectableRangeCount} 时段</span><span class="is-covered">完整 ${covered}</span><span class="is-partial">部分 ${partial}</span><span class="is-missing">未覆盖 ${missing}</span></div>
     <details class="product-scan-source-details"><summary>已导入 ${timeline.length} 段视频，查看文件范围</summary><div class="product-scan-source-summary" aria-label="已导入视频范围">${sourceSummary}</div></details>
   `;
@@ -1812,6 +1978,15 @@ function bindActions() {
       if (action === "preview-director-chapter-focus") focusPreviewDirectorChapter(target.dataset.previewScope || "smart", target.dataset.chapterId || "");
       if (action === "preview-director-alternatives-toggle") togglePreviewDirectorAlternatives(target.dataset.previewScope || "smart");
       if (action === "preview-director-alternatives-close") togglePreviewDirectorAlternatives(target.dataset.previewScope || "smart", false);
+      if (action === "preview-director-variant") await switchPreviewDirectorVariant(
+        target.dataset.previewId || "",
+        target.dataset.previewScope || "smart",
+      );
+      if (action === "preview-director-render-toggle") togglePreviewDirectorRenderVariant(
+        target.dataset.previewId || "",
+        target.dataset.previewScope || "smart",
+        Boolean(target.checked),
+      );
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-commerce-director-preview") await startCommerceDirectorPreview();
@@ -1906,6 +2081,7 @@ function bindActions() {
   document.body.addEventListener("change", (event) => {
     const target = event.target.closest("[data-live-naming-mode]");
     if (target) updateLiveRoomNamingMode(Number(target.dataset.index), target.value);
+    if (event.target.closest("#sc-versions, #mix-versions")) refreshVersionCostNotes();
   });
 
   document.body.addEventListener("input", (event) => {
@@ -2039,14 +2215,16 @@ function bindAiPresetControls() {
   });
 
   ["sc", "mix"].forEach((prefix) => {
-    [`${prefix}-primary-category`, `${prefix}-goal`, `${prefix}-hook-style`, `${prefix}-ending-style`, `${prefix}-secondary-category`, `${prefix}-leaf-category`, `${prefix}-main-product`].forEach((id) => {
-      $(id)?.addEventListener("change", () => markAiPresetCustom(prefix));
+    ["primary-category", "goal", "secondary-category", "leaf-category", "main-product", "content-price", "content-inventory", "content-size", "content-styling"].forEach((suffix) => {
+      $(`${prefix}-${suffix}`)?.addEventListener("change", () => {
+        markAiPresetCustom(prefix);
+        refreshDirectorContentLabels(prefix);
+      });
     });
-    document.body.addEventListener("change", (event) => {
-      const control = event.target?.dataset?.aiControl;
-      if (control === `${prefix}-selling` || control === `${prefix}-avoid`) markAiPresetCustom(prefix);
-    });
-    $(`${prefix}-selling-custom`)?.addEventListener("input", () => markAiPresetCustom(prefix));
+    ["extra-instruction", "main-product"].forEach((suffix) => $(`${prefix}-${suffix}`)?.addEventListener("input", () => {
+      markAiPresetCustom(prefix);
+      refreshDirectorContentLabels(prefix);
+    }));
   });
 }
 
@@ -2102,23 +2280,13 @@ function applyAiPreset(prefix, presetKey) {
     preferredSecondary: preset.secondary_category,
     preferredLeaf: preset.leaf_category,
     preferredGoal: preset.goal,
-    preferredHook: preset.hook,
-    preferredEnding: preset.ending,
-    selectedSelling: preset.selling,
-    selectedAvoid: preset.avoid,
   });
   setSelectIfPresent(`${prefix}-secondary-category`, preset.secondary_category);
   const leafInput = $(`${prefix}-leaf-category`);
   if (leafInput && preset.leaf_category !== undefined) leafInput.value = preset.leaf_category || "";
   const mainProductInput = $(`${prefix}-main-product`);
   if (mainProductInput && preset.main_product !== undefined) mainProductInput.value = preset.main_product || "";
-  setSelectIfPresent(`${prefix}-goal`, preset.goal);
-  setSelectIfPresent(`${prefix}-hook-style`, preset.hook);
-  setSelectIfPresent(`${prefix}-ending-style`, preset.ending);
-  setCheckedValues(`${prefix}-selling`, sellingWithLegacyFocus(preset.selling, preset.focus));
-  setCheckedValues(`${prefix}-avoid`, preset.avoid);
-  const customInput = $(`${prefix}-selling-custom`);
-  if (customInput) customInput.value = (preset.selling_custom || []).join("，");
+  applyCompactDirectorValues(prefix, preset);
   const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
   if (panel) updatePanelSummary(panel);
   toast(`已套用「${preset.label}」导演预设`, "success");
@@ -2143,17 +2311,16 @@ function sellingWithLegacyFocus(values, focus) {
 function collectCurrentAiPreset(prefix, label) {
   return {
     label,
+    controls_version: "director-controls-v2",
     primary_category: $(`${prefix}-primary-category`)?.value || "服饰内衣",
     category: backendCategoryForPrimary(primaryCategoryValue(prefix)),
     secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
     leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
-    hook: $(`${prefix}-hook-style`)?.value || "自动",
-    ending: $(`${prefix}-ending-style`)?.value || "自动",
-    selling: checkedControlValues(`${prefix}-selling`),
-    selling_custom: customSellingValues(prefix),
-    avoid: checkedControlValues(`${prefix}-avoid`),
+    extra_instruction: $(`${prefix}-extra-instruction`)?.value.trim().slice(0, 300) || "",
+    content_choices: directorContentChoices(prefix),
+    migration_note: $(`${prefix}-director-migration-note`)?.textContent || "",
   };
 }
 
@@ -2236,8 +2403,8 @@ function collectControlGroup(group) {
   });
   const ai = {};
   (group.prefixes || []).forEach((prefix) => {
-    ai[`${prefix}-selling`] = checkedControlValues(`${prefix}-selling`);
-    ai[`${prefix}-avoid`] = checkedControlValues(`${prefix}-avoid`);
+    ai[`${prefix}-controls-version`] = "director-controls-v2";
+    ai[`${prefix}-migration-note`] = $(`${prefix}-director-migration-note`)?.textContent || "";
   });
   return { values, ai };
 }
@@ -2258,10 +2425,17 @@ function applyControlGroup(group, saved) {
   group.ids.forEach((id) => setControlValue(id, values[id]));
   const ai = saved.ai || {};
   (group.prefixes || []).forEach((prefix) => {
-    if (Array.isArray(ai[`${prefix}-selling`]) || values[`${prefix}-focus`]) {
-      setCheckedValues(`${prefix}-selling`, sellingWithLegacyFocus(ai[`${prefix}-selling`], values[`${prefix}-focus`]));
-    }
-    if (Array.isArray(ai[`${prefix}-avoid`])) setCheckedValues(`${prefix}-avoid`, ai[`${prefix}-avoid`]);
+    if (!$(`${prefix}-goal`)) return;
+    const hasSavedDirector = Object.keys(values).some((key) => key.startsWith(`${prefix}-`) && /goal|ai-preset|main-product|leaf-category|content-/.test(key)) || Array.isArray(ai[`${prefix}-avoid`]);
+    if (!hasSavedDirector) return;
+    applyCompactDirectorValues(prefix, {
+      controls_version: ai[`${prefix}-controls-version`],
+      goal: values[`${prefix}-goal`], focus: values[`${prefix}-focus`],
+      avoid: ai[`${prefix}-avoid`], selling_custom: values[`${prefix}-selling-custom`],
+      extra_instruction: values[`${prefix}-extra-instruction`],
+      content_choices: directorContentChoices(prefix),
+      migration_note: ai[`${prefix}-migration-note`],
+    });
   });
 }
 
@@ -2281,6 +2455,7 @@ function refreshFeaturePreferenceUi() {
     refreshCategoryAiControls(prefix);
     refreshDedupCustomVisibility(prefix);
   });
+  refreshVersionCostNotes();
   document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => updatePanelSummary(panel));
 }
 
@@ -3297,19 +3472,15 @@ function updatePanelSummary(panel) {
       inspectPipPool(prefix);
     }
   } else if (kind === "ai") {
-    const preset = fieldText(`${prefix}-ai-preset`, "自定义");
-    const primary = fieldText(`${prefix}-primary-category`, "");
-    const secondary = fieldText(`${prefix}-secondary-category`, "自动识别");
+    refreshDirectorContentLabels(prefix);
+    const primary = fieldText(`${prefix}-primary-category`, "服饰内衣");
     const leaf = fieldText(`${prefix}-leaf-category`, "");
-    const goal = fieldText(`${prefix}-goal`, "自动");
-    const selling = selectedAiValues(`${prefix}-selling`);
-    const avoid = selectedAiValues(`${prefix}-avoid`);
-    const ruleText = [
-      selling.length ? `优先${selling.slice(0, 3).join("、")}` : "",
-      avoid.length ? `排除${avoid.slice(0, 2).join("、")}` : "",
-    ].filter(Boolean).join(" · ");
-    const categoryPath = [primary, secondary, leaf].filter(Boolean).join(" / ");
-    text = `${preset} · ${categoryPath || "自动识别"} · 导演方向${goal}${ruleText ? ` · ${ruleText}` : ""}`;
+    const mainProduct = fieldText(`${prefix}-main-product`, "");
+    const goal = fieldText(`${prefix}-goal`, "AI 自动推荐");
+    const policy = directorContentPolicy(collectContentPolicy(), directorContentChoices(prefix));
+    const excludes = [["price", "价格"], ["cta", "促销"], ["inventory_pressure", "库存"], ["size_interaction", "尺码"]]
+      .filter(([key]) => policy[key] === "block").map(([, label]) => label);
+    text = `${primary} · ${mainProduct ? `锁定：${mainProduct}` : leaf || "商品自动识别"} · ${goal}${excludes.length ? ` · 排除${excludes.join("、")}` : ""}`;
   }
   summary.textContent = text;
   button.textContent = panel.classList.contains("is-collapsed") ? "展开" : "收起";
@@ -3507,6 +3678,7 @@ function bindAiSelectionAutoSave() {
   const choiceSelector = [
     "#s-policy-price",
     "#s-policy-cta",
+    "#s-policy-inventory-pressure",
     "#s-policy-source-claim",
     "#s-policy-social-proof",
     "#s-policy-after-sale",
@@ -3529,6 +3701,11 @@ function bindAiSelectionAutoSave() {
     const target = event.target;
     if (target?.matches(".content-policy-row select, .content-policy-rule-action")) {
       syncContentPolicyTone(target);
+      ["sc", "mix"].forEach((prefix) => {
+        refreshDirectorContentLabels(prefix);
+        const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
+        if (panel) updatePanelSummary(panel);
+      });
     }
     if (target?.matches(choiceSelector) || target?.matches("[data-pref-key]")) {
       queueAiSelectionSave(0);
@@ -4443,6 +4620,7 @@ function applyContentPolicy(policy) {
     }
   });
   renderContentPolicyRules(normalized.custom_rules);
+  ["sc", "mix"].forEach(refreshDirectorContentLabels);
 }
 
 function collectContentPolicy() {
@@ -5475,7 +5653,24 @@ function renderVideoList(targetId) {
           </div>
           <button class="video-remove" type="button" aria-label="删除 ${escapeHtml(name)}" data-action="remove-video" data-target="${targetId}" data-index="${index}">&times;</button>
         </div>`;
-    }    if (isCompact) {
+    }
+    if (targetId === "ps-video-paths") {
+      const anchor = productScanVideoAnchor(path);
+      const stamp = productScanFilenameStamp(path);
+      const sourceTime = stamp ? `文件名 ${stamp.text.slice(4, 6)}-${stamp.text.slice(6, 8)} ${productScanSourceLabel(name)} · ` : "";
+      return `<div class="${rowClass} ps-source-row" data-video-row="${targetId}" data-index="${index}">
+        <div class="video-main"><div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}${retryButton}</div>
+        <span class="video-meta">${escapeHtml(sourceTime + compactVideoMetaText(info))}</span></div>
+        <div class="ps-video-anchor ${anchor.value === null ? "is-pending" : ""}">
+          <label for="ps-offset-${index}">直播起点</label>
+          <input id="ps-offset-${index}" data-ps-video-offset="${index}" type="text" value="${escapeHtml(anchor.text || "")}" placeholder="时:分:秒" aria-label="${escapeHtml(name)} 的直播起点" aria-describedby="ps-offset-hint-${index}" autocomplete="off">
+          <button type="button" class="ps-anchor-reset" data-ps-reset-offset="${index}" ${anchor.manual ? "" : "hidden"} title="清除手动值，恢复文件名建议" aria-label="恢复 ${escapeHtml(name)} 的文件名建议">恢复</button>
+          <small class="ps-anchor-status" id="ps-offset-hint-${index}">${escapeHtml(anchor.hint)}</small>
+        </div>
+        <button class="video-remove" type="button" title="删除" aria-label="删除 ${escapeHtml(name)}" data-action="remove-video" data-target="${targetId}" data-index="${index}">×</button>
+      </div>`;
+    }
+    if (isCompact) {
       return `
         <div class="${rowClass}" draggable="true" data-video-row="${targetId}" data-index="${index}">
           <div class="video-drag" title="拖拽排序">≡</div>
@@ -5807,23 +6002,24 @@ function checkedControlValues(controlName) {
 }
 
 function collectAiControls(prefix) {
-  const selling = checkedControlValues(`${prefix}-selling`);
-  const customWords = customSellingValues(prefix);
+  const choices = directorContentChoices(prefix);
   return {
+    controls_version: "director-controls-v2",
     primary_category: primaryCategoryValue(prefix),
     secondary_category: $(`${prefix}-secondary-category`)?.value || "自动识别",
     leaf_category: $(`${prefix}-leaf-category`)?.value.trim() || "",
     main_product: $(`${prefix}-main-product`)?.value.trim() || "",
     goal: $(`${prefix}-goal`)?.value || "自动",
-    selling_points: selling,
-    priority_terms: customWords,
-    preference_weights: collectPreferenceWeights(),
-    avoid: checkedControlValues(`${prefix}-avoid`),
-    hook_style: $(`${prefix}-hook-style`)?.value || "自动",
-    ending_style: $(`${prefix}-ending-style`)?.value || "自动",
+    extra_instruction: $(`${prefix}-extra-instruction`)?.value.trim().slice(0, 300) || "",
+    // Explicit empty weights prevent server defaults from reintroducing the
+    // removed preference stack. Opening and ending belong to the Director.
+    preference_weights: {},
+    avoid: ["无关闲聊", "无效重复", ...(choices.styling === "block" ? ["搭配其他品"] : [])],
+    supporting_products: choices.styling,
+    content_choices: choices,
     // Carry the currently visible policy with every run. Saving remains useful
     // for future runs, but a preview must never silently use stale settings.
-    content_policy: collectContentPolicy(),
+    content_policy: directorContentPolicy(collectContentPolicy(), choices),
     content_review_mode: $("s-content-review-mode")?.value || "off",
   };
 }
@@ -5957,6 +6153,7 @@ function collectSmartPayload(options = {}) {
 async function startSmartPreview() {
   await saveFeaturePreferences();
   const payload = collectSmartPayload();
+  toastVersionCostIfNeeded(payload, "导演方案");
   await runPreflight("smart-preview", payload, "smart-cut");
   const result = await api("/api/smart-cut/preview/start", {
     method: "POST",
@@ -5981,6 +6178,7 @@ async function startSmartPreview() {
 async function startCommerceDirectorPreview() {
   await saveFeaturePreferences();
   const payload = collectSmartPayload();
+  toastVersionCostIfNeeded(payload, "导演方案");
   await runPreflight("smart-preview", payload, "smart-cut");
   const result = await api("/api/smart-cut/commerce-director/preview/start", {
     method: "POST",
@@ -6040,7 +6238,13 @@ async function selectCommerceDirectorStrategy(directorStrategyId, requiresAdditi
     toast("请先完成一次商业导演实验，并从 AI 导演方案中选择", "warning");
     return;
   }
-  if (requiresAdditionalAiCall && !window.confirm("生成这个备选方向会重新调用 2 次 AI（故事章节、短句 Casting），并产生新的模型费用；原始视频和字幕会复用。继续吗？")) {
+  const existing = commerceDirectorPlanRows(preview).find(item =>
+    item.director_strategy_id === directorStrategyId && item.preview_id);
+  if (existing) {
+    await switchPreviewDirectorVariant(existing.preview_id, scope);
+    return;
+  }
+  if (requiresAdditionalAiCall && !window.confirm("生成这个备选方向通常调用 2 次 AI（故事章节、短句选片），在选片时按目标时长一次编排完整脚本，会产生新的模型费用；原始视频和字幕会复用。继续吗？")) {
     return;
   }
   const result = await api(isMix ? "/api/mix/commerce-director/strategy/select" : "/api/smart-cut/commerce-director/strategy/select", {
@@ -6051,6 +6255,10 @@ async function selectCommerceDirectorStrategy(directorStrategyId, requiresAdditi
       confirm_additional_ai_call: Boolean(requiresAdditionalAiCall),
     }),
   });
+  if (result.reused) {
+    await switchPreviewDirectorVariant(result.preview_id, scope);
+    return;
+  }
   const nextPreview = {
     id: result.preview_id,
     status: "running",
@@ -6378,7 +6586,7 @@ function commerceDirectorDiscoveryProposalCards(proposals, activeId) {
     const active = id === activeId || (!activeId && index === 0);
     const available = Boolean(proposal?.available);
     const extraAi = Boolean(proposal?.requires_additional_ai_call);
-    const actionLabel = extraAi ? "生成此方向（需 1 次 AI）" : "主方案已生成";
+    const actionLabel = extraAi ? "生成并查看（额外 AI 费用）" : "主方案已生成";
     return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""}" ${extraAi ? 'data-action="select-commerce-director-strategy"' : "disabled"} data-director-strategy-id="${escapeHtml(id)}" data-additional-ai-call="${extraAi ? "true" : "false"}" aria-pressed="${active ? "true" : "false"}" ${available ? "" : "disabled"}><strong>${escapeHtml(proposal?.icon || "")}${escapeHtml(proposal?.name || `方案 ${index + 1}`)}</strong><span>${escapeHtml(proposal?.opening_promise || proposal?.headline || "当前素材支持的导演方向")}</span><em>${extraAi ? actionLabel : "主方案预览已生成"}</em></button>`;
   }).join("")}</div>`;
 }
@@ -6720,6 +6928,7 @@ async function playCommerceDirectorReview(targetPreviewId = "") {
 async function startMixPreview() {
   await saveFeaturePreferences();
   const payload = collectFeaturePayload("mix");
+  toastVersionCostIfNeeded(payload, "混剪导演方案");
   await runPreflight("mix-preview", payload, "mix");
   const result = await api("/api/mix/preview/start", {
     method: "POST",
@@ -8135,6 +8344,7 @@ async function loadLatestSmartPreview() {
   try {
     const preview = await api("/api/smart-cut/preview/latest");
     if (!preview?.id) return;
+    if (shouldKeepCurrentDirectorVariantFocus("smart", preview)) return;
     const isNewPreview = !state.smartPreview || preview.id !== state.smartPreview.id;
     const isNewerPreview = preview.created_at > (state.smartPreview?.created_at || 0);
     const statusChanged = preview.status !== state.smartPreview?.status;
@@ -8153,6 +8363,7 @@ async function loadLatestMixPreview() {
   try {
     const preview = await api("/api/mix/preview/latest");
     if (!preview?.id) return;
+    if (shouldKeepCurrentDirectorVariantFocus("mix", preview)) return;
     const isNewPreview = !state.mixPreview || preview.id !== state.mixPreview.id;
     const isNewerPreview = preview.created_at > (state.mixPreview?.created_at || 0);
     const statusChanged = preview.status !== state.mixPreview?.status;
@@ -8201,6 +8412,35 @@ function commerceDirectorServerRenderKey(preview) {
     kind: review?.kind || "",
     batch,
   });
+}
+
+function commerceDirectorPreviewGroupId(preview) {
+  return String(
+    preview?.director_family_root
+    || preview?.parent_preview_id
+    || preview?.dedup_summary?.parent_preview_id
+    || preview?.dedup_summary?.root_preview_id
+    || preview?.id
+    || ""
+  ).trim();
+}
+
+function commerceDirectorIsVariantPreview(preview) {
+  return Boolean(
+    preview?.commercial_director_experiment
+    && String(preview?.id || "").trim()
+    && String(preview?.id || "").trim() !== commerceDirectorPreviewGroupId(preview)
+  );
+}
+
+function shouldKeepCurrentDirectorVariantFocus(scope, latestPreview) {
+  const current = scope === "mix" ? state.mixPreview : state.smartPreview;
+  if (current?.director_family_root && current.status === "ready"
+      && current.id !== latestPreview?.id && latestPreview?.status === "ready"
+      && commerceDirectorPreviewGroupId(current) === commerceDirectorPreviewGroupId(latestPreview)) return true;
+  if (!commerceDirectorIsVariantPreview(current)) return false;
+  if (!latestPreview?.commercial_director_experiment) return false;
+  return commerceDirectorPreviewGroupId(current) === commerceDirectorPreviewGroupId(latestPreview);
 }
 
 async function pollSmartPreview(previewId, attempt = 0) {
@@ -9111,12 +9351,12 @@ function renderDirectorStrategyLibrary(review) {
     const extraAi = Boolean(proposal.requires_additional_ai_call);
     const action = available
       ? (extraAi
-        ? `<button class="button button-primary button-small" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(proposal.director_strategy_id || "")}" data-additional-ai-call="true">生成此方向（需 1 次 AI）</button>`
+        ? `<button class="button button-primary button-small" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(proposal.director_strategy_id || "")}" data-additional-ai-call="true">生成并查看（额外 AI 费用）</button>`
         : `<span class="preview-notice">主方案已生成真实口播预览</span>`)
       : `<span class="preview-notice">${escapeHtml(proposal.unavailable_reason || "当前素材暂不支持")}</span>`;
     return `<article class="commerce-director-strategy-card ${available ? "is-available" : "is-unavailable"}"><div class="commerce-director-strategy-card-head"><div><strong>${escapeHtml(proposal.icon || "")}${escapeHtml(proposal.name || "AI 导演方案")}</strong><span>${escapeHtml(proposal.commercial_goal || proposal.goal || "")}</span></div><em>${Number(proposal.estimated_natural_duration || 0).toFixed(1)}s</em></div><p>${escapeHtml(proposal.headline || "")}</p><dl><div><dt>视频结构</dt><dd>${escapeHtml(structureName)}</dd></div><div><dt>开场承诺</dt><dd>${escapeHtml(proposal.opening_promise || "未形成可验证承诺")}</dd></div><div><dt>故事组合</dt><dd>${escapeHtml(mix || "当前无可验证故事")}</dd></div></dl><footer>${action}</footer></article>`;
   }).join("");
-  return `<section class="commerce-director-strategies"><div class="commerce-director-section-head"><div><strong>AI 发现的 ${proposals.length} 种卖法</strong><span>本次只生成主方案；选择备选方向会明确重新调用 2 次 AI（展开故事章节 + 短句 Casting），再按真实原话生成预览。</span></div></div><div class="commerce-director-strategy-grid">${cards}</div></section>`;
+  return `<section class="commerce-director-strategies"><div class="commerce-director-section-head"><div><strong>AI 发现的 ${proposals.length} 种卖法</strong><span>本次只生成主方案；备选方向通常调用 2 次 AI，在选片时按目标时长一次编排完整脚本，再按真实原话生成预览。</span></div></div><div class="commerce-director-strategy-grid">${cards}</div></section>`;
 }
 
 function commerceDirectorReviewVideoUrl(previewId) {
@@ -9432,7 +9672,8 @@ function renderCommerceDirectorReview(preview) {
   // legacy discovery screen.
   const strategySection = renderDirectorStrategyLibrary(review)
     + (isDiscovery ? renderCommerceDirectorStoryLibrary(review) : "");
-  return `<section class="preview-overview-card commerce-director-review"><div class="commerce-director-workspace-head"><div><span>AI 导演实验工作台</span><strong>${escapeHtml(headline)}</strong></div><em>${escapeHtml(stateLabel)}</em></div><p class="commerce-director-experiment-note">${warning.replace(/^<p class="preview-notice">|<\/p>$/g, "")}</p><div class="preview-overview-grid">${storyRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>${directResult}${isBatch ? renderCommerceDirectorBatch(review) : strategySection}${draftSummary}${chapters ? `<div class="commerce-director-chapter-summary"><strong>M2 章节摘要</strong><ol>${chapters}</ol></div>` : ""}${issues ? `<div class="commerce-director-issues"><strong>当前问题</strong><ul>${issues}</ul></div>` : ""}</section>`;
+  const costStrip = renderCommerceDirectorCostStrip(preview);
+  return `<section class="preview-overview-card commerce-director-review">${costStrip}<div class="commerce-director-workspace-head"><div><span>AI 导演实验工作台</span><strong>${escapeHtml(headline)}</strong></div><em>${escapeHtml(stateLabel)}</em></div><p class="commerce-director-experiment-note">${warning.replace(/^<p class="preview-notice">|<\/p>$/g, "")}</p><div class="preview-overview-grid">${storyRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div>${directResult}${isBatch ? renderCommerceDirectorBatch(review) : strategySection}${draftSummary}${chapters ? `<div class="commerce-director-chapter-summary"><strong>M2 章节摘要</strong><ol>${chapters}</ol></div>` : ""}${issues ? `<div class="commerce-director-issues"><strong>当前问题</strong><ul>${issues}</ul></div>` : ""}</section>`;
 }
 
 function renderSmartPreview(preview) {
@@ -10302,6 +10543,140 @@ function formatSeconds(value) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+const deepSeekPreviewRatesCnyPerMillion = {
+  "deepseek-v4-flash": {
+    offpeak: { cachedInput: 0.05, input: 1.5, output: 4.5 },
+    peak: { cachedInput: 0.1, input: 3, output: 9 },
+    label: "DeepSeek V4 Flash",
+  },
+  "deepseek-v4-pro": {
+    offpeak: { cachedInput: 0.15, input: 4.5, output: 13.5 },
+    peak: { cachedInput: 0.3, input: 9, output: 27 },
+    label: "DeepSeek V4 Pro",
+  },
+};
+
+function versionCostNoteText(count) {
+  const versions = Math.max(1, Number(count || 1));
+  if (versions > 1) {
+    return `当前选择 ${versions} 个方案，AI 会一次生成多套故事和选句，算力成本会增加。`;
+  }
+  return "只生成 1 套完整预览，另外两个题目按需生成；确认生成备选才增加 AI 费用。";
+}
+
+function refreshVersionCostNotes() {
+  [
+    ["sc-versions", "sc-version-cost-note"],
+    ["mix-versions", "mix-version-cost-note"],
+  ].forEach(([fieldId, noteId]) => {
+    const field = $(fieldId);
+    const note = $(noteId);
+    if (!field || !note) return;
+    const versions = Math.max(1, Number(field.value || 1));
+    note.textContent = versionCostNoteText(versions);
+    note.classList.toggle("is-warning", versions > 1);
+  });
+}
+
+function toastVersionCostIfNeeded(payload, label = "导演方案") {
+  const versions = Math.max(1, Number(payload?.versions || 1));
+  if (versions > 1) {
+    toast(`已选择 ${versions} 个${label}，本次 AI 预览会增加算力成本。`, "warning");
+  }
+}
+
+function beijingPeakWindowFromReport(report) {
+  const raw = String(report?.request_started_at || report?.timestamp || report?.generated_at || "");
+  const date = new Date(raw);
+  if (!raw || Number.isNaN(date.getTime())) return {label: "时段未知", peak: null};
+  const beijing = new Date(date.getTime() + 8 * 3600000);
+  const minutes = beijing.getUTCHours() * 60 + beijing.getUTCMinutes();
+  const weekday = beijing.getUTCDay();
+  const peak = weekday >= 1 && weekday <= 5
+    && ((minutes >= 540 && minutes < 720) || (minutes >= 840 && minutes < 1080));
+  return {label: peak ? "峰时" : "谷时", peak,
+    time: beijing.toISOString().slice(0, 19).replace("T", " ")};
+}
+
+function commerceDirectorCostReport(preview) {
+  return preview?.ai_cost_report
+    || preview?.cost_report
+    || preview?.dedup_summary?.ai_cost_report
+    || preview?.dedup_summary?.cost_report
+    || preview?.director_review?.ai_cost_report
+    || preview?.director_review?.cost_report
+    || null;
+}
+
+function commerceDirectorPreviewCostSummary(preview) {
+  const report = commerceDirectorCostReport(preview);
+  const tokens = report?.tokens || {};
+  const totalTokens = Number(tokens.known_total_tokens || 0);
+  if (!totalTokens) return null;
+  const inputTokens = Number(tokens.known_input_tokens || 0);
+  const outputTokens = Number(tokens.known_output_tokens || 0);
+  const cachedInputTokens = Number(tokens.known_cached_input_tokens || 0);
+  const usageMissing = Number(report?.records?.usage_missing_requests || 0);
+  const models = Array.isArray(report?.by_model)
+    ? report.by_model.map((item) => String(item?.model || "").trim()).filter(Boolean)
+    : [];
+  const uniqueModels = Array.from(new Set(models));
+  const model = uniqueModels.length === 1 ? uniqueModels[0] : "";
+  const modelKey = model.toLowerCase();
+  const rates = deepSeekPreviewRatesCnyPerMillion[modelKey];
+  const observed = Array.isArray(report.output_diagnostics) ? report.output_diagnostics : [];
+  const hasPerCallUsage = observed.length && observed.every(r => r.input_tokens != null && r.output_tokens != null);
+  const rows = hasPerCallUsage ? observed : [{...tokens, model,
+    input_tokens: inputTokens, output_tokens: outputTokens, cached_input_tokens: cachedInputTokens,
+    generated_at: report.generated_at, stage: "本次合计"}];
+  const details = rows.map(row => {
+    const window = beijingPeakWindowFromReport(row);
+    const rate = deepSeekPreviewRatesCnyPerMillion[String(row.model || "").toLowerCase()];
+    const tier = rate && window.peak !== null ? (window.peak ? rate.peak : rate.offpeak) : null;
+    const input = Number(row.input_tokens), output = Number(row.output_tokens), cached = Number(row.cached_input_tokens);
+    const known = row.cached_input_tokens != null && Number.isFinite(input) && Number.isFinite(output)
+      && input >= cached && cached >= 0 && output >= 0;
+    const amount = tier && known ? ((input - cached) * tier.input + cached * tier.cachedInput + output * tier.output) / 1000000 : null;
+    return {stage: row.stage, model: row.model, window, tier, input, output, cached, amount,
+      basis: row.request_started_at ? "请求开始时间" : row.timestamp ? "历史回执时间估算" : "历史报告时间估算"};
+  });
+  const cost = details.every(d => d.amount !== null) ? details.reduce((sum, d) => sum + d.amount, 0) : null;
+  const labels = [...new Set(details.map(d => d.window.label))];
+  const priceWindowLabel = labels.length > 1 ? "跨峰谷" : (labels[0] || "时段未知");
+
+  return {
+    totalTokens,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    usageMissing,
+    model,
+    modelLabel: rates?.label || model || "AI 模型",
+    cost,
+    priceWindowLabel,
+    details,
+  };
+}
+
+function renderCommerceDirectorCostStrip(preview) {
+  const summary = commerceDirectorPreviewCostSummary(preview);
+  if (!summary) return "";
+  const pieces = [
+    `<strong>本次预览</strong>`,
+    `<span>${summary.totalTokens.toLocaleString("zh-CN")} tokens</span>`,
+  ];
+  if (summary.cost !== null) {
+    pieces.push(`<span>${escapeHtml(summary.priceWindowLabel)}约 ¥${summary.cost.toFixed(3)}</span>`);
+    pieces.push(`<small>${escapeHtml(summary.modelLabel)}</small>`);
+  } else {
+    pieces.push(`<small>${escapeHtml(summary.modelLabel)} 暂无完整价格估算</small>`);
+  }
+  if (summary.usageMissing > 0) {
+    pieces.push(`<small>${summary.usageMissing} 次调用缺少用量回执，金额可能偏低</small>`);
+  }
+  return `<div class="commerce-director-cost-strip">${pieces.join("")}</div>`;
+}
+
 function collectFeaturePayload(feature) {
   if (feature === "mix") {
     const primaryCategory = primaryCategoryValue("mix");
@@ -10338,7 +10713,6 @@ function collectFeaturePayload(feature) {
   }
 
   if (feature.startsWith("product-scan")) {
-    const alignmentMode = productScanAlignmentMode();
     return {
       excel_path: $("ps-excel-path").value.trim(),
       video_paths: getLines("ps-video-paths"),
@@ -10346,9 +10720,8 @@ function collectFeaturePayload(feature) {
       advance_seconds: Number($("ps-advance").value || 0),
       fast_cut: $("ps-fast-cut")?.checked !== false,
       selected_ranges: feature === "product-scan" ? productScanSelectedRangeKeys() : [],
-      video_start_offset: alignmentMode === "manual" ? $("ps-video-start-offset")?.value.trim() || "" : "",
-      live_start_time: productScanNeedsLiveStart() ? productScanLiveStartValue() : "",
-      schedule_time_basis: productScanTimeBasis(),
+      live_start_time: $("ps-live-start-time")?.value.trim() || "",
+      video_offsets: productScanVideoOverrides(),
     };
   }
 
@@ -11462,7 +11835,7 @@ function effectiveClipBounds(clip) {
 }
 
 function previewCandidateKey(clip) {
-  return String(clip?.candidate_key || "").trim();
+  return String(clip?.selection_key || clip?.candidate_key || "").trim();
 }
 
 function buildPreviewDraftFromState(scope = "smart") {
@@ -11509,13 +11882,15 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length || !draft) return;
   const keyToIndex = new Map(preview.clips.map((clip) => [previewCandidateKey(clip), Number(clip.index)]).filter(([key, index]) => key && Number.isInteger(index)));
+  const sourceKeys = preview.clips.map((clip) => String(clip.candidate_key || ""));
+  const ambiguousKeys = new Set(sourceKeys.filter((key, index) => key && sourceKeys.indexOf(key) !== index));
   const selectedKeys = Array.isArray(draft.selected_keys) ? draft.selected_keys.map(String).filter(Boolean) : [];
   const orderKeys = Array.isArray(draft.order_keys) ? draft.order_keys.map(String).filter(Boolean) : [];
-  const hasSelectedKeys = selectedKeys.length > 0;
+  const hasSelectedKeys = selectedKeys.length > 0 && !selectedKeys.some((key) => ambiguousKeys.has(key));
   const hasSelectedIndices = hasSelectedKeys || Array.isArray(draft.selected_indices);
   const selectedByKey = selectedKeys.map((key) => keyToIndex.get(key)).filter(Number.isInteger);
   const selectedSet = new Set(hasSelectedKeys ? selectedByKey : normalizedIntegerList(draft.selected_indices));
-  const order = orderKeys.length ? orderKeys.map((key) => keyToIndex.get(key)).filter(Number.isInteger) : normalizedIntegerList(draft.order);
+  const order = orderKeys.length && !orderKeys.some((key) => ambiguousKeys.has(key)) ? orderKeys.map((key) => keyToIndex.get(key)).filter(Number.isInteger) : normalizedIntegerList(draft.order);
   const segmentMap = draft.selected_segments && typeof draft.selected_segments === "object" ? draft.selected_segments : {};
   const wordMap = draft.selected_words && typeof draft.selected_words === "object" ? draft.selected_words : {};
   const segmentKeyMap = draft.selected_segments_by_key && typeof draft.selected_segments_by_key === "object" ? draft.selected_segments_by_key : {};
@@ -11530,14 +11905,14 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
       segments.forEach((segment) => { segment.selected = false; previewSegmentWords(segment).forEach((word) => { word.selected = false; }); });
       return;
     }
-    const segmentValues = Array.isArray(segmentKeyMap[candidateKey]) ? segmentKeyMap[candidateKey] : segmentMap[String(clipIndex)];
+    const segmentValues = !ambiguousKeys.has(candidateKey) && Array.isArray(segmentKeyMap[candidateKey]) ? segmentKeyMap[candidateKey] : segmentMap[String(clipIndex)];
     if (segments.length && Array.isArray(segmentValues)) {
       const segmentSet = new Set(normalizedIntegerList(segmentValues));
       segments.forEach((segment) => { segment.selected = segment.selection_locked === true ? false : segmentSet.has(Number(segment.index)); });
     } else if (segments.length) {
       segments.forEach((segment) => { if (segment.selection_locked === true) segment.selected = false; else if (segment.selected === undefined) segment.selected = true; });
     }
-    const keyedWordMap = wordKeyMap[candidateKey];
+    const keyedWordMap = ambiguousKeys.has(candidateKey) ? null : wordKeyMap[candidateKey];
     const clipWordMap = keyedWordMap && typeof keyedWordMap === "object" ? keyedWordMap : (wordMap[String(clipIndex)] && typeof wordMap[String(clipIndex)] === "object" ? wordMap[String(clipIndex)] : {});
     segments.forEach((segment) => {
       const words = previewSegmentWords(segment);
@@ -12150,7 +12525,20 @@ async function startSmartFromPreview() {
     selected_words_by_key: selection.selectedWordsByKey,
   };
   await runPreflight('smart-from-preview', payload, 'smart-cut');
-  const result = await api('/api/smart-cut/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
+  let endpoint = '/api/smart-cut/from-preview/start';
+  if (state.smartPreview?.commercial_director_experiment) {
+    const renderIds = Array.from(commerceDirectorSelectedRenderIds('smart', state.smartPreview));
+    payload.versions = 1;
+    await api('/api/preview/selection/save', {
+      method: 'POST',
+      body: JSON.stringify(buildPreviewDraftFromState('smart')),
+    });
+    if (renderIds.length > 1 || String(renderIds[0] || '') !== String(state.smartPreview.id || '')) {
+      payload.preview_ids = renderIds;
+      endpoint = '/api/smart-cut/from-preview/director-batch/start';
+    }
+  }
+  const result = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
   toast(result.message || '\u9884\u89c8\u6210\u7247\u4efb\u52a1\u5df2\u542f\u52a8', 'success');
   refreshTasks();
 }
@@ -12180,7 +12568,20 @@ async function startMixFromPreview() {
     selected_words_by_key: selection.selectedWordsByKey,
   };
   await runPreflight('mix-from-preview', payload, 'mix');
-  const result = await api('/api/mix/from-preview/start', { method: 'POST', body: JSON.stringify(payload) });
+  let endpoint = '/api/mix/from-preview/start';
+  if (state.mixPreview?.commercial_director_experiment) {
+    const renderIds = Array.from(commerceDirectorSelectedRenderIds('mix', state.mixPreview));
+    payload.versions = 1;
+    await api('/api/preview/selection/save', {
+      method: 'POST',
+      body: JSON.stringify(buildPreviewDraftFromState('mix')),
+    });
+    if (renderIds.length > 1 || String(renderIds[0] || '') !== String(state.mixPreview.id || '')) {
+      payload.preview_ids = renderIds;
+      endpoint = '/api/mix/from-preview/director-batch/start';
+    }
+  }
+  const result = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
   toast(result.message || '\u9884\u89c8\u6df7\u526a\u4efb\u52a1\u5df2\u542f\u52a8', 'success');
   refreshTasks();
 }
@@ -13123,8 +13524,12 @@ function buildPreviewFilmOverview(scope, preview, targetId, selected, duration) 
   const blocking = issues.some(function (item) { return item.blocking === true; });
   const status = blocking ? "block" : (issues.length ? "warn" : "ok");
   const statusLabel = blocking ? "\u6682\u4e0d\u80fd\u6210\u7247" : (issues.length ? `\u5efa\u8bae\u68c0\u67e5 ${issues.length} \u9879` : "\u53ef\u4ee5\u6210\u7247");
-  const mainProduct = String($(`${prefix}-main-product`)?.value || plan?.product?.locked || plan?.product?.selected || "").trim();
-  const mainCategory = String(category.main_category || $(`${prefix}-primary-category`)?.selectedOptions?.[0]?.textContent || "").trim();
+  const verifiedProduct = preview?.director_review?.product_control?.final?.resolved_scope || {};
+  // A completed preview describes its frozen subject, not unsaved form edits
+  // or an older keyword classifier's category label.
+  const mainProduct = String(verifiedProduct.main_product || plan?.product?.locked || plan?.product?.selected || $(`${prefix}-main-product`)?.value || "").trim();
+  const productTypeLabels = {top:"上衣",shirt:"衬衫",tshirt:"T恤",knitwear:"针织衫",sweatshirt:"卫衣",outerwear:"外套",down_jacket:"羽绒/棉服",vest:"背心/马甲",pants:"裤子",skirt:"半身裙",dress:"连衣裙",set:"套装",underwear:"内衣",shoes:"鞋靴",bag:"箱包"};
+  const mainCategory = String(productTypeLabels[verifiedProduct.product_type] || (verifiedProduct.main_product ? "其他单品" : category.main_category) || $(`${prefix}-primary-category`)?.selectedOptions?.[0]?.textContent || "").trim();
   const preferenceLabel = String(preference.used_label || preference.label || "").trim();
   const salesChain = buildSalesChainSummary(selected);
   const sellingCount = roleCounts.product + roleCounts.proof + roleCounts.scene + roleCounts.weak;
@@ -13277,6 +13682,91 @@ function togglePreviewDirectorAlternatives(scope = "smart", force = null) {
   }
 }
 
+async function switchPreviewDirectorVariant(previewId, scope = "smart") {
+  const id = String(previewId || "").trim();
+  const current = getPreviewState(scope);
+  if (!id || id === String(current?.id || "")) return;
+  syncPreviewClipSelections(scope);
+  const endpoint = scope === "mix"
+    ? `/api/mix/preview/${encodeURIComponent(id)}`
+    : `/api/smart-cut/preview/${encodeURIComponent(id)}`;
+  const preview = await api(endpoint);
+  if (!preview?.ok) throw new Error(preview?.message || "导演方案尚未准备完成");
+  if (scope === "mix") state.mixPreview = preview;
+  else state.smartPreview = preview;
+  if (!state.previewDirectorChapterFocus) state.previewDirectorChapterFocus = { smart: "", mix: "" };
+  if (!state.previewDirectorCandidateViews) state.previewDirectorCandidateViews = { smart: "recommended", mix: "recommended" };
+  state.previewDirectorChapterFocus[scope] = "";
+  state.previewDirectorCandidateViews[scope] = "recommended";
+  state.previewCandidateSelections[scope] = null;
+  state.previewDetailSelection[scope] = null;
+  if (scope === "mix") renderMixPreview(preview);
+  else renderSmartPreview(preview);
+  toast("已切换导演方案；使用已生成结果，不产生新的调用费用。", "success");
+}
+
+function commerceDirectorProposalId(item) {
+  return String(item?.primary_story_id || item?.strategy_id || item?.director_strategy_id || "").trim();
+}
+
+function commerceDirectorPlanRows(preview) {
+  const review = preview?.director_review || {};
+  const proposals = review?.director_strategy_library?.proposals || [];
+  const variants = review?.director_variants || [];
+  const rows = proposals.map((item) => {
+    const strategyId = commerceDirectorProposalId(item);
+    const variant = variants.find(v => v.director_strategy_id === item.director_strategy_id
+      || String(v.strategy_id || "") === strategyId);
+    const active = strategyId === String(review.active_director_strategy_id || "")
+      || item.director_strategy_id === review.active_director_strategy_id;
+    return {...item, strategy_id: strategyId,
+      preview_id: variant?.preview_id || (active ? preview.id : ""),
+      can_generate: Boolean(item.available && item.requires_additional_ai_call),
+      available: Boolean(variant?.preview_id || active), ...variant};
+  });
+  variants.forEach(v => { if (!rows.some(r => r.preview_id === v.preview_id)) rows.push(v); });
+  return rows;
+}
+
+function commerceDirectorRenderSelectionKey(preview, rows = commerceDirectorPlanRows(preview)) {
+  const primary = rows.find((item) => String(item?.director_plan_role || "") === "primary" && item?.preview_id);
+  return String(preview?.parent_preview_id || preview?.dedup_summary?.parent_preview_id || primary?.preview_id || preview?.id || "").trim();
+}
+
+function commerceDirectorSelectedRenderIds(scope = "smart", preview = getPreviewState(scope), rows = commerceDirectorPlanRows(preview)) {
+  if (!state.previewDirectorRenderSelections) state.previewDirectorRenderSelections = { smart: {}, mix: {} };
+  if (!state.previewDirectorRenderSelections[scope]) state.previewDirectorRenderSelections[scope] = {};
+  const ready = rows.filter((item) => item?.preview_id && item?.available !== false);
+  const allowed = new Set(ready.map((item) => String(item.preview_id)));
+  const key = commerceDirectorRenderSelectionKey(preview, rows);
+  let selected = state.previewDirectorRenderSelections[scope][key];
+  if (!(selected instanceof Set)) {
+    const field = $(scope === "mix" ? "mix-versions" : "sc-versions");
+    const requested = Math.max(1, Math.min(ready.length || 1, Number(field?.value || 1)));
+    selected = new Set(ready.slice(0, requested).map((item) => String(item.preview_id)));
+    if (!selected.size && preview?.id) selected.add(String(preview.id));
+    state.previewDirectorRenderSelections[scope][key] = selected;
+  }
+  Array.from(selected).forEach((id) => { if (!allowed.has(id)) selected.delete(id); });
+  if (!selected.size && ready.length) selected.add(String(ready[0].preview_id));
+  return selected;
+}
+
+function togglePreviewDirectorRenderVariant(previewId, scope = "smart", checked = true) {
+  const preview = getPreviewState(scope);
+  const rows = commerceDirectorPlanRows(preview);
+  const selected = commerceDirectorSelectedRenderIds(scope, preview, rows);
+  const id = String(previewId || "").trim();
+  if (!id) return;
+  if (checked) selected.add(id);
+  else if (selected.size > 1) selected.delete(id);
+  else {
+    toast("至少保留一个导演方案用于成片。", "warning");
+    return;
+  }
+  renderPreviewStateKeepStoryScroll(scope);
+}
+
 function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope = "smart") {
   if (!preview?.commercial_director_experiment && !preview?.commercial_director_preview) return "";
   const review = preview?.director_review || {};
@@ -13286,7 +13776,11 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
   const stories = Array.isArray(review?.m1_story_library?.stories)
     ? review.m1_story_library.stories
     : [];
-  const primary = proposals.find((item) => String(item?.director_plan_role || "") === "primary")
+  const planRows = commerceDirectorPlanRows(preview);
+  const activeStrategyId = String(review?.active_director_strategy_id || "").trim();
+  const activeProposal = proposals.find((item) => String(item?.primary_story_id || item?.strategy_id || "") === activeStrategyId);
+  const primary = activeProposal
+    || proposals.find((item) => String(item?.director_plan_role || "") === "primary")
     || proposals.find((item) => !item?.requires_additional_ai_call)
     || proposals[0]
     || null;
@@ -13311,6 +13805,15 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
   const durationCopy = currentSeconds > 0 ? `当前成片 ${currentSeconds.toFixed(1)}s` : "按真实原话计算";
   const targetCopy = targetSeconds > 0 ? `目标 ${targetSeconds.toFixed(0)}s` : "自然成片";
   const initialCopy = initialSeconds > 0 ? `AI 初稿 ${initialSeconds.toFixed(1)}s` : "";
+  const activePreviewId = String(preview?.id || "").trim();
+  const renderSelection = commerceDirectorSelectedRenderIds(scope, preview, planRows);
+  const activeReady = Boolean(activePreviewId && planRows.some((item) => String(item?.preview_id || "") === activePreviewId && item?.available !== false));
+  const renderButton = document.querySelector(`[data-action="start-${scope === "mix" ? "mix" : "smart"}-from-preview"]`);
+  if (renderButton) {
+    renderButton.textContent = renderSelection.size > 1
+      ? `按已选 ${renderSelection.size} 个方案成片`
+      : (scope === "mix" ? "按当前编排混剪" : "按当前编排成片");
+  }
 
   const chapterRows = outline.slice(0, 6).map((chapter, index) => {
     const id = String(chapter?.chapter_id || `chapter-${index + 1}`).trim();
@@ -13321,43 +13824,39 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
   }).join("");
   const moreChapters = outline.length > 6 ? `<span class="commerce-director-path-more">更多 ${outline.length - 6}</span>` : "";
 
-  const alternatives = proposals.filter((item) => item !== primary && String(item?.director_plan_role || "") !== "primary");
-  const alternativeRows = alternatives.map((item, index) => {
-    const alternativeStory = stories.find((entry) => String(entry?.story_id || "") === String(item?.primary_story_id || "")) || {};
-    // Alternative cards are direction-only by contract.  They intentionally
-    // have no selected chapters or source assets until the user confirms a
-    // fresh Story + Casting run, so an empty M1 asset view is not a failure.
-    const unavailable = item?.available === false;
-    const name = String(item?.name || alternativeStory?.angle || "\u5176\u4ed6\u5356\u6cd5").trim();
-    const desire = String(item?.core_desire || item?.commercial_goal || alternativeStory?.purchase_reason || "").trim();
-    const alternativeOpening = String(item?.opening_promise || alternativeStory?.payoff || "").trim();
-    const alternativeStructure = String(item?.video_structure?.name || item?.narrative_archetype || "导演自定义结构").trim();
-    const unavailableReason = String(item?.unavailable_reason || "当前素材无法支撑这个方向").trim();
-    const action = unavailable
-      ? `<span class="commerce-director-alt-state" title="${escapeHtml(unavailableReason)}">此方向不可用</span>`
-      : `<button type="button" class="commerce-director-alt-action" data-action="select-commerce-director-strategy" data-preview-scope="${scope}" data-director-strategy-id="${escapeHtml(item?.director_strategy_id || "")}" data-additional-ai-call="true">生成此方向 <small>需 2 次 AI</small></button>`;
-    return `<article class="commerce-director-alt-card ${unavailable ? "is-unavailable" : ""}">
-      <header><span>备选 ${index + 1}</span><em>${escapeHtml(alternativeStructure)}</em></header>
-      <strong>${escapeHtml(name)}</strong>
-      ${desire ? `<p><b>核心购买理由</b>${escapeHtml(desire)}</p>` : ""}
-      ${alternativeOpening ? `<p><b>开场方向</b>${escapeHtml(alternativeOpening)}</p>` : ""}
-      <footer>${action}</footer>
+  const alternatives = planRows.filter((item) => {
+    const previewId = String(item?.preview_id || "").trim();
+    const strategyId = String(item?.strategy_id || commerceDirectorProposalId(item)).trim();
+    return previewId ? previewId !== activePreviewId : strategyId !== activeStrategyId;
+  }).slice(0, 2);
+  const alternativeCards = alternatives.map((item, index) => {
+    const previewId = String(item?.preview_id || "").trim();
+    const ready = Boolean(previewId && item?.available !== false);
+    const cardTitle = String(item?.title || item?.name || `备用导演方案 ${index + 1}`).trim();
+    const cardCore = String(item?.core_desire || item?.commercial_goal || item?.why_this_plan || "").trim();
+    const cardStructure = String(item?.video_structure?.name || item?.narrative_archetype || "差异化方向").trim();
+    const selectedForRender = ready && renderSelection.has(previewId);
+    const canGenerate = !ready && Boolean(item.can_generate);
+    const cardBody = `<span><b>${escapeHtml(cardStructure)}</b>${ready ? `<small>${Number(item?.duration_seconds || 0).toFixed(1)}s · ${Number(item?.clip_count || 0)} 段</small>` : `<small>未生成 · 按需付费</small>`}</span><strong>${escapeHtml(cardTitle)}</strong>${cardCore ? `<p>${escapeHtml(cardCore)}</p>` : ""}`;
+    return `<article class="commerce-director-top-variant ${ready ? "is-ready" : "is-summary"}">
+      ${ready ? `<button type="button" data-action="preview-director-variant" data-preview-id="${escapeHtml(previewId)}" data-preview-scope="${scope}" title="查看这个方案的已选片段">${cardBody}</button>` : canGenerate ? `<button type="button" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(item.director_strategy_id || "")}" data-additional-ai-call="true" data-preview-scope="${scope}">${cardBody}<small>生成并查看 · 额外消耗 AI</small></button>` : `<div>${cardBody}</div>`}
+      <label class="commerce-director-render-choice ${ready ? "" : "is-disabled"}"><input type="checkbox" data-action="preview-director-render-toggle" data-preview-id="${escapeHtml(previewId)}" data-preview-scope="${scope}" ${selectedForRender ? "checked" : ""} ${ready ? "" : "disabled"}><span>${ready ? "加入成片" : "等待完整片单"}</span></label>
     </article>`;
   }).join("");
-  const alternativesOpen = Boolean(state.previewDirectorAlternativesOpen?.[scope]);
   const statusSource = manual ? "当前编排检查" : "AI 初稿评价";
   const statusTone = status.status === "block" ? "block" : (status.status === "warn" ? "warn" : "ok");
+  const costStrip = renderCommerceDirectorCostStrip(preview);
 
   return `<section class="commerce-director-recommendation is-${statusTone}" aria-label="AI 推荐方案">
+    ${costStrip}
     <div class="commerce-director-thesis-row">
-      <div class="commerce-director-thesis-copy"><span class="commerce-director-recommendation-badge">AI 导演推荐</span><h3>${escapeHtml(title)}</h3><span class="commerce-director-structure-pill">${escapeHtml(structureName)}</span><p>${escapeHtml(promise || title)}</p></div>
-      <div class="commerce-director-thesis-actions"><span><strong>${escapeHtml(durationCopy)}</strong><small>${escapeHtml([targetCopy, initialCopy].filter(Boolean).join(" · "))}</small></span>${alternativeRows ? `<button type="button" class="commerce-director-alternatives-toggle" data-action="preview-director-alternatives-toggle" data-preview-scope="${scope}" aria-expanded="${alternativesOpen ? "true" : "false"}">其他导演方向 ${alternatives.length}</button>` : ""}</div>
+      <div class="commerce-director-thesis-copy"><span class="commerce-director-recommendation-badge">AI 导演推荐</span><h3>${escapeHtml(title)}</h3><span class="commerce-director-structure-pill">${escapeHtml(structureName)}</span><p>${escapeHtml(promise || title)}</p><div class="commerce-director-active-plan-meta"><span><strong>${escapeHtml(durationCopy)}</strong><small>${escapeHtml([targetCopy, initialCopy].filter(Boolean).join(" · "))}</small></span>${activeReady ? `<label class="commerce-director-render-choice"><input type="checkbox" data-action="preview-director-render-toggle" data-preview-id="${escapeHtml(activePreviewId)}" data-preview-scope="${scope}" ${renderSelection.has(activePreviewId) ? "checked" : ""}><span>加入成片</span></label>` : ""}<em>已选择 ${renderSelection.size} 个方案</em></div></div>
+      ${alternativeCards ? `<aside class="commerce-director-top-variants" aria-label="其他导演方案"><header><strong>其他导演方案</strong><span>已生成可直接查看；未生成需确认额外费用</span></header><div>${alternativeCards}</div></aside>` : ""}
     </div>
     ${chapterRows ? `<nav class="commerce-director-recommendation-path" aria-label="说服路径"><span>说服路径</span><ol>${chapterRows}</ol>${moreChapters}</nav>` : ""}
     <div class="commerce-director-status-row" role="status"><span class="commerce-director-opening"><b>开场承诺</b>${escapeHtml(openingPromise || "尚未形成明确开场承诺")}</span><div class="commerce-director-status-metrics"><span>可编辑候选约 ${Number(candidateStats.duration || 0).toFixed(1)}s</span><span>已选 ${selected.length} 段</span><span>${escapeHtml(status.progressionLabel)}</span><span>${escapeHtml(status.openingLabel)}</span><span>${escapeHtml(status.endingLabel)}</span></div><span class="commerce-director-status-badge is-${statusTone}"><small>${escapeHtml(statusSource)}</small>${escapeHtml(status.overallLabel)}</span></div>
     ${status.boundaryMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.boundaryMessage)}</p>` : ""}
     <span class="visually-hidden" aria-live="polite">当前查看 ${escapeHtml(outline.find(function (item) { return String(item?.chapter_id || "") === activeChapterId; })?.goal || "导演方案")}</span>
-    ${alternativesOpen && alternativeRows ? `<aside class="commerce-director-alternative-popover" role="dialog" aria-label="其他导演方向"><header><div><strong>其他导演方向</strong><small>仅展示方向摘要；选择后才会重新调用 AI</small></div><button type="button" data-action="preview-director-alternatives-close" data-preview-scope="${scope}" aria-label="关闭其他导演方向">关闭</button></header><div>${alternativeRows}</div></aside>` : ""}
   </section>`;
 }
 

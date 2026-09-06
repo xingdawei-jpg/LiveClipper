@@ -132,7 +132,10 @@ class ContentPolicyTests(unittest.TestCase):
         allowed = _policy(source_claim="allow", social_proof="allow", after_sale="allow")
 
         self.assertEqual(ai_clipper._filter_price_and_cta(clips, content_policy=allowed), clips)
-        self.assertEqual(ai_clipper._filter_price_and_cta(clips), [])
+        self.assertEqual(
+            ai_clipper._filter_price_and_cta(clips, content_policy=_policy()),
+            [],
+        )
 
     def test_policy_only_body_content_cannot_be_promoted_to_hook(self) -> None:
         clip = ("hook", "原厂同款的肩线往里收，穿起来更利落。", 0.0, 4.0, 0, 4.0)

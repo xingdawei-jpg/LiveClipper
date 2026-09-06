@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,15 @@ server = importlib.import_module("server")
 
 
 class CommerceDirectorPreviewRouteTests(unittest.TestCase):
+    def test_main_product_and_leaf_changes_invalidate_preview_cache_for_both_modes(self) -> None:
+        with mock.patch.object(server, "_preview_selection_config_signature", return_value={"director_contract": "director-duration-v2-product-v1"}):
+            for mode, payload_type in (("smart", server.SmartCutPayload), ("mix", server.MixPayload)):
+                payloads = [payload_type(ai_controls=controls) for controls in (
+                    {"main_product": "裤子"}, {"main_product": "白衬衫"},
+                    {"leaf_category": "针织衫"}, {"leaf_category": "外套"},
+                )]
+                self.assertEqual(len({server._preview_cache_key(mode, [], payload) for payload in payloads}), 4)
+
     def test_internal_direct_render_plan_does_not_replace_latest_editable_preview(self) -> None:
         visible = {
             "id": "visible",
@@ -514,6 +524,40 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
         )
         self.assertEqual(run_m1.call_count, 1)
 
+    def test_three_versions_request_three_plans_inside_same_two_ai_calls(self) -> None:
+        payload = server.SmartCutPayload(
+            video_paths=["C:/source.mp4"], srt_path="C:/source.srt", target_duration=60, versions=3,
+        )
+        with mock.patch.object(server, "_run_commerce_director_preview") as run_director:
+            server._run_commerce_director_preview_auto_batch("parent", "preview", payload)
+
+        contract = run_director.call_args.kwargs["director_strategy_contract"]
+        self.assertEqual(contract["semantic_call_count"], 2)
+        self.assertEqual(contract["requested_director_plan_count"], 3)
+        self.assertEqual(contract["packet_mode"], "multi_plan")
+
+    def test_variant_card_is_ready_for_instant_switch(self) -> None:
+        card = server._commerce_director_variant_card(
+            preview_id="variant-2",
+            strategy={"strategy_id": "S2", "director_title": "通勤松弛感", "core_desire": "轻松出门"},
+            plan={"plan_valid": True, "selected_candidates": [
+                {"candidate_id": 1, "duration": 2.2}, {"candidate_id": 2, "duration": 3.1},
+            ]},
+            primary=False,
+        )
+        self.assertEqual(card["preview_id"], "variant-2")
+        self.assertEqual(card["title"], "通勤松弛感")
+        self.assertEqual(card["duration_seconds"], 5.3)
+        self.assertEqual(card["director_plan_role"], "alternative")
+
+    def test_preview_cache_accounts_for_export_speed_and_duration_tolerance(self) -> None:
+        slow = server.SmartCutPayload(video_paths=["C:/source.mp4"], target_duration=60, dedup_preset="none")
+        fast = server.SmartCutPayload(video_paths=["C:/source.mp4"], target_duration=60, dedup_preset="custom", video={"speed": True, "speed_value": 125})
+        narrow = server.SmartCutPayload(video_paths=["C:/source.mp4"], target_duration=60, dedup_preset="none", duration_tolerance=3)
+        with mock.patch.object(server, "_preview_selection_config_signature", return_value={}):
+            keys = [server._preview_cache_key("smart", [], p) for p in (slow, fast, narrow)]
+        self.assertEqual(len(set(keys)), 3)
+
     def test_initial_preview_endpoint_starts_the_one_click_auto_batch_worker(self) -> None:
         payload = server.SmartCutPayload(video_paths=["C:/source.mp4"])
         settings = {"m2_planner_mode": "lite_director_experiment"}
@@ -813,6 +857,7 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                 video_paths=[str(video)], srt_path=str(srt), target_duration=45,
                 ai_controls={"goal": "场景种草", "main_product": "焦糖朗姆", "selling_points": ["穿着体验"],
                              "priority_terms": ["三伏天"], "avoid": ["价格", "闲聊"]},
+                dedup_preset="custom", video={"speed": True, "speed_value": 125},
             )
             observed: dict[str, Path] = {}
 
@@ -820,6 +865,7 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                 observed["output_dir"] = kwargs["output_dir"]
                 observed["director_controls"] = kwargs["director_controls"]
                 self.assertEqual(kwargs["source_definition"]["product"], "焦糖朗姆")
+                self.assertEqual(kwargs["director_strategy_contract"]["output_speed_factor"], 1.25)
                 self.assertTrue(kwargs["output_dir"].is_dir())
                 return {
                     "passed": True,
@@ -939,6 +985,17 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
             self.assertFalse(observed["commerce_director"])
 
     def test_worker_failure_keeps_source_identity_and_failure_artifact(self) -> None:
+        from ai_cost_ledger import record_ai_call
+
+        def fail_after_paid_call(*_args, **_kwargs):
+            record_ai_call(
+                module="commercial_analyzer", stage="Director_beat_casting", model="deepseek-v4-flash",
+                request_payload={"max_tokens": 32000},
+                response_payload={"usage": {"prompt_tokens": 100, "completion_tokens": 32000}},
+                success=False, error_type="output_truncated",
+            )
+            raise ValueError("no materializable hard-safe candidates")
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             video = root / "source.mp4"
@@ -955,8 +1012,9 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                 mock.patch.object(server, "_load_settings", return_value=settings),
                 mock.patch(
                     "run_m3_new_golden_plan_fidelity._run_case",
-                    side_effect=ValueError("no materializable hard-safe candidates"),
+                    side_effect=fail_after_paid_call,
                 ),
+                mock.patch.dict(os.environ, {"LIVECLIPPER_DATA_DIR": str(root / "data")}),
                 mock.patch.object(server, "_set_task"),
                 mock.patch.object(server, "_set_task_progress"),
                 mock.patch.object(server, "emit_log"),
@@ -966,10 +1024,15 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
             artifact_dir = root / "workspace" / "ui_commerce_director_experiment" / "failed-task"
             self.assertTrue((artifact_dir / "source_info.json").exists())
             self.assertTrue((artifact_dir / "failure.json").exists())
+            self.assertTrue((artifact_dir / "cost_report.json").exists())
             preview = server._get_preview("failed-preview")
             self.assertEqual(preview["video"], str(video))
             self.assertEqual(preview["srt_path"], str(srt))
             self.assertTrue(preview["dedup_summary"]["failure_artifact"].endswith("failure.json"))
+            self.assertEqual(preview["dedup_summary"]["cost_report"]["session_id"], "failed-preview")
+            self.assertEqual(preview["dedup_summary"]["cost_report"]["tokens"]["known_total_tokens"], 32100)
+            self.assertEqual(preview["dedup_summary"]["cost_report"]["records"]["failed_requests"], 1)
+            self.assertEqual(preview["error"], "no materializable hard-safe candidates")
 
     def test_local_asr_temp_sidecar_is_verified_only_for_its_exact_video_hash(self) -> None:
         from asr_cache import inspect_cache
@@ -1043,6 +1106,60 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
             self.assertTrue(source_srt.is_file())
             self.assertTrue(source_srt.with_suffix(".words.json").is_file())
             self.assertTrue(source_srt.with_suffix(".asr-cache.json").is_file())
+
+    def test_director_variant_batch_accepts_only_ready_plans_from_the_same_preview(self) -> None:
+        clip = ("product", "完整原话", 1.0, 3.0, 0.0, 2.0, "", "C:/source.mp4")
+        root = {
+            "id": "root-plan",
+            "scope": "smart-cut",
+            "status": "ready",
+            "commercial_director_experiment": True,
+            "raw_clips": [clip],
+            "candidate_raw_clips": [clip],
+            "director_review": {"director_variants": [
+                {"preview_id": "root-plan", "strategy_id": "S1", "available": True},
+                {"preview_id": "alt-plan", "strategy_id": "S2", "available": True},
+            ]},
+        }
+        alternative = {
+            **root,
+            "id": "alt-plan",
+            "parent_preview_id": "root-plan",
+            "hidden_from_latest": True,
+        }
+        with mock.patch.dict(server._CLIP_PREVIEWS, {
+            "root-plan": root,
+            "alt-plan": alternative,
+        }, clear=True):
+            self.assertEqual(
+                server._validate_director_variant_batch(["root-plan", "alt-plan"], "smart"),
+                ["root-plan", "alt-plan"],
+            )
+
+    def test_unedited_director_variant_renders_only_its_ai_story_not_candidate_library(self) -> None:
+        recommended = [
+            ("hook", "开场", 0.0, 2.0, 0.0, 2.0, "", "C:/source.mp4"),
+            ("product", "证明", 2.0, 4.0, 0.0, 2.0, "", "C:/source.mp4"),
+        ]
+        preview = {
+            "id": "alt-plan",
+            "scope": "smart-cut",
+            "status": "ready",
+            "commercial_director_experiment": True,
+            "raw_clips": recommended,
+            "candidate_raw_clips": [*recommended, ("product", "手动备用", 4.0, 6.0, 0.0, 2.0, "", "C:/source.mp4")],
+        }
+        with mock.patch.dict(server._CLIP_PREVIEWS, {"alt-plan": preview}, clear=True):
+            data = server._director_variant_render_data(server.SmartCutPayload(), "alt-plan")
+
+        self.assertEqual(data["versions"], 1)
+        self.assertEqual(data["selected_indices"], [0, 1])
+        self.assertEqual(data["order"], [0, 1])
+
+    def test_product_conflict_warning_does_not_drop_ai_authored_alternative_plans(self) -> None:
+        source = (ROOT / "run_m3_new_golden_plan_fidelity.py").read_text(encoding="utf-8")
+        self.assertIn("product_scope_conflict_non_blocking", source)
+        self.assertNotIn('if variant_product_status == "conflict":\n                    continue', source)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from commercial_analyzer import (
     normalize_director_controls,
     parse_strategy_result,
     _extract_json,
+    _normalize_two_pass_director_payload,
     _post_two_pass_director_request,
     resolve_commercial_director_model,
 )
@@ -566,6 +567,70 @@ class PromptTests(unittest.TestCase):
 
 
 class TwoPassDirectorTests(unittest.TestCase):
+    def test_three_version_story_and_cast_prompts_request_three_complete_plans(self) -> None:
+        story_prompt = build_two_pass_story_prompt(
+            product="白衬衫", subtitles=SAMPLE_SUBTITLES, director_plan_count=3,
+        )
+        self.assertIn("恰好 3 个完整且明显不同的导演故事合同", story_prompt)
+        self.assertIn('"strategy_id":"S3"', story_prompt)
+        story = {
+            "strategies": [
+                {"strategy_id": f"S{i}", "director_plan_role": "primary" if i == 1 else "alternative",
+                 "core_desire": f"欲望{i}", "chapter_packets": [{"chapter_id": "C1"}]}
+                for i in range(1, 4)
+            ]
+        }
+        cast_prompt = build_two_pass_cast_prompt(story_contract=story, subtitles=SAMPLE_SUBTITLES)
+        self.assertIn("已冻结 3 个完整导演方案", cast_prompt)
+        self.assertIn('"strategy_id":"S3"', cast_prompt)
+
+    def test_normalize_preserves_all_fully_cast_strategies(self) -> None:
+        story = {"strategies": [
+            {"strategy_id": "S1", "director_plan_role": "primary", "core_desire": "显瘦",
+             "chapter_packets": [{"chapter_id": "C1", "title": "结果"}]},
+            {"strategy_id": "S2", "director_plan_role": "alternative", "core_desire": "通勤",
+             "chapter_packets": [{"chapter_id": "C1", "title": "场景"}]},
+        ]}
+        cast = {"strategies": [
+            {"strategy_id": "S1", "director_plan_role": "primary",
+             "chapter_packets": [{"chapter_id": "C1", "beats": [{"subtitle_ids": [1]}]}]},
+            {"strategy_id": "S2", "director_plan_role": "alternative",
+             "chapter_packets": [{"chapter_id": "C1", "beats": [{"subtitle_ids": [2]}]}]},
+        ]}
+        normalized = _normalize_two_pass_director_payload(
+            story, cast,
+            casting_rows=[{"id": 1, "text": "第一句"}, {"id": 2, "text": "第二句"}],
+        )
+        self.assertEqual([item["strategy_id"] for item in normalized["strategies"]], ["S1", "S2"])
+        self.assertEqual(normalized["strategies"][1]["director_plan_role"], "alternative")
+        self.assertEqual(normalized["strategies"][1]["core_desire"], "通勤")
+        self.assertEqual(normalized["strategies"][1]["chapter_packets"][0]["title"], "场景")
+        self.assertEqual(normalized["strategies"][1]["final_readthrough"], "第二句")
+
+    def test_compact_controls_drop_removed_preferences_and_reach_both_prompts(self) -> None:
+        controls = normalize_director_controls({
+            "controls_version": "director-controls-v2", "goal": "穿着体验",
+            "main_product": "白色衬衫", "leaf_category": "衬衫",
+            "extra_instruction": "先讲通勤，再用袖子设计作证明。",
+            "selling_points": ["紧迫稀缺"], "preferred_topics": ["显瘦"],
+            "priority_terms": ["必须买"], "focus_hint": "面料", "preference_weights": {"版型": 3},
+            "hook_style": "价格开头", "ending_style": "促单收尾", "avoid": ["价格"],
+            "supporting_products": "block",
+        })
+        self.assertEqual(normalize_director_controls(controls), controls)
+        self.assertEqual(controls["director_direction"], "穿着体验")
+        for key in ("preferred_topics", "preferred_terms", "preference_weights", "opening_style", "ending_style", "priority_theme"):
+            self.assertFalse(controls[key])
+        self.assertNotIn("价格", controls["avoid"])
+        self.assertIn("搭配其他品", controls["avoid"])
+        shared = {"subtitles": SAMPLE_SUBTITLES, "director_controls": controls}
+        for prompt in (build_two_pass_story_prompt(product="白色衬衫", **shared),
+                       build_two_pass_cast_prompt(story_contract={"strategies": []}, **shared)):
+            self.assertIn("先讲通勤，再用袖子设计作证明。", prompt)
+            self.assertIn('"supporting_products":"block"', prompt)
+            self.assertIn("director-controls-v2", prompt)
+            self.assertNotIn("价格开头", prompt)
+
     def test_director_controls_are_idempotent_and_do_not_weaken_quality(self) -> None:
         controls = normalize_director_controls({
             "primary_category": "服饰内衣", "secondary_category": "自动识别",
@@ -616,6 +681,13 @@ class TwoPassDirectorTests(unittest.TestCase):
 
         self.assertEqual(parsed["subtitle_ids"], [99, 7])
         self.assertEqual(parsed["spoken"], "原句里的 099 保持不变")
+
+    def test_extract_json_repairs_unescaped_quotes_only_in_known_narrative_fields(self) -> None:
+        parsed = _extract_json(
+            '{"opening_promise":"开头用一句"我穿这件衣服"的悬念开场","subtitle_ids":[101]}'
+        )
+        self.assertEqual(parsed["opening_promise"], '开头用一句"我穿这件衣服"的悬念开场')
+        self.assertEqual(parsed["subtitle_ids"], [101])
 
     def test_story_contract_uses_complete_pool_but_selects_no_subtitle_ids(self) -> None:
         prompt = build_two_pass_story_prompt(
@@ -680,12 +752,13 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertIn("没有 Strong Ranking、没有 TopK", prompt)
         self.assertIn("subtitle_ids 只能有一个 ID", prompt)
         self.assertIn('"subtitle_ids"', prompt)
-        self.assertIn('"chapter_readthrough"', prompt)
+        self.assertNotIn('"chapter_readthrough":', prompt)
+        self.assertIn("程序会按源字幕ID还原真实全文", prompt)
         self.assertNotIn('"verbatim"', prompt)
         self.assertNotIn('"source_span"', prompt)
         self.assertIn('"chapter_count":5', prompt)
         self.assertIn("不得为下限填充", prompt)
-        self.assertIn("48.0-66.0 秒", prompt)
+        self.assertIn("50.0-70.0 秒", prompt)
         self.assertNotIn("expected_total_beats", TWO_PASS_CAST_SYSTEM_PROMPT + prompt)
         self.assertNotIn("00:00:", prompt)
         self.assertLess(prompt.index("[ID 002]"), prompt.index("下面是第一遍 AI"))
@@ -768,6 +841,8 @@ class TwoPassDirectorTests(unittest.TestCase):
             "strategies": [{
                 "strategy_id": "S1", "director_plan_role": "primary",
                 "director_title": "冻结标题",
+                "product_scope": {"main_product": "上衣", "product_type": "top", "sales_scope": "single_product", "target_confirmation": "match", "identity_evidence_ids": [1],
+                                  "source_product_sections": [{"start_id": 1, "end_id": 2, "product_type": "top", "subject_product": "上衣", "identity_evidence_ids": [1]}]},
                 "core_desire": "大身材也能穿得利落",
                 "central_promise": "用真实版型说明大身材也能利落",
                 "opening_promise": "先看到显窄结果",
@@ -791,8 +866,8 @@ class TwoPassDirectorTests(unittest.TestCase):
             "chapter_packets": [{
                 "chapter_id": "C1",
                 "beats": [
-                    {"beat_function": "result", "subtitle_ids": [1]},
-                    {"beat_function": "mechanism", "subtitle_ids": [2]},
+                    {"beat_function": "result", "subtitle_ids": [1], "product_relation": "main_product", "subject_product": "上衣", "subject_product_type": "top", "product_evidence_ids": [1]},
+                    {"beat_function": "mechanism", "subtitle_ids": [2], "product_relation": "main_product", "subject_product": "上衣", "subject_product_type": "top", "product_evidence_ids": [1]},
                 ],
                 "continuity_status": "pass",
             }],
@@ -809,6 +884,7 @@ class TwoPassDirectorTests(unittest.TestCase):
                 api_key="test-key", base_url="https://example.invalid/v1", model="test-model",
                 product="x", subtitles=subtitles, executable_subtitle_ids=[1, 2],
                 two_pass_director=True,
+                target_duration=4.0, duration_tolerance=1.0,
                 director_controls={"goal": "显瘦转化", "priority_terms": ["利落"]},
                 stage_response_hook=lambda stage, _value: captured_stages.append(stage),
                 stage_progress_hook=progress_stages.append,
@@ -818,7 +894,7 @@ class TwoPassDirectorTests(unittest.TestCase):
         for call in post.call_args_list:
             self.assertIn('"director_direction":"显瘦转化"', call.kwargs["user_prompt"])
             self.assertIn('"preferred_terms":["利落"]', call.kwargs["user_prompt"])
-        self.assertEqual(captured_stages, ["story_contract", "beat_casting"])
+        self.assertEqual(captured_stages, ["story_contract", "beat_casting", "duration_control", "product_control"])
         self.assertEqual(post.call_args_list[0].kwargs["stage"], "Director_story_contract")
         self.assertEqual(post.call_args_list[1].kwargs["stage"], "Director_beat_casting")
         self.assertIn("chapter_readthrough", post.call_args_list[1].kwargs["user_prompt"])
@@ -888,7 +964,7 @@ class TwoPassDirectorTests(unittest.TestCase):
             mock.patch("commercial_analyzer.urllib.request.urlopen", return_value=FakeResponse()),
             mock.patch("commercial_analyzer.record_ai_call") as ledger,
         ):
-            with self.assertRaisesRegex(AnalyzerError, "16000 token 上限，JSON 被截断"):
+            with self.assertRaisesRegex(AnalyzerError, "48384 token 上限，JSON 被截断"):
                 _post_two_pass_director_request(
                     api_key="test", base_url="https://example.invalid/v1", model="deepseek-v4-pro",
                     system_prompt="system", user_prompt="user", stage="Director_beat_casting",
@@ -898,7 +974,7 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertFalse(ledger.call_args.kwargs["success"])
         self.assertEqual(ledger.call_args.kwargs["error_type"], "output_truncated")
 
-    def test_two_pass_casting_disables_provider_thinking(self) -> None:
+    def test_only_v4_casting_uses_low_reasoning_with_reserved_capacity(self) -> None:
         captured = {}
         provider_response = {
             "choices": [{"message": {"content": '{"strategies":[]}'}, "finish_reason": "stop"}],
@@ -917,6 +993,7 @@ class TwoPassDirectorTests(unittest.TestCase):
 
         def fake_urlopen(request, **_kwargs):
             captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = _kwargs["timeout"]
             return FakeResponse()
 
         with (
@@ -929,19 +1006,60 @@ class TwoPassDirectorTests(unittest.TestCase):
                 stage="Director_beat_casting", max_tokens=8000, timeout=30,
             )
 
+            casting_body = captured["body"]
+            self.assertGreaterEqual(captured["timeout"], 600)
+            # A three-plan completion above the old 32k ceiling must remain
+            # intact, with no automatic paid retry or third AI request.
+            provider_response["usage"]["completion_tokens"] = 36000
+            result = _post_two_pass_director_request(
+                api_key="test", base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash", system_prompt="system", user_prompt="user",
+                stage="Director_beat_casting", max_tokens=24000, timeout=30,
+            )
+            self.assertEqual(result, '{"strategies":[]}')
+            self.assertEqual(captured["body"]["max_tokens"], 64384)
+            provider_response["usage"]["completion_tokens"] = 8
+            _post_two_pass_director_request(
+                api_key="test", base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash", system_prompt="system", user_prompt="user",
+                stage="Director_story_contract", max_tokens=8000, timeout=30,
+            )
+        self.assertEqual(casting_body["thinking"], {"type": "enabled"})
+        self.assertEqual(casting_body["reasoning_effort"], "low")
+        self.assertEqual(casting_body["max_tokens"], 32768)
         self.assertEqual(captured["body"]["thinking"], {"type": "disabled"})
-        self.assertNotIn("reasoning_effort", captured["body"])
+        self.assertEqual(captured["body"]["max_tokens"], 8000)
+
+
+class JsonRecoveryTests(unittest.TestCase):
+    def test_missing_continuity_note_quote_keeps_ids_and_note_unchanged(self):
+        expected = {"subtitle_ids": [476, 477], "continuity_links": [
+            {"from_id": 476, "to_id": 477, "relation": "大衣上身到‘还不错’"},
+            {"from_id": 497, "to_id": 420, "relation": '保留引号"和花括号}原文'},
+        ]}
+        valid = json.dumps(expected, ensure_ascii=False, indent=2)
+        broken = valid.replace('大衣上身到‘还不错’"\n', '大衣上身到‘还不错’\n')
+        self.assertNotEqual(broken, valid)
+        self.assertEqual(_extract_json(broken), expected)
+        self.assertEqual(_extract_json(valid), expected)
+        self.assertEqual(_extract_json(broken.replace('\n', '\r\n')), expected)
+
+    def test_does_not_guess_missing_ids_or_containers(self):
+        for broken in ('{\n"subtitle_ids": "476\n}', '{\n"relation": "truncated',
+                       '{\n"relation": "uncertain\n"next": 2\n}'):
+            with self.subTest(broken=broken), self.assertRaises(AnalyzerError):
+                _extract_json(broken)
 
 
 class CallTests(unittest.TestCase):
-    def test_deepseek_default_flash_is_upgraded_only_for_commercial_director(self) -> None:
+    def test_deepseek_flash_is_not_silently_upgraded_for_commercial_director(self) -> None:
         self.assertEqual(
             resolve_commercial_director_model("https://api.deepseek.com", "deepseek-v4-flash"),
-            "deepseek-v4-pro",
+            "deepseek-v4-flash",
         )
         self.assertEqual(
-            resolve_commercial_director_model("https://example.invalid/v1", "deepseek-v4-flash"),
-            "deepseek-v4-flash",
+            resolve_commercial_director_model("https://api.deepseek.com", "deepseek-v4-pro"),
+            "deepseek-v4-pro",
         )
 
     def test_analyze_posts_and_computes_scores(self) -> None:

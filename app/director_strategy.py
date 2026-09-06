@@ -265,10 +265,10 @@ def _single_pass_proposal(strategy: Strategy, *, plan_role: str = "") -> dict[st
     return {
         "director_strategy_id": f"D_DIRECTOR_{strategy.strategy_id}",
         "director_mode": "single_pass_director",
-        "available": has_packet if is_primary else True,
+        "available": has_packet,
         "unavailable_reason": (
             "主方案缺少至少两段真实口播，未进入物化。"
-            if is_primary and not has_packet else ""
+            if not has_packet else ""
         ),
         "primary_story_id": strategy.strategy_id,
         "supporting_story_ids": [],
@@ -285,15 +285,15 @@ def _single_pass_proposal(strategy: Strategy, *, plan_role: str = "") -> dict[st
         "quality_tier": strategy.director_quality_tier or "standard",
         "video_structure": video_structure,
         "director_plan_role": "primary" if is_primary else "alternative",
-        "requires_additional_ai_call": not is_primary,
-        "materialization_status": "ready" if is_primary and has_packet else "direction_only",
-        "director_sequence": [item.to_dict() for item in strategy.director_sequence] if is_primary else [],
-        "chapter_packets": [item.to_dict() for item in strategy.director_chapter_packets] if is_primary else [],
-        "final_readthrough": strategy.director_readthrough if is_primary else "",
+        "requires_additional_ai_call": not has_packet,
+        "materialization_status": "ready" if has_packet else "direction_only",
+        "director_sequence": [item.to_dict() for item in strategy.director_sequence] if has_packet else [],
+        "chapter_packets": [item.to_dict() for item in strategy.director_chapter_packets] if has_packet else [],
+        "final_readthrough": strategy.director_readthrough if has_packet else "",
         "opening_alternative_packages": [
             item.to_dict() for item in strategy.director_opening_alternatives
-        ] if is_primary else [],
-        "whole_video_audit": dict(strategy.whole_video_audit or {}) if is_primary else {},
+        ] if has_packet else [],
+        "whole_video_audit": dict(strategy.whole_video_audit or {}) if has_packet else {},
         "opening_scope": {
             "source": "single_ai_director_packet",
             **dict(strategy.opening_scope or {}),

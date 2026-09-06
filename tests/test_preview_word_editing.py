@@ -17,6 +17,26 @@ ai_clipper = importlib.import_module("ai_clipper")
 
 
 class PreviewWordEditingTests(unittest.TestCase):
+    def test_director_variants_switch_complete_previews_without_new_ai(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-action="preview-director-variant"', script)
+        self.assertIn("async function switchPreviewDirectorVariant", script)
+        self.assertIn("shouldKeepCurrentDirectorVariantFocus", script)
+        self.assertIn("commerceDirectorPreviewGroupId(current) === commerceDirectorPreviewGroupId(latestPreview)", script)
+        self.assertIn("使用已生成结果，不产生新的调用费用", script)
+        self.assertIn("director_variants", script)
+
+    def test_director_alternatives_live_beside_primary_not_in_candidate_sidebar(self):
+        script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("commerce-director-top-variants", script)
+        self.assertIn("其他导演方案", script)
+        self.assertIn("已生成可直接查看；未生成需确认额外费用", script)
+        self.assertNotIn("function renderCommerceDirectorSidebarAlternatives", script)
+        self.assertNotIn("has-director-alternatives", script)
+        self.assertIn('data-action="preview-director-render-toggle"', script)
+        self.assertIn("/api/smart-cut/from-preview/director-batch/start", script)
+        self.assertIn("/api/mix/from-preview/director-batch/start", script)
+
     def test_workbench_selling_point_categories_are_domain_aware(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
         category_start = script.rfind("function previewWorkbenchCategoryDomain")
@@ -301,23 +321,22 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertIn('api("/api/smart-cut/start"', smart)
         self.assertNotIn("previewReady", smart)
 
-    def test_director_alternative_cards_are_direction_only_and_collapsed_by_default(self):
+    def test_director_alternative_cards_show_ready_plans_beside_the_primary(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")
         start = script.index("function renderCommerceDirectorRecommendationCard")
         end = script.index("function togglePreviewOverviewDetails", start)
         rendered = script[start:end]
         styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(encoding="utf-8")
 
-        self.assertIn("const unavailable = item?.available === false", rendered)
-        self.assertNotIn('String(alternativeStory?.duration_feasibility', rendered)
-        self.assertIn("commerce-director-alternatives-toggle", rendered)
-        self.assertIn("commerce-director-alternative-popover", rendered)
-        self.assertIn("preview-director-alternatives-toggle", rendered)
-        self.assertIn("commerce-director-alt-card", rendered)
-        self.assertIn("核心购买理由", rendered)
-        self.assertIn("开场方向", rendered)
-        self.assertIn("需 2 次 AI", rendered)
-        self.assertIn("position: absolute;", styles)
+        self.assertIn("const planRows = commerceDirectorPlanRows(preview)", rendered)
+        self.assertIn("commerce-director-top-variants", rendered)
+        self.assertIn('data-action="preview-director-variant"', rendered)
+        self.assertIn('data-action="preview-director-render-toggle"', rendered)
+        self.assertIn("已生成可直接查看；未生成需确认额外费用", rendered)
+        self.assertIn("等待完整片单", rendered)
+        self.assertIn("commerce-director-thesis-row", styles)
+        self.assertIn("commerce-director-top-variant", styles)
+        self.assertNotIn("commerce-director-alternative-popover", rendered)
 
     def test_director_workbench_exposes_story_path_candidate_views_and_chapter_script(self):
         script = (ROOT / "web_client" / "frontend" / "assets" / "app.js").read_text(encoding="utf-8")

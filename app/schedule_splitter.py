@@ -385,7 +385,7 @@ def normalize_clock_schedule_to_live_offsets(schedule, live_start, log_fn=None):
     return schedule
 
 
-def _locate_explain_time_range(header):
+def _locate_explain_time_range(header, rows=None):
     """在表头中定位“讲解时段1..N”列的起止范围。
 
     返回 (起始列下标, 结束列下标+1)。飞书导出的排品表模板并不固定 ——
@@ -401,6 +401,24 @@ def _locate_explain_time_range(header):
             matched.append(idx)
         elif text.startswith("讲解") and text[-1:].isdigit():
             matched.append(idx)
+    if not matched and rows:
+        # Some exported sheets leave the column title blank or rename it, but
+        # still store standard ``01:04-26:15`` values in the actual schedule
+        # column.  Detect that column from data instead of assuming a fixed
+        # E/F/G position.
+        time_range_pattern = re.compile(
+            r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[-~～—–]\s*\d{1,2}:\d{2}(?::\d{2})?\s*$"
+        )
+        width = max((len(row or []) for row in rows[1:]), default=0)
+        for idx in range(width):
+            matches = sum(
+                1
+                for row in rows[1:]
+                if idx < len(row or [])
+                and time_range_pattern.match(str(row[idx] or ""))
+            )
+            if matches:
+                matched.append(idx)
     if not matched:
         return None, None
     start = min(matched)
@@ -451,7 +469,7 @@ def read_excel(filepath: str, log_fn=None, time_basis="relative"):
             if "商品标题" in str(header[_hi] or "") or "商品名称" in str(header[_hi] or ""):
                 _name_col = _hi
                 break
-        _time_start, _time_end = _locate_explain_time_range(header)
+        _time_start, _time_end = _locate_explain_time_range(header, rows)
         if _time_start is None:
             # 兜底: 表头未标明“讲解时段”列时, 沿用历史固定位置
             _time_start = 6 if _name_col == 1 else 4
@@ -467,7 +485,7 @@ def read_excel(filepath: str, log_fn=None, time_basis="relative"):
                 tv = row[ci]
                 if tv is None:
                     continue
-                ts = str(tv).strip()
+                ts = str(tv).strip().replace("～", "-").replace("—", "-").replace("–", "-")
                 if not ts or ts == "None":
                     continue
                 sep = "-" if "-" in ts else ("~" if "~" in ts else None)
@@ -793,16 +811,24 @@ def _probe_durations(video_list, log_fn=None, ffmpeg_cmd=None):
 
 
 
-def build_video_timeline(video_list, ffmpeg_cmd=None, log_fn=None):
+def build_video_timeline(video_list, ffmpeg_cmd=None, log_fn=None, video_start_offsets=None):
     """Return the real selected-file timeline without filling timestamp gaps."""
-    ordered_videos = sort_videos_by_start(video_list)
+    if video_start_offsets is not None:
+        if any(video not in video_start_offsets for video in video_list):
+            raise ValueError("每段视频都需要独立的直播起点。")
+        ordered_videos = sorted(video_list, key=lambda video: float(video_start_offsets[video]))
+    else:
+        ordered_videos = sort_videos_by_start(video_list)
     durations = _probe_durations(ordered_videos, log_fn=log_fn, ffmpeg_cmd=ffmpeg_cmd)
-    starts = _get_video_timeline(ordered_videos, durations)
+    starts = ([float(video_start_offsets[video]) for video in ordered_videos]
+              if video_start_offsets is not None else _get_video_timeline(ordered_videos, durations))
     timestamped = [_parse_datetime_from_name(video) for video in ordered_videos]
     has_precise_timestamps = bool(timestamped) and all(value is not None for value in timestamped)
     timeline = []
     for index, video in enumerate(ordered_videos):
         duration = max(0.0, float(durations[index] if index < len(durations) else 0.0))
+        if video_start_offsets is not None and duration < 0.5:
+            raise ValueError("无法读取视频时长，请检查是否下载完成：%s" % os.path.basename(video))
         start = float(starts[index] if index < len(starts) else 0.0)
         timeline.append({
             "video": video,
@@ -811,9 +837,38 @@ def build_video_timeline(video_list, ffmpeg_cmd=None, log_fn=None):
             "end": start + duration,
             "duration": duration,
             "timestamp": timestamped[index].isoformat() if timestamped[index] else "",
-            "estimated": not has_precise_timestamps,
+            "estimated": video_start_offsets is None and not has_precise_timestamps,
         })
     return timeline
+
+
+def _timeline_parts(start, end, timeline):
+    """Intersect independent sources once; overlaps prefer the later-starting file."""
+    boundaries = sorted({float(start), float(end)} | {
+        max(float(start), min(float(end), float(source[key])))
+        for source in timeline for key in ("start", "end")
+    })
+    parts = []
+    for left, right in zip(boundaries, boundaries[1:]):
+        if right <= left:
+            continue
+        candidates = [source for source in timeline
+                      if float(source["start"]) <= left and float(source["end"]) >= right]
+        if not candidates:
+            continue
+        source = max(candidates, key=lambda item: float(item["start"]))
+        if parts and parts[-1]["video_path"] == source["video"] and abs(parts[-1]["timeline_end"] - left) < 1e-6:
+            parts[-1]["timeline_end"] = right
+            parts[-1]["file_end"] = right - float(source["start"])
+            parts[-1]["duration"] += right - left
+        else:
+            parts.append({
+                "video": source["name"], "video_path": source["video"],
+                "timeline_start": left, "timeline_end": right,
+                "file_start": left - float(source["start"]),
+                "file_end": right - float(source["start"]), "duration": right - left,
+            })
+    return [part for part in parts if part["duration"] >= 0.5]
 
 
 def _coverage_gaps(start, end, parts):
@@ -833,9 +888,10 @@ def _coverage_gaps(start, end, parts):
     return gaps
 
 
-def build_schedule_coverage(groups, video_list, ffmpeg_cmd=None, log_fn=None):
+def build_schedule_coverage(groups, video_list, ffmpeg_cmd=None, log_fn=None, video_start_offsets=None):
     """Map schedule ranges to real selected-file coverage for preview and export."""
-    timeline = build_video_timeline(video_list, ffmpeg_cmd=ffmpeg_cmd, log_fn=log_fn)
+    timeline = build_video_timeline(video_list, ffmpeg_cmd=ffmpeg_cmd, log_fn=log_fn,
+                                    video_start_offsets=video_start_offsets)
     coverage_groups = []
     for group in groups:
         records = []
@@ -845,21 +901,7 @@ def build_schedule_coverage(groups, video_list, ffmpeg_cmd=None, log_fn=None):
             start = float(start)
             end = float(end)
             expected_duration = max(0.0, end - start)
-            parts = []
-            for source in timeline:
-                clip_start = max(start, float(source["start"]))
-                clip_end = min(end, float(source["end"]))
-                if clip_end - clip_start < 0.5:
-                    continue
-                parts.append({
-                    "video": source["name"],
-                    "video_path": source["video"],
-                    "timeline_start": clip_start,
-                    "timeline_end": clip_end,
-                    "file_start": clip_start - float(source["start"]),
-                    "file_end": clip_end - float(source["start"]),
-                    "duration": clip_end - clip_start,
-                })
+            parts = _timeline_parts(start, end, timeline)
             gaps = _coverage_gaps(start, end, parts)
             missing = sum(float(item["duration"]) for item in gaps)
             covered = max(0.0, expected_duration - missing)
@@ -946,7 +988,7 @@ def _find_video_for_time(video_list, offset_sec, durations=None):
 
 
 
-def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None):
+def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None, source_timeline=None):
     """Export independent source-file pieces with input-side stream-copy seeking.
 
     This intentionally trades a small keyframe-boundary time deviation for speed.
@@ -955,24 +997,12 @@ def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpe
     results = []
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    video_list = sort_videos_by_start(video_list)
-    durations = _probe_durations(video_list, log_fn=log_fn, ffmpeg_cmd=ffmpeg)
-    if not durations or len(durations) != len(video_list):
-        durations = [99999] * len(video_list)
-    starts = _get_video_timeline(video_list, durations)
-    timeline = [
-        (video, starts[index], starts[index] + (durations[index] if index < len(durations) else 0))
-        for index, video in enumerate(video_list)
-    ]
+    timeline = source_timeline if source_timeline is not None else build_video_timeline(
+        video_list, ffmpeg_cmd=ffmpeg, log_fn=log_fn)
 
     def _split_across_videos(start, end):
-        parts = []
-        for video, video_start, video_end in timeline:
-            cut_start = max(start, video_start)
-            cut_end = min(end, video_end)
-            if cut_end - cut_start >= 0.5:
-                parts.append((video, cut_start - video_start, cut_end - cut_start))
-        return parts
+        return [(part["video_path"], part["file_start"], part["duration"])
+                for part in _timeline_parts(start, end, timeline)]
 
     def _error_tail(process):
         raw = getattr(process, "stderr", b"") or b""
@@ -997,7 +1027,7 @@ def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpe
         os.makedirs(out_dir, exist_ok=True)
         exported = 0
         for segment_index, (start, end) in enumerate(segments):
-            if end - start < 10:
+            if end - start < 0.5:
                 continue
             parts = _split_across_videos(start, end)
             if not parts:
@@ -1058,7 +1088,7 @@ def _extract_by_schedule_fast_copy(groups, video_list, output_dir, ffmpeg="ffmpe
     return results
 
 
-def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None, fast_copy=False):
+def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=None, fast_copy=False, source_timeline=None):
     """按分组切割导出每段独立文件，不拼接"""
     if fast_copy:
         return _extract_by_schedule_fast_copy(
@@ -1067,32 +1097,22 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
             output_dir,
             ffmpeg=ffmpeg,
             log_fn=log_fn,
+            source_timeline=source_timeline,
         )
     results = []
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    video_list = sort_videos_by_start(video_list)
-    durations = _probe_durations(video_list, log_fn=log_fn, ffmpeg_cmd=ffmpeg)
-    if not durations or len(durations) != len(video_list):
-        durations = [99999] * len(video_list)
-    starts = _get_video_timeline(video_list, durations)
-    timeline = [
-        (video, starts[index], starts[index] + (durations[index] if index < len(durations) else 0))
-        for index, video in enumerate(video_list)
-    ]
+    timeline = source_timeline if source_timeline is not None else build_video_timeline(
+        video_list, ffmpeg_cmd=ffmpeg, log_fn=log_fn)
     normalized_sources = {}
     normalized_offsets = {}
     normalization_attempted = set()
     schedule_temp_dir = None
 
     def _split_across_videos(start, end):
-        parts = []
-        for video, vs, ve in timeline:
-            cut_start = max(start, vs)
-            cut_end = min(end, ve)
-            if cut_end - cut_start >= 0.5:
-                parts.append((video, cut_start - vs, cut_end - cut_start, cut_start, cut_end))
-        return parts
+        return [(part["video_path"], part["file_start"], part["duration"],
+                 part["timeline_start"], part["timeline_end"])
+                for part in _timeline_parts(start, end, timeline)]
 
     def _source_for_cut(video):
         nonlocal schedule_temp_dir
@@ -1137,7 +1157,7 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
             os.makedirs(out_dir, exist_ok=True)
             exported = 0
             for segment_index, (start, end) in enumerate(segments):
-                if end - start < 10:
+                if end - start < 0.5:
                     continue
                 parts = _split_across_videos(start, end)
                 if not parts:

@@ -401,14 +401,9 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertEqual(feedback[1]["label"], "已取消")
         self.assertIn("手动取消", feedback[1]["message"])
 
-    def test_compact_live_start_uses_the_exact_12_digit_format(self) -> None:
-        parsed = self.server._parse_live_start_datetime(
-            "202608051219",
-            [r"C:\\recordings\\live_202608051219.mp4"],
-        )
-        self.assertEqual(parsed.strftime("%Y-%m-%d %H:%M:%S"), "2026-08-05 12:19:00")
-
-    def test_clock_time_schedule_requires_an_explicit_live_start(self) -> None:
+    def test_product_scan_rejects_clock_time_schedule(self) -> None:
+        with self.assertRaises(ValueError):
+            self.server.ProductScanPayload(schedule_time_basis="clock")
         warnings: list[str] = []
         errors: list[str] = []
         self.server._preflight_product_schedule(
@@ -422,7 +417,39 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
             errors,
         )
         self.assertEqual(warnings, [])
-        self.assertEqual(errors, ["表格已选择“时钟时间”，请填写直播开播时间后再校验。"])
+        self.assertEqual(errors, ["单品扫描仅支持“开播后时段”，请使用例如 01:04–26:15 的讲解时段。"])
+
+    def test_relative_schedule_locates_explain_columns_at_e_or_f(self) -> None:
+        import openpyxl
+
+        app_dir = str(ROOT / "app")
+        sys.path.insert(0, app_dir)
+        try:
+            from schedule_splitter import read_excel
+
+            for column, header in (
+                (5, ["商品标题", "商品ID", "价格", "封面", "讲解时段1"]),
+                (6, ["商品标题", "商品ID", "价格", "封面", "备注", "讲解时段1"]),
+            ):
+                workbook = openpyxl.Workbook()
+                sheet = workbook.active
+                sheet.append(header)
+                row = ["测试商品", "SKU-01", "88", ""] + [""] * (column - 4)
+                row[column - 1] = "35:59-1:14:16"
+                sheet.append(row)
+                with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as handle:
+                    path = handle.name
+                try:
+                    workbook.save(path)
+                    schedule, _ = read_excel(path, time_basis="relative")
+                finally:
+                    workbook.close()
+                    os.unlink(path)
+                self.assertEqual(len(schedule), 1)
+                self.assertEqual(schedule[0]["start_offset"], 2159.0)
+                self.assertEqual(schedule[0]["end_offset"], 4456.0)
+        finally:
+            sys.path.remove(app_dir)
 
     def test_product_scan_frontend_requires_validation_before_split(self) -> None:
         frontend = (
@@ -465,22 +492,51 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         self.assertIn('selected_ranges: feature === "product-scan"', frontend)
         self.assertNotIn("state.productScan.groups.slice(0, 60)", frontend)
 
-    def test_product_scan_uses_one_live_start_input_and_hides_inactive_panels(self) -> None:
+    def test_product_scan_uses_relative_schedule_and_independent_video_starts(self) -> None:
         frontend = (
             ROOT / "web_client" / "frontend" / "assets" / "app.js"
         ).read_text(encoding="utf-8")
         index = (ROOT / "web_client" / "frontend" / "index.html").read_text(
             encoding="utf-8"
         )
-        styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(
-            encoding="utf-8"
-        )
+        self.assertNotIn('id="ps-video-start-offset"', index)
         self.assertEqual(index.count('id="ps-live-start-time"'), 1)
-        self.assertNotIn("ps-clock-live-start-time", index)
-        self.assertIn('data-ps-live-start hidden', index)
-        self.assertIn('panel.hidden = !productScanNeedsLiveStart();', frontend)
-        self.assertIn('.alignment-mode-panel[hidden]', styles)
-        self.assertIn('max-height: none;', styles)
+        self.assertIn("表格“讲解时段”按开播后进度读取", index)
+        self.assertNotIn("ps-time-basis-clock", index)
+        self.assertNotIn("ps-align-auto", index)
+        self.assertNotIn("productScanNeedsLiveStart", frontend)
+        self.assertIn('video_offsets: productScanVideoOverrides()', frontend)
+        self.assertIn('data-ps-video-offset=', frontend)
+
+    def test_product_scan_video_anchors_preserve_gaps_and_manual_overrides(self) -> None:
+        videos = [r"C:\live\clip202608051349.mp4", r"C:\live\clip202608051249.mp4"]
+        data = {"video_paths": videos, "live_start_time": "202608051219"}
+        self.assertEqual(self.server._resolve_product_scan_video_offsets(data), {videos[0]: 5400, videos[1]: 1800})
+        data["video_offsets"] = {videos[0]: "01:31:05"}
+        self.assertEqual(self.server._resolve_product_scan_video_offsets(data)[videos[0]], 5465)
+        # Reordering or removing files does not rebase the remaining sources.
+        data["video_paths"] = [videos[0]]
+        self.assertEqual(self.server._resolve_product_scan_video_offsets(data), {videos[0]: 5465})
+
+    def test_product_scan_requires_individual_missing_or_duplicate_timestamps(self) -> None:
+        cases = [[r"C:\live\plain.mp4"], [r"C:\live\a202608051219.mp4", r"C:\live\b202608051219.mp4"]]
+        for videos in cases:
+            data = {"video_paths": videos, "live_start_time": "202608051219"}
+            with self.assertRaises(ValueError):
+                self.server._resolve_product_scan_video_offsets(data)
+            data["video_offsets"] = {video: str(index * 1800) for index, video in enumerate(videos)}
+            self.assertEqual(len(self.server._resolve_product_scan_video_offsets(data)), len(videos))
+        with self.assertRaises(ValueError):
+            self.server._resolve_product_scan_video_offsets({"video_paths": cases[0], "video_start_offset": "0"})
+
+    def test_product_scan_anchors_support_midnight_and_manual_only_sources(self) -> None:
+        video = r"C:\live\clip20260806001015.mp4"
+        self.assertEqual(self.server._resolve_product_scan_video_offsets({
+            "video_paths": [video], "live_start_time": "20260805235015"
+        })[video], 1200)
+        self.assertEqual(self.server._resolve_product_scan_video_offsets({
+            "video_paths": [video], "video_offsets": {video: "01:02:03"}
+        })[video], 3723)
 
     def test_product_scan_result_list_has_its_own_bounded_scroll_area(self) -> None:
         frontend = (
@@ -489,7 +545,8 @@ class RuntimeV4ServerUpdateBridgeTests(unittest.TestCase):
         styles = (ROOT / "web_client" / "frontend" / "assets" / "styles.css").read_text(
             encoding="utf-8"
         )
-        self.assertIn(r"/20\d{6}(\d{2})(\d{2})(?:\d{2})?/", frontend)
+        self.assertIn("match[3] ?", frontend)
+        self.assertIn("`${match[1]}:${match[2]}`", frontend)
         self.assertIn('const route = `排表 ${target} → ${actual}`;', frontend)
         self.assertIn('align-items: start;', styles)
         self.assertIn('height: min(720px, calc(100vh - 180px));', styles)

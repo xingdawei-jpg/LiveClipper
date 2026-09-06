@@ -23,7 +23,7 @@ from runtime_v4.business_bundle import (
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "release" / "runtime_v4_business_policy.json"
-TEST_VERSION = "2026.9.4.1"
+TEST_VERSION = "2026.9.6.1"
 COMMERCIAL_DIRECTOR_RUNNERS = (
     "run_commercial_asset_ledger_audit.py",
     "run_m1_asset_aware_goldens.py",
@@ -154,6 +154,7 @@ os.environ['APPDATA'] = str(appdata)
 os.environ['LIVECLIPPER_BUNDLE_DIR'] = str(bundle_root)
 os.environ['LIVECLIPPER_V4_BUNDLE_VERIFIED'] = '1'
 os.environ['LIVECLIPPER_RUNTIME_LAYOUT'] = '4'
+os.environ['LIVECLIPPER_CODE_SOURCE'] = 'bundled'
 sys.path[:] = [
     str(bundle_root / 'app'),
     str(bundle_root / 'web_client'),

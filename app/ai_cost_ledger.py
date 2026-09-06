@@ -39,12 +39,19 @@ def default_ledger_path() -> Path:
 
 
 @contextmanager
-def ai_cost_ledger_scope(*, task_id: str = "", session_id: str = "", parent_request_id: str = ""):
+def ai_cost_ledger_scope(
+    *,
+    task_id: str = "",
+    session_id: str = "",
+    parent_request_id: str = "",
+    retry: bool = False,
+):
     """Attach correlation ids to nested observations without changing calls."""
     token = _SCOPE.set({
         "task_id": str(task_id or ""),
         "session_id": str(session_id or ""),
         "parent_request_id": str(parent_request_id or ""),
+        "retry": bool(retry),
     })
     try:
         yield
@@ -88,6 +95,8 @@ def extract_usage(response: Mapping[str, Any] | None) -> dict[str, int | None]:
             "output_tokens": None,
             "cached_input_tokens": None,
             "total_tokens": None,
+            "reasoning_tokens": None,
+            "non_reasoning_output_tokens": None,
             "usage_available": False,
         }
 
@@ -101,11 +110,22 @@ def extract_usage(response: Mapping[str, Any] | None) -> dict[str, int | None]:
     total_tokens = _usage_value(usage, "total_tokens")
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
+    reasoning_tokens = _usage_details_value(usage, "completion_tokens_details", "reasoning_tokens")
+    if reasoning_tokens is None:
+        reasoning_tokens = _usage_details_value(usage, "output_tokens_details", "reasoning_tokens")
+    # Reasoning is already included in completion_tokens; never bill it twice.
+    non_reasoning_tokens = (
+        output_tokens - reasoning_tokens
+        if output_tokens is not None and reasoning_tokens is not None and reasoning_tokens <= output_tokens
+        else None
+    )
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_input_tokens": cached_tokens,
         "total_tokens": total_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "non_reasoning_output_tokens": non_reasoning_tokens,
         "usage_available": True,
     }
 
@@ -160,6 +180,7 @@ def record_ai_call(
     parent_request_id: str = "",
     retry: bool = False,
     error_type: str = "",
+    request_started_at: str = "",
     ledger_path: Path | None = None,
 ) -> str:
     """Append one provider-call fact and return its immutable request id.
@@ -172,6 +193,11 @@ def record_ai_call(
         scope = _SCOPE.get()
         usage = extract_usage(response_payload)
         input_fp, prefix_fp = _message_fingerprints(request_payload)
+        payload = request_payload if isinstance(request_payload, Mapping) else {}
+        response = response_payload if isinstance(response_payload, Mapping) else {}
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
         record = {
             "version": LEDGER_VERSION,
             "request_id": request_id,
@@ -179,15 +205,21 @@ def record_ai_call(
             "session_id": str(session_id or scope.get("session_id") or ""),
             "parent_request_id": str(parent_request_id or scope.get("parent_request_id") or ""),
             "timestamp": _utc_now(),
+            "request_started_at": str(request_started_at or ""),
             "module": str(module or "other"),
             "stage": str(stage or "other"),
             "model": str(model or ""),
             **usage,
+            "output_limit_tokens": _number(payload.get("max_tokens")),
+            "reasoning_effort": str(payload.get("reasoning_effort") or ""),
+            "finish_reason": str(choice.get("finish_reason") or ""),
+            "content_characters": len(message["content"]) if isinstance(message.get("content"), str) else None,
+            "reasoning_characters": len(message["reasoning_content"]) if isinstance(message.get("reasoning_content"), str) else None,
             "estimated_cost": _estimate_cost(usage["input_tokens"], usage["output_tokens"]),
             "pricing_configured": _configured_price("LIVECLIPPER_AI_INPUT_PER_MILLION") is not None
             and _configured_price("LIVECLIPPER_AI_OUTPUT_PER_MILLION") is not None,
             "success": bool(success),
-            "retry": bool(retry),
+            "retry": bool(retry or scope.get("retry")),
             "error_type": str(error_type or ""),
             "input_fingerprint": input_fp,
             "prompt_prefix_fingerprint": prefix_fp,
@@ -306,6 +338,7 @@ def generate_ai_cost_reports(
             "failed_requests": sum(not bool(item.get("success")) for item in records),
             "retry_count": retry_count,
             "usage_missing_requests": sum(not bool(item.get("usage_available")) for item in records),
+            "reasoning_usage_missing_requests": sum(_number(item.get("reasoning_tokens")) is None for item in records),
             "malformed_ledger_lines": malformed,
         },
         "tokens": {
@@ -313,11 +346,22 @@ def generate_ai_cost_reports(
             "known_input_tokens": _sum_known(records, "input_tokens"),
             "known_output_tokens": _sum_known(records, "output_tokens"),
             "known_cached_input_tokens": _sum_known(records, "cached_input_tokens"),
+            "known_reasoning_tokens": _sum_known(records, "reasoning_tokens"),
+            "known_non_reasoning_output_tokens": _sum_known(records, "non_reasoning_output_tokens"),
             "average_known_tokens_per_request": round(total_tokens / len(records), 2) if records else 0.0,
         },
         "by_stage": _breakdown(records, "stage"),
         "by_module": _breakdown(records, "module"),
         "by_model": _breakdown(records, "model"),
+        "output_diagnostics": [
+            {key: item.get(key) for key in (
+                "request_id", "stage", "model", "timestamp", "request_started_at",
+                "input_tokens", "cached_input_tokens", "success", "error_type", "output_limit_tokens",
+                "output_tokens", "reasoning_tokens", "non_reasoning_output_tokens",
+                "finish_reason", "content_characters", "reasoning_characters",
+            )}
+            for item in records
+        ],
         "top_duplicate_chains": duplicate_chains[:20],
         "repeated_task_stages": [
             {"task_id": task, "stage": stage, "count": count}

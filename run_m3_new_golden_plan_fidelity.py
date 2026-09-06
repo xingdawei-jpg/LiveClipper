@@ -35,6 +35,7 @@ from commercial_analyzer import (  # noqa: E402
     Strategy,
     analyze_commercial_story,
     director_target_duration_range,
+    director_delivery_duration_range,
     normalize_director_controls,
 )
 from commercial_asset_audit import classify_commercial_assets  # noqa: E402
@@ -120,6 +121,7 @@ def _asset_ledger_for_source(
     *,
     source_srt: str = "",
     content_policy: Mapping[str, Any] | None = None,
+    allow_context_dependent_beats: bool = False,
 ) -> dict[str, Any]:
     """Build the same read-only hard-safe -> Commercial Asset Ledger boundary."""
     source_srt = str(source_srt or M3_GOLDEN_SOURCES[case_id]["srt"])
@@ -131,6 +133,7 @@ def _asset_ledger_for_source(
     inventory = _director_safe_candidate_inventory(
         _build_ai_srt_entry_index(srt_text),
         content_policy=normalize_content_policy(content_policy or default_content_policy()),
+        allow_context_dependent_beats=allow_context_dependent_beats,
     )
     ledger.transition(
         "hard_safe_candidate_inventory", inventory,
@@ -469,6 +472,7 @@ def _run_case(
     label = str(source.get("label") or case_id)
     product = str(source.get("product") or M3_GOLDEN_PRODUCTS.get(case_id) or label)
     effective_director_controls = normalize_director_controls(director_controls)
+    two_pass_director = bool(dict(director_strategy_contract or {}).get("two_pass_director_packet"))
     active_content_policy = normalize_content_policy(
         settings.get("content_policy") if isinstance(settings, Mapping) else default_content_policy()
     )
@@ -476,6 +480,7 @@ def _run_case(
         case_id,
         source_srt=str(source["srt"]),
         content_policy=active_content_policy,
+        allow_context_dependent_beats=two_pass_director,
     )
     assets = list(ledger_context["assets"])
     subtitles = _hard_safe_subtitles(assets)
@@ -591,9 +596,6 @@ def _run_case(
     # Materialization is an independent, deterministic prerequisite.  Do not
     # spend an M1 call when the selected source cannot ever reach M3.
     m1_path = output_dir / f"{case_id}_{dt.datetime.now():%Y%m%d_%H%M%S}.m1.response.txt"
-    two_pass_director = bool(
-        dict(director_strategy_contract or {}).get("two_pass_director_packet")
-    )
     two_pass_response_paths: dict[str, str] = {}
 
     def capture_director_stage(stage: str, value: str) -> None:
@@ -633,6 +635,12 @@ def _run_case(
             stage_response_hook=capture_director_stage if two_pass_director else None,
             stage_progress_hook=director_progress_hook if two_pass_director else None,
             two_pass_director=two_pass_director,
+            output_speed_factor=float(dict(director_strategy_contract or {}).get("output_speed_factor") or 1.0),
+            source_context_subtitles=ledger_context.get("source_context_units") if two_pass_director else None,
+            director_plan_count=max(
+                1,
+                min(3, int(dict(director_strategy_contract or {}).get("requested_director_plan_count") or 1)),
+            ),
         )
         strategy, hero_selection_reason = _select_m1_hero(m1_result.strategies, strategy_id)
         discovered_strategies = tuple(m1_result.strategies)
@@ -677,7 +685,12 @@ def _run_case(
             "commercial_ready": False,
         }
     m2_path = output_dir / f"{case_id}_{dt.datetime.now():%Y%m%d_%H%M%S}.m2.response.txt"
-    duration_range = director_target_duration_range(target_duration, duration_tolerance)
+    duration_range = (
+        director_delivery_duration_range(
+            target_duration, duration_tolerance,
+            float(dict(director_strategy_contract or {}).get("output_speed_factor") or 1.0),
+        ) if two_pass_director else director_target_duration_range(target_duration, duration_tolerance)
+    )
     contract = {
         "contract_version": "m3-new-golden-plan-fidelity-v1",
         "m1_hero_strategy_id": strategy.strategy_id,
@@ -719,11 +732,13 @@ def _run_case(
     narrative_mode_response_paths: dict[str, Any] = {}
     narrative_mode_hook_recall = None
     narrative_mode_opening_packages = None
+    director_variant_plans: list[dict[str, Any]] = []
     single_pass_director_execution = bool(
         commerce_lite_final_editor
-        and bool(getattr(strategy, "director_sequence", ()))
         and bool(dict(director_strategy_contract or {}).get("single_ai_director_packet"))
     )
+    # An empty/invalid modern packet must not fall through into historical
+    # multi-prompt planners. The exact-source builder reports it as invalid.
     if commerce_director:
         # M2.5 reads existing commercial-asset facts and M1 evidence only.  It
         # outputs no IDs/times/order, and the returned plan is appended to M2's
@@ -767,6 +782,40 @@ def _run_case(
                 selection_contract=contract,
                 director_contract=director_strategy_contract,
             )
+            for variant_strategy in discovered_strategies:
+                if variant_strategy.strategy_id == strategy.strategy_id:
+                    continue
+                if len(tuple(getattr(variant_strategy, "director_sequence", ()) or ())) < 2:
+                    continue
+                variant_audit = dict(getattr(variant_strategy, "whole_video_audit", {}) or {})
+                variant_product_control = dict(variant_audit.get("product_control") or {})
+                variant_product_final = dict(variant_product_control.get("final") or {})
+                variant_product_status = str(variant_product_final.get("status") or "")
+                # Product relation checks are advisory at this stage.  The AI
+                # already authored a complete editable strategy from the same
+                # source pool; silently dropping S2/S3 here made a three-plan
+                # response look like a one-plan preview.  Keep the full plan
+                # and surface the existing product-control audit as a warning
+                # in the workbench instead of changing the Director's result.
+                if variant_product_status == "conflict":
+                    variant_audit.setdefault("program_warnings", []).append(
+                        "product_scope_conflict_non_blocking"
+                    )
+                variant_plan = build_single_pass_director_plan(
+                    strategy=variant_strategy,
+                    safe_candidates=candidates,
+                    target_duration=target_duration,
+                    selection_contract=contract,
+                    director_contract={
+                        **dict(director_strategy_contract or {}),
+                        "director_strategy_id": variant_strategy.strategy_id,
+                    },
+                )
+                if variant_plan.selected_candidates:
+                    director_variant_plans.append({
+                        "strategy": variant_strategy.to_dict(),
+                        "m2_plan": variant_plan.to_dict(),
+                    })
             commerce_lite_response = "embedded_in_single_ai_director_response"
             commerce_lite_completion_response = "not_run_single_ai_director_packet"
             commerce_strong_clip_ranking_response = "not_run_single_ai_director_packet"
@@ -1350,6 +1399,7 @@ def _run_case(
         "m1_hero_selection_reason": hero_selection_reason,
         "m1_story_library": story_library,
         "director_strategy_library": director_strategy_library,
+        "director_variant_plans": director_variant_plans,
         "director_strategy_contract": dict(director_strategy_contract or {}),
         "m2_attempts": m2_attempts,
         "m2_opening_quality_review_attempt": opening_review_attempt,

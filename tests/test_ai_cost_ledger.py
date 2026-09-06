@@ -16,6 +16,50 @@ from ai_cost_ledger import ai_cost_ledger_scope, extract_usage, generate_ai_cost
 
 
 class AiCostLedgerTests(unittest.TestCase):
+    def test_reasoning_is_a_subset_of_output_and_missing_is_not_zero(self) -> None:
+        for reasoning in (None, 0, 24000, 40000):
+            with self.subTest(reasoning=reasoning):
+                usage = {"prompt_tokens": 100, "completion_tokens": 32000}
+                if reasoning is not None:
+                    usage["completion_tokens_details"] = {"reasoning_tokens": reasoning}
+                result = extract_usage({"usage": usage})
+                self.assertEqual(result["total_tokens"], 32100)
+                self.assertEqual(result["reasoning_tokens"], reasoning)
+                self.assertEqual(result["non_reasoning_output_tokens"],
+                                 32000 - reasoning if reasoning is not None and reasoning <= 32000 else None)
+
+    def test_truncation_diagnostics_preserve_usage_without_response_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = Path(temp_dir) / "ledger.jsonl"
+            record_ai_call(
+                module="commercial_analyzer", stage="Director_beat_casting", model="deepseek-v4-flash",
+                request_payload={"max_tokens": 32000, "reasoning_effort": "low"},
+                response_payload={
+                    "choices": [{"finish_reason": "length", "message": {
+                        "content": "private incomplete JSON", "reasoning_content": "private reasoning",
+                    }}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 32000,
+                              "completion_tokens_details": {"reasoning_tokens": 24000}},
+                },
+                success=False, error_type="output_truncated", ledger_path=ledger,
+                request_started_at="2026-09-07T03:59:59+00:00",
+            )
+            raw = ledger.read_text(encoding="utf-8")
+            self.assertNotIn("private", raw)
+            report, _ = generate_ai_cost_reports(ledger_path=ledger)
+            self.assertEqual(report["tokens"]["known_total_tokens"], 32100)
+            self.assertEqual(report["tokens"]["known_reasoning_tokens"], 24000)
+            self.assertEqual(report["tokens"]["known_non_reasoning_output_tokens"], 8000)
+            self.assertEqual(report["records"]["failed_requests"], 1)
+            self.assertEqual(report["records"]["reasoning_usage_missing_requests"], 0)
+            diagnostic = report["output_diagnostics"][0]
+            self.assertEqual(diagnostic["finish_reason"], "length")
+            self.assertEqual(diagnostic["output_limit_tokens"], 32000)
+            self.assertEqual(diagnostic["request_started_at"], "2026-09-07T03:59:59+00:00")
+            self.assertEqual(diagnostic["model"], "deepseek-v4-flash")
+            self.assertEqual(diagnostic["input_tokens"], 100)
+            self.assertEqual(diagnostic["reasoning_characters"], len("private reasoning"))
+
     def test_extracts_openai_usage_and_nested_cached_tokens(self) -> None:
         usage = extract_usage({
             "usage": {
@@ -99,6 +143,18 @@ class AiCostLedgerTests(unittest.TestCase):
             self.assertEqual(report["tokens"]["known_total_tokens"], 9)
             record = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual((record["task_id"], record["session_id"]), ("case-a", "run-a"))
+
+    def test_retry_scope_marks_every_call_in_a_retried_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = Path(temp_dir) / "ledger.jsonl"
+            with ai_cost_ledger_scope(task_id="task-a", session_id="attempt-2", retry=True):
+                record_ai_call(
+                    module="commercial_analyzer", stage="Director_story_contract", model="test-model",
+                    request_payload={"messages": []}, response_payload={"usage": {"total_tokens": 5}},
+                    success=True, ledger_path=ledger,
+                )
+            report, _ = generate_ai_cost_reports(ledger_path=ledger, task_id="task-a")
+            self.assertEqual(report["records"]["retry_count"], 1)
 
 
 if __name__ == "__main__":

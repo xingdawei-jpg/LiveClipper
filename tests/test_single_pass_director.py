@@ -42,6 +42,21 @@ def _candidate(candidate_id: int, start: float, end: float) -> PlanningCandidate
 
 
 class SinglePassDirectorTests(unittest.TestCase):
+    def test_duration_uses_final_speed_not_source_time_and_retains_audit(self) -> None:
+        from commercial_analyzer import director_delivery_duration_range
+        sequence = tuple(DirectorBeat(f"B{i}", "proof", "说明", (i,), "证据", "Q1", "为什么", "proof", "", "result", "required") for i in range(1, 11))
+        strategy = replace(_strategy(sequence), whole_video_audit={"duration_control": {"status": "target_range_fulfilled"}})
+        plan = build_single_pass_director_plan(
+            strategy=strategy, safe_candidates=tuple(_candidate(i, i * 8, i * 8 + 6.9) for i in range(1, 11)),
+            target_duration=60, selection_contract={"target_duration_range": director_delivery_duration_range(60, None, 1.15)},
+            director_contract={"single_ai_director_packet": True, "two_pass_director_packet": True},
+        )
+        self.assertTrue(plan.plan_valid)
+        self.assertAlmostEqual(plan.duration_assessment["actual_seconds"], 69)
+        self.assertAlmostEqual(plan.duration_assessment["projected_final_seconds"], 60)
+        self.assertEqual(plan.duration_assessment["status"], "target_range_fulfilled")
+        self.assertEqual(plan.duration_assessment["duration_control"]["status"], "target_range_fulfilled")
+
     def test_two_pass_chapter_readthrough_is_verified_without_mutating_selection(self) -> None:
         first = DirectorBeat(
             "C1B1", "result", "显瘦结果", (11,), "先兑现购买理由",

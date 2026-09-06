@@ -489,6 +489,11 @@ def _progress_message(raw: str, scope: str) -> str | None:
         return _clean_low_level_terms(compact)
     if "试用" in compact and "剩余" in compact:
         return compact
+    # The sentence contains the cloud label only as a negation.  Handle it
+    # before the generic cloud matcher below so the workbench never reports
+    # paid cloud recognition while it is starting local SenseVoice.
+    if "未启用云端语音识别" in compact or "未启用云端 ASR" in compact:
+        return "未启用云端语音识别，正在使用本地语音识别。"
 
     if cloud_asr and any(token in compact for token in ("语音识别成功", "ASR 成功", "ASR成功", "识别完成", "解析得到")):
         return "云端语音识别成功。"
@@ -1711,7 +1716,7 @@ def _preview_selection_config_signature() -> dict[str, Any]:
         _LOG.warning("failed to include AI settings in preview cache identity", exc_info=True)
     return {
         "pipeline": _AI_PREVIEW_CACHE_SCHEMA,
-        "director_contract": "opening-fidelity-v1",
+        "director_contract": "director-duration-v3-product-v2-occurrence-v1",
         "settings": settings_summary,
         "keywords": _file_signature(_safe_user_child("keywords.json")),
         "style_profile": _file_signature(
@@ -1721,6 +1726,8 @@ def _preview_selection_config_signature() -> dict[str, Any]:
 
 
 def _preview_cache_key(mode: str, paths: list[Path], payload: Any, srt_path: str | None = None) -> str:
+    from cutter_logic import _planned_output_speed_factor
+
     target_duration = getattr(payload, "target_duration", getattr(payload, "duration", 60))
     data = {
         "schema": _AI_PREVIEW_CACHE_SCHEMA,
@@ -1737,6 +1744,10 @@ def _preview_cache_key(mode: str, paths: list[Path], payload: Any, srt_path: str
         "category": getattr(payload, "category", ""),
         "focus_hint": getattr(payload, "focus_hint", ""),
         "target": target_duration,
+        "duration_tolerance": getattr(payload, "duration_tolerance", None),
+        "duration_speed_factor": _planned_output_speed_factor(
+            getattr(payload, "dedup_preset", "medium"), getattr(payload, "video", None),
+        ),
         "ai_controls": getattr(payload, "ai_controls", {}) or {},
         "selection_config": _preview_selection_config_signature(),
     }
@@ -2200,6 +2211,14 @@ class MixPreviewCutPayload(MixPayload):
     selected_words_by_key: dict[str, dict[str, list[int]]] = Field(default_factory=dict)
 
 
+class SmartDirectorVariantBatchPayload(SmartCutPayload):
+    preview_ids: list[str] = Field(default_factory=list)
+
+
+class MixDirectorVariantBatchPayload(MixPayload):
+    preview_ids: list[str] = Field(default_factory=list)
+
+
 class PreviewSelectionPayload(BaseModel):
     preview_id: str = ""
     scope: str = "smart"
@@ -2267,12 +2286,12 @@ class AiFeedbackDeletePayload(BaseModel):
 
 class ProductScanPayload(BaseModel):
     excel_path: str = ""
+    schedule_time_basis: str = Field(default="relative", pattern="^relative$")
     video_paths: list[str] = Field(default_factory=list)
     output_dir: str = ""
     advance_seconds: int = Field(default=0, ge=0, le=600)
-    video_start_offset: str = ""
     live_start_time: str = ""
-    schedule_time_basis: str = "relative"
+    video_offsets: dict[str, str] = Field(default_factory=dict)
     fast_cut: bool = True
     selected_ranges: list[str] = Field(default_factory=list)
 
@@ -2550,6 +2569,15 @@ def _set_task(task_id: str, **updates: Any) -> None:
         if task_id in _TASKS:
             current = _TASKS[task_id]
             next_status = updates.get("status")
+            # Nested Director preview/render workers share the top-level task.
+            # Keep its original clock so the UI covers planning and every
+            # rendered version instead of only the final inner worker.
+            if (
+                next_status == "running"
+                and current.get("started_at") is not None
+                and "started_at" in updates
+            ):
+                updates["started_at"] = current["started_at"]
             if current.get("status") == "cancelled" and next_status in {"running", "completed", "failed"}:
                 return
             if next_status == "running" and "progress" not in updates:
@@ -3716,8 +3744,6 @@ def _preflight_ai_settings(feature: str, warnings: list[str]) -> None:
         ]
         if missing:
             warnings.append("云端语音识别配置不完整：" + ", ".join(missing) + "，可能会切换到本地语音识别。")
-    else:
-        warnings.append("未启用云端语音识别，将使用本地语音识别。")
 
 
 def _hms(seconds: float) -> str:
@@ -3752,7 +3778,7 @@ def _parse_offset_seconds(value: Any) -> float | None:
 
 
 def _datetime_from_video_name(path: str) -> datetime | None:
-    match = re.search(r"(20\d{10}(?:\d{2})?)", Path(str(path)).name)
+    match = re.search(r"(?<!\d)(20\d{12}|20\d{10})(?!\d)", Path(str(path)).name)
     if not match:
         return None
     value = match.group(1)
@@ -3806,9 +3832,42 @@ def _parse_product_scan_time_basis(value: Any) -> str:
     basis = str(value or "relative").strip().lower()
     if basis in {"", "relative"}:
         return "relative"
-    if basis == "clock":
-        return "clock"
-    raise ValueError("表格时间类型只能是“开播后时长”或“时钟时间”")
+    raise ValueError("单品扫描仅支持“开播后时段”，请使用例如 01:04–26:15 的讲解时段。")
+
+
+def _resolve_product_scan_video_offsets(data: dict[str, Any]) -> dict[str, float]:
+    """Keep every source anchored to livestream zero, including missing-file gaps."""
+    videos = [str(_clean_path(value)) for value in data.get("video_paths") or []]
+    overrides = {os.path.normcase(str(_clean_path(key))): str(value).strip()
+                 for key, value in (data.get("video_offsets") or {}).items()}
+    stamps = {video: _datetime_from_video_name(video) for video in videos}
+    live_text = str(data.get("live_start_time") or "").strip()
+    live_start = None
+    if live_text:
+        # A full date is required so midnight and reordered files stay unambiguous.
+        if not (re.fullmatch(r"\d{12}|\d{14}", live_text) or re.match(r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]", live_text)):
+            raise ValueError("请填写完整开播日期和时间，例如 202608051219；也可逐段手填直播起点。")
+        live_start = _parse_live_start_datetime(live_text)
+    offsets = {}
+    for video in videos:
+        manual = overrides.get(os.path.normcase(video), "")
+        stamp = stamps[video]
+        if manual:
+            value = _parse_offset_seconds(manual)
+            if value is None or value < 0:
+                raise ValueError("视频直播起点须为非负时段：%s" % Path(video).name)
+        else:
+            if stamp is None:
+                raise ValueError("文件名没有有效时间，请手填该段直播起点：%s" % Path(video).name)
+            if sum(other == stamp for other in stamps.values()) > 1:
+                raise ValueError("文件名时间重复，请分别手填直播起点：%s" % Path(video).name)
+            if live_start is None:
+                raise ValueError("请填写直播开播时间，或为每段视频手填直播起点。")
+            value = (stamp - live_start).total_seconds()
+            if value < 0:
+                raise ValueError("文件名时间早于开播时间，请核对或手填直播起点：%s" % Path(video).name)
+        offsets[video] = float(value)
+    return offsets
 
 
 def _normalize_product_scan_clock_schedule(
@@ -4063,58 +4122,22 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
         errors.append(str(exc))
         return
     try:
-        requested_video_start = _parse_offset_seconds(data.get("video_start_offset"))
+        video_offsets = _resolve_product_scan_video_offsets(data)
     except ValueError as exc:
-        errors.append(f"所选视频起点格式不正确：{exc}")
-        return
-    try:
-        requested_live_start = _parse_live_start_datetime(data.get("live_start_time"), video_values)
-    except ValueError as exc:
-        errors.append(f"直播开始时间格式不正确：{exc}")
-        return
-    if schedule_time_basis == "clock" and requested_live_start is None:
-        errors.append("表格已选择“时钟时间”，请填写直播开播时间后再校验。")
+        errors.append(str(exc))
         return
     try:
         from schedule_splitter import (
-            _parse_datetime_from_name,
-            align_schedule_to_video,
             build_schedule_coverage,
             group_by_product,
             read_excel,
         )
 
-        schedule, live_start = read_excel(excel, time_basis=schedule_time_basis)
+        schedule, _ = read_excel(excel, time_basis=schedule_time_basis)
         if not schedule:
             errors.append("排品表未读取到有效商品时间段，请确认 Excel 格式是否正确。")
             return
-        _normalize_product_scan_clock_schedule(
-            schedule,
-            schedule_time_basis,
-            requested_live_start,
-        )
-
-        if requested_video_start is not None:
-            _shift_schedule_offsets(schedule, requested_video_start)
-            alignment_label = f"所选视频起点 {_hms(requested_video_start)}"
-        else:
-            if requested_live_start is None:
-                errors.append("按文件名自动对齐需要填写直播开播时间。")
-                return
-            has_all_video_timestamps = bool(video_values) and all(
-                _parse_datetime_from_name(path) is not None for path in video_values
-            )
-            if requested_live_start is not None and not has_all_video_timestamps:
-                errors.append("自动对齐要求每个所选视频文件名都含完整日期时间；否则请改用手动起点。")
-                return
-            live_start_for_align = requested_live_start or live_start
-            align_schedule_to_video(
-                schedule,
-                video_values,
-                live_start_for_align,
-                ffmpeg_cmd=_ffmpeg_cmd(),
-            )
-            alignment_label = "直播开始时间" if requested_live_start is not None else "排品表时间"
+        video_values = list(video_offsets)
 
         groups = _apply_product_scan_advance(
             group_by_product(schedule),
@@ -4124,26 +4147,20 @@ def _preflight_product_schedule(data: dict[str, Any], warnings: list[str], error
             groups,
             video_values,
             ffmpeg_cmd=_ffmpeg_cmd(),
+            video_start_offsets=video_offsets,
         )
         if not timeline or not any(float(item.get("duration") or 0.0) >= 0.5 for item in timeline):
             warnings.append("未能读取所选视频时长，暂时无法核对逐文件覆盖范围。")
             return
-        if any(bool(item.get("estimated")) for item in timeline):
-            warnings.append("部分文件名缺少完整日期时间，当前按所选顺序估算，不能识别中间断档。")
 
         stats = _product_scan_coverage_stats(coverage_groups)
         usable = int(stats["covered_ranges"]) + int(stats["partial_ranges"])
         if not usable:
-            errors.append("排品表没有任何时段落在本批导入视频的真实范围内。请检查视频起点或直播开始时间。")
+            errors.append("排品表没有任何时段落在本批导入视频的真实范围内。请检查本批视频起点。")
             return
-        note = (
-            f"完整覆盖 {stats['covered_ranges']} 条"
-            f"，部分覆盖 {stats['partial_ranges']} 条"
-            f"，未覆盖 {stats['missing_ranges']} 条"
-        )
-        warnings.append(f"已按{alignment_label}逐文件对齐：{note}；未覆盖时段不会导出。")
+        # Expected gaps are displayed in the result list, not as a failed-media warning.
     except Exception as exc:
-        warnings.append(f"排品表时间范围预棢失败：{exc}")
+        errors.append(f"排品表时间范围校验失败：{exc}")
 
 
 def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -6525,7 +6542,17 @@ def _preview_selection_raw_clips(preview: dict[str, Any]) -> list[Any]:
 
 
 def _preview_selection_public_clips(preview: dict[str, Any]) -> list[dict[str, Any]]:
-    return list(preview.get("candidate_clips") or preview.get("clips") or [])
+    clips = list(preview.get("candidate_clips") or preview.get("clips") or [])
+    counts: dict[str, int] = {}
+    for clip in clips:
+        key = str(clip.get("candidate_key") or _preview_candidate_key(clip))
+        counts[key] = counts.get(key, 0) + 1
+    for clip in clips:
+        key = str(clip.get("candidate_key") or _preview_candidate_key(clip))
+        # Source identity is still shared for feedback/dedup. Editing addresses
+        # an occurrence in THIS preview, not the last use of a source sentence.
+        clip["selection_key"] = hashlib.sha256(f"{key}:occurrence:{clip['index']}".encode("utf-8")).hexdigest()[:24] if counts[key] > 1 else key
+    return clips
 
 
 def _preview_requested_word_indices(
@@ -7074,6 +7101,16 @@ def _preferred_category_for_payload(payload: Any, category_summary: dict[str, An
 
 def _payload_ai_controls(payload: Any) -> dict[str, Any]:
     controls = dict(getattr(payload, "ai_controls", {}) or {})
+    if (controls.get("controls_version") or controls.get("contract_version")) == "director-controls-v2":
+        # Old presets/cache entries may still carry removed preferences. Do not
+        # let them tighten a visible 'allow' choice before the Director sees it.
+        for key in ("focus_hint", "priority_theme", "selling_points", "preferred_topics",
+                    "priority_terms", "preferred_terms", "hook_style", "opening_style", "ending_style"):
+            controls.pop(key, None)
+        controls["preference_weights"] = {}
+        controls["avoid"] = ["无关闲聊", "无效重复"]
+        if controls.get("supporting_products") == "block":
+            controls["avoid"].append("搭配其他品")
     primary = _payload_primary_category(payload)
     if primary and not _is_auto_category_value(primary):
         controls["primary_category"] = primary
@@ -7085,7 +7122,8 @@ def _payload_ai_controls(payload: Any) -> dict[str, Any]:
             # child path when it belongs to another first-level category.
             controls.pop("secondary_category", None)
             controls.pop("leaf_category", None)
-            controls.pop("main_product", None)
+            # Explicit user identity is not a stale classifier output. Keep it
+            # for the Director's source check instead of silently unlocking it.
     return controls
 
 
@@ -8120,14 +8158,18 @@ def _normalize_preview_selection_draft(
         if str(clip.get("index", "")).lstrip("-").isdigit()
     }
     key_by_index = {
-        index: str(clip.get("candidate_key") or _preview_candidate_key(clip))
+        index: str(clip.get("selection_key") or clip.get("candidate_key") or _preview_candidate_key(clip))
         for index, clip in public_clips.items()
     }
+    source_keys = [str(clip.get("candidate_key") or _preview_candidate_key(clip)) for clip in public_clips.values()]
+    ambiguous_keys = {key for key in source_keys if source_keys.count(key) > 1}
     index_by_key = {key: index for index, key in key_by_index.items() if key}
     clean_selected_keys = _clean_preview_key_list(selected_keys)
     clean_order_keys = _clean_preview_key_list(order_keys)
-    has_selected_key_payload = isinstance(selected_keys, list) and bool(selected_keys)
-    has_order_key_payload = isinstance(order_keys, list) and bool(order_keys)
+    # Old drafts also carry indices. They are authoritative when their legacy
+    # source keys cannot identify occurrences. Never resurrect removed clips.
+    has_selected_key_payload = bool(clean_selected_keys) and not ambiguous_keys.intersection(clean_selected_keys)
+    has_order_key_payload = bool(clean_order_keys) and not ambiguous_keys.intersection(clean_order_keys)
     selected = (
         [index_by_key[key] for key in clean_selected_keys if key in index_by_key]
         if has_selected_key_payload
@@ -8291,11 +8333,17 @@ def _apply_preview_payload_draft(
 def _preview_public(preview: dict[str, Any] | None) -> dict[str, Any]:
     if not preview:
         return {"ok": False, "status": "missing", "message": "暂无选片预览。"}
+    selection_keys = {int(clip["index"]): clip["selection_key"] for clip in _preview_selection_public_clips(preview)}
+    for clip in preview.get("clips") or []:
+        if int(clip["index"]) in selection_keys:
+            clip["selection_key"] = selection_keys[int(clip["index"])]
     return {
         "ok": preview.get("status") == "ready",
         "id": preview.get("id", ""),
         "task_id": preview.get("task_id", ""),
         "scope": preview.get("scope", "smart-cut"),
+        "parent_preview_id": preview.get("parent_preview_id", ""),
+        "director_family_root": preview.get("director_family_root", ""),
         "status": preview.get("status", ""),
         "commercial_director_experiment": bool(preview.get("commercial_director_experiment")),
         "commercial_director_sentence_preview": bool(
@@ -8322,6 +8370,66 @@ def _store_preview(preview_id: str, **updates: Any) -> None:
     with _CLIP_PREVIEW_LOCK:
         current = _CLIP_PREVIEWS.setdefault(preview_id, {"id": preview_id})
         current.update(updates)
+    if updates.get("status") == "ready":
+        _link_paid_director_preview(preview_id)
+
+
+def _link_paid_director_preview(preview_id: str) -> None:
+    """Link a completed on-demand direction without changing any clip or cost."""
+    with _CLIP_PREVIEW_LOCK:
+        child = _CLIP_PREVIEWS.get(preview_id) or {}
+        parent_id = child.get("director_family_root")
+        proposal_id = child.get("director_requested_proposal")
+        parent = _CLIP_PREVIEWS.get(parent_id) or {}
+        if not parent or not proposal_id or child.get("status") != "ready":
+            return
+        parent_review = dict(parent.get("director_review") or {})
+        proposals = list(dict(parent_review.get("director_strategy_library") or {}).get("proposals") or [])
+        proposal = next((p for p in proposals if p.get("director_strategy_id") == proposal_id), None)
+        if not proposal:
+            return
+        cards = [dict(c) for c in parent_review.get("director_variants") or []]
+        if not cards:
+            cards = [{"strategy_id": parent_review.get("active_director_strategy_id"),
+                      "preview_id": parent_id, "title": parent_review.get("headline", "主方案"),
+                      "available": True, "director_plan_role": "primary"}]
+        cards = [c for c in cards if c.get("director_strategy_id") != proposal_id]
+        cards.append({**proposal, "strategy_id": proposal.get("primary_story_id"),
+                      "preview_id": preview_id, "title": proposal.get("name"),
+                      "available": True, "requires_additional_ai_call": False,
+                      "clip_count": len(child.get("clips") or []),
+                      "duration_seconds": round(sum(float(c.get("duration") or 0) for c in child.get("clips") or []), 3),
+                      "director_plan_role": "alternative"})
+        for card in cards:
+            member = _CLIP_PREVIEWS.get(card.get("preview_id"))
+            if not member:
+                continue
+            review = dict(member.get("director_review") or {})
+            review["director_variants"] = [dict(c) for c in cards]
+            review["active_director_strategy_id"] = card.get("strategy_id")
+            review["director_strategy_library"] = dict(parent_review.get("director_strategy_library") or {})
+            member["director_review"] = review
+            member["director_family_root"] = parent_id
+            if card.get("preview_id") != parent_id:
+                member["parent_preview_id"] = parent_id
+
+
+def _director_family_source(preview: dict[str, Any]) -> dict[str, Any]:
+    return _get_preview(str(preview.get("director_family_root") or "")) or preview
+
+
+def _ready_director_direction(preview: dict[str, Any], proposal_id: str) -> dict[str, Any] | None:
+    review = dict(preview.get("director_review") or {})
+    proposals = list(dict(review.get("director_strategy_library") or {}).get("proposals") or [])
+    proposal = next((p for p in proposals if p.get("director_strategy_id") == proposal_id), {})
+    for card in review.get("director_variants") or []:
+        if (card.get("director_strategy_id") == proposal_id or
+                proposal and card.get("strategy_id") == proposal.get("primary_story_id")):
+            ready = _get_preview(str(card.get("preview_id") or ""))
+            if ready and ready.get("status") == "ready":
+                return {"ok": True, "preview_id": ready["id"], "task_id": ready.get("task_id"),
+                        "additional_ai_calls": 0, "reused": True, "message": "方案已生成，直接查看，不新增 AI 费用。"}
+    return None
 
 
 def _get_preview(preview_id: str) -> dict[str, Any] | None:
@@ -8757,7 +8865,13 @@ def _preview_clip_video(
     return target
 
 
-def _ensure_srt(video: Path, scope: str) -> Path | None:
+def _ensure_srt(
+    video: Path,
+    scope: str,
+    *,
+    local_asr_session: Any = None,
+    cancel_event: threading.Event | None = None,
+) -> Path | None:
     srt = video.with_suffix(".srt")
     if srt.exists():
         # Managed ASR caches are source-bound.  A matching older SenseVoice
@@ -8843,6 +8957,8 @@ def _ensure_srt(video: Path, scope: str) -> Path | None:
         generated = generate_srt(
             str(video),
             log_fn=lambda msg: emit_log("info", msg, scope),
+            cancel_event=cancel_event,
+            worker_session=local_asr_session,
         )
         if generated and Path(generated).exists():
             emit_log("info", "本地语音识别完成。", scope)
@@ -9608,35 +9724,20 @@ def _run_product_scan_read(task_id: str, payload: ProductScanPayload) -> None:
     scope = "product-scan"
     _set_task(task_id, status="running", started_at=time.time(), progress=8, message="读取时间表")
     try:
-        from schedule_splitter import align_schedule_to_video, build_schedule_coverage, group_by_product, read_excel
+        from schedule_splitter import build_schedule_coverage, group_by_product, read_excel
 
         excel = _clean_path(payload.excel_path)
         if not excel.exists():
             raise FileNotFoundError("Excel 文件不存在。")
         videos = _existing_paths(payload.video_paths, "直播视频")
-        time_basis = _parse_product_scan_time_basis(payload.schedule_time_basis)
-        video_start_offset = _parse_offset_seconds(payload.video_start_offset)
-        live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+        video_offsets = _resolve_product_scan_video_offsets(payload.model_dump())
         schedule, live_start = read_excel(
             str(excel),
             log_fn=_task_log_fn(task_id, scope, base=10, span=18),
-            time_basis=time_basis,
-        )
-        _normalize_product_scan_clock_schedule(
-            schedule,
-            time_basis,
-            live_start_override,
-            log_fn=lambda message: emit_log("info", message, scope),
+            time_basis="relative",
         )
         _set_task_progress(task_id, 35, "对齐时间表")
-        if video_start_offset is not None:
-            _shift_schedule_offsets(schedule, video_start_offset)
-            emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
-        else:
-            if live_start_override is None:
-                raise ValueError("按文件名自动对齐需要填写直播开播时间。")
-            align_schedule_to_video(schedule, [str(v) for v in videos], live_start_override or live_start, log_fn=lambda msg: emit_log("info", msg, scope), ffmpeg_cmd=_ffmpeg_cmd())
-            emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
+        emit_log("info", "表格以开播为零，每段视频按独立直播起点定位。", scope)
         _set_task_progress(task_id, 78, "分组商品")
         groups = _apply_product_scan_advance(group_by_product(schedule), payload.advance_seconds)
         coverage_groups, timeline = build_schedule_coverage(
@@ -9644,11 +9745,12 @@ def _run_product_scan_read(task_id: str, payload: ProductScanPayload) -> None:
             [str(v) for v in videos],
             ffmpeg_cmd=_ffmpeg_cmd(),
             log_fn=_task_log_fn(task_id, scope, base=78, span=12),
+            video_start_offsets=video_offsets,
         )
         stats = _product_scan_coverage_stats(coverage_groups)
         usable = int(stats["covered_ranges"]) + int(stats["partial_ranges"])
         if not usable:
-            raise ValueError("没有时段落在本批导入视频的真实范围内。请检查视频起点或直播开始时间。")
+            raise ValueError("没有时段落在本批导入视频的真实范围内。请检查本批视频起点。")
         with _SCAN_LOCK:
             _SCAN_RESULTS["schedule"] = schedule
             _SCAN_RESULTS["live_start"] = live_start
@@ -9676,7 +9778,6 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
     try:
         _ensure_feature_access("单品扫描")
         from schedule_splitter import (
-            align_schedule_to_video,
             build_schedule_coverage,
             extract_by_schedule,
             group_by_product,
@@ -9693,29 +9794,14 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             raise FileNotFoundError("Excel 文件不存在。")
         out_dir.mkdir(parents=True, exist_ok=True)
         _set_task_progress(task_id, 12, "读取时间表")
-        time_basis = _parse_product_scan_time_basis(payload.schedule_time_basis)
-        video_start_offset = _parse_offset_seconds(payload.video_start_offset)
-        live_start_override = _parse_live_start_datetime(payload.live_start_time, [str(v) for v in videos])
+        video_offsets = _resolve_product_scan_video_offsets(payload.model_dump())
         schedule, live_start = read_excel(
             str(excel),
             log_fn=_task_log_fn(task_id, scope, base=12, span=14),
-            time_basis=time_basis,
-        )
-        _normalize_product_scan_clock_schedule(
-            schedule,
-            time_basis,
-            live_start_override,
-            log_fn=lambda message: emit_log("info", message, scope),
+            time_basis="relative",
         )
         _set_task_progress(task_id, 30, "对齐视频时间")
-        if video_start_offset is not None:
-            _shift_schedule_offsets(schedule, video_start_offset)
-            emit_log("info", f"已按所选视频起点 {_hms(video_start_offset)} 调整时间表。", scope)
-        else:
-            if live_start_override is None:
-                raise ValueError("按文件名自动对齐需要填写直播开播时间。")
-            align_schedule_to_video(schedule, [str(v) for v in videos], live_start_override or live_start, log_fn=_task_log_fn(task_id, scope, base=30, span=20), ffmpeg_cmd=_ffmpeg_cmd())
-            emit_log("info", f"已按直播开始时间 {live_start_override.strftime('%H:%M:%S')} 自动对齐时间表。", scope)
+        emit_log("info", "表格以开播为零，每段视频按独立直播起点定位。", scope)
         groups = _apply_product_scan_advance(group_by_product(schedule), payload.advance_seconds)
         _set_task_progress(task_id, 58, "整理商品片段")
         coverage_groups, _timeline = build_schedule_coverage(
@@ -9723,6 +9809,7 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             [str(v) for v in videos],
             ffmpeg_cmd=_ffmpeg_cmd(),
             log_fn=_task_log_fn(task_id, scope, base=58, span=8),
+            video_start_offsets=video_offsets,
         )
         stats = _product_scan_coverage_stats(coverage_groups)
         selected_range_keys = [
@@ -9760,6 +9847,7 @@ def _run_product_scan(task_id: str, payload: ProductScanPayload) -> None:
             ffmpeg=_ffmpeg_cmd(),
             log_fn=_task_log_fn(task_id, scope, base=68, span=24),
             fast_copy=bool(payload.fast_cut),
+            source_timeline=_timeline,
         )
         exported_results = []
         for item in results:
@@ -12426,6 +12514,7 @@ def _run_mix_from_preview(
     finalize_task: bool = True,
     raise_errors: bool = False,
     output_extra_suffix: str = "",
+    local_asr_session: Any = None,
 ) -> list[str]:
     scope = "mix"
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取混剪预览片段")
@@ -12590,6 +12679,7 @@ def _run_mix_from_preview(
                     mirror_enabled=payload.mirror_enabled,
                     kb_intensity=payload.ken_burns_intensity,
                     _user_confirmed_clips=True,
+                    local_asr_session=local_asr_session,
                 )
                 if _result_ok(result) and version_path.exists():
                     produced_outputs.append(str(version_path))
@@ -13252,6 +13342,7 @@ def _prepare_mix_director_source(
     *,
     task_id: str,
     scope: str,
+    local_asr_session: Any = None,
 ) -> dict[str, Any]:
     """Build one ordered virtual transcript while retaining every real source.
 
@@ -13275,7 +13366,13 @@ def _prepare_mix_director_source(
     cursor = 0.0
 
     for source_index, video in enumerate(paths, start=1):
-        srt_path = _ensure_srt(video, scope)
+        ensure_kwargs: dict[str, Any] = {}
+        if local_asr_session is not None:
+            ensure_kwargs = {
+                "local_asr_session": local_asr_session,
+                "cancel_event": _task_cancel_event(task_id),
+            }
+        srt_path = _ensure_srt(video, scope, **ensure_kwargs)
         if not srt_path or not srt_path.exists():
             raise RuntimeError(f"未找到可用于 AI 导演混剪的字幕：{video.name}")
         _verify_local_asr_temp_identity_for_experiment(video, srt_path, scope)
@@ -13411,12 +13508,13 @@ def _run_commerce_director_preview(
     preview_scope: str = "smart-cut",
     source_bundle: Mapping[str, Any] | None = None,
     finalize_task: bool = True,
+    direct_attempt: int = 1,
 ) -> None:
     """Run story planning, exact Beat casting, then the editable preview.
 
     Historical experiment modes remain readable as fallback, but the compiled
-    two-stage Director packet is the production preview path and may not
-    trigger another semantic call before rendering.
+    two-stage Director packet is the production path, with at most one
+    conditional Casting correction against measured duration before rendering.
     """
     scope = str(preview_scope or "smart-cut")
     selected_story_id = str(selected_story_id or "").strip()
@@ -13442,7 +13540,7 @@ def _run_commerce_director_preview(
     emit_log(
         "info",
         (f"AI 导演方案已选定：正在按原始口播物化 {selected_story_id}。"
-         if selected_story_id else f"AI 导演已启动：故事规划后只进行一次短句 Casting；目标 {payload.target_duration} 秒为叙事深度参考。"),
+         if selected_story_id else f"AI 导演已启动：先规划故事，再选真实短句；目标成片 {payload.target_duration} 秒，偏离时先保留可编辑方案。"),
         scope,
     )
     video: Path | None = None
@@ -13466,12 +13564,23 @@ def _run_commerce_director_preview(
         # saved preferences are never mutated by a run-only avoid chip.
         from content_policy import apply_run_avoid_overrides, normalize_content_policy
         from commercial_analyzer import normalize_director_controls
+        from cutter_logic import _planned_output_speed_factor
 
-        task_controls = dict(payload.ai_controls or {})
-        if not task_controls.get("source_product_hints"):
-            task_controls["source_product_hints"] = [
-                Path(str(path).strip().strip('"')).stem for path in payload.video_paths
-            ]
+        director_strategy_contract = dict(director_strategy_contract or {})
+        director_strategy_contract["output_speed_factor"] = _planned_output_speed_factor(
+            payload.dedup_preset, payload.video,
+        )
+
+        paths = _existing_paths(payload.video_paths, "视频")
+        bundle = dict(source_bundle or {})
+        video = Path(str(bundle.get("preview_video") or paths[0]))
+        task_controls = _payload_ai_controls(payload)
+        # Bind metadata to the sources actually analyzed, not every item in
+        # the batch UI. A single-video preview must not inherit another SKU.
+        task_controls["source_product_hints"] = [
+            Path(str(path).strip().strip('"')).stem
+            for path in (list(bundle.get("sources") or []) if bundle else [str(video)])
+        ]
         task_controls.setdefault("primary_category", payload.primary_category)
         task_controls.setdefault("category", payload.category)
         if not isinstance(task_controls.get("preference_weights"), Mapping):
@@ -13498,9 +13607,6 @@ def _run_commerce_director_preview(
             M2_PLANNER_MODE_LITE_FINAL_EDITOR_EXPERIMENT,
         }:
             raise RuntimeError("请先在设置中选择 Heavy Director、Lite Director、Lite Chapter Compression 或 Lite Final Editor（仅本地实验）。")
-        paths = _existing_paths(payload.video_paths, "视频")
-        bundle = dict(source_bundle or {})
-        video = Path(str(bundle.get("preview_video") or paths[0]))
         if bundle:
             srt_path = Path(str(bundle.get("srt_path") or ""))
         else:
@@ -13526,6 +13632,8 @@ def _run_commerce_director_preview(
                 "target_duration": payload.target_duration,
                 "duration_tolerance": payload.duration_tolerance,
                 "run_avoid": list(task_controls.get("avoid") or []),
+                "dedup_preset": payload.dedup_preset,
+                "video_options": dict(payload.video or {}),
                 "director_controls": effective_director_controls,
                 "selected_director_direction": dict(director_focus or {}),
                 "formal_export_allowed": bool(dict(director_strategy_contract or {}).get("sentence_preview_without_m3")),
@@ -13545,11 +13653,18 @@ def _run_commerce_director_preview(
                 "story_contract_completed": (43, "核心故事已确定"),
                 "beat_casting_started": (46, "AI 正从完整字幕选出真实短句"),
                 "beat_casting_completed": (82, "真实短句已选定，正在还原逐句预览"),
+            "duration_calibration_started": (83, "正在校准时长、章节和商品归属"),
+                "duration_calibration_completed": (85, "校准结束，正在还原可编辑预览"),
             }.get(str(stage or ""))
             if progress:
                 _set_task_progress(task_id, progress[0], progress[1])
 
-        with ai_cost_ledger_scope(task_id=f"commerce_preview:{task_id}", session_id=preview_id):
+        with ai_cost_ledger_scope(
+            task_id=f"commerce_preview:{task_id}",
+            session_id=preview_id,
+            parent_request_id=f"direct_attempt:{int(direct_attempt)}",
+            retry=bool(int(direct_attempt) > 1),
+        ):
             case = _run_case(
                 f"ui_{preview_id}",
                 settings=settings,
@@ -13604,8 +13719,11 @@ def _run_commerce_director_preview(
             case["selected_from_m1_story_library"] = selected_story_id
         cost_report, _ = generate_ai_cost_reports(
             output_dir=experiment_dir,
-            session_id=preview_id,
+            task_id=f"commerce_preview:{task_id}",
         )
+        # Keep the current preview id for existing UI/artifact readers while
+        # the records themselves now cover every attempt in this top-level task.
+        cost_report["session_id"] = preview_id
         if case.get("director_discovery_only"):
             _write_commerce_director_preview_artifacts(
                 experiment_dir, case=case, planner_mode=planner_mode, preview_id=preview_id,
@@ -13686,6 +13804,33 @@ def _run_commerce_director_preview(
                 video=video,
                 source_srt_text=source_srt_text,
             )
+            plan_payload = dict(case.get("m2_plan") or {})
+            product_control = dict(dict(dict(plan_payload.get("director_narrative_contract") or {}).get("whole_video_audit") or {}).get("product_control") or {})
+            resolved_scope = dict(dict(product_control.get("final") or {}).get("resolved_scope") or {})
+            main_type = str(resolved_scope.get("product_type") or "unknown")
+            try:
+                from director_product_contract import compatible as _product_type_compatible
+                main_product_ids = {
+                    subtitle_id
+                    for section in resolved_scope.get("source_product_sections") or []
+                    if isinstance(section, Mapping) and _product_type_compatible(main_type, str(section.get("product_type") or "unknown"))
+                    for subtitle_id in range(int(section.get("start_id") or 0), int(section.get("end_id") or -1) + 1)
+                }
+            except (TypeError, ValueError):
+                main_product_ids = set()
+            if main_product_ids:
+                for foreign in dict(product_control.get("final") or {}).get("foreign_product_ranges") or []:
+                    if isinstance(foreign, Mapping):
+                        try:
+                            main_product_ids.difference_update(range(int(foreign["start_id"]), int(foreign["end_id"]) + 1))
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                def _keep_product_candidates(raw_items: list[Any], metadata_items: list[dict[str, Any]]) -> tuple[list[Any], list[dict[str, Any]]]:
+                    kept = [(raw, meta) for raw, meta in zip(raw_items, metadata_items)
+                            if int(meta.get("source_subtitle_id") or meta.get("director_candidate_id") or 0) in main_product_ids]
+                    return [item[0] for item in kept], [item[1] for item in kept]
+                alternative_raw_clips, alternative_metadata = _keep_product_candidates(alternative_raw_clips, alternative_metadata)
+                inventory_raw_clips, inventory_metadata = _keep_product_candidates(inventory_raw_clips, inventory_metadata)
             if bundle:
                 raw_clips = _remap_mix_director_raw_clips(raw_clips, bundle)
                 mapped_alternatives: list[Any] = []
@@ -13813,7 +13958,82 @@ def _run_commerce_director_preview(
             ]
             for candidate_index, candidate_clip in enumerate(candidate_public_clips):
                 candidate_clip["index"] = candidate_index
-            plan_payload = dict(case.get("m2_plan") or {})
+            primary_strategy = dict(case.get("selected_m1_hero") or {})
+            director_variant_cards = [
+                _commerce_director_variant_card(
+                    preview_id=preview_id,
+                    strategy=primary_strategy,
+                    plan=dict(case.get("m2_plan") or {}),
+                    primary=True,
+                )
+            ]
+            prepared_variant_previews: list[dict[str, Any]] = []
+            shared_candidate_pairs = list(zip(candidate_raw_clips, candidate_public_clips))
+            for variant_entry in list(case.get("director_variant_plans") or [])[:2]:
+                if not isinstance(variant_entry, Mapping):
+                    continue
+                variant_strategy = dict(variant_entry.get("strategy") or {})
+                variant_plan = dict(variant_entry.get("m2_plan") or {})
+                if not variant_plan.get("selected_candidates"):
+                    continue
+                variant_case = dict(case)
+                variant_case["selected_m1_hero"] = variant_strategy
+                variant_case["m2_plan"] = variant_plan
+                variant_case["chapter_lineage"] = []
+                variant_raw = _commerce_director_sentence_raw_clips(variant_case, video=video)
+                if bundle:
+                    variant_raw = _remap_mix_director_raw_clips(variant_raw, bundle)
+                if not variant_raw:
+                    continue
+                variant_public = _preview_public_clips(
+                    variant_raw,
+                    srt_text,
+                    sources=list(bundle.get("sources") or []),
+                    merge_mode=bool(bundle),
+                    word_timings=word_timings,
+                    preserve_director_selection=True,
+                    content_policy=settings["content_policy"],
+                )
+                _annotate_commerce_director_public_clips(
+                    variant_public,
+                    _commerce_director_candidate_timeline(variant_case),
+                    recommended=True,
+                )
+                variant_selected_identities = {
+                    _preview_candidate_identity(item) for item in variant_raw
+                }
+                variant_candidate_raw = list(variant_raw)
+                variant_candidate_public = copy.deepcopy(variant_public)
+                for shared_raw, shared_public in shared_candidate_pairs:
+                    identity = _preview_candidate_identity(shared_raw)
+                    if not identity[3] or identity in variant_selected_identities:
+                        continue
+                    variant_selected_identities.add(identity)
+                    variant_candidate_raw.append(shared_raw)
+                    candidate_copy = copy.deepcopy(shared_public)
+                    candidate_copy["candidate_origin"] = "source_inventory"
+                    candidate_copy["director_recommended"] = False
+                    variant_candidate_public.append(candidate_copy)
+                for candidate_index, candidate_clip in enumerate(variant_candidate_public):
+                    candidate_clip["index"] = candidate_index
+                variant_preview_id = uuid.uuid4().hex
+                variant_card = _commerce_director_variant_card(
+                    preview_id=variant_preview_id,
+                    strategy=variant_strategy,
+                    plan=variant_plan,
+                    primary=False,
+                )
+                director_variant_cards.append(variant_card)
+                prepared_variant_previews.append({
+                    "preview_id": variant_preview_id,
+                    "strategy": variant_strategy,
+                    "plan": variant_plan,
+                    "raw_clips": variant_raw,
+                    "clips": variant_public,
+                    "candidate_raw_clips": variant_candidate_raw,
+                    "candidate_clips": variant_candidate_public,
+                    "card": variant_card,
+                })
             preview_fidelity = _director_preview_fidelity_audit(public_clips)
             duration_assessment = dict(plan_payload.get("duration_assessment") or {})
             actual_seconds = round(sum(float(item.get("duration") or 0.0) for item in public_clips), 3)
@@ -13852,6 +14072,7 @@ def _run_commerce_director_preview(
                 },
                 "m3_status": "not_run_sentence_preview",
                 "preview_fidelity": preview_fidelity,
+                "product_control": product_control,
                 "review_contract": {
                     "sentence_source": "M2 selected candidates in exact AI-authored order",
                     "m3_materialized": False,
@@ -13859,15 +14080,144 @@ def _run_commerce_director_preview(
                     "formal_export_allowed": True,
                     "render_path": "existing_smart_or_mix_from_preview",
                 },
+                "director_variants": director_variant_cards,
+                "active_director_strategy_id": str(primary_strategy.get("strategy_id") or ""),
             }
+            for prepared_variant in prepared_variant_previews:
+                variant_strategy = dict(prepared_variant["strategy"])
+                variant_plan = dict(prepared_variant["plan"])
+                variant_duration = dict(variant_plan.get("duration_assessment") or {})
+                variant_actual_seconds = round(sum(
+                    float(item.get("duration") or 0.0)
+                    for item in list(variant_plan.get("selected_candidates") or [])
+                    if isinstance(item, Mapping)
+                ), 3)
+                variant_final_story = dict(variant_plan.get("final_story_brief") or {})
+                variant_core = str(
+                    variant_final_story.get("core_desire")
+                    or variant_strategy.get("core_desire")
+                    or variant_strategy.get("core_commercial_idea")
+                    or variant_strategy.get("thesis")
+                    or ""
+                )
+                variant_opening = str(
+                    variant_final_story.get("opening_promise")
+                    or variant_strategy.get("opening_promise")
+                    or variant_core
+                )
+                variant_review = {
+                    "kind": "m2_sentence_preview",
+                    "headline": "AI 导演逐句预览",
+                    "m1_story": {
+                        "strategy_id": str(variant_strategy.get("strategy_id") or ""),
+                        "thesis": variant_core,
+                        "audience_tension": str(variant_strategy.get("audience_tension") or ""),
+                        "core_commercial_idea": variant_core,
+                        "payoff": variant_opening,
+                        "story_priority": str(variant_strategy.get("story_priority") or ""),
+                    },
+                    "m1_story_library": dict(case.get("m1_story_library") or {}),
+                    "director_strategy_library": dict(case.get("director_strategy_library") or {}),
+                    "m2_outline": _commerce_director_m2_outline(variant_plan),
+                    "m2_candidate_timeline": _commerce_director_candidate_timeline({
+                        **dict(case), "m2_plan": variant_plan, "chapter_lineage": [],
+                    }),
+                    "duration_assessment": variant_duration,
+                    "candidate_pool_summary": {
+                        "recommended_count": len(prepared_variant["clips"]),
+                        "alternative_count": 0,
+                        "source_inventory_count": max(
+                            0, len(prepared_variant["candidate_clips"]) - len(prepared_variant["clips"]),
+                        ),
+                        "candidate_pool_count": len(prepared_variant["candidate_clips"]),
+                        "semantic_source": "same_two_ai_calls_multi_plan_casting",
+                        "program_auto_inserted": False,
+                        "source_inventory_manual_only": True,
+                    },
+                    "m3_status": "not_run_sentence_preview",
+                    "preview_fidelity": _director_preview_fidelity_audit(prepared_variant["clips"]),
+                    "product_control": product_control,
+                    "review_contract": {
+                        "sentence_source": "AI selected candidates in this strategy's exact order",
+                        "semantic_ai_calls": int(
+                            dict(variant_duration.get("duration_control") or {}).get("semantic_call_count") or 2
+                        ),
+                        "strategy_switch_requires_ai": False,
+                        "m3_materialized": False,
+                        "sentence_preview_editable": True,
+                        "formal_export_allowed": True,
+                        "render_path": "existing_smart_or_mix_from_preview",
+                    },
+                    "director_variants": director_variant_cards,
+                    "active_director_strategy_id": str(variant_strategy.get("strategy_id") or ""),
+                }
+                variant_message = (
+                    f"差异化导演方案已就绪：{len(prepared_variant['clips'])} 句 / 原声 "
+                    f"{variant_actual_seconds:.1f} 秒；切换方案不再调用 AI。"
+                )
+                _store_preview(
+                    str(prepared_variant["preview_id"]),
+                    task_id=task_id,
+                    scope=scope,
+                    status="ready",
+                    message=variant_message,
+                    created_at=time.time(),
+                    hidden_from_latest=True,
+                    parent_preview_id=preview_id,
+                    video=str(video),
+                    video_name=("多素材混剪" if bundle else video.name),
+                    sources=list(bundle.get("sources") or [str(video)]),
+                    srt_path=str(srt_path),
+                    srt_text=srt_text,
+                    target_duration=payload.target_duration,
+                    duration_tolerance=payload.duration_tolerance,
+                    raw_clips=list(prepared_variant["raw_clips"]),
+                    clips=list(prepared_variant["clips"]),
+                    candidate_raw_clips=list(prepared_variant["candidate_raw_clips"]),
+                    candidate_clips=list(prepared_variant["candidate_clips"]),
+                    dedup_summary={
+                        "narrative_owner": "two_pass_ai_director_multi_plan_sentence_preview",
+                        "parent_preview_id": preview_id,
+                        "director_strategy_id": str(variant_strategy.get("strategy_id") or ""),
+                        "m3_skipped": True,
+                        "sentence_preview_editable": True,
+                        "formal_export_allowed": True,
+                        "publication_allowed": True,
+                        "cost_report": dict(cost_report),
+                    },
+                    commercial_director_experiment=True,
+                    commercial_director_preview=True,
+                    commercial_director_sentence_preview=True,
+                    planner_mode=planner_mode,
+                    director_review=variant_review,
+                )
             target_fulfilled = str(duration_assessment.get("status") or "") == "target_range_fulfilled"
             message = (
-                f"AI 导演逐句预览已完成：{len(public_clips)} 句 / {actual_seconds:.1f} 秒。"
+                f"AI 导演逐句预览已完成：{len(public_clips)} 句 / 原声 {actual_seconds:.1f} 秒，"
+                f"预计成片 {float(duration_assessment.get('projected_final_seconds') or actual_seconds):.1f} 秒。"
                 "每句可单独预览、删改和调整顺序；M3 未运行。"
             )
+            if not target_fulfilled:
+                message += f" 当前未达本次 {payload.target_duration} 秒目标区间，已保留可编辑方案，不追加第三轮 AI。"
+                pool_audit = dict(dict(duration_assessment.get("duration_control") or {}).get("final") or {})
+                if pool_audit.get("duplicate_subtitle_ids"):
+                    message += f" 含重复原句，不重复计算为达标内容；不同原句预计 {float(pool_audit.get('unique_projected_final_seconds') or 0):.1f} 秒。"
+                if pool_audit.get("pool_cannot_reach_minimum"):
+                    message += (
+                        f" 按当前内容规则和短句范围，全部候选合计最多约 {float(pool_audit.get('pool_upper_bound_final_seconds') or 0):.1f} 秒成片；"
+                        "即使全选也不足目标区间，可补充素材或检查内容限制。"
+                    )
+                elif pool_audit.get("main_product_pool_cannot_reach_minimum"):
+                    message += (
+                        f" 当前主商品的完整安全短句池合计最多约 {float(pool_audit.get('main_product_pool_upper_bound_final_seconds') or 0):.1f} 秒成片；"
+                        "其余候选属于别的商品，不能拿来补时长。"
+                    )
             if preview_fidelity["status"] == "warning":
                 message += " " + preview_fidelity["message"]
                 emit_log("warning", preview_fidelity["message"], scope)
+            resolved_product = dict(dict(product_control.get("final") or {}).get("resolved_scope") or {}).get("main_product")
+            if resolved_product:
+                message += f" 本次主商品：{resolved_product}；已核对已选原话及AI备选句的商品归属。"
             _store_preview(
                 preview_id,
                 status="ready",
@@ -13893,6 +14243,9 @@ def _run_commerce_director_preview(
                     "m3_skipped": True,
                     "sentence_preview_editable": True,
                     "target_duration_fulfilled": target_fulfilled,
+                    "duration_speed_factor": float(duration_assessment.get("output_speed_factor") or 1.0),
+                    "ai_target_duration": float(payload.target_duration) * float(duration_assessment.get("output_speed_factor") or 1.0),
+                    "duration_control": dict(duration_assessment.get("duration_control") or {}),
                     "word_timing_summary": dict(word_timing_summary),
                     "task_content_policy": settings["content_policy"],
                     "formal_export_allowed": True,
@@ -14094,7 +14447,21 @@ def _run_commerce_director_preview(
         )
     except Exception as exc:
         failure_artifact = ""
+        failure_cost_report: dict[str, Any] = {}
         if experiment_dir is not None:
+            # Failed paid calls still consume tokens. Preserve their usage and
+            # output-limit diagnostics without masking the original failure.
+            try:
+                from ai_cost_ledger import generate_ai_cost_reports
+                failure_cost_report, _ = generate_ai_cost_reports(
+                    output_dir=experiment_dir, task_id=f"commerce_preview:{task_id}",
+                )
+                failure_cost_report["session_id"] = preview_id
+                (experiment_dir / "cost_report.json").write_text(
+                    json.dumps(failure_cost_report, ensure_ascii=False, indent=2), encoding="utf-8",
+                )
+            except Exception:
+                _LOG.warning("Could not save failed Director usage report", exc_info=True)
             failure_path = experiment_dir / "failure.json"
             failure_path.write_text(
                 json.dumps({
@@ -14102,6 +14469,7 @@ def _run_commerce_director_preview(
                     "error": str(exc),
                     "video": str(video) if video is not None else "",
                     "srt": str(srt_path) if srt_path is not None else "",
+                    "cost_report": failure_cost_report,
                     "formal_export_allowed": False,
                     "publication_allowed": False,
                 }, ensure_ascii=False, indent=2),
@@ -14120,6 +14488,7 @@ def _run_commerce_director_preview(
             dedup_summary={
                 "experiment_dir": str(experiment_dir) if experiment_dir is not None else "",
                 "failure_artifact": failure_artifact,
+                "cost_report": failure_cost_report,
                 "formal_export_allowed": False,
                 "publication_allowed": False,
             },
@@ -14531,6 +14900,44 @@ def _commerce_director_sentence_raw_clips(
     return raw_clips
 
 
+def _commerce_director_variant_card(
+    *,
+    preview_id: str,
+    strategy: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    primary: bool,
+) -> dict[str, Any]:
+    """Describe one already-cast plan for instant UI switching."""
+
+    selected = [item for item in list(plan.get("selected_candidates") or []) if isinstance(item, Mapping)]
+    duration = sum(float(item.get("duration") or 0.0) for item in selected)
+    core_desire = str(
+        strategy.get("core_desire")
+        or strategy.get("core_commercial_idea")
+        or strategy.get("thesis")
+        or ""
+    ).strip()
+    return {
+        "preview_id": preview_id,
+        "strategy_id": str(strategy.get("strategy_id") or ""),
+        "director_plan_role": "primary" if primary else "alternative",
+        "title": str(
+            strategy.get("director_title")
+            or strategy.get("title")
+            or core_desire
+            or ("AI 推荐方案" if primary else "差异化导演方案")
+        ).strip(),
+        "core_desire": core_desire,
+        "opening_promise": str(strategy.get("opening_promise") or core_desire).strip(),
+        "narrative_archetype": str(strategy.get("narrative_archetype") or "director_defined").strip(),
+        "duration_seconds": round(duration, 3),
+        "clip_count": len(selected),
+        "available": bool(selected),
+        "plan_valid": bool(plan.get("plan_valid")),
+        "outline": _commerce_director_m2_outline(plan),
+    }
+
+
 def _director_batch_result_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     """Expose one child preview without granting it normal-preview authority."""
     proposal = dict(entry.get("proposal") or {})
@@ -14802,8 +15209,10 @@ def _run_commerce_director_preview_auto_batch(
     payload: SmartCutPayload,
     *,
     finalize_task: bool = True,
+    direct_attempt: int = 1,
 ) -> None:
     """Default flow: Director draft, measured final revision, then exact M3."""
+    requested_plan_count = max(1, min(3, int(payload.versions or 1)))
     _run_commerce_director_preview(
         task_id,
         preview_id,
@@ -14815,9 +15224,12 @@ def _run_commerce_director_preview_auto_batch(
             "two_pass_director_packet": True,
             "sentence_preview_without_m3": True,
             "semantic_call_count": 2,
-            "packet_mode": "primary_only",
+            "max_semantic_call_count": 2,
+            "packet_mode": "multi_plan" if requested_plan_count > 1 else "primary_only",
+            "requested_director_plan_count": requested_plan_count,
         },
         finalize_task=finalize_task,
+        direct_attempt=direct_attempt,
     )
 
 
@@ -14828,9 +15240,11 @@ def _run_commerce_director_mix_preview(
     director_focus: Mapping[str, Any] | None = None,
     *,
     finalize_task: bool = True,
+    direct_attempt: int = 1,
 ) -> None:
     """Run the same two-call Director over all mix sources as one story space."""
     scope = "mix"
+    requested_plan_count = max(1, min(3, int(payload.versions or 1)))
     try:
         _ensure_feature_access("混剪成片")
         paths = _existing_paths(payload.video_paths, "视频")
@@ -14848,7 +15262,24 @@ def _run_commerce_director_mix_preview(
             commercial_director_experiment=True,
             commercial_director_preview=True,
         )
-        source_bundle = _prepare_mix_director_source(paths, task_id=task_id, scope=scope)
+        # This session starts its worker only when a source has no usable SRT.
+        # It is deliberately released before the paid Director requests.
+        local_asr_session = None
+        try:
+            from stt import LocalASRWorkerSession
+
+            local_asr_session = LocalASRWorkerSession()
+            source_bundle = _prepare_mix_director_source(
+                paths,
+                task_id=task_id,
+                scope=scope,
+                local_asr_session=local_asr_session,
+            )
+        finally:
+            if local_asr_session is not None:
+                local_asr_session.close(
+                    log_fn=lambda message: emit_log("info", message, scope, task_id=task_id)
+                )
         smart_payload = SmartCutPayload(
             video_paths=[str(path) for path in paths],
             output_dir=payload.output_dir,
@@ -14886,7 +15317,9 @@ def _run_commerce_director_mix_preview(
                 "two_pass_director_packet": True,
                 "sentence_preview_without_m3": True,
                 "semantic_call_count": 2,
-                "packet_mode": "primary_only",
+                "max_semantic_call_count": 2,
+                "packet_mode": "multi_plan" if requested_plan_count > 1 else "primary_only",
+                "requested_director_plan_count": requested_plan_count,
             },
             selected_story_id=str(
                 dict(director_focus or {}).get("strategy_id")
@@ -14897,6 +15330,7 @@ def _run_commerce_director_mix_preview(
             preview_scope=scope,
             source_bundle=source_bundle,
             finalize_task=finalize_task,
+            direct_attempt=direct_attempt,
         )
     except Exception as exc:
         _store_preview(
@@ -14918,6 +15352,8 @@ def _run_smart_cut_from_preview(
     *,
     finalize_task: bool = True,
     raise_errors: bool = False,
+    output_extra_suffix: str = "",
+    local_asr_session: Any = None,
 ) -> list[str]:
     scope = "smart-cut"
     _set_task(task_id, status="running", started_at=time.time(), progress=6, message="读取预览片段")
@@ -14965,6 +15401,10 @@ def _run_smart_cut_from_preview(
         base_output_path = _smart_output_path(
             output_dir, video, payload.output_naming_mode, versions=version_count
         )
+        if output_extra_suffix:
+            base_output_path = base_output_path.with_name(
+                f"{base_output_path.stem}{output_extra_suffix}{base_output_path.suffix}"
+            )
         version_paths = [
             base_output_path
             if version_count == 1
@@ -15007,6 +15447,7 @@ def _run_smart_cut_from_preview(
                 dedup_video_options=payload.video,
                 dedup_audio_options=payload.audio,
                 transition_options=payload.transition,
+                local_asr_session=local_asr_session,
             )
             if _result_ok(result) and version_path.exists():
                 produced_outputs.append(str(version_path))
@@ -15039,6 +15480,116 @@ def _run_smart_cut_from_preview(
         if raise_errors:
             raise
         return []
+
+
+def _director_variant_render_data(payload: BaseModel, preview_id: str) -> dict[str, Any]:
+    """Build one render receipt from that plan's saved manual arrangement."""
+
+    preview = _get_preview(preview_id)
+    if not preview or preview.get("status") != "ready":
+        raise RuntimeError(f"导演方案预览不存在或尚未完成：{preview_id}")
+    candidate_count = len(_preview_selection_raw_clips(preview))
+    recommended_count = len(list(preview.get("raw_clips") or []))
+    if not candidate_count or not recommended_count:
+        raise RuntimeError(f"导演方案没有可用片段：{preview_id}")
+    draft = _preview_selection_draft(preview)
+    # A variant that the user has not opened/edited yet must render its AI
+    # story script, not every manual-only candidate in that plan's library.
+    selected = list(draft.get("selected_indices") or range(recommended_count))
+    order = list(draft.get("order") or selected)
+    data = _payload_to_dict(payload)
+    data.pop("preview_ids", None)
+    data.update({
+        "versions": 1,
+        "preview_id": preview_id,
+        "selected_indices": selected,
+        "selected_keys": list(draft.get("selected_keys") or []),
+        "order": order,
+        "order_keys": list(draft.get("order_keys") or []),
+        "selected_segments": dict(draft.get("selected_segments") or {}),
+        "selected_words": dict(draft.get("selected_words") or {}),
+        "selected_segments_by_key": dict(draft.get("selected_segments_by_key") or {}),
+        "selected_words_by_key": dict(draft.get("selected_words_by_key") or {}),
+    })
+    return data
+
+
+def _run_smart_director_variant_batch(
+    task_id: str,
+    payload: SmartDirectorVariantBatchPayload,
+) -> None:
+    """Render one output per selected Director plan without another AI call."""
+
+    outputs: list[str] = []
+    failures: list[str] = []
+    preview_ids = list(dict.fromkeys(str(item).strip() for item in payload.preview_ids if str(item).strip()))[:3]
+    for index, preview_id in enumerate(preview_ids, 1):
+        if _is_task_cancelled(task_id):
+            break
+        try:
+            emit_log("info", f"按已选导演方案成片 {index}/{len(preview_ids)}（不再调用 AI）", "smart-cut")
+            render_payload = SmartPreviewCutPayload(**_director_variant_render_data(payload, preview_id))
+            outputs.extend(_run_smart_cut_from_preview(
+                task_id,
+                render_payload,
+                finalize_task=False,
+                raise_errors=True,
+                output_extra_suffix=f"_方案{index}",
+            ))
+        except Exception as exc:
+            failures.append(f"方案{index}: {exc}")
+            emit_log("warning", f"导演方案 {index} 成片失败：{exc}", "smart-cut")
+    if not outputs:
+        raise RuntimeError("所选导演方案均未生成成片。" + (" " + "；".join(failures) if failures else ""))
+    _set_task(
+        task_id,
+        status="completed",
+        finished_at=time.time(),
+        output=outputs[0],
+        outputs=outputs,
+        result_count=len(outputs),
+        message=f"已按 {len(outputs)}/{len(preview_ids)} 个导演方案分别成片。",
+    )
+    emit_log("success", f"多导演方案成片完成：{len(outputs)} 个不同故事版本", "smart-cut")
+
+
+def _run_mix_director_variant_batch(
+    task_id: str,
+    payload: MixDirectorVariantBatchPayload,
+) -> None:
+    """Render one mix output per selected Director plan without another AI call."""
+
+    outputs: list[str] = []
+    failures: list[str] = []
+    preview_ids = list(dict.fromkeys(str(item).strip() for item in payload.preview_ids if str(item).strip()))[:3]
+    for index, preview_id in enumerate(preview_ids, 1):
+        if _is_task_cancelled(task_id):
+            break
+        try:
+            emit_log("info", f"按已选导演方案混剪 {index}/{len(preview_ids)}（不再调用 AI）", "mix")
+            render_payload = MixPreviewCutPayload(**_director_variant_render_data(payload, preview_id))
+            outputs.extend(_run_mix_from_preview(
+                task_id,
+                render_payload,
+                finalize_task=False,
+                raise_errors=True,
+                output_extra_suffix=f"_方案{index}",
+            ))
+        except Exception as exc:
+            failures.append(f"方案{index}: {exc}")
+            emit_log("warning", f"导演方案 {index} 混剪失败：{exc}", "mix")
+    if not outputs:
+        raise RuntimeError("所选导演方案均未生成混剪。" + (" " + "；".join(failures) if failures else ""))
+    _set_task(
+        task_id,
+        status="completed",
+        finished_at=time.time(),
+        output=outputs[0],
+        outputs=outputs,
+        result_count=len(outputs),
+        message=f"已按 {len(outputs)}/{len(preview_ids)} 个导演方案分别混剪。",
+    )
+    emit_log("success", f"多导演方案混剪完成：{len(outputs)} 个不同故事版本", "mix")
 
 
 def _director_direct_retryable(error: Any) -> bool:
@@ -15096,7 +15647,7 @@ def _build_director_preview_for_direct_output(
             hidden_from_latest=True,
         )
         if attempt > 1:
-            emit_log("warning", "AI 返回格式不完整，正在自动重试一次。", scope)
+            emit_log("warning", "AI 回复格式错误，正在自动重试一次；本次费用会计入总额。", scope)
         _set_task_progress(task_id, 10, "AI 导演正在理解素材并编排故事")
         if scope == "mix":
             _run_commerce_director_mix_preview(
@@ -15104,6 +15655,7 @@ def _build_director_preview_for_direct_output(
                 preview_id,
                 payload if isinstance(payload, MixPayload) else MixPayload(**_payload_to_dict(payload)),
                 finalize_task=False,
+                direct_attempt=attempt,
             )
         else:
             _run_commerce_director_preview_auto_batch(
@@ -15111,6 +15663,7 @@ def _build_director_preview_for_direct_output(
                 preview_id,
                 payload if isinstance(payload, SmartCutPayload) else SmartCutPayload(**_payload_to_dict(payload)),
                 finalize_task=False,
+                direct_attempt=attempt,
             )
         preview = _get_preview(preview_id) or {}
         recommended = list(preview.get("raw_clips") or [])
@@ -15177,20 +15730,56 @@ def _run_commerce_director_smart_cut(task_id: str, payload: SmartCutPayload) -> 
                 preview_id, preview = _build_director_preview_for_direct_output(
                     task_id, item_payload, scope=scope,
                 )
-                recommended_count = len(list(preview.get("raw_clips") or []))
-                render_data = dict(item_data)
-                render_data.update({
-                    "preview_id": preview_id,
-                    "selected_indices": list(range(recommended_count)),
-                    "order": list(range(recommended_count)),
-                })
-                produced = _run_smart_cut_from_preview(
-                    task_id,
-                    SmartPreviewCutPayload(**render_data),
-                    finalize_task=False,
-                    raise_errors=True,
-                )
-                outputs.extend(produced)
+                requested_versions = max(1, int(item_payload.versions or 1))
+                variant_cards = [
+                    dict(card) for card in list(dict(preview.get("director_review") or {}).get("director_variants") or [])
+                    if isinstance(card, Mapping) and bool(card.get("available"))
+                ][:requested_versions]
+                if len(variant_cards) > 1:
+                    for variant_index, card in enumerate(variant_cards, 1):
+                        variant_preview_id = str(card.get("preview_id") or preview_id)
+                        variant_preview = _get_preview(variant_preview_id) or {}
+                        recommended_count = len(list(variant_preview.get("raw_clips") or []))
+                        if not recommended_count:
+                            continue
+                        render_data = dict(item_data)
+                        render_data.update({
+                            "versions": 1,
+                            "preview_id": variant_preview_id,
+                            "selected_indices": list(range(recommended_count)),
+                            "order": list(range(recommended_count)),
+                        })
+                        emit_log(
+                            "info",
+                            f"差异化导演成片 {variant_index}/{len(variant_cards)}：{card.get('title') or '导演方案'}（不再调用 AI）",
+                            scope,
+                        )
+                        outputs.extend(_run_smart_cut_from_preview(
+                            task_id,
+                            SmartPreviewCutPayload(**render_data),
+                            finalize_task=False,
+                            raise_errors=True,
+                        ))
+                    if len(variant_cards) < requested_versions:
+                        emit_log(
+                            "warning",
+                            f"AI 本次只形成 {len(variant_cards)}/{requested_versions} 个可执行差异化方案；未复制同一片单凑版本。",
+                            scope,
+                        )
+                else:
+                    recommended_count = len(list(preview.get("raw_clips") or []))
+                    render_data = dict(item_data)
+                    render_data.update({
+                        "preview_id": preview_id,
+                        "selected_indices": list(range(recommended_count)),
+                        "order": list(range(recommended_count)),
+                    })
+                    outputs.extend(_run_smart_cut_from_preview(
+                        task_id,
+                        SmartPreviewCutPayload(**render_data),
+                        finalize_task=False,
+                        raise_errors=True,
+                    ))
             except Exception as item_exc:
                 detail = _batch_failure_detail(video.name, item_exc)
                 failures.append(detail)
@@ -15240,6 +15829,7 @@ def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
     """Direct Mix: one unified Director plan over all sources, then render it exactly."""
 
     scope = "mix"
+    local_asr_session = None
     _set_task(task_id, status="running", started_at=time.time(), progress=5, message="准备 AI 导演混剪")
     emit_log("info", "混剪已使用商业导演链路：统一理解全部素材后直接成片。", scope)
     try:
@@ -15247,19 +15837,59 @@ def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
         preview_id, preview = _build_director_preview_for_direct_output(
             task_id, payload, scope=scope,
         )
-        recommended_count = len(list(preview.get("raw_clips") or []))
-        render_data = _payload_to_dict(payload)
-        render_data.update({
-            "preview_id": preview_id,
-            "selected_indices": list(range(recommended_count)),
-            "order": list(range(recommended_count)),
-        })
-        outputs = _run_mix_from_preview(
-            task_id,
-            MixPreviewCutPayload(**render_data),
-            finalize_task=False,
-            raise_errors=True,
-        )
+        requested_versions = max(1, int(payload.versions or 1))
+        if payload.subtitle_overlay and requested_versions > 1:
+            from stt import LocalASRWorkerSession
+
+            # The worker remains lazy and is shared only by this direct
+            # multi-plan render.  Every output still recognises its own audio.
+            local_asr_session = LocalASRWorkerSession()
+        variant_cards = [
+            dict(card) for card in list(dict(preview.get("director_review") or {}).get("director_variants") or [])
+            if isinstance(card, Mapping) and bool(card.get("available"))
+        ][:requested_versions]
+        outputs: list[str] = []
+        if len(variant_cards) > 1:
+            for variant_index, card in enumerate(variant_cards, 1):
+                variant_preview_id = str(card.get("preview_id") or preview_id)
+                variant_preview = _get_preview(variant_preview_id) or {}
+                recommended_count = len(list(variant_preview.get("raw_clips") or []))
+                if not recommended_count:
+                    continue
+                render_data = _payload_to_dict(payload)
+                render_data.update({
+                    "versions": 1,
+                    "preview_id": variant_preview_id,
+                    "selected_indices": list(range(recommended_count)),
+                    "order": list(range(recommended_count)),
+                })
+                emit_log(
+                    "info",
+                    f"差异化导演混剪 {variant_index}/{len(variant_cards)}：{card.get('title') or '导演方案'}（不再调用 AI）",
+                    scope,
+                )
+                outputs.extend(_run_mix_from_preview(
+                    task_id,
+                    MixPreviewCutPayload(**render_data),
+                    finalize_task=False,
+                    raise_errors=True,
+                    local_asr_session=local_asr_session,
+                ))
+        else:
+            recommended_count = len(list(preview.get("raw_clips") or []))
+            render_data = _payload_to_dict(payload)
+            render_data.update({
+                "preview_id": preview_id,
+                "selected_indices": list(range(recommended_count)),
+                "order": list(range(recommended_count)),
+            })
+            outputs = _run_mix_from_preview(
+                task_id,
+                MixPreviewCutPayload(**render_data),
+                finalize_task=False,
+                raise_errors=True,
+                local_asr_session=local_asr_session,
+            )
         _set_task(
             task_id,
             status="completed",
@@ -15270,7 +15900,15 @@ def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
             message="AI 导演混剪完成",
         )
         emit_log("success", f"AI 导演混剪完成：{len(outputs)} 个输出。", scope)
+        if local_asr_session is not None:
+            local_asr_session.close(
+                log_fn=lambda message: emit_log("info", message, scope, task_id=task_id)
+            )
     except Exception as exc:
+        if local_asr_session is not None:
+            local_asr_session.close(
+                log_fn=lambda message: emit_log("info", message, scope, task_id=task_id)
+            )
         _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
         emit_log("error", f"AI 导演混剪失败：{exc}", scope)
 
@@ -15441,6 +16079,8 @@ def runtime() -> dict[str, Any]:
     v4_bundle_verified = os.environ.get("LIVECLIPPER_V4_BUNDLE_VERIFIED") == "1"
     return {
         "version": _load_version(),
+        "director_contract": "director-duration-v3-product-v2-occurrence-v1",
+        "director_controls_contract": "director-controls-v2",
         "repo_root": str(REPO_ROOT),
         "app_dir": str(APP_DIR),
         "web_dir": str(WEB_DIR),
@@ -16805,6 +17445,10 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
     previous = _get_preview(preview_id)
     if not previous or not previous.get("commercial_director_experiment"):
         raise HTTPException(status_code=409, detail="请先完成一次商业导演实验预览，建立商品故事地图。")
+    previous = _director_family_source(previous)
+    existing = _ready_director_direction(previous, proposal_id)
+    if existing:
+        return existing
     review = dict(previous.get("director_review") or {})
     story_library = dict(review.get("m1_story_library") or {})
     strategy_library = dict(review.get("director_strategy_library") or {})
@@ -16833,12 +17477,12 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
         raise HTTPException(status_code=409, detail="当前实验没有完整的 M1 故事地图；请从首次发现结果选择方案。")
     # Alternatives deliberately carried no source order in the initial
     # response.  They can only become a preview after an explicit user
-    # confirmation of one new director call; no legacy M2 fallback is allowed.
+    # confirmation of the focused two-pass Director run; no legacy M2 fallback is allowed.
     if bool(proposal.get("requires_additional_ai_call")):
         if not payload.confirm_additional_ai_call:
             raise HTTPException(
                 status_code=409,
-                detail="该备选方向需要重新调用 2 次 AI（展开故事章节 + 短句 Casting）；请在界面确认后继续。",
+                detail="该备选方向通常调用 2 次 AI，由第二次选片一次完成时长编排；请在界面确认后继续。",
             )
         raw_direction = next(
             (
@@ -16859,17 +17503,22 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
         selected_payload = SmartCutPayload(
             video_paths=[video],
             srt_path=srt_path,
+            primary_category=str(reused_controls.get("primary_category") or "服饰内衣"),
             target_duration=max(10, int(previous.get("target_duration") or 60)),
             duration_tolerance=previous.get("duration_tolerance"),
             ai_controls=reused_controls,
+            dedup_preset=str(source_info.get("dedup_preset") or "medium"),
+            video=dict(source_info.get("video_options") or {}),
         )
         task_id = _new_task("smart-cut", f"AI导演备选方案：{proposal_id}")
         selected_preview_id = uuid.uuid4().hex
+        _store_preview(selected_preview_id, director_family_root=previous.get("id") or preview_id, director_requested_proposal=proposal_id)
         focused_contract = {
             "single_ai_director_packet": True,
             "two_pass_director_packet": True,
             "sentence_preview_without_m3": True,
             "semantic_call_count": 2,
+            "max_semantic_call_count": 2,
             "packet_mode": "confirmed_alternative",
             "requested_alternative_strategy_id": proposal_id,
         }
@@ -16885,8 +17534,9 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
             "ok": True,
             "task_id": task_id,
             "preview_id": selected_preview_id,
-            "message": f"已确认 {proposal.get('name') or proposal_id}：将重新调用 2 次 AI（故事章节 + 短句 Casting），再生成逐句可编辑预览；不运行 M3。",
+            "message": f"已确认 {proposal.get('name') or proposal_id}：通常调用 2 次 AI，由第二次选片一次完成时长编排，然后生成逐句可编辑预览；不运行 M3。",
             "additional_ai_calls": 2,
+            "max_additional_ai_calls": 2,
         }
     from commercial_analyzer import Strategy
     from director_strategy import compile_director_strategy
@@ -16906,6 +17556,7 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
     selected_payload = SmartCutPayload(
         video_paths=[video],
         srt_path=srt_path,
+        primary_category=str(reused_controls.get("primary_category") or "服饰内衣"),
         target_duration=max(10, int(previous.get("target_duration") or 60)),
         duration_tolerance=previous.get("duration_tolerance"),
         ai_controls=reused_controls,
@@ -16943,6 +17594,10 @@ def select_mix_commerce_director_strategy(
         or not previous.get("commercial_director_experiment")
     ):
         raise HTTPException(status_code=409, detail="请先完成一次混剪 AI 导演预览。")
+    previous = _director_family_source(previous)
+    existing = _ready_director_direction(previous, proposal_id)
+    if existing:
+        return existing
     review = dict(previous.get("director_review") or {})
     strategy_library = dict(review.get("director_strategy_library") or {})
     proposal = next(
@@ -16994,12 +17649,16 @@ def select_mix_commerce_director_strategy(
     reused_controls["content_policy"] = dict(source_info.get("task_content_policy") or {})
     selected_payload = MixPayload(
         video_paths=sources,
+        primary_category=str(reused_controls.get("primary_category") or "服饰内衣"),
         duration=max(10, int(previous.get("target_duration") or 60)),
         duration_tolerance=previous.get("duration_tolerance"),
         ai_controls=reused_controls,
+        dedup_preset=str(source_info.get("dedup_preset") or "medium"),
+        video=dict(source_info.get("video_options") or {}),
     )
     task_id = _new_task("mix", f"混剪AI导演备选方案：{proposal_id}")
     selected_preview_id = uuid.uuid4().hex
+    _store_preview(selected_preview_id, director_family_root=previous.get("id") or preview_id, director_requested_proposal=proposal_id)
     threading.Thread(
         target=_run_task_worker,
         args=(
@@ -17198,6 +17857,59 @@ def get_smart_preview(preview_id: str) -> dict[str, Any]:
     return _preview_public(_get_preview(preview_id))
 
 
+def _validate_director_variant_batch(preview_ids: Sequence[str], scope: str) -> list[str]:
+    ids = list(dict.fromkeys(str(item).strip() for item in preview_ids if str(item).strip()))
+    if not ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个导演方案。")
+    if len(ids) > 3:
+        raise HTTPException(status_code=400, detail="一次最多生成三个导演方案。")
+    previews = []
+    for preview_id in ids:
+        preview = _get_preview(preview_id)
+        if not preview or preview.get("status") != "ready":
+            raise HTTPException(status_code=404, detail="所选导演方案不存在或尚未完成。")
+        expected_scope = "mix" if scope == "mix" else "smart-cut"
+        if str(preview.get("scope") or expected_scope) != expected_scope:
+            raise HTTPException(status_code=400, detail="所选方案不属于当前成片类型。")
+        if not preview.get("commercial_director_experiment") or not _preview_selection_raw_clips(preview):
+            raise HTTPException(status_code=400, detail="所选项目不是可编辑的导演方案。")
+        previews.append(preview)
+    roots = {
+        str(preview.get("parent_preview_id") or preview_id)
+        for preview_id, preview in zip(ids, previews)
+    }
+    if len(roots) != 1:
+        raise HTTPException(status_code=400, detail="只能同时生成同一次预览里的导演方案。")
+    root_id = next(iter(roots))
+    root = _get_preview(root_id)
+    advertised = {
+        str(card.get("preview_id") or "")
+        for card in list(dict((root or {}).get("director_review") or {}).get("director_variants") or [])
+        if isinstance(card, Mapping) and card.get("available") is not False
+    }
+    if advertised and not set(ids).issubset(advertised):
+        raise HTTPException(status_code=400, detail="所选方案不属于当前导演方案组。")
+    return ids
+
+
+@app.post("/api/smart-cut/from-preview/director-batch/start")
+def start_smart_director_variant_batch(payload: SmartDirectorVariantBatchPayload) -> dict[str, Any]:
+    _ensure_scope_idle("smart-cut", "多导演方案成片")
+    payload.preview_ids = _validate_director_variant_batch(payload.preview_ids, "smart")
+    task_id = _new_task("smart-cut", "多导演方案成片")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_smart_director_variant_batch, task_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "plan_count": len(payload.preview_ids),
+        "message": f"已启动 {len(payload.preview_ids)} 个导演方案成片；不会再次调用 AI。",
+    }
+
+
 @app.post("/api/smart-cut/from-preview/start")
 def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     _ensure_scope_idle("smart-cut", "预览成片")
@@ -17341,6 +18053,24 @@ def get_latest_mix_preview() -> dict[str, Any]:
 @app.get("/api/mix/preview/{preview_id}")
 def get_mix_preview(preview_id: str) -> dict[str, Any]:
     return _preview_public(_get_preview(preview_id))
+
+
+@app.post("/api/mix/from-preview/director-batch/start")
+def start_mix_director_variant_batch(payload: MixDirectorVariantBatchPayload) -> dict[str, Any]:
+    _ensure_scope_idle("mix", "多导演方案混剪")
+    payload.preview_ids = _validate_director_variant_batch(payload.preview_ids, "mix")
+    task_id = _new_task("mix", "多导演方案混剪")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _run_mix_director_variant_batch, task_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "plan_count": len(payload.preview_ids),
+        "message": f"已启动 {len(payload.preview_ids)} 个导演方案混剪；不会再次调用 AI。",
+    }
 
 
 @app.post("/api/mix/from-preview/start")

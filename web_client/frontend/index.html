@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260903-subtitle-system-font-v1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260905-director-compact-v2">
 </head>
 <body>
   <div class="app-shell">
@@ -143,6 +143,7 @@
                   <option>2</option>
                   <option>3</option>
                 </select>
+                <p class="panel-note version-cost-note" id="sc-version-cost-note">1 个方案成本最低；需要对比时再切换到 2/3 个方案。</p>
               </div>
             </div>
             <div class="field-pair">
@@ -309,34 +310,37 @@
             </div>
           </section>
 
-          <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-collapse-group="sc-top" data-advanced-panel="sc-ai">
+          <section class="panel panel-wide ai-params-panel director-compact-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="sc-ai" data-summary-kind="ai" data-summary-prefix="sc" data-collapse-group="sc-top" data-advanced-panel="sc-ai">
             <div class="panel-header">
-              <h2>AI导演参数</h2>
-            </div>
-            <div class="field-row compact ai-preset-row">
-              <label for="sc-ai-preset">导演预设</label>
-              <div class="preset-control">
-                <select id="sc-ai-preset" data-ai-preset="sc">
-                  <option value="custom" selected>自定义</option>
-                  <option value="viral">爆款种草</option>
-                  <option value="slim">显瘦转化</option>
-                  <option value="quality">质感高级</option>
-                  <option value="commute">通勤场景</option>
-                  <option value="fast">快速促单</option>
-                  <option value="gentle">温柔讲解</option>
-                  <option value="food_fresh">食品/生鲜</option>
-                  <option value="food_packaged">食品饮料</option>
-                  <option value="beauty">美妆护肤</option>
-                  <option value="personal_care">个护家清</option>
-                  <option value="household">家居百货</option>
-                  <option value="electronics">3C数码家电</option>
-                  <option value="mother_baby_pet">母婴宠物</option>
-                  <option value="books_education">图书教育</option>
-                  <option value="sports_outdoor">运动户外</option>
-                  <option value="flowers_garden">鲜花园艺</option>
-                </select>
-                <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="sc">保存</button>
-                <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
+              <div class="director-panel-title">
+                <h2>AI导演参数</h2>
+                <span>AI 根据商品和内容规则自动编排片段</span>
+              </div>
+              <div class="director-header-preset">
+                <label class="director-preset-label" for="sc-ai-preset">导演预设</label>
+                <div class="preset-control">
+                  <select id="sc-ai-preset" data-ai-preset="sc">
+                    <option value="custom" selected>自定义</option>
+                    <option value="viral">爆款种草</option>
+                    <option value="slim">显瘦转化</option>
+                    <option value="quality">质感高级</option>
+                    <option value="commute">通勤场景</option>
+                    <option value="fast">快速促单</option>
+                    <option value="gentle">温柔讲解</option>
+                    <option value="food_fresh">食品/生鲜</option>
+                    <option value="food_packaged">食品饮料</option>
+                    <option value="beauty">美妆护肤</option>
+                    <option value="personal_care">个护家清</option>
+                    <option value="household">家居百货</option>
+                    <option value="electronics">3C数码家电</option>
+                    <option value="mother_baby_pet">母婴宠物</option>
+                    <option value="books_education">图书教育</option>
+                    <option value="sports_outdoor">运动户外</option>
+                    <option value="flowers_garden">鲜花园艺</option>
+                  </select>
+                  <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="sc">保存</button>
+                  <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="sc">删除</button>
+                </div>
               </div>
             </div>
             <select id="sc-category" hidden aria-hidden="true" tabindex="-1">
@@ -352,113 +356,114 @@
               <option>运动户外</option>
               <option>鲜花园艺</option>
             </select>
-            <div class="field-pair">
-              <div class="field-row compact">
-                <label for="sc-secondary-category">二级类目</label>
-                <select id="sc-secondary-category">
-                  <option selected>自动识别</option>
-                </select>
+            <div class="director-card-body">
+              <div class="director-product-summary">
+                <div class="director-product-summary-main">
+                  <span>当前商品</span>
+                  <strong id="sc-director-product-title">等待 AI 识别</strong>
+                  <small id="sc-director-product-breadcrumb">服饰内衣 · 自动识别</small>
+                </div>
+                <div class="director-product-summary-state">
+                  <span id="sc-director-recognition-status">AI 自动识别</span>
+                  <small id="sc-director-more-status"></small>
+                </div>
               </div>
-              <div class="field-row compact">
-                <label for="sc-goal">导演方向</label>
-                <select id="sc-goal">
-                  <option>自动</option>
-                  <option>爆款种草</option>
-                  <option>专业讲解</option>
-                  <option>显瘦转化</option>
-                  <option>质感高级</option>
-                  <option>快速促单</option>
-                  <option>食欲种草</option>
-                  <option>新鲜转化</option>
-                  <option>囤货转化</option>
-                </select>
+
+              <details class="director-section director-product-section" open>
+                <summary>
+                  <span class="director-section-number">1</span>
+                  <strong>商品信息</strong>
+                  <small>告诉 AI 这次剪的是什么，识别不准时再修改</small>
+                </summary>
+                <div class="director-section-body director-identity-grid">
+                  <div class="director-field director-readonly-field">
+                    <span class="director-field-label">一级类目</span>
+                    <div class="director-readonly-value">
+                      <strong id="sc-director-primary-value">服饰内衣</strong>
+                      <span>跟随项目</span>
+                    </div>
+                  </div>
+                  <div class="director-field">
+                    <label for="sc-secondary-category">二级类目</label>
+                    <select id="sc-secondary-category"><option selected>自动识别</option></select>
+                  </div>
+                  <div class="director-field">
+                    <label for="sc-leaf-category">商品类型 / 款型</label>
+                    <input id="sc-leaf-category" type="text" list="sc-leaf-category-list" placeholder="留空自动识别，可选 T恤 / 衬衫 / 裤子">
+                    <datalist id="sc-leaf-category-list"></datalist>
+                  </div>
+                  <div class="director-field">
+                    <label for="sc-main-product">商品名称 / 款号 <span>可选，优先于商品类型</span></label>
+                    <input id="sc-main-product" type="text" maxlength="120" placeholder="如：白色抽褶衬衫；不要只填“衣服”">
+                  </div>
+                  <p class="panel-note director-scope-note" id="sc-product-scope-note">留空由 AI 识别；指定后只围绕当前商品编排。</p>
+                </div>
+              </details>
+
+              <details class="director-section director-content-section" open>
+                <summary>
+                  <span class="director-section-number">2</span>
+                  <strong>本次内容规则</strong>
+                  <small>控制这一条片子允许出现什么</small>
+                </summary>
+                <div class="director-section-body">
+                  <div class="director-content-grid">
+                    <label class="director-content-choice" for="sc-content-price">
+                      <span>价格促销</span>
+                      <select id="sc-content-price">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="sc-content-inventory">
+                      <span>库存催单</span>
+                      <select id="sc-content-inventory">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="sc-content-size">
+                      <span>尺码讲解</span>
+                      <select id="sc-content-size">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="sc-content-styling">
+                      <span>其他商品搭配</span>
+                      <select id="sc-content-styling">
+                        <option value="allow" selected>允许作搭配</option><option value="block">排除</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="panel-note">允许不代表必选；“仅正文”不用于开头和结尾，自定义禁用词仍生效。</p>
+                </div>
+              </details>
+
+              <details class="director-section director-strategy-section">
+                <summary>
+                  <span class="director-section-number">3</span>
+                  <strong>AI 成片策略</strong>
+                  <small id="sc-director-strategy-summary">AI 自动推荐 · 开头 / 卖点 / 结构 / 收尾由 AI 编排</small>
+                </summary>
+                <div class="director-section-body">
+                  <div class="director-field">
+                    <label for="sc-goal">导演策略</label>
+                    <select id="sc-goal">
+                      <option value="自动" selected>AI 自动推荐</option>
+                      <option>上身效果</option><option>穿着体验</option><option>搭配场景</option><option>面料工艺</option>
+                    </select>
+                  </div>
+                  <p class="panel-note">AI 会根据商品类型和本次内容规则，自动选择更合适的开头、卖点顺序和收尾。</p>
+                  <p class="panel-note" id="sc-director-migration-note" hidden></p>
+                  <p class="panel-note">本次仅使用这里的导演设置，不叠加旧卖点多选和权重。</p>
+                </div>
+              </details>
+
+              <div class="director-extra-section">
+                <div class="director-field">
+                  <label for="sc-extra-instruction">补充要求 <span>可选，最多 300 字</span></label>
+                  <textarea id="sc-extra-instruction" rows="2" maxlength="300" placeholder="如：围绕夏天通勤，先讲穿着体验，再用面料细节作证明。"></textarea>
+                </div>
               </div>
             </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                <label for="sc-leaf-category">细分类目</label>
-                <input id="sc-leaf-category" type="text" list="sc-leaf-category-list" placeholder="自动识别，可填写具体商品">
-                <datalist id="sc-leaf-category-list"></datalist>
-              </div>
-              <div class="field-row compact">
-                <label for="sc-main-product">主商品锁定</label>
-                <input id="sc-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
-              </div>
-            </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                <label for="sc-hook-style">开头偏好</label>
-                <select id="sc-hook-style">
-                  <option>自动</option>
-                  <option>痛点开头</option>
-                  <option>上身效果开头</option>
-                  <option>爆点金句开头</option>
-                  <option>主播强推荐开头</option>
-                  <option>试吃反应开头</option>
-                  <option>细节近景开头</option>
-                  <option>产地品质开头</option>
-                  <option>不强制Hook</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                <label for="sc-ending-style">收尾偏好</label>
-                <select id="sc-ending-style">
-                  <option>自动</option>
-                  <option>尺码引导</option>
-                  <option>信任背书</option>
-                  <option>场景收尾</option>
-                  <option>囤货收尾</option>
-                  <option>发货保鲜</option>
-                  <option>复购背书</option>
-                  <option>自然结束</option>
-                  <option>不要促单</option>
-                </select>
-              </div>
-            </div>
-            <div class="field-row field-row-stack advanced-param">
-              <label>本次优先讲</label>
-              <div class="chip-grid chip-grid-14" data-ai-chip-group="sc-selling">
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="版型显瘦"> 版型显瘦</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="上身效果"> 上身效果</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="面料质感"> 面料质感</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="品质细节"> 品质细节</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="颜色氛围"> 颜色氛围</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="风格定位"> 风格定位</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="场景搭配"> 场景搭配</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="穿着体验"> 穿着体验</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="性价比"> 性价比</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="情绪感染"> 情绪感染</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="流行趋势"> 流行趋势</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="紧迫稀缺"> 紧迫稀缺</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="尺寸长度"> 尺寸长度</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="工艺细节"> 工艺细节</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="对比优势"> 对比优势</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="口感食欲"> 口感食欲</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="新鲜品质"> 新鲜品质</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="产地溯源"> 产地溯源</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="规格分量"> 规格分量</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="发货保鲜"> 发货保鲜</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="场景吃法"> 场景吃法</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-selling" value="通用卖点"> 通用卖点</label>
-              </div>
-              <div class="field-row">
-                <label for="sc-selling-custom">本次重点词</label>
-                <input id="sc-selling-custom" type="text" data-ai-control="sc-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
-              </div>
-            </div>
-            <div class="field-row field-row-stack advanced-param">
-              <label>本次避选</label>
-              <div class="chip-grid" data-ai-chip-group="sc-avoid">
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="价格"> 价格</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="尺码"> 尺码</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="库存"> 库存</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="闲聊"> 闲聊</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="搭配其他品"> 搭配其他品</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="重复卖点"> 重复卖点</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="sc-avoid" value="保健功效"> 保健功效</label>
-              </div>
-            </div>
-            <p class="panel-note director-controls-note">优先项会同时用于故事规划和短句选择，不要求全部覆盖。本次避选会进一步收紧内容边界；开头、收尾偏好不能放行被禁止的内容。</p>
           </section>
 
           <section class="panel panel-wide">
@@ -612,6 +617,7 @@
                   <option>2</option>
                   <option>3</option>
                 </select>
+                <p class="panel-note version-cost-note" id="mix-version-cost-note">1 个方案成本最低；需要对比时再切换到 2/3 个方案。</p>
               </div>
             </div>
             <div class="field-pair">
@@ -778,34 +784,37 @@
             </div>
           </section>
 
-          <section class="panel panel-wide ai-params-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-collapse-group="mix-top" data-advanced-panel="mix-ai">
+          <section class="panel panel-wide ai-params-panel director-compact-panel top-config-panel collapsible-panel is-collapsed" data-collapsible-panel="mix-ai" data-summary-kind="ai" data-summary-prefix="mix" data-collapse-group="mix-top" data-advanced-panel="mix-ai">
             <div class="panel-header">
-              <h2>AI导演参数</h2>
-            </div>
-            <div class="field-row compact ai-preset-row">
-              <label for="mix-ai-preset">导演预设</label>
-              <div class="preset-control">
-                <select id="mix-ai-preset" data-ai-preset="mix">
-                  <option value="custom" selected>自定义</option>
-                  <option value="viral">爆款种草</option>
-                  <option value="slim">显瘦转化</option>
-                  <option value="quality">质感高级</option>
-                  <option value="commute">通勤场景</option>
-                  <option value="fast">快速促单</option>
-                  <option value="gentle">温柔讲解</option>
-                  <option value="food_fresh">食品/生鲜</option>
-                  <option value="food_packaged">食品饮料</option>
-                  <option value="beauty">美妆护肤</option>
-                  <option value="personal_care">个护家清</option>
-                  <option value="household">家居百货</option>
-                  <option value="electronics">3C数码家电</option>
-                  <option value="mother_baby_pet">母婴宠物</option>
-                  <option value="books_education">图书教育</option>
-                  <option value="sports_outdoor">运动户外</option>
-                  <option value="flowers_garden">鲜花园艺</option>
-                </select>
-                <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="mix">保存</button>
-                <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
+              <div class="director-panel-title">
+                <h2>AI导演参数</h2>
+                <span>AI 根据商品和内容规则自动编排片段</span>
+              </div>
+              <div class="director-header-preset">
+                <label class="director-preset-label" for="mix-ai-preset">导演预设</label>
+                <div class="preset-control">
+                  <select id="mix-ai-preset" data-ai-preset="mix">
+                    <option value="custom" selected>自定义</option>
+                    <option value="viral">爆款种草</option>
+                    <option value="slim">显瘦转化</option>
+                    <option value="quality">质感高级</option>
+                    <option value="commute">通勤场景</option>
+                    <option value="fast">快速促单</option>
+                    <option value="gentle">温柔讲解</option>
+                    <option value="food_fresh">食品/生鲜</option>
+                    <option value="food_packaged">食品饮料</option>
+                    <option value="beauty">美妆护肤</option>
+                    <option value="personal_care">个护家清</option>
+                    <option value="household">家居百货</option>
+                    <option value="electronics">3C数码家电</option>
+                    <option value="mother_baby_pet">母婴宠物</option>
+                    <option value="books_education">图书教育</option>
+                    <option value="sports_outdoor">运动户外</option>
+                    <option value="flowers_garden">鲜花园艺</option>
+                  </select>
+                  <button class="button button-secondary button-small" data-action="save-ai-preset" data-prefix="mix">保存</button>
+                  <button class="button button-muted button-small" data-action="delete-ai-preset" data-prefix="mix">删除</button>
+                </div>
               </div>
             </div>
             <select id="mix-category" hidden aria-hidden="true" tabindex="-1">
@@ -821,113 +830,114 @@
               <option>运动户外</option>
               <option>鲜花园艺</option>
             </select>
-            <div class="field-pair">
-              <div class="field-row compact">
-                <label for="mix-secondary-category">二级类目</label>
-                <select id="mix-secondary-category">
-                  <option selected>自动识别</option>
-                </select>
+            <div class="director-card-body">
+              <div class="director-product-summary">
+                <div class="director-product-summary-main">
+                  <span>当前商品</span>
+                  <strong id="mix-director-product-title">等待 AI 识别</strong>
+                  <small id="mix-director-product-breadcrumb">服饰内衣 · 自动识别</small>
+                </div>
+                <div class="director-product-summary-state">
+                  <span id="mix-director-recognition-status">AI 自动识别</span>
+                  <small id="mix-director-more-status"></small>
+                </div>
               </div>
-              <div class="field-row compact">
-                <label for="mix-goal">导演方向</label>
-                <select id="mix-goal">
-                  <option>自动</option>
-                  <option>爆款种草</option>
-                  <option>专业讲解</option>
-                  <option>显瘦转化</option>
-                  <option>质感高级</option>
-                  <option>快速促单</option>
-                  <option>食欲种草</option>
-                  <option>新鲜转化</option>
-                  <option>囤货转化</option>
-                </select>
+
+              <details class="director-section director-product-section" open>
+                <summary>
+                  <span class="director-section-number">1</span>
+                  <strong>商品信息</strong>
+                  <small>告诉 AI 这次剪的是什么，识别不准时再修改</small>
+                </summary>
+                <div class="director-section-body director-identity-grid">
+                  <div class="director-field director-readonly-field">
+                    <span class="director-field-label">一级类目</span>
+                    <div class="director-readonly-value">
+                      <strong id="mix-director-primary-value">服饰内衣</strong>
+                      <span>跟随项目</span>
+                    </div>
+                  </div>
+                  <div class="director-field">
+                    <label for="mix-secondary-category">二级类目</label>
+                    <select id="mix-secondary-category"><option selected>自动识别</option></select>
+                  </div>
+                  <div class="director-field">
+                    <label for="mix-leaf-category">商品类型 / 款型</label>
+                    <input id="mix-leaf-category" type="text" list="mix-leaf-category-list" placeholder="留空自动识别，可选 T恤 / 衬衫 / 裤子">
+                    <datalist id="mix-leaf-category-list"></datalist>
+                  </div>
+                  <div class="director-field">
+                    <label for="mix-main-product">商品名称 / 款号 <span>可选，优先于商品类型</span></label>
+                    <input id="mix-main-product" type="text" maxlength="120" placeholder="如：白色抽褶衬衫；不要只填“衣服”">
+                  </div>
+                  <p class="panel-note director-scope-note" id="mix-product-scope-note">留空由 AI 识别；指定后只围绕当前商品编排。</p>
+                </div>
+              </details>
+
+              <details class="director-section director-content-section" open>
+                <summary>
+                  <span class="director-section-number">2</span>
+                  <strong>本次内容规则</strong>
+                  <small>控制这一条片子允许出现什么</small>
+                </summary>
+                <div class="director-section-body">
+                  <div class="director-content-grid">
+                    <label class="director-content-choice" for="mix-content-price">
+                      <span>价格促销</span>
+                      <select id="mix-content-price">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="mix-content-inventory">
+                      <span>库存催单</span>
+                      <select id="mix-content-inventory">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="mix-content-size">
+                      <span>尺码讲解</span>
+                      <select id="mix-content-size">
+                        <option value="inherit" selected>跟随全局设置</option><option value="block">排除</option><option value="body_only">仅正文</option><option value="allow">允许</option>
+                      </select>
+                    </label>
+                    <label class="director-content-choice" for="mix-content-styling">
+                      <span>其他商品搭配</span>
+                      <select id="mix-content-styling">
+                        <option value="allow" selected>允许作搭配</option><option value="block">排除</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="panel-note">允许不代表必选；“仅正文”不用于开头和结尾，自定义禁用词仍生效。</p>
+                </div>
+              </details>
+
+              <details class="director-section director-strategy-section">
+                <summary>
+                  <span class="director-section-number">3</span>
+                  <strong>AI 成片策略</strong>
+                  <small id="mix-director-strategy-summary">AI 自动推荐 · 开头 / 卖点 / 结构 / 收尾由 AI 编排</small>
+                </summary>
+                <div class="director-section-body">
+                  <div class="director-field">
+                    <label for="mix-goal">导演策略</label>
+                    <select id="mix-goal">
+                      <option value="自动" selected>AI 自动推荐</option>
+                      <option>上身效果</option><option>穿着体验</option><option>搭配场景</option><option>面料工艺</option>
+                    </select>
+                  </div>
+                  <p class="panel-note">AI 会根据商品类型和本次内容规则，自动选择更合适的开头、卖点顺序和收尾。</p>
+                  <p class="panel-note" id="mix-director-migration-note" hidden></p>
+                  <p class="panel-note">本次仅使用这里的导演设置，不叠加旧卖点多选和权重。</p>
+                </div>
+              </details>
+
+              <div class="director-extra-section">
+                <div class="director-field">
+                  <label for="mix-extra-instruction">补充要求 <span>可选，最多 300 字</span></label>
+                  <textarea id="mix-extra-instruction" rows="2" maxlength="300" placeholder="如：围绕夏天通勤，先讲穿着体验，再用面料细节作证明。"></textarea>
+                </div>
               </div>
             </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                <label for="mix-leaf-category">细分类目</label>
-                <input id="mix-leaf-category" type="text" list="mix-leaf-category-list" placeholder="自动识别，可填写具体商品">
-                <datalist id="mix-leaf-category-list"></datalist>
-              </div>
-              <div class="field-row compact">
-                <label for="mix-main-product">主商品锁定</label>
-                <input id="mix-main-product" type="text" placeholder="自动识别，可填蟠桃/面膜">
-              </div>
-            </div>
-            <div class="field-pair advanced-param">
-              <div class="field-row compact">
-                <label for="mix-hook-style">开头偏好</label>
-                <select id="mix-hook-style">
-                  <option>自动</option>
-                  <option>痛点开头</option>
-                  <option>上身效果开头</option>
-                  <option>爆点金句开头</option>
-                  <option>主播强推荐开头</option>
-                  <option>试吃反应开头</option>
-                  <option>细节近景开头</option>
-                  <option>产地品质开头</option>
-                  <option>不强制Hook</option>
-                </select>
-              </div>
-              <div class="field-row compact">
-                <label for="mix-ending-style">收尾偏好</label>
-                <select id="mix-ending-style">
-                  <option>自动</option>
-                  <option>尺码引导</option>
-                  <option>信任背书</option>
-                  <option>场景收尾</option>
-                  <option>囤货收尾</option>
-                  <option>发货保鲜</option>
-                  <option>复购背书</option>
-                  <option>自然结束</option>
-                  <option>不要促单</option>
-                </select>
-              </div>
-            </div>
-            <div class="field-row field-row-stack advanced-param">
-              <label>本次优先讲</label>
-              <div class="chip-grid chip-grid-14" data-ai-chip-group="mix-selling">
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="版型显瘦"> 版型显瘦</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="上身效果"> 上身效果</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="面料质感"> 面料质感</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="品质细节"> 品质细节</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="颜色氛围"> 颜色氛围</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="风格定位"> 风格定位</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="场景搭配"> 场景搭配</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="穿着体验"> 穿着体验</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="性价比"> 性价比</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="情绪感染"> 情绪感染</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="流行趋势"> 流行趋势</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="紧迫稀缺"> 紧迫稀缺</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="尺寸长度"> 尺寸长度</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="工艺细节"> 工艺细节</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="对比优势"> 对比优势</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="口感食欲"> 口感食欲</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="新鲜品质"> 新鲜品质</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="产地溯源"> 产地溯源</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="规格分量"> 规格分量</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="发货保鲜"> 发货保鲜</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="场景吃法"> 场景吃法</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-selling" value="通用卖点"> 通用卖点</label>
-              </div>
-              <div class="field-row">
-                <label for="mix-selling-custom">本次重点词</label>
-                <input id="mix-selling-custom" type="text" data-ai-control="mix-selling-custom" placeholder="输入关键词，用逗号分隔，如：背心、垂感、冷链、脆甜">
-              </div>
-            </div>
-            <div class="field-row field-row-stack advanced-param">
-              <label>本次避选</label>
-              <div class="chip-grid" data-ai-chip-group="mix-avoid">
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="价格"> 价格</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="尺码"> 尺码</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="库存"> 库存</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="闲聊"> 闲聊</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="搭配其他品"> 搭配其他品</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="重复卖点"> 重复卖点</label>
-                <label class="check-item"><input type="checkbox" data-ai-control="mix-avoid" value="保健功效"> 保健功效</label>
-              </div>
-            </div>
-            <p class="panel-note director-controls-note">优先项会同时用于故事规划和短句选择，不要求全部覆盖。本次避选会进一步收紧内容边界；开头、收尾偏好不能放行被禁止的内容。</p>
           </section>
 
           <section class="panel panel-wide">
@@ -1043,7 +1053,7 @@
 
         <ol class="product-scan-steps" aria-label="单品扫描步骤">
           <li class="is-current"><span>1</span><div><strong>素材与输出</strong><small>时间表、视频与导出位置</small></div></li>
-          <li><span>2</span><div><strong>对齐时间</strong><small>确认片段从直播第几秒开始</small></div></li>
+          <li><span>2</span><div><strong>逐段定位</strong><small>确认每段对应的直播进度</small></div></li>
           <li><span>3</span><div><strong>校验并分割</strong><small>先核对可切内容，再导出</small></div></li>
         </ol>
 
@@ -1080,6 +1090,14 @@
                       <button class="button button-muted" data-action="open-path" data-target="ps-output-dir">打开</button>
                     </div>
                   </div>
+                  <div class="ps-live-anchor">
+                    <label for="ps-live-start-time">直播开播时间</label>
+                    <div class="path-entry">
+                      <input id="ps-live-start-time" type="text" placeholder="例如 202608051219" aria-describedby="ps-anchor-help" autocomplete="off">
+                      <button class="button button-secondary" type="button" id="ps-use-first-time" title="仅当最早一段就是开播录像时使用">首段即开播</button>
+                    </div>
+                    <p class="field-help" id="ps-anchor-help">填真实开播时间，按文件名分别定位每段；只有分钟时为约值，可逐段修改。没有时间戳的手填直播起点。</p>
+                  </div>
                   <div class="product-scan-video-field">
                     <label for="ps-video-input">直播片段 <span class="product-scan-video-count" data-video-count-for="ps-video-paths">0个</span></label>
                     <div class="path-entry">
@@ -1088,7 +1106,7 @@
                       <button class="button button-muted" data-action="clear-video-list" data-target="ps-video-paths">清空</button>
                     </div>
                     <textarea id="ps-video-paths" class="path-box" spellcheck="false" placeholder="每行一个直播视频路径"></textarea>
-                    <div class="video-dropzone" data-drop-target="ps-video-paths">也可以把连续直播片段拖到这里</div>
+                    <div class="video-dropzone" data-drop-target="ps-video-paths">也可拖入视频，支持缺段和不连续录像</div>
                   <div class="video-list" data-list-for="ps-video-paths"></div>
                   </div>
                 </div>
@@ -1097,69 +1115,12 @@
               <section class="product-scan-section product-scan-alignment" aria-labelledby="ps-alignment-title">
                 <div class="product-scan-section-heading">
                   <div>
-                    <h3 id="ps-alignment-title">2. 识别表格时间并对齐</h3>
-                    <p>先明确表格里的时间含义，再选择视频的对齐方式；不会自动猜测。</p>
+                    <h3 id="ps-alignment-title">2. 确认并分割</h3>
+                    <p>表格“讲解时段”按开播后进度读取，如 01:04–26:15；自动查找表头，不固定 E / F 列。</p>
                   </div>
-                  <span class="recommendation-badge">先选表格时间</span>
+                  <span class="recommendation-badge">开播后时段</span>
                 </div>
-                <div class="product-scan-decision-stack">
-                  <section class="product-scan-decision" aria-labelledby="ps-time-basis-title">
-                    <div class="product-scan-decision-heading">
-                      <span>第一步</span>
-                      <div>
-                        <strong id="ps-time-basis-title">表格里的时间代表什么？</strong>
-                        <small>按排品表实际写法选择，系统不会自动猜测。</small>
-                      </div>
-                    </div>
-                    <div class="alignment-choice-grid" role="radiogroup" aria-label="表格讲解时间类型">
-                      <label class="alignment-choice is-active" data-ps-time-basis-choice="relative">
-                        <input id="ps-time-basis-relative" type="radio" name="ps-time-basis" value="relative" checked>
-                        <span><strong>开播后时长</strong><small><code>01:04–26:15</code> 表示开播后的第 1 分 04 秒至第 26 分 15 秒</small></span>
-                      </label>
-                      <label class="alignment-choice" data-ps-time-basis-choice="clock">
-                        <input id="ps-time-basis-clock" type="radio" name="ps-time-basis" value="clock">
-                        <span><strong>时钟时间</strong><small><code>12:20:04–12:45:15</code> 表示当天实际的钟表时间</small></span>
-                      </label>
-                    </div>
-                    <p class="field-help">只有表格写的是实际钟表时间时，才需要填写整场直播开播时间。</p>
-                  </section>
-
-                  <section class="product-scan-decision" aria-labelledby="ps-align-mode-title">
-                    <div class="product-scan-decision-heading">
-                      <span>第二步</span>
-                      <div>
-                        <strong id="ps-align-mode-title">视频从直播的哪里开始？</strong>
-                        <small>选择一种可复核的对齐依据。</small>
-                      </div>
-                    </div>
-                    <div class="alignment-choice-grid" role="radiogroup" aria-label="时间对齐方式">
-                      <label class="alignment-choice is-active" data-ps-align-choice="manual">
-                        <input id="ps-align-manual" type="radio" name="ps-align-mode" value="manual" checked>
-                        <span><strong>手动填写片段起点</strong><small>文件名没有可靠时间戳时使用</small></span>
-                      </label>
-                      <label class="alignment-choice" data-ps-align-choice="auto">
-                        <input id="ps-align-auto" type="radio" name="ps-align-mode" value="auto">
-                        <span><strong>文件名有时间戳，自动识别</strong><small>自动读取如 202608051219 的片段起点</small></span>
-                      </label>
-                    </div>
-
-                    <div class="alignment-mode-panel" data-ps-align-panel="manual">
-                      <label for="ps-video-start-offset">本段视频从直播第几秒开始</label>
-                      <div>
-                        <input id="ps-video-start-offset" type="text" placeholder="例如 01:28:13">
-                        <p class="field-help">例如直播 17:08 开始、这段视频 18:36:13 开始，填写 <strong>01:28:13</strong>。</p>
-                      </div>
-                    </div>
-
-                    <div class="alignment-mode-panel" data-ps-live-start hidden>
-                      <label for="ps-live-start-time" data-ps-live-start-label>整场直播开播时间</label>
-                      <div>
-                        <input id="ps-live-start-time" type="text" placeholder="例如 2026-03-13 17:08">
-                        <p class="field-help" data-ps-live-start-help>这不是视频起点；系统会自动读取文件名时间戳。可填 <strong>202608051219</strong> 或 <strong>2026-08-05 12:19</strong>。</p>
-                      </div>
-                    </div>
-                  </section>
-                </div>
+                <p class="field-help">核对各段直播起点 → 读取并校验 → 在右侧勾选商品或时段。缺失的时段会提示，跨文件分别输出。</p>
 
                 <details class="product-scan-advanced">
                   <summary>高级设置</summary>
@@ -2070,6 +2031,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260903-subtitle-system-font-v1" defer></script>
+  <script src="/assets/app.js?v=20260905-director-compact-v2" defer></script>
 </body>
 </html>

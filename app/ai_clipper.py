@@ -5262,6 +5262,8 @@ def _director_safe_patch_candidate(
     forbidden_words=None,
     price_patterns=None,
     allowed_candidate_ids=None,
+    allow_context_dependent_beats=False,
+    content_policy=None,
 ):
     """Build a Product only from AI-declared immutable candidate indices."""
     if isinstance(indices, bool):
@@ -5300,10 +5302,10 @@ def _director_safe_patch_candidate(
     text = "".join(str(entry[2] or "") for entry in entries).strip()
     if not text or end <= start:
         return None
-    if _is_safety_blocked_text(text, forbidden_words, price_patterns) or _is_backstage_instruction(text):
+    if _is_safety_blocked_text(text, forbidden_words, price_patterns, content_policy=content_policy) or _is_backstage_instruction(text):
         return None
     _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
-    if starts_incomplete or ends_incomplete:
+    if not allow_context_dependent_beats and (starts_incomplete or ends_incomplete):
         return None
 
     candidate = ("product", text, start, end, 50, end - start, str(focus or "").strip())
@@ -5324,6 +5326,7 @@ def _director_safe_candidate_inventory(
     record_metrics=False,
     log_fn=None,
     content_policy=None,
+    allow_context_dependent_beats=False,
 ):
     """Return only hard-safe frozen candidates, without changing any boundary.
 
@@ -5371,7 +5374,9 @@ def _director_safe_candidate_inventory(
             reject("直播现场调度", duration)
             continue
         _needs_previous, starts_incomplete, ends_incomplete = _director_context_boundary_flags(text)
-        if starts_incomplete or ends_incomplete:
+        # Exact-Beat Casting judges continuity across selected short rows.
+        # ASR commas and conjunctions are not content-policy bans.
+        if not allow_context_dependent_beats and (starts_incomplete or ends_incomplete):
             reject("不完整语义边界", duration)
             continue
         candidate = _director_safe_patch_candidate(
@@ -5379,6 +5384,8 @@ def _director_safe_candidate_inventory(
             srt_entries,
             forbidden_words=forbidden_words,
             price_patterns=price_patterns,
+            allow_context_dependent_beats=allow_context_dependent_beats,
+            content_policy=active_content_policy,
         )
         if candidate is None:
             reject("不可用安全候选", duration)

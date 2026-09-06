@@ -17,6 +17,48 @@ schedule_splitter = importlib.import_module("schedule_splitter")
 
 
 class ScheduleSplitterFastTsTests(unittest.TestCase):
+    def test_independent_anchors_share_preview_and_fast_export_without_filling_gaps(self) -> None:
+        videos = ["first.mp4", "later.mp4"]
+        groups = [{"name": "product", "segments": [(90, 220)]}]
+        with mock.patch.object(schedule_splitter, "_probe_durations", return_value=[100, 100]):
+            covered, timeline = schedule_splitter.build_schedule_coverage(
+                groups, videos, video_start_offsets={videos[0]: 0, videos[1]: 200})
+        record = covered[0]["ranges"][0]
+        self.assertEqual(record["status"], "partial")
+        self.assertEqual(record["missing_duration"], 100)
+        expected = [(part["video_path"], part["file_start"], part["duration"]) for part in record["parts"]]
+        self.assertEqual(expected, [("first.mp4", 90, 10), ("later.mp4", 0, 20)])
+        calls = []
+
+        def copy(_ffmpeg, start, duration, video, output):
+            calls.append((video, start, duration))
+            Path(output).write_bytes(b"x" * 2048)
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as output, mock.patch.object(schedule_splitter, "_fast_copy_segment", side_effect=copy), mock.patch.object(schedule_splitter, "_probe_durations", side_effect=AssertionError("export must use preview timeline")):
+            results = schedule_splitter.extract_by_schedule(groups, videos, output, fast_copy=True, source_timeline=timeline)
+        self.assertEqual(calls, expected)
+        self.assertEqual(len(results), 2)
+
+    def test_overlaps_are_exported_once_and_short_ranges_remain_available(self) -> None:
+        timeline = [
+            {"video": "one.mp4", "name": "one.mp4", "start": 1800, "end": 3601.32},
+            {"video": "two.mp4", "name": "two.mp4", "start": 3600, "end": 5400},
+        ]
+        parts = schedule_splitter._timeline_parts(2159, 4456, timeline)
+        self.assertEqual([(p["file_start"], p["file_end"]) for p in parts], [(359, 1800), (0, 856)])
+        self.assertEqual(sum(p["duration"] for p in parts), 2297)
+        calls = []
+
+        def copy(_ffmpeg, start, duration, video, output):
+            calls.append((video, start, duration))
+            Path(output).write_bytes(b"x" * 2048)
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as output, mock.patch.object(schedule_splitter, "_fast_copy_segment", side_effect=copy):
+            schedule_splitter.extract_by_schedule([{"name": "short", "segments": [(3602, 3607)]}], [], output, fast_copy=True, source_timeline=timeline)
+        self.assertEqual(calls, [("two.mp4", 2, 5)])
+
     def test_clock_time_basis_keeps_two_part_clock_values_and_crosses_midnight(self) -> None:
         self.assertEqual(
             schedule_splitter._parse_schedule_time_value("12:20", time_basis="relative"),

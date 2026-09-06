@@ -553,6 +553,7 @@ def generate_srt(
     log_fn: Callable[[str], None] | None = None,
     asr_engine: str = "sensevoice",
     cancel_event: _CancelEvent | None = None,
+    worker_session: LocalASRWorkerSession | None = None,
 ) -> str | None:
     """Generate a reusable source-side SRT with SenseVoice.
 
@@ -577,6 +578,7 @@ def generate_srt(
             log_fn=log_fn,
             asr_engine=asr_engine,
             cancel_event=cancel_event,
+            worker_session=worker_session,
         ):
             return None
         try:

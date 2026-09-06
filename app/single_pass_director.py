@@ -573,11 +573,20 @@ def build_single_pass_director_plan(
     requested_seconds = float(duration_range.get("requested_seconds") or target_duration or 45.0)
     preferred_low = float(duration_range.get("preferred_low") or max(30.0, requested_seconds * 0.80))
     preferred_high = float(duration_range.get("preferred_high") or min(120.0, requested_seconds * 1.10))
+    speed_factor = float(duration_range.get("speed_factor") or 1.0)
+    projected_seconds = selected_seconds / speed_factor
+    margin = float(duration_range.get("acceptance_margin") or 0.0)
+    duration_fulfilled = plan_valid and preferred_low - margin <= projected_seconds <= preferred_high + margin
+    duration_control = dict(strategy.whole_video_audit or {}).get("duration_control") or {}
+    duplicate_source_ids = list(dict(duration_control.get("final") or {}).get("duplicate_subtitle_ids") or [])
+    if duplicate_source_ids:
+        duration_fulfilled = False
     duration_status = (
+        "duplicate_source_needs_review" if duplicate_source_ids else
         "target_range_fulfilled"
-        if plan_valid and journey_complete and preferred_low <= selected_seconds <= preferred_high
+        if duration_fulfilled
         else "natural_shortfall_below_requested_duration"
-        if plan_valid and journey_complete and selected_seconds < preferred_low
+        if plan_valid and (journey_complete or duration_control) and projected_seconds < preferred_low
         else "natural_complete_above_requested_duration"
         if plan_valid and journey_complete
         else "short_draft_below_normal_duration" if plan_valid
@@ -586,15 +595,20 @@ def build_single_pass_director_plan(
     duration_assessment = {
         "status": duration_status,
         "reason": (
-            "AI 导演短句 Casting 已按真实可执行字幕物化；程序没有补句，实际时长按目标区间如实标记。"
+            "AI 导演短句 Casting 已按真实可执行字幕物化；程序没有自行选句，实际时长按目标区间如实标记。"
             if journey_complete else
             "AI 导演短句 Casting 给出了可预览的短草案，但购买链仍偏薄；保留给人工比较和编辑，不伪装成完成目标时长的商品片。"
         ),
         "duration_note": (
-            f"真实时长 {selected_seconds:.1f}s；本次目标 {requested_seconds:.0f}s，"
+            f"原声 {selected_seconds:.1f}s，预计成片 {projected_seconds:.1f}s；本次目标 {requested_seconds:.0f}s，"
             f"验收区间 {preferred_low:.1f}–{preferred_high:.1f}s。预览仍允许，以便人工比较和手动编辑。"
         ),
         "actual_seconds": selected_seconds,
+        "projected_final_seconds": round(projected_seconds, 3),
+        "output_speed_factor": speed_factor,
+        "target_range_fulfilled": duration_fulfilled,
+        "duplicate_source_ids": duplicate_source_ids,
+        "duration_control": duration_control,
         "requested_seconds": requested_seconds,
         "preferred_low": preferred_low,
         "preferred_high": preferred_high,

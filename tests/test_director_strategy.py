@@ -157,3 +157,23 @@ class DirectorStrategyTests(unittest.TestCase):
         self.assertEqual(option["director_plan_role"], "alternative")
         self.assertTrue(option["requires_additional_ai_call"])
         self.assertEqual(option["director_sequence"], [])
+
+    def test_fully_cast_alternative_is_ready_without_another_ai_call(self):
+        primary = replace(
+            _story("S1", "body_confidence", "显瘦", 1, priority="high"),
+            director_plan_role="primary",
+            director_sequence=(DirectorBeat("B1", "result", "结果", (1,)), DirectorBeat("B2", "proof", "证明", (2,))),
+        )
+        alternative = replace(
+            _story("S2", "comfort_lifestyle", "夏天通勤", 3),
+            director_plan_role="alternative",
+            director_sequence=(DirectorBeat("B1", "scene", "场景", (3,)), DirectorBeat("B2", "experience", "体验", (4,))),
+        )
+
+        library = build_director_strategy_library((primary, alternative))
+        option = library["proposals"][1]
+
+        self.assertTrue(option["available"])
+        self.assertFalse(option["requires_additional_ai_call"])
+        self.assertEqual(option["materialization_status"], "ready")
+        self.assertEqual(len(option["director_sequence"]), 2)
