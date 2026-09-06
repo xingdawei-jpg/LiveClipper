@@ -17,6 +17,6 @@
     "full_core_validation": "not_applicable: Core unchanged and excluded; historical delivered-Core mismatch remains unresolved",
     "second_clean_machine_gui": "not_run",
     "real_paid_model_media_review": "not_run",
-    "ready_public_channel": "pending"
+    "ready_public_channel": "pass: OSS public signature and 9.4.1/9.3.3/8.7.1 routes verified; 935b3f0d9495e23b4305f8204e6e9ffb9bf8a0c6988753fabdc8b682ca326993"
   }
 }
