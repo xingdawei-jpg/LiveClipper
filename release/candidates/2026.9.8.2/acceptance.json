@@ -11,6 +11,8 @@
   "update_engine_regressions": "73 passed, 1 Windows symlink case skipped by OS privilege",
   "deterministic_build": "pass",
   "signed_remote_update": "pass",
+  "primary_oss_ready_channel": "pass: signed 2026.9.8.2 channel and archive verified",
+  "fallback_endpoint_parity": "not_pass: configured jsDelivr and pages.dev stable endpoints return 404; clients currently rely on the verified primary OSS endpoint",
   "atomic_activation": "pass",
   "rollback_source_retained": "pass",
   "rollback_health_failure_tests": "pass",
