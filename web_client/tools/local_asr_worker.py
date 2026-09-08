@@ -35,6 +35,34 @@ def _configure_runtime_path() -> None:
             sys.path.insert(0, text)
 
 
+def _configure_ffmpeg_path() -> str:
+    """Expose the Core-bundled FFmpeg to FunASR's command-name probe."""
+    candidates = []
+    configured = os.environ.get("LIVECLIPPER_FFMPEG_PATH", "").strip()
+    if configured:
+        path = Path(configured)
+        candidates.append(path.parent if path.suffix else path)
+    frozen_root = str(getattr(sys, "_MEIPASS", "") or "").strip()
+    if frozen_root:
+        candidates.append(Path(frozen_root) / "ffmpeg")
+    executable_root = Path(sys.executable).resolve().parent
+    candidates.extend((
+        executable_root / "_internal" / "ffmpeg",
+        executable_root / "ffmpeg",
+    ))
+    for candidate in candidates:
+        ffmpeg = candidate / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if not ffmpeg.is_file():
+            continue
+        current = os.environ.get("PATH", "")
+        entries = [entry for entry in current.split(os.pathsep) if entry]
+        candidate_text = str(candidate.resolve())
+        if all(os.path.normcase(entry) != os.path.normcase(candidate_text) for entry in entries):
+            os.environ["PATH"] = candidate_text + (os.pathsep + current if current else "")
+        return str(ffmpeg.resolve())
+    return ""
+
+
 def _emit(message_type: str, **payload: object) -> None:
     record = {"type": message_type, **payload}
     print(json.dumps(record, ensure_ascii=False), flush=True)
@@ -82,6 +110,8 @@ def _serve() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
+    _configure_runtime_path()
+    _configure_ffmpeg_path()
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--serve"]:
         return _serve()

@@ -22,6 +22,51 @@ _LOCAL_ASR_TIMEOUT_SECONDS = 4 * 60 * 60
 _LOCAL_ASR_TOOL_FLAG = "--liveclipper-run-tool"
 
 
+class LocalASRFailure(RuntimeError):
+    """Actionable local-ASR failure that callers should show to the user."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = str(code or "local_asr_failed")
+
+
+_LOCAL_ASR_MEMORY_TOKENS = (
+    "defaultcpuallocator",
+    "alloc_cpu.cpp",
+    "not enough memory",
+    "cannot allocate memory",
+    "can't allocate memory",
+    "out of memory",
+    "paging file is too small",
+    "page file is too small",
+    "页面文件太小",
+    "内存不足",
+    "无法分配内存",
+)
+
+
+def _actionable_local_asr_failure(messages: list[str]) -> LocalASRFailure | None:
+    combined = "\n".join(str(message or "") for message in messages).lower()
+    if any(token in combined for token in _LOCAL_ASR_MEMORY_TOKENS):
+        return LocalASRFailure(
+            "本机可用内存或 Windows 虚拟内存不足，SenseVoice 无法启动。"
+            "请关闭占用内存的软件后重试；仍失败时把虚拟内存设为系统管理，"
+            "或启用云端语音识别、提供与视频同名的 SRT 字幕。",
+            code="local_asr_out_of_memory",
+        )
+    return None
+
+
+def _is_upstream_ffmpeg_notice(message: str) -> bool:
+    lower = str(message or "").strip().lower()
+    return any(token in lower for token in (
+        "notice: ffmpeg is not installed",
+        "if you want to use ffmpeg backend",
+        "sudo apt install ffmpeg",
+        "brew install ffmpeg",
+    ))
+
+
 class _CancelEvent(Protocol):
     def is_set(self) -> bool: ...
 
@@ -319,6 +364,7 @@ class LocalASRWorkerSession:
 
             deadline = time.monotonic() + self._timeout_seconds()
             diagnostics: list[str] = []
+            worker_messages: list[str] = []
             result_ok: bool | None = None
             while result_ok is None:
                 if cancel_event is not None and cancel_event.is_set():
@@ -338,6 +384,13 @@ class LocalASRWorkerSession:
                 except queue.Empty:
                     raw_line = ""
                 if raw_line is None:
+                    failure = _actionable_local_asr_failure(worker_messages + diagnostics)
+                    if failure is not None:
+                        if log_fn:
+                            log_fn(str(failure))
+                        self._terminate()
+                        _remove_local_asr_outputs(srt_output)
+                        raise failure
                     if log_fn:
                         log_fn(_local_asr_exit_diagnostic(proc.poll()))
                     self._terminate()
@@ -345,6 +398,13 @@ class LocalASRWorkerSession:
                     return False
                 if not raw_line:
                     if proc.poll() is not None:
+                        failure = _actionable_local_asr_failure(worker_messages + diagnostics)
+                        if failure is not None:
+                            if log_fn:
+                                log_fn(str(failure))
+                            self._terminate()
+                            _remove_local_asr_outputs(srt_output)
+                            raise failure
                         if log_fn:
                             log_fn(_local_asr_exit_diagnostic(proc.returncode))
                         self._terminate()
@@ -354,8 +414,10 @@ class LocalASRWorkerSession:
                 try:
                     payload = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    diagnostics.append(str(raw_line).strip())
-                    diagnostics = diagnostics[-5:]
+                    diagnostic = str(raw_line).strip()
+                    if diagnostic and not _is_upstream_ffmpeg_notice(diagnostic):
+                        diagnostics.append(diagnostic)
+                        diagnostics = diagnostics[-5:]
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -363,19 +425,25 @@ class LocalASRWorkerSession:
                 response_id = str(payload.get("id") or "")
                 if message_type == "log" and (not response_id or response_id == request_id):
                     message = str(payload.get("message") or "").strip()
-                    if message and log_fn:
-                        log_fn(message)
+                    if message:
+                        worker_messages.append(message)
+                        worker_messages = worker_messages[-12:]
+                        if log_fn:
+                            log_fn(message)
                 elif message_type == "result" and response_id == request_id:
                     result_ok = bool(payload.get("ok"))
 
             srt_path = Path(srt_output)
             succeeded = bool(result_ok) and srt_path.is_file() and srt_path.stat().st_size > 0
             if not succeeded:
+                failure = _actionable_local_asr_failure(worker_messages + diagnostics)
                 if log_fn:
                     for diagnostic in diagnostics:
                         log_fn(f"SenseVoice 诊断: {diagnostic[:300]}")
-                    log_fn("SenseVoice 批量识别未生成可用字幕。")
+                    log_fn(str(failure) if failure is not None else "SenseVoice 批量识别未生成可用字幕。")
                 _remove_local_asr_outputs(srt_output)
+                if failure is not None:
+                    raise failure
             return succeeded
 
     def close(self, log_fn: Callable[[str], None] | None = None) -> None:
@@ -425,6 +493,7 @@ def _run_local_asr_worker(
     result_ok = False
     reader_finished = False
     raw_diagnostics: list[str] = []
+    worker_messages: list[str] = []
     proc: subprocess.Popen[str] | None = None
     reader: threading.Thread | None = None
 
@@ -481,10 +550,15 @@ def _run_local_asr_worker(
                     if message_type == "result":
                         result_ok = bool(value)
                     elif message_type == "raw":
-                        raw_diagnostics.append(str(value))
-                        raw_diagnostics = raw_diagnostics[-5:]
+                        diagnostic = str(value)
+                        if diagnostic and not _is_upstream_ffmpeg_notice(diagnostic):
+                            raw_diagnostics.append(diagnostic)
+                            raw_diagnostics = raw_diagnostics[-5:]
                     elif value:
-                        _log(str(value))
+                        message = str(value)
+                        worker_messages.append(message)
+                        worker_messages = worker_messages[-12:]
+                        _log(message)
 
             if proc.poll() is not None and reader_finished and line_queue.empty():
                 break
@@ -493,10 +567,13 @@ def _run_local_asr_worker(
         srt_path = Path(srt_output)
         succeeded = result_ok and return_code == 0 and srt_path.is_file() and srt_path.stat().st_size > 0
         if not succeeded:
+            failure = _actionable_local_asr_failure(worker_messages + raw_diagnostics)
             for diagnostic in raw_diagnostics:
                 _log(f"SenseVoice 诊断: {diagnostic[:300]}")
-            _log(_local_asr_exit_diagnostic(return_code))
+            _log(str(failure) if failure is not None else _local_asr_exit_diagnostic(return_code))
             _remove_local_asr_outputs(srt_output)
+            if failure is not None:
+                raise failure
         return succeeded
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         _log(f"SenseVoice 独立识别进程启动失败: {exc}")

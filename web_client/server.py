@@ -8966,6 +8966,8 @@ def _ensure_srt(
         return None
     except Exception as exc:
         emit_log("error", f"字幕生成失败：{exc}", scope)
+        if getattr(exc, "code", "") == "local_asr_out_of_memory":
+            raise
         return None
 
 
