@@ -60,6 +60,24 @@ class AiCostLedgerTests(unittest.TestCase):
             self.assertEqual(diagnostic["input_tokens"], 100)
             self.assertEqual(diagnostic["reasoning_characters"], len("private reasoning"))
 
+    def test_provider_success_and_business_failure_are_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = Path(temp_dir) / "ledger.jsonl"
+            record_ai_call(
+                module="cutter_logic", stage="subtitle_processing", model="deepseek-v4-flash",
+                request_payload={"max_tokens": 768},
+                response_payload={"usage": {"prompt_tokens": 10, "completion_tokens": 768}},
+                success=True, business_success=False,
+                outcome="subtitle_repair_output_truncated", error_type="subtitle_repair_output_truncated",
+                ledger_path=ledger,
+            )
+            report, _ = generate_ai_cost_reports(ledger_path=ledger)
+            self.assertEqual(report["records"]["successful_requests"], 1)
+            self.assertEqual(report["records"]["business_successful_requests"], 0)
+            self.assertEqual(report["records"]["business_failed_requests"], 1)
+            self.assertEqual(report["by_stage"][0]["business_failed_requests"], 1)
+            self.assertEqual(report["output_diagnostics"][0]["outcome"], "subtitle_repair_output_truncated")
+
     def test_extracts_openai_usage_and_nested_cached_tokens(self) -> None:
         usage = extract_usage({
             "usage": {

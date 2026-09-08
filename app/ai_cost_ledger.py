@@ -175,6 +175,8 @@ def record_ai_call(
     request_payload: Mapping[str, Any] | None,
     response_payload: Mapping[str, Any] | None = None,
     success: bool,
+    business_success: bool | None = None,
+    outcome: str = "",
     task_id: str = "",
     session_id: str = "",
     parent_request_id: str = "",
@@ -218,7 +220,14 @@ def record_ai_call(
             "estimated_cost": _estimate_cost(usage["input_tokens"], usage["output_tokens"]),
             "pricing_configured": _configured_price("LIVECLIPPER_AI_INPUT_PER_MILLION") is not None
             and _configured_price("LIVECLIPPER_AI_OUTPUT_PER_MILLION") is not None,
+            # ``success`` is deliberately the provider transport outcome.  A
+            # 200 response can still be unusable to the feature (for example,
+            # an empty subtitle-repair answer cut off by the output limit).
+            # Keep that second fact explicitly so reports do not call paid,
+            # discarded work a successful repair.
             "success": bool(success),
+            "business_success": bool(success) if business_success is None else bool(business_success),
+            "outcome": str(outcome or ""),
             "retry": bool(retry or scope.get("retry")),
             "error_type": str(error_type or ""),
             "input_fingerprint": input_fp,
@@ -275,6 +284,7 @@ def _breakdown(records: Sequence[Mapping[str, Any]], field: str) -> list[dict[st
             "average_known_tokens_per_request": round(tokens / len(items), 2) if items else 0.0,
             "usage_missing_requests": sum(not bool(item.get("usage_available")) for item in items),
             "failed_requests": sum(not bool(item.get("success")) for item in items),
+            "business_failed_requests": sum(not bool(item.get("business_success", item.get("success"))) for item in items),
             "retries": sum(bool(item.get("retry")) for item in items),
         })
     return sorted(rows, key=lambda row: (row["known_tokens"], row["requests"]), reverse=True)
@@ -336,6 +346,8 @@ def generate_ai_cost_reports(
             "total_requests": len(records),
             "successful_requests": sum(bool(item.get("success")) for item in records),
             "failed_requests": sum(not bool(item.get("success")) for item in records),
+            "business_successful_requests": sum(bool(item.get("business_success", item.get("success"))) for item in records),
+            "business_failed_requests": sum(not bool(item.get("business_success", item.get("success"))) for item in records),
             "retry_count": retry_count,
             "usage_missing_requests": sum(not bool(item.get("usage_available")) for item in records),
             "reasoning_usage_missing_requests": sum(_number(item.get("reasoning_tokens")) is None for item in records),
@@ -356,7 +368,7 @@ def generate_ai_cost_reports(
         "output_diagnostics": [
             {key: item.get(key) for key in (
                 "request_id", "stage", "model", "timestamp", "request_started_at",
-                "input_tokens", "cached_input_tokens", "success", "error_type", "output_limit_tokens",
+                "input_tokens", "cached_input_tokens", "success", "business_success", "outcome", "error_type", "output_limit_tokens",
                 "output_tokens", "reasoning_tokens", "non_reasoning_output_tokens",
                 "finish_reason", "content_characters", "reasoning_characters",
             )}

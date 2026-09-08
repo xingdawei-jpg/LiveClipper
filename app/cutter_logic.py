@@ -1493,13 +1493,13 @@ def _custom_frame_structure_filter(video_options=None, source_fps=30.0):
     return f"fps=fps={target_fps:.3f}:round=near", f"frame_structure({level},stable-{target_fps:.2f}fps)"
 
 
-def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None, speed_factor=None):
+def build_dedup_filters(width, height, clip_index=0, mirror_enabled=None, speed_factor=None, preset=None):
     """
     构建去重滤镜链
     - enhanced模式: 镜像 + 随机变速 + 随机微裁剪（pitch已移除）
     - classic模式: 原有随机方法（兼容）
     """
-    preset = _normalize_dedup_preset(DEDUP_PRESET)
+    preset = _normalize_dedup_preset(DEDUP_PRESET if preset is None else preset)
     if preset == "none":
         return {"video_filters": "", "audio_filters": "", "applied": []}
     _, methods, strategy = apply_preset(preset)
@@ -2657,7 +2657,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                    target_duration=60, mirror_enabled=None, kb_intensity="中", ai_controls=None,
                    dedup_video_options=None, dedup_audio_options=None, transition_options=None,
                    _user_confirmed_clips=False, duration_tolerance=None, _result_cache=None,
-                   local_asr_session=None):
+                   local_asr_session=None, _selected_clips=None):
     """
     完整处理流程：
     1. 如果没有 SRT，自动语音识别
@@ -2998,6 +2998,10 @@ def process_video(video_path, srt_path=None, output_path=None,
         return {"ok": True, "asr_only": True}
 
     from ai_clipper import is_enabled as ai_is_enabled, ai_analyze_clips, fallback_clips
+    if _selected_clips is not None:
+        invocation_clips = list(_selected_clips)
+        ai_analyze_clips = lambda *args, **kwargs: list(invocation_clips)
+        ai_is_enabled = lambda: True
     preference_summary = {}
     analysis_metadata = {}
     _word_timings = []
@@ -4965,6 +4969,31 @@ def _apply_final_subtitle_text_repairs(raw_segments, fixed_text):
     ]
 
 
+def _final_subtitle_repair_result(raw_segments, response_payload):
+    """Validate a subtitle-repair response before calling it a usable result.
+
+    A model can spend its allowance in hidden reasoning and still return HTTP
+    success with no visible subtitle body. Timestamps remain local; only a
+    one-to-one replacement of text is accepted.
+    """
+    response = response_payload if isinstance(response_payload, dict) else {}
+    choices = response.get("choices") if isinstance(response.get("choices"), list) else []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    fixed_text = str(message.get("content") or "").strip()
+    if fixed_text.startswith("```"):
+        fixed_text = re.sub(r"^```[a-z]*\n?|\n?```$", "", fixed_text).strip()
+    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+    if not fixed_text:
+        outcome = "subtitle_repair_output_truncated" if finish_reason == "length" else "subtitle_repair_empty_content"
+        return raw_segments, False, outcome, outcome
+    fixed_segments = _apply_final_subtitle_text_repairs(raw_segments, fixed_text)
+    if fixed_segments is None:
+        outcome = "subtitle_repair_output_truncated" if finish_reason == "length" else "subtitle_repair_line_mismatch"
+        return raw_segments, False, outcome, outcome
+    return fixed_segments, True, "subtitle_repair_applied", ""
+
+
 def _add_subtitles_final(
     video_path,
     output_path,
@@ -5283,12 +5312,19 @@ def _add_subtitles_final(
                 import urllib.request
                 import ssl as _ssl
                 ctx = create_ssl_context()
-                req_body = _json.dumps({
+                repair_max_tokens = min(2048, max(768, len(raw_segments) * 72))
+                req_payload = {
                     "model": model,
                     "messages": [{"role": "user", "content": fix_prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 4000
-                }).encode("utf-8")
+                    "max_tokens": repair_max_tokens,
+                }
+                # Subtitle correction is a format-preserving conversion, not
+                # a reasoning task. Disable DeepSeek thinking so a blank
+                # visible answer cannot consume the complete allowance.
+                if "deepseek" in str(model).lower() or "deepseek" in str(base_url).lower():
+                    req_payload["thinking"] = {"type": "disabled"}
+                req_body = _json.dumps(req_payload).encode("utf-8")
 
                 req = urllib.request.Request(
                     ai_chat_completions_url(base_url),
@@ -5297,29 +5333,24 @@ def _add_subtitles_final(
                 )
                 with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
                     resp_data = _json.loads(resp.read().decode("utf-8"))
+                fixed_segments, repair_ok, repair_outcome, repair_error = _final_subtitle_repair_result(
+                    raw_segments, resp_data,
+                )
                 record_ai_call(
                     module="cutter_logic", stage="subtitle_processing", model=model,
-                    request_payload=_json.loads(req_body.decode("utf-8")),
-                    response_payload=resp_data, success=True,
+                    request_payload=req_payload, response_payload=resp_data, success=True,
+                    business_success=repair_ok, outcome=repair_outcome, error_type=repair_error,
                 )
-
-                fixed_text = resp_data["choices"][0]["message"]["content"].strip()
-                # V4 Flash sometimes wraps in markdown code blocks
-                if fixed_text.startswith("```"):
-                    fixed_text = re.sub(r"^```[a-z]*\n?|\n?```$", "", fixed_text).strip()
-                _log("DeepSeek修复完成")
-
-                fixed_segments = _apply_final_subtitle_text_repairs(raw_segments, fixed_text)
-                if fixed_segments is None:
-                    _log("DeepSeek返回行数异常，回退到 ASR 原始文本以保持字幕时间轴。")
-                    fixed_segments = raw_segments
-                else:
+                if repair_ok:
                     _log(f"DeepSeek修复: {len(fixed_segments)} 条字幕（保留最终ASR时间轴）")
+                else:
+                    _log("DeepSeek字幕修复未产生可用正文，已回退 ASR 原始文本以保持字幕时间轴。")
             except Exception as e:
                 record_ai_call(
                     module="cutter_logic", stage="subtitle_processing", model=model,
-                    request_payload=_json.loads(req_body.decode("utf-8")) if "req_body" in locals() else None,
-                    success=False, error_type=type(e).__name__,
+                    request_payload=req_payload if "req_payload" in locals() else None,
+                    success=False, business_success=False, outcome="subtitle_repair_provider_failure",
+                    error_type=type(e).__name__,
                 )
                 _log(f"DeepSeek修复失败: {e}，回退到 ASR 原始文本")
                 fixed_segments = raw_segments
@@ -5901,10 +5932,7 @@ def _process_version_with_clips(video_path, srt_path, output_path,
     # and uses the provided clips directly
     # We need to call the internal cutting/dedup/subtitle logic
     
-    # For now, we use a workaround: temporarily patch ai_analyze_clips to return our clips
-    import ai_clipper as _ai
-    _original_fn = _ai.ai_analyze_clips
-    _original_is_enabled = _ai.is_enabled
+    # Pass the frozen sequence to this invocation without changing other workers.
     _prepared_clips = list(clips or [])
     try:
         _log("预览成片: 保留用户调整后的片段顺序，不再自动重排")
@@ -5923,27 +5951,18 @@ def _process_version_with_clips(video_path, srt_path, output_path,
         _LOG.warning("unexpected error", exc_info=True)
         pass
     
-    def _mock_analyze(*args, **kwargs):
-        return _prepared_clips
-    
-    _ai.ai_analyze_clips = _mock_analyze
-    _ai.is_enabled = lambda: True
-    
-    try:
-        result = process_video(video_path, srt_path, output_path,
-                              dedup_preset, subtitle_overlay, log_fn,
-                              None, cancel_event,  # force_category=None (already filtered)
-                               pip_path, pip_size, pip_opacity, pip_pos,
-                                smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
-                                mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, target_duration=target_duration,
-                                dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
-                                transition_options=transition_options, _user_confirmed_clips=True,
-                                duration_tolerance=duration_tolerance,
-                                local_asr_session=local_asr_session)
-        return result
-    finally:
-        _ai.ai_analyze_clips = _original_fn
-        _ai.is_enabled = _original_is_enabled
+    result = process_video(video_path, srt_path, output_path,
+                          dedup_preset, subtitle_overlay, log_fn,
+                          None, cancel_event,  # force_category=None (already filtered)
+                           pip_path, pip_size, pip_opacity, pip_pos,
+                            smart_crop_enabled=smart_crop_enabled, crop_level=crop_level, ken_burns_enabled=ken_burns_enabled,
+                            mirror_enabled=mirror_enabled, kb_intensity=kb_intensity, target_duration=target_duration,
+                            dedup_video_options=dedup_video_options, dedup_audio_options=dedup_audio_options,
+                            transition_options=transition_options, _user_confirmed_clips=True,
+                            duration_tolerance=duration_tolerance,
+                            local_asr_session=local_asr_session,
+                            _selected_clips=_prepared_clips)
+    return result
 
 def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                        subtitle_overlay=True, log_fn=None, cancel_event=None,
@@ -6037,6 +6056,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     # Phase 1: 合并SRT + AI 一步选片
     # ============================================================
     from ai_clipper import ai_analyze_clips, is_enabled as ai_is_enabled
+
+    if extra_kwargs.get("_selected_clips") is not None:
+        invocation_clips = list(extra_kwargs["_selected_clips"])
+        ai_analyze_clips = lambda *args, **kwargs: list(invocation_clips)
+        ai_is_enabled = lambda: True
 
     if not ai_is_enabled():
         _log("AI 未启用"); shutil.rmtree(tmp, ignore_errors=True); return False

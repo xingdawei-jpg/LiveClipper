@@ -105,6 +105,31 @@ console.log(JSON.stringify(renderCommerceDirectorRecommendationCard(preview)));
 
 
 class DirectionFamilyTests(unittest.TestCase):
+    def test_director_render_keeps_subtitle_cost_with_direct_task_and_surfaces_product_review(self):
+        preview = {
+            "id": "preview-1",
+            "commercial_director_preview": True,
+            "director_source_task_id": "direct-task",
+            "director_review": {"product_control": {
+                "warnings": ["字幕 12 的商品归属未核实"],
+            }},
+        }
+        self.assertEqual(
+            server._preview_render_cost_scope(preview, "direct-task"),
+            ("commerce_preview:direct-task", "preview-1"),
+        )
+        self.assertEqual(
+            server._preview_render_cost_scope(preview, "manual-render-task"),
+            ("commerce_render:manual-render-task", "preview-1"),
+        )
+        self.assertEqual(server._preview_product_review_warnings(preview), ["字幕 12 的商品归属未核实"])
+
+    def test_product_conflict_without_legacy_warning_still_reaches_render_task(self):
+        preview = {"director_review": {"product_control": {
+            "final": {"status": "conflict", "scope_errors": ["搭配裤子没有主商品支撑"]},
+        }}}
+        self.assertEqual(server._preview_product_review_warnings(preview), ["搭配裤子没有主商品支撑"])
+
     def test_mix_three_versions_use_the_same_two_pass_multi_plan_packet(self):
         payload = server.MixPayload(video_paths=['C:/one.mp4', 'C:/two.mp4'], duration=60, versions=3)
         source_bundle = {'sources': ['one', 'two']}

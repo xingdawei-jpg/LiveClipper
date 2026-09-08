@@ -138,7 +138,8 @@ _LOG_SEQ = 0
 _LOG_LAST_BY_SCOPE: dict[str, str] = {}
 _TASK_LOG_CONTEXT = threading.local()
 _TASKS: dict[str, dict[str, Any]] = {}
-_TASK_LOCK = threading.Lock()
+_TASK_LOCK = threading.RLock()
+_DIRECTOR_RENDER_LOCK = threading.RLock()
 _OUTPUT_HISTORY_LOCK = threading.Lock()
 _CANCELLED_TASKS: set[str] = set()
 _TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
@@ -832,8 +833,9 @@ def _load_keyword_config() -> dict[str, Any]:
     if not user_data:
         return default_data
     try:
-        from ai_clipper import is_keyword_config_usable
+        from ai_clipper import is_keyword_config_usable, recover_keyword_encoding
 
+        user_data = recover_keyword_encoding(user_data)
         if not is_keyword_config_usable(user_data):
             _LOG.warning("Ignoring corrupted user keyword vocabulary: %s", user_file)
             return default_data
@@ -2470,6 +2472,8 @@ def _apply_task_structure(current: dict[str, Any], updates: dict[str, Any]) -> N
 def _new_task(scope: str, title: str) -> str:
     task_id = f"{scope}-{int(time.time())}-{os.urandom(3).hex()}"
     with _TASK_LOCK:
+        if scope in _MEDIA_PIPELINE_SCOPES:
+            _ensure_scope_idle(scope, title)
         terminal = sorted(
             (
                 (task_id, task)
@@ -2548,12 +2552,12 @@ def _ensure_scope_idle(scope: str, current_title: str = "任务") -> None:
         for task in _TASKS.values():
             task_scope = str(task.get("scope") or "")
             blocks_scope = task_scope == scope or (
-                media_pipeline_scope and task_scope in _MEDIA_PIPELINE_SCOPES
+                scope in {"mix", "mix-batch"} and task_scope in {"mix", "mix-batch"}
             )
             if blocks_scope and task.get("status") in {"queued", "running"}:
                 title = task.get("title") or scope
                 shared_pipeline_note = (
-                    "智能成片与混剪共用媒体处理队列，"
+                    "混剪与批量混剪共用任务通道，"
                     if media_pipeline_scope and task_scope != scope
                     else ""
                 )
@@ -2561,6 +2565,25 @@ def _ensure_scope_idle(scope: str, current_title: str = "任务") -> None:
                     status_code=409,
                     detail=f"{title}正在运行，{shared_pipeline_note}请等待完成，或先点击停止后再启动{current_title}。",
                 )
+
+
+def _director_render_queued(task_id: str, render: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Serialize media rendering while preserving each caller's task context."""
+    event = _task_cancel_event(task_id)
+    acquired = _DIRECTOR_RENDER_LOCK.acquire(blocking=False)
+    if not acquired:
+        _set_task(task_id, message="等待视频渲染，另一任务正在成片")
+    while not acquired:
+        if event.is_set():
+            return {"ok": False, "error": "cancelled"}
+        acquired = _DIRECTOR_RENDER_LOCK.acquire(timeout=0.2)
+    try:
+        if event.is_set():
+            return {"ok": False, "error": "cancelled"}
+        _set_task(task_id, message="正在渲染视频")
+        return render(*args, **kwargs)
+    finally:
+        _DIRECTOR_RENDER_LOCK.release()
 
 
 def _set_task(task_id: str, **updates: Any) -> None:
@@ -8872,6 +8895,36 @@ def _ensure_srt(
     local_asr_session: Any = None,
     cancel_event: threading.Event | None = None,
 ) -> Path | None:
+    # Source-side SRT and word caches are shared with the render pipeline.
+    # Serialize their preparation; release the slot before any Director AI work.
+    event = cancel_event
+    task_id = getattr(_TASK_LOG_CONTEXT, "task_id", None)
+    if event is None and task_id:
+        event = _task_cancel_event(task_id)
+    acquired = _DIRECTOR_RENDER_LOCK.acquire(blocking=False)
+    if not acquired and task_id:
+        _set_task(task_id, message="等待素材处理，另一任务正在使用处理通道")
+    while not acquired:
+        if event is not None and event.is_set():
+            return None
+        acquired = _DIRECTOR_RENDER_LOCK.acquire(timeout=0.2)
+    try:
+        if event is not None and event.is_set():
+            return None
+        return _ensure_srt_unlocked(
+            video, scope, local_asr_session=local_asr_session, cancel_event=event,
+        )
+    finally:
+        _DIRECTOR_RENDER_LOCK.release()
+
+
+def _ensure_srt_unlocked(
+    video: Path,
+    scope: str,
+    *,
+    local_asr_session: Any = None,
+    cancel_event: threading.Event | None = None,
+) -> Path | None:
     srt = video.with_suffix(".srt")
     if srt.exists():
         # Managed ASR caches are source-bound.  A matching older SenseVoice
@@ -10472,12 +10525,9 @@ def _core_dedup_filters(video: Path, index: int, preset: str, mirror_enabled: bo
     height = int(info.get("height") or 0) or 1280
     import cutter_logic as cutter_core
 
-    old_preset = getattr(cutter_core, "DEDUP_PRESET", "medium")
-    try:
-        cutter_core.DEDUP_PRESET = preset
-        return cutter_core.build_dedup_filters(width, height, index, mirror_enabled=mirror_enabled)
-    finally:
-        cutter_core.DEDUP_PRESET = old_preset
+    return cutter_core.build_dedup_filters(
+        width, height, index, mirror_enabled=mirror_enabled, preset=preset,
+    )
 
 
 def _audio_complex(af: str) -> str:
@@ -12509,6 +12559,28 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
             )
 
 
+def _preview_render_cost_scope(preview: Mapping[str, Any], task_id: str) -> tuple[str, str]:
+    """Keep a render's paid subtitle work attributable to the right task."""
+    preview_id = str(preview.get("id") or "").strip()
+    source_task_id = str(preview.get("director_source_task_id") or "").strip()
+    if bool(preview.get("commercial_director_preview")) and source_task_id == str(task_id):
+        return f"commerce_preview:{task_id}", preview_id
+    if bool(preview.get("commercial_director_preview")):
+        return f"commerce_render:{task_id}", preview_id
+    return f"render:{task_id}", preview_id
+
+
+def _preview_product_review_warnings(preview: Mapping[str, Any]) -> list[str]:
+    review = dict(preview.get("director_review") or {})
+    control = dict(review.get("product_control") or {})
+    warnings = [str(item).strip() for item in (control.get("warnings") or []) if str(item).strip()]
+    final = dict(control.get("final") or {})
+    if not warnings and str(final.get("status") or "") == "conflict":
+        detail = "；".join(str(item).strip() for item in (final.get("scope_errors") or []) if str(item).strip())
+        warnings.append(detail or "已选原话的商品归属仍待核实")
+    return warnings
+
+
 def _run_mix_from_preview(
     task_id: str,
     payload: MixPreviewCutPayload,
@@ -12526,6 +12598,8 @@ def _run_mix_from_preview(
         preview = _get_preview(payload.preview_id)
         if not preview or preview.get("status") != "ready":
             raise RuntimeError("混剪选片预览不存在或尚未完成。")
+        for warning in _preview_product_review_warnings(preview):
+            emit_log("warning", f"保留商品归属待审提示：{warning}", scope, task_id=task_id)
         raw_clips = _preview_selection_raw_clips(preview)
         if not raw_clips:
             raise RuntimeError("混剪选片预览里没有可用片段。")
@@ -12633,29 +12707,21 @@ def _run_mix_from_preview(
         pip_path, used_pip_file = _pick_pip_asset(payload, scope)
         _set_task_progress(task_id, 34, "准备混剪输出")
 
-        import ai_clipper as ai_mod
+        from ai_cost_ledger import ai_cost_ledger_scope, generate_ai_cost_reports
         from cutter_logic import process_video_mix
+        cost_task_id, cost_session_id = _preview_render_cost_scope(preview, task_id)
 
-        original_ai_analyze = ai_mod.ai_analyze_clips
-        original_ai_enabled = ai_mod.is_enabled
-
-        def _preview_ai_analyze(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
-            emit_log("info", f"预览混剪：使用已调整的 {len(selected_tuples)} 个片段/子句组，不重新 AI 选片。", scope)
-            return list(selected_tuples)
-
-        ai_mod.ai_analyze_clips = _preview_ai_analyze
-        ai_mod.is_enabled = lambda: True
         produced_outputs: list[str] = []
-        try:
-            for version_index, version_path in enumerate(version_paths, 1):
-                if _is_task_cancelled(task_id):
-                    break
-                emit_log(
-                    "info",
-                    f"导演方案混剪 {version_index}/{version_count}：复用同一故事片单，不重新调用 AI。",
-                    scope,
-                )
-                result = process_video_mix(
+        for version_index, version_path in enumerate(version_paths, 1):
+            if _is_task_cancelled(task_id):
+                break
+            emit_log(
+                "info",
+                f"导演方案混剪 {version_index}/{version_count}：复用同一故事片单，不重新调用 AI。",
+                scope,
+            )
+            with ai_cost_ledger_scope(task_id=cost_task_id, session_id=cost_session_id):
+                result = _director_render_queued(task_id, process_video_mix,
                     [str(path) for path in existing_sources],
                     output_path=str(version_path),
                     dedup_preset=payload.dedup_preset,
@@ -12681,15 +12747,13 @@ def _run_mix_from_preview(
                     mirror_enabled=payload.mirror_enabled,
                     kb_intensity=payload.ken_burns_intensity,
                     _user_confirmed_clips=True,
+                    _selected_clips=selected_tuples,
                     local_asr_session=local_asr_session,
                 )
-                if _result_ok(result) and version_path.exists():
-                    produced_outputs.append(str(version_path))
-                else:
-                    emit_log("warning", f"导演方案混剪第 {version_index} 版未生成输出。", scope)
-        finally:
-            ai_mod.ai_analyze_clips = original_ai_analyze
-            ai_mod.is_enabled = original_ai_enabled
+            if _result_ok(result) and version_path.exists():
+                produced_outputs.append(str(version_path))
+            else:
+                emit_log("warning", f"导演方案混剪第 {version_index} 版未生成输出。", scope)
 
         if not produced_outputs:
             raise RuntimeError("预览混剪处理失败。")
@@ -12699,6 +12763,8 @@ def _run_mix_from_preview(
             return produced_outputs
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("混剪成片", units=len(produced_outputs), scope=scope)
+        cost_report, _ = generate_ai_cost_reports(task_id=cost_task_id)
+        _set_task(task_id, ai_cost_report=cost_report)
         if finalize_task:
             _set_task(
                 task_id,
@@ -14190,6 +14256,7 @@ def _run_commerce_director_preview(
                     commercial_director_experiment=True,
                     commercial_director_preview=True,
                     commercial_director_sentence_preview=True,
+                    director_source_task_id=task_id,
                     planner_mode=planner_mode,
                     director_review=variant_review,
                 )
@@ -14214,11 +14281,42 @@ def _run_commerce_director_preview(
                         f" 当前主商品的完整安全短句池合计最多约 {float(pool_audit.get('main_product_pool_upper_bound_final_seconds') or 0):.1f} 秒成片；"
                         "其余候选属于别的商品，不能拿来补时长。"
                     )
+            final_duration_audit = dict(
+                dict(duration_assessment.get("duration_control") or {}).get("final") or {}
+            )
+            incomplete_chapters = [
+                str(item) for item in (final_duration_audit.get("incomplete_chapter_ids") or [])
+                if str(item).strip()
+            ]
+            unverified_chapters = [
+                str(item) for item in (final_duration_audit.get("unverified_completion_chapter_ids") or [])
+                if str(item).strip()
+            ]
+            if incomplete_chapters:
+                warning = (
+                    f"{len(incomplete_chapters)} 个章节没有可执行原话（{'、'.join(incomplete_chapters)}），"
+                    "已保留可编辑预览，不能按完整故事通过。"
+                )
+
+                message += " " + warning
+                emit_log("warning", warning, scope, task_id=task_id)
+            if unverified_chapters:
+                warning = (
+                    f"{len(unverified_chapters)} 个章节缺少选句回执（{'、'.join(unverified_chapters)}），"
+                    "请在工作台复核后再成片。"
+                )
+                message += " " + warning
+                emit_log("warning", warning, scope, task_id=task_id)
             if preview_fidelity["status"] == "warning":
                 message += " " + preview_fidelity["message"]
                 emit_log("warning", preview_fidelity["message"], scope)
             resolved_product = dict(dict(product_control.get("final") or {}).get("resolved_scope") or {}).get("main_product")
-            if resolved_product:
+            product_warnings = [str(item).strip() for item in (product_control.get("warnings") or []) if str(item).strip()]
+            if resolved_product and product_warnings:
+                message += f" 本次主商品：{resolved_product}；商品归属有 {len(product_warnings)} 项待审，成片前请核实。"
+                for warning in product_warnings:
+                    emit_log("warning", f"主商品归属待审：{warning}", scope)
+            elif resolved_product:
                 message += f" 本次主商品：{resolved_product}；已核对已选原话及AI备选句的商品归属。"
             _store_preview(
                 preview_id,
@@ -14257,6 +14355,7 @@ def _run_commerce_director_preview(
                 commercial_director_experiment=True,
                 commercial_director_preview=True,
                 commercial_director_sentence_preview=True,
+                director_source_task_id=task_id,
                 planner_mode=planner_mode,
                 director_review=director_review,
             )
@@ -15362,11 +15461,15 @@ def _run_smart_cut_from_preview(
     emit_log("info", "使用 AI 选片预览开始成片。", scope)
     try:
         _ensure_feature_access("智能成片")
+        from ai_cost_ledger import ai_cost_ledger_scope, generate_ai_cost_reports
         from cutter_logic import _process_version_with_clips
 
         preview = _get_preview(payload.preview_id)
         if not preview or preview.get("status") != "ready":
             raise RuntimeError("选片预览不存在或尚未完成。")
+        for warning in _preview_product_review_warnings(preview):
+            emit_log("warning", f"保留商品归属待审提示：{warning}", scope, task_id=task_id)
+        cost_task_id, cost_session_id = _preview_render_cost_scope(preview, task_id)
         raw_clips = _preview_selection_raw_clips(preview)
         if not raw_clips:
             raise RuntimeError("选片预览里没有可用片段。")
@@ -15426,31 +15529,32 @@ def _run_smart_cut_from_preview(
                 f"导演方案成片 {version_index}/{version_count}：复用同一故事片单，不重新调用 AI。",
                 scope,
             )
-            result = _process_version_with_clips(
-                str(video),
-                srt_path,
-                str(version_path),
-                clips,
-                payload.dedup_preset,
-                payload.subtitle_overlay,
-                _task_log_fn(task_id, scope, base=30, span=58),
-                _task_cancel_event(task_id),
-                pip_path,
-                payload.pip_size,
-                payload.pip_opacity,
-                payload.pip_pos,
-                smart_crop_enabled=payload.smart_crop_enabled,
-                crop_level=payload.crop_level,
-                ken_burns_enabled=payload.ken_burns_enabled,
-                mirror_enabled=payload.mirror_enabled,
-                kb_intensity=payload.ken_burns_intensity,
-                target_duration=payload.target_duration,
-                duration_tolerance=payload.duration_tolerance,
-                dedup_video_options=payload.video,
-                dedup_audio_options=payload.audio,
-                transition_options=payload.transition,
-                local_asr_session=local_asr_session,
-            )
+            with ai_cost_ledger_scope(task_id=cost_task_id, session_id=cost_session_id):
+                result = _director_render_queued(task_id, _process_version_with_clips,
+                    str(video),
+                    srt_path,
+                    str(version_path),
+                    clips,
+                    payload.dedup_preset,
+                    payload.subtitle_overlay,
+                    _task_log_fn(task_id, scope, base=30, span=58),
+                    _task_cancel_event(task_id),
+                    pip_path,
+                    payload.pip_size,
+                    payload.pip_opacity,
+                    payload.pip_pos,
+                    smart_crop_enabled=payload.smart_crop_enabled,
+                    crop_level=payload.crop_level,
+                    ken_burns_enabled=payload.ken_burns_enabled,
+                    mirror_enabled=payload.mirror_enabled,
+                    kb_intensity=payload.ken_burns_intensity,
+                    target_duration=payload.target_duration,
+                    duration_tolerance=payload.duration_tolerance,
+                    dedup_video_options=payload.video,
+                    dedup_audio_options=payload.audio,
+                    transition_options=payload.transition,
+                    local_asr_session=local_asr_session,
+                )
             if _result_ok(result) and version_path.exists():
                 produced_outputs.append(str(version_path))
             else:
@@ -15460,6 +15564,8 @@ def _run_smart_cut_from_preview(
         _set_task_progress(task_id, 94, "整理输出")
         _archive_used_pip(used_pip_file, scope)
         _consume_trial("智能成片", units=len(produced_outputs), scope=scope)
+        cost_report, _ = generate_ai_cost_reports(task_id=cost_task_id)
+        _set_task(task_id, ai_cost_report=cost_report)
         if finalize_task:
             _set_task(
                 task_id,
@@ -17006,6 +17112,10 @@ def save_keywords(payload: dict[str, Any]) -> dict[str, Any]:
     saved_fields = _keyword_payload_fields(payload)
     if saved_fields:
         saved = _normalize_keyword_payload(payload)
+        from ai_clipper import is_keyword_config_usable, recover_keyword_encoding, _keyword_text_is_corrupted
+        saved = recover_keyword_encoding(saved)
+        if not is_keyword_config_usable(saved) or _keyword_text_is_corrupted(json.dumps(saved, ensure_ascii=False)):
+            raise HTTPException(status_code=422, detail="词库包含无法恢复的乱码，未覆盖已保存文件。请检查文字后再保存。")
         _write_json_file(target, saved)
         _clear_ai_keyword_cache()
     data = _load_effective_keyword_config()

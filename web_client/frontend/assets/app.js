@@ -5735,15 +5735,16 @@ function syncFlowActionState() {
   const smartHasVideos = getVideoPaths().length > 0;
   const mixHasVideos = getLines("mix-video-paths").length > 0;
   const runningScopes = state.runningScopes instanceof Set ? state.runningScopes : new Set();
-  const mediaPipelineBusy = runningScopes.has("smart-cut") || runningScopes.has("mix");
-  const mediaPipelineReason = "智能成片与混剪不能同时运行";
+  const smartBusy = runningScopes.has("smart-cut");
+  const mixBusy = runningScopes.has("mix") || runningScopes.has("mix-batch");
+  const mediaPipelineReason = "当前工作区已有任务正在运行";
 
-  setButtonsEnabled('[data-action="start-smart-preview"]', smartHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加视频素材");
-  setButtonsEnabled('[data-action="start-smart-cut"]', smartHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加视频素材");
-  setButtonsEnabled('[data-action="start-smart-from-preview"]', previewReady(state.smartPreview, "smart") && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "当前编排没有可用片段");
-  setButtonsEnabled('[data-action="start-mix-preview"]', mixHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加混剪视频素材");
-  setButtonsEnabled('[data-action="feature-submit"][data-feature="mix"]', mixHasVideos && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "先添加混剪视频素材");
-  setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview, "mix") && !mediaPipelineBusy, mediaPipelineBusy ? mediaPipelineReason : "当前编排没有可用片段");
+  setButtonsEnabled('[data-action="start-smart-preview"]', smartHasVideos && !smartBusy, smartBusy ? mediaPipelineReason : "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-cut"]', smartHasVideos && !smartBusy, smartBusy ? mediaPipelineReason : "先添加视频素材");
+  setButtonsEnabled('[data-action="start-smart-from-preview"]', previewReady(state.smartPreview, "smart") && !smartBusy, smartBusy ? mediaPipelineReason : "当前编排没有可用片段");
+  setButtonsEnabled('[data-action="start-mix-preview"]', mixHasVideos && !mixBusy, mixBusy ? mediaPipelineReason : "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="feature-submit"][data-feature="mix"]', mixHasVideos && !mixBusy, mixBusy ? mediaPipelineReason : "先添加混剪视频素材");
+  setButtonsEnabled('[data-action="start-mix-from-preview"]', previewReady(state.mixPreview, "mix") && !mixBusy, mixBusy ? mediaPipelineReason : "当前编排没有可用片段");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="smart-cut"]', runningScopes.has("smart-cut"), "当前没有智能成片任务");
   setButtonsEnabled('[data-action="stop-scope"][data-scope="mix"]', runningScopes.has("mix"), "当前没有混剪任务");
   syncProductScanFlow();

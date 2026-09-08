@@ -316,8 +316,8 @@ class PreviewWordEditingTests(unittest.TestCase):
         smart_end = script.index("async function startSmartFromPreview", smart_start)
         smart = script[smart_start:smart_end]
 
-        self.assertIn("smartHasVideos && !mediaPipelineBusy", actions)
-        self.assertIn("mixHasVideos && !mediaPipelineBusy", actions)
+        self.assertIn("smartHasVideos && !smartBusy", actions)
+        self.assertIn("mixHasVideos && !mixBusy", actions)
         self.assertIn('api("/api/smart-cut/start"', smart)
         self.assertNotIn("previewReady", smart)
 
@@ -607,7 +607,7 @@ class PreviewWordEditingTests(unittest.TestCase):
         self.assertIn("_ordered_preview_selection_indices", smart_source)
         self.assertIn("_ordered_preview_selection_indices", mix_source)
 
-    def test_media_pipeline_rejects_cross_workspace_overlap(self):
+    def test_media_pipeline_allows_cross_workspace_but_rejects_same_scope(self):
         original_tasks = server._TASKS
         try:
             server._TASKS = {
@@ -617,10 +617,11 @@ class PreviewWordEditingTests(unittest.TestCase):
                     "status": "running",
                 }
             }
+            server._ensure_scope_idle("smart-cut", "AI选片预览")
             with self.assertRaises(server.HTTPException) as context:
-                server._ensure_scope_idle("smart-cut", "AI选片预览")
+                server._ensure_scope_idle("mix", "AI选片预览")
             self.assertEqual(context.exception.status_code, 409)
-            self.assertIn("共用媒体处理队列", context.exception.detail)
+            self.assertIn("正在运行", context.exception.detail)
         finally:
             server._TASKS = original_tasks
 

@@ -581,6 +581,28 @@ class LocalAsrQualityTests(unittest.TestCase):
 
         self.assertIsNone(repaired)
 
+    def test_final_subtitle_empty_or_truncated_response_is_not_a_successful_repair(self) -> None:
+        raw_segments = [{"start": 1.0, "end": 2.0, "text": "第一句"}]
+        repaired, success, outcome, error = cutter_logic._final_subtitle_repair_result(
+            raw_segments,
+            {"choices": [{"finish_reason": "length", "message": {"content": "", "reasoning_content": "..."}}]},
+        )
+        self.assertEqual(repaired, raw_segments)
+        self.assertFalse(success)
+        self.assertEqual(outcome, "subtitle_repair_output_truncated")
+        self.assertEqual(error, "subtitle_repair_output_truncated")
+
+    def test_final_subtitle_valid_repair_is_a_business_success(self) -> None:
+        raw_segments = [{"start": 1.0, "end": 2.0, "text": "板型很显受"}]
+        repaired, success, outcome, error = cutter_logic._final_subtitle_repair_result(
+            raw_segments,
+            {"choices": [{"finish_reason": "stop", "message": {"content": "[1.00-2.00] 版型很显瘦"}}]},
+        )
+        self.assertEqual(repaired[0]["text"], "版型很显瘦")
+        self.assertTrue(success)
+        self.assertEqual(outcome, "subtitle_repair_applied")
+        self.assertEqual(error, "")
+
     def test_smart_cut_final_subtitles_always_re_recognize_assembled_audio(self) -> None:
         source = inspect.getsource(cutter_logic.process_video)
 

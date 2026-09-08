@@ -2806,6 +2806,40 @@ def _keyword_text_is_corrupted(value):
     )
 
 
+def recover_keyword_encoding(data):
+    """Undo reversible UTF-8/Latin-1 mojibake; never guess damaged characters."""
+    def recover(value):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                name, restored = recover(key), recover(item)
+                if name in result:
+                    if isinstance(result[name], list) and isinstance(restored, list):
+                        result[name].extend(restored)  # Preserve both user lists.
+                    else:
+                        result[key] = restored
+                else:
+                    result[name] = restored
+            return result
+        if isinstance(value, list):
+            return [recover(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        original = value
+        for _ in range(4):
+            try:
+                candidate = value.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                break
+            if candidate == value:
+                break
+            value = candidate
+        # Accept only an exact roundtrip ending in Chinese text, not an
+        # arbitrary non-ASCII word or a partly decoded damaged fragment.
+        return value if not _keyword_text_is_corrupted(value) and any("\u4e00" <= c <= "\u9fff" for c in value) else original
+    return recover(data)
+
+
 def is_keyword_config_usable(data):
     """Return false when a persisted keyword file is predominantly corrupted."""
     if not isinstance(data, dict):
@@ -2896,13 +2930,13 @@ def load_keywords():
     Source order:
     1. %APPDATA%/LiveClipper/keywords.json when the user has saved settings.
     2. app/keywords.json as the default/reset template.
-    3. config.STRICT_FORBIDDEN_PHRASES as the only non-editable safety floor.
+    3. Built-in phrases seed defaults only; a saved user list, including [], replaces them.
     """
     from config import STRICT_FORBIDDEN_PHRASES
 
     app_kw_path, user_kw_path = _keyword_file_paths()
     app_data = _load_keyword_file(app_kw_path)
-    user_data = _load_keyword_file(user_kw_path)
+    user_data = recover_keyword_encoding(_load_keyword_file(user_kw_path))
     using_user_data = bool(user_data and is_keyword_config_usable(user_data))
     source = user_data if using_user_data else app_data
 
@@ -2914,7 +2948,8 @@ def load_keywords():
         return fallback
 
     merged_forbidden = _clean_keyword_list(_pick("forbidden_phrases", []))
-    merged_forbidden = list(dict.fromkeys(merged_forbidden + _clean_keyword_list(list(STRICT_FORBIDDEN_PHRASES))))
+    if not (using_user_data and "forbidden_phrases" in user_data):
+        merged_forbidden = list(dict.fromkeys(merged_forbidden + _clean_keyword_list(list(STRICT_FORBIDDEN_PHRASES))))
     merged_clip_kw = _strip_forbidden_keyword_conflicts(
         _clean_keyword_map(_pick("clip_keywords", {})),
         merged_forbidden,
@@ -2926,7 +2961,7 @@ def load_keywords():
         default_pref = _clean_keyword_map(_DEFAULT_PREFERENCE_KEYWORDS)
     except Exception:
         default_pref = {}
-    merged_pref_base = dict(default_pref)
+    merged_pref_base = {} if using_user_data and "preference_keywords" in user_data else dict(default_pref)
     merged_pref_base.update(source_pref)
     merged_pref = _strip_forbidden_keyword_conflicts(
         merged_pref_base,

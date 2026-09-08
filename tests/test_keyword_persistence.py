@@ -34,6 +34,45 @@ class KeywordPersistenceTests(unittest.TestCase):
         self.effective["preference_keywords"]["口感食欲"] = ["系统默认词"]
         self.effective["_source"] = "runtime-only"
 
+    def test_recover_double_encoding_without_losing_colliding_categories(self):
+        broken = lambda text: text.encode("utf-8").decode("latin-1").encode("utf-8").decode("latin-1")
+        data = {"forbidden_phrases": [broken("羊毛"), "自定义"], "preference_keywords": {broken("版型显瘦"): [broken("修身")], "版型显瘦": ["利落"]}}
+        restored = ai_clipper.recover_keyword_encoding(data)
+        self.assertEqual(restored["forbidden_phrases"], ["羊毛", "自定义"])
+        self.assertEqual(restored["preference_keywords"], {"版型显瘦": ["修身", "利落"]})
+        self.assertEqual(ai_clipper.recover_keyword_encoding(restored), restored)
+        self.assertEqual(ai_clipper.recover_keyword_encoding("损坏�"), "损坏�")
+
+    def test_saved_deletion_and_empty_list_survive_reload_and_title_cleanup(self):
+        import config
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "keywords.json"
+            defaults = Path(temp) / "defaults.json"
+            defaults.write_text(json.dumps({"forbidden_phrases": ["羊毛", "价格"]}), encoding="utf-8")
+            with mock.patch.object(server, "_safe_user_child", return_value=target), mock.patch.object(ai_clipper, "_keyword_file_paths", return_value=(str(defaults), str(target))), mock.patch.object(server, "emit_log"):
+                for words in (["价格"], []):
+                    result = server.save_keywords({"changes": {"forbidden_phrases": words}})
+                    self.assertEqual(result["keywords"]["forbidden_phrases"], words)
+                    server._clear_ai_keyword_cache()
+                    self.assertEqual(server.get_keywords()["keywords"]["forbidden_phrases"], words)
+                    self.assertEqual(json.loads(target.read_text(encoding="utf-8"))["forbidden_phrases"], words)
+                    self.assertEqual(config.sanitize_forbidden_title("羊毛毛衣"), "羊毛毛衣")
+
+    def test_saved_empty_preference_map_does_not_restore_default_categories(self):
+        with mock.patch.object(ai_clipper, "_keyword_file_paths", return_value=("default", "user")), mock.patch.object(ai_clipper, "_load_keyword_file", side_effect=[{"preference_keywords": {"默认": ["默认词"]}}, {"preference_keywords": {}, "forbidden_phrases": []}]):
+            self.assertEqual(ai_clipper.load_keywords()["preference_keywords"], {})
+
+    def test_bad_encoding_is_rejected_without_overwriting_good_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "keywords.json"
+            target.write_text(json.dumps(self.raw), encoding="utf-8")
+            before = target.read_bytes()
+            with mock.patch.object(server, "_safe_user_child", return_value=target):
+                with self.assertRaises(server.HTTPException) as caught:
+                    server.save_keywords({"changes": {"forbidden_phrases": ["损坏�"]}})
+            self.assertEqual(caught.exception.status_code, 422)
+            self.assertEqual(target.read_bytes(), before)
+
     def test_explicit_changes_preserve_unedited_raw_vocabulary(self) -> None:
         payload = {"changes": {"filler_words": ["新的废话"]}}
         with mock.patch.object(server, "_load_keyword_config", return_value=copy.deepcopy(self.raw)):

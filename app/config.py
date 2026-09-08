@@ -269,11 +269,15 @@ STRICT_FORBIDDEN_PHRASES = [
 ]
 
 def forbidden_phrase_list(extra_phrases=None):
-    words = []
-    if extra_phrases:
-        words.extend(str(item).strip() for item in extra_phrases if str(item).strip())
-    words.extend(STRICT_FORBIDDEN_PHRASES)
-    return list(dict.fromkeys(words))
+    if extra_phrases is not None:
+        words = extra_phrases
+    else:
+        try:
+            from ai_clipper import load_keywords
+            words = load_keywords().get("forbidden_phrases", [])
+        except (ImportError, AttributeError):
+            words = STRICT_FORBIDDEN_PHRASES
+    return list(dict.fromkeys(str(item).strip() for item in words if str(item).strip()))
 
 
 def sanitize_forbidden_title(text, extra_phrases=None, fallback="未命名商品"):

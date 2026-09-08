@@ -8,12 +8,142 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from commercial_analyzer import (
     AnalyzerError, analyze_commercial_story, build_director_duration_audit,
     build_two_pass_story_prompt, build_two_pass_cast_prompt, director_delivery_duration_range,
-    _extract_json,
+    _extract_json, sanitize_two_pass_story_for_content_policy,
     _casting_chapter_duration_budgets,
+    _casting_execution_contract,
+    _semantic_unit_issues, _story_evidence_issues,
 )
 
 
 class DirectorDurationControlTests(unittest.TestCase):
+    def test_grouped_cast_is_expanded_without_a_third_call(self):
+        payload = self.cast(21)
+        chapter = payload["strategies"][0]["chapter_packets"][0]
+        before = chapter["beats"]
+        group = dict(before[0])
+        group["subtitle_ids"] = [sid for beat in before for sid in beat["subtitle_ids"]]
+        chapter["beats"] = [group]
+        result, calls, captured = self.run_ai(payload)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(result.director_sequence), 21)
+        self.assertIn("casting_format_normalization", captured)
+
+    def test_policy_removes_only_forbidden_requirements_from_mixed_chapter(self):
+        story = {"strategies": [{"strategy_id": "S2", "chapter_packets": [{
+            "chapter_id": "C2", "title": "毛衣的前世", "source_budget_seconds": 20,
+            "chapter_job": "从昂贵帽子的价格讲毛衣设计",
+            "completion_requirements": ["说明帽子如何启发毛衣设计", "强调帽子价格", "展示定制配色"],
+        }]}]}
+        fixed, audit = sanitize_two_pass_story_for_content_policy(story, {"price": "block"})
+        chapter = fixed["strategies"][0]["chapter_packets"][0]
+        self.assertEqual(chapter["chapter_id"], "C2")
+        self.assertEqual(chapter["completion_requirements"], ["说明帽子如何启发毛衣设计", "展示定制配色"])
+        self.assertNotIn("价格", chapter["chapter_job"])
+        self.assertEqual(chapter["source_budget_seconds"], 20)
+        self.assertEqual(audit["removed_chapters"], [])
+        self.assertEqual(len(audit["trimmed_chapters"]), 1)
+        self.assertEqual(len(story["strategies"][0]["chapter_packets"][0]["completion_requirements"]), 3)
+
+    def test_body_only_sales_chapter_is_not_promoted_to_opening(self):
+        story = {"strategies": [{"chapter_packets": [
+            {"chapter_id": "C1", "title": "百单火热进行", "chapter_job": "说明销量临近100单", "completion_requirements": ["营造商品受欢迎的氛围"]},
+            {"chapter_id": "C2", "title": "设计来源", "chapter_job": "解释设计由来", "completion_requirements": ["展示配色灵感"]},
+        ]}]}
+        fixed, audit = sanitize_two_pass_story_for_content_policy(story, {"social_proof": "body_only"})
+        self.assertEqual([c["chapter_id"] for c in fixed["strategies"][0]["chapter_packets"]], ["C2"])
+        self.assertEqual(len(audit["removed_chapters"]), 1)
+
+    def test_setup_budget_is_reserved_without_trimming_or_reordering_content(self):
+        story = {"strategies": [{"chapter_packets": [
+            {"chapter_id": "C1", "chapter_kind": "pain", "source_budget_seconds": 30},
+            {"chapter_id": "C2", "chapter_kind": "mechanism", "source_budget_seconds": 20},
+            {"chapter_id": "C3", "chapter_kind": "comfort", "source_budget_seconds": 19},
+        ]}]}
+        before = json.dumps(story)
+        chapters = _casting_chapter_duration_budgets(story, 69)[0]["chapters"]
+        self.assertEqual(chapters[0]["source_budget_seconds"], 10.35)
+        self.assertEqual(chapters[-1]["cumulative_source_seconds"], 69)
+        self.assertEqual(json.dumps(story), before)
+        self.assertEqual([c["chapter_id"] for c in chapters], ["C1", "C2", "C3"])
+
+    def test_overlong_cast_remains_editable_without_third_call(self):
+        strategy, calls, _ = self.run_ai(self.cast(45))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(strategy.director_sequence), 45)
+
+    def test_invalid_location_is_omitted_without_blocking_casting(self):
+        self.story["strategies"][0]["chapter_packets"][0]["evidence_locations"] = [1, 9999]
+        _, calls, _ = self.run_ai(self.cast(21))
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"evidence_locations":[1]', calls[1].kwargs["user_prompt"])
+        self.assertNotIn('9999', calls[1].kwargs["user_prompt"])
+
+    def test_many_story_locations_do_not_block_second_call(self):
+        self.story["strategies"][0]["chapter_packets"][0]["evidence_locations"] = list(range(1, 35))
+        _, calls, captured = self.run_ai(self.cast(21))
+        self.assertEqual(len(calls), 2)
+        self.assertIn("many_locations", captured["story_evidence_notes"])
+        self.assertIn('"evidence_locations":[1,2,3,4,5', calls[1].kwargs["user_prompt"])
+
+    def test_story_evidence_errors_distinguish_format_from_pool(self):
+        def check(value):
+            return _story_evidence_issues({"strategies": [{"chapter_packets": [
+                {"evidence_locations": value}]}]}, [1, 2])
+        self.assertEqual(check([]), [])
+        self.assertIn("evidence_format_invalid", check("1")[0])
+        self.assertIn("evidence_id_format_invalid", check(["1"])[0])
+        self.assertIn("evidence_outside_safe_pool", check([3])[0])
+
+    def test_story_locations_reach_casting_without_becoming_selected_beats(self):
+        story = {"strategies": [{"strategy_id": "S1", "chapter_packets": [{
+            "chapter_id": "C1", "source_budget_seconds": 20,
+            "evidence_locations": [41, 69], "completion_requirements": ["解释穿法"],
+        }]}]}
+        self.assertEqual(_story_evidence_issues(story, [41, 69]), [])
+        self.assertTrue(_story_evidence_issues(story, [41]))
+        contract = _casting_execution_contract(story, duration_range=director_delivery_duration_range(60))
+        chapter = contract["strategies"][0]["chapters"][0]
+        self.assertEqual(chapter["evidence_locations"], [41, 69])
+        self.assertNotIn("beats", chapter)
+
+    def test_cross_line_units_require_selected_adjacent_ordered_ids(self):
+        chapter = {"semantic_units": [[41, 42], [68, 69]]}
+        self.assertEqual(_semantic_unit_issues(chapter, [41, 42, 43, 68, 69]), [])
+        for sequence in ([42, 68, 69], [42, 41, 68, 69], [41, 43, 42, 68, 69]):
+            self.assertTrue(_semantic_unit_issues(chapter, sequence))
+
+    def test_unexecuted_semantic_unit_marks_chapter_for_review(self):
+        payload = self.cast(6)
+        chapter = payload["strategies"][0]["chapter_packets"][0]
+        chapter["completion_receipts"] = [{"requirement_index": 1, "subtitle_ids": [1, 2]}]
+        chapter["semantic_units"] = [[1, 3]]
+        audit = self.measure(payload)
+        self.assertIn("C1", audit["unverified_completion_chapter_ids"])
+        self.assertEqual(audit["selected_subtitle_ids"], [1, 2, 3, 4, 5, 6])
+
+    def test_short_utterances_scale_pacing_without_fixed_beat_cap(self):
+        rows = [{"id": i, "start": i * 3.0, "end": i * 3.0 + 2.5, "text": "真实短句"}
+                for i in range(1, 41)]
+        prompt = build_two_pass_cast_prompt(
+            story_contract={"strategies": [{"strategy_id": "S1", "chapter_packets": [
+                {"chapter_id": "C1", "source_budget_seconds": 15, "completion_requirements": ["结果"]},
+                {"chapter_id": "C2", "source_budget_seconds": 45, "completion_requirements": ["证据"]},
+            ]}]}, subtitles=rows, target_duration=60, output_speed_factor=1.15,
+        )
+        self.assertIn('"approximate_beats_for_target":28', prompt)
+        self.assertIn('"approximate_beats":21', prompt)
+        self.assertNotIn("每章最多 4", prompt)
+        self.assertNotIn("15-22", prompt)
+
+    def test_execution_preserves_fourth_completion_requirement(self):
+        requirements = ["回应顾虑", "斜肩", "小白鞋", "帽子"]
+        contract = _casting_execution_contract(
+            {"strategies": [{"chapter_packets": [{"chapter_id": "C5", "source_budget_seconds": 15,
+                                                 "completion_requirements": requirements}]}]},
+            duration_range=director_delivery_duration_range(60, 10, 1.15),
+        )
+        self.assertEqual(contract["strategies"][0]["chapters"][0]["needs"], requirements)
+
     def setUp(self):
         self.rows = [{"id": i, "start": i * 5.0, "end": i * 5.0 + 3.0,
                       "text": f"真实口播{i}讲明一个证据"} for i in range(1, 61)]
@@ -94,6 +224,54 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertIn('"source_target": 103.', prompt)
         self.assertIn("不得出现 beats、subtitle_ids", prompt)
 
+    def test_blocked_story_promise_is_removed_before_paid_beat_casting(self):
+        story = json.loads(json.dumps(self.story))
+        story["strategies"][0]["chapter_packets"] = [
+            {
+                "chapter_id": "C-price", "coverage": "required", "title": "99 元现在下单",
+                "chapter_job": "用价格促成购买", "completion_requirements": ["说清价格和抢购"],
+            },
+            {
+                "chapter_id": "C-proof", "coverage": "required", "title": "解释设计细节",
+                "chapter_job": "用口袋和袖边说明差异", "completion_requirements": ["展示设计细节"],
+            },
+            {
+                "chapter_id": "C-styling", "coverage": "recommended", "title": "搭配美元裤",
+                "chapter_job": "说明绿色上衣能搭美元裤", "completion_requirements": ["展示搭配效果"],
+            },
+        ]
+        sanitized, audit = sanitize_two_pass_story_for_content_policy(
+            story, {"price": "block", "cta": "block"},
+        )
+        kept = sanitized["strategies"][0]["chapter_packets"]
+        self.assertEqual([item["chapter_id"] for item in kept], ["C-proof", "C-styling"])
+        self.assertEqual(audit["status"], "policy_trimmed")
+        self.assertEqual(audit["removed_chapters"][0]["blocked_kinds"], ["cta", "price"])
+
+    def test_cast_execution_budgets_reconcile_speed_for_each_plan_without_changing_story(self):
+        story = json.loads(json.dumps(self.story))
+        primary = story["strategies"][0]
+        primary["chapter_packets"] = [
+            {**primary["chapter_packets"][0], "chapter_id": f"C{i}", "source_budget_seconds": seconds}
+            for i, seconds in enumerate([10, 8, 12, 12, 7, 6, 6], 1)
+        ]
+        other = json.loads(json.dumps(self.story["strategies"][0]))
+        other["strategy_id"] = "S2"
+        other["director_plan_role"] = "alternative"
+        story["strategies"].append(other)
+        original = json.loads(json.dumps(story))
+        prompt = build_two_pass_cast_prompt(
+            story_contract=story, subtitles=self.rows, target_duration=60,
+            output_speed_factor=1.15,
+        )
+        contract = next(json.loads(line) for line in prompt.splitlines()
+                        if line.startswith('{"version":"director-cast-exec-v1"'))
+        self.assertAlmostEqual(contract["duration"]["source_target"], 69)
+        for plan in contract["strategies"]:
+            self.assertAlmostEqual(sum(c["budget"] for c in plan["chapters"]), 69)
+        self.assertAlmostEqual(contract["strategies"][0]["chapters"][0]["budget"], 69 * 10 / 61, places=3)
+        self.assertEqual(story, original)
+
     def test_physical_pool_limit_is_separate_from_model_selection_shortfall(self):
         self.rows = self.rows[:10]
         limited = self.measure(self.cast(6))
@@ -160,13 +338,14 @@ class DirectorDurationControlTests(unittest.TestCase):
             executable_subtitle_ids=[1, 3], source_context_subtitles=self.rows,
             target_duration=60, output_speed_factor=1.15,
         )
-        table_line = prompt.split("可选时长表（ID→真实原声秒数）", 1)[1].splitlines()[1]
-        self.assertEqual(json.loads(table_line), {"1": 3.0, "3": 3.0})
+        self.assertIn("[ID 001][3.00s]", prompt)
+        self.assertIn("[ID 003][3.00s]", prompt)
+        self.assertNotIn("[ID 002][3.00s]", prompt)
         schema = json.loads(prompt.split("实际回复必须使用 director-wire-v1：", 1)[1].splitlines()[1])
         chapter = schema["packet"]["strategies"][0]["chapter_packets"][0]
         self.assertNotIn("duration_fill_beats", chapter)
-        self.assertLess(list(chapter).index("beats"), list(chapter).index("budget_execution"))
-        self.assertIn("sec", chapter["beats"][0])
+        self.assertNotIn("budget_execution", chapter)
+        self.assertNotIn("sec", chapter["beats"][0])
 
     def test_ai_receipt_cannot_inflate_measured_duration(self):
         payload = self.cast(10)
@@ -218,6 +397,34 @@ class DirectorDurationControlTests(unittest.TestCase):
         primary, calls, _ = self.run_ai(first, self.cast(20))
         self.assertEqual(len(calls), 3)
         self.assertEqual(primary.whole_video_audit["duration_control"]["initial"]["incomplete_chapter_ids"], ["C2"])
+
+    def test_complete_chapter_without_receipts_is_reviewable_but_does_not_buy_a_third_call(self):
+        audit = self.measure(self.cast(20))
+        self.assertEqual(audit["unverified_completion_chapter_ids"], ["C1", "C2", "C3"])
+        self.assertFalse(audit["needs_calibration"])
+        self.assertEqual(audit["chapters"][0]["completion_status"], "needs_review")
+
+    def test_completion_receipts_must_point_to_the_same_chapter_selection(self):
+        payload = self.cast(20)
+        for chapter in payload["strategies"][0]["chapter_packets"]:
+            chapter["completion_receipts"] = [{
+                "requirement_index": 1,
+                "subtitle_ids": [chapter["beats"][0]["subtitle_ids"][0]],
+            }]
+        audit = self.measure(payload)
+        self.assertEqual(audit["unverified_completion_chapter_ids"], [])
+        self.assertTrue(audit["chapters"][0]["completion_receipt_verified"])
+
+    def test_source_limited_chapter_remains_visible_without_an_unproductive_retry(self):
+        payload = self.cast(20)
+        payload["strategies"][0]["chapter_packets"][1].update({
+            "completion_status": "source_limited",
+            "missing_content": "没有主商品可执行的外套实穿证明",
+        })
+        audit = self.measure(payload)
+        self.assertEqual(audit["incomplete_chapter_ids"], ["C2"])
+        self.assertEqual(audit["retryable_incomplete_chapter_ids"], [])
+        self.assertFalse(audit["needs_calibration"])
 
     def test_still_short_is_truthful_editable_no_fourth_call(self):
         primary, calls, _ = self.run_ai(self.cast(10), self.cast(13))
