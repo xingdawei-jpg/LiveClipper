@@ -36,6 +36,15 @@ All of the following passed: signed remote update, atomic activation, rollback-s
 
 Eligible source versions are `2026.8.5.1`, `2026.8.5.2`, `2026.8.7.1`, `2026.8.8.1`, `2026.8.11.1`, `2026.8.11.2`, `2026.8.12.1`, `2026.8.12.2`, `2026.8.15.1`, `2026.9.3.2`, `2026.9.3.3`, `2026.9.4.1`, `2026.9.6.1`, and `2026.9.8.2`.
 
+## Post-publication endpoint check
+
+- Aliyun OSS stable channel: pass; serves the ready document with SHA-256 `202d61a1dc9323609dd5e48f2f902d2f699d34ef7e52e8e493fd8bc47e72eb0b`.
+- Aliyun OSS business archive: pass; downloaded size and SHA-256 match the signed channel.
+- jsDelivr fallback: timed out during this check.
+- Cloudflare Pages fallback: returned HTTP 404.
+
+The primary configured endpoint is healthy and is the only signed archive source in this release. The two fallback endpoints are not release acceptance evidence and require separate deployment repair.
+
 ## Scope notes
 
 This candidate improves AI Director direction and preview behavior, duration and content safeguards, local ASR device fallback and segment processing, plus the related settings and interface. It does not establish a measured paid-model token-cost or quality claim; a real paid-model production acceptance remains separate work.
