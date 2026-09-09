@@ -155,8 +155,30 @@ class DirectorStrategyTests(unittest.TestCase):
         self.assertEqual(main["director_plan_role"], "primary")
         self.assertFalse(main["requires_additional_ai_call"])
         self.assertEqual(option["director_plan_role"], "alternative")
+        self.assertTrue(option["available"])
         self.assertTrue(option["requires_additional_ai_call"])
         self.assertEqual(option["director_sequence"], [])
+
+    def test_single_plan_preview_keeps_both_direction_card_titles_selectable(self):
+        primary = replace(
+            _story("S1", "body_confidence", "显瘦又好穿", 1, priority="high"),
+            director_plan_role="primary",
+            director_title="显瘦主方案",
+            director_sequence=(DirectorBeat("B1", "result", "结果", (1,)), DirectorBeat("B2", "proof", "证明", (2,))),
+        )
+        second = replace(
+            _story("S2", "comfort_lifestyle", "夏天轻松出门", 3),
+            director_plan_role="alternative", director_title="凉快通勤方案",
+        )
+        third = replace(
+            _story("S3", "styling", "一衣多穿", 4),
+            director_plan_role="alternative", director_title="一衣多穿方案",
+        )
+
+        proposals = build_director_strategy_library((primary, second, third))["proposals"]
+
+        self.assertEqual([item["name"] for item in proposals], ["显瘦主方案", "凉快通勤方案", "一衣多穿方案"])
+        self.assertTrue(all(item["available"] and item["requires_additional_ai_call"] for item in proposals[1:]))
 
     def test_fully_cast_alternative_is_ready_without_another_ai_call(self):
         primary = replace(

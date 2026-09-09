@@ -968,6 +968,8 @@ def _load_settings() -> dict[str, Any]:
         "enabled": False,
         "asr_enabled": False,
         "local_asr_quality_retry_enabled": False,
+        "local_asr_device": "auto",
+        "local_asr_cpu_threads": 0,
         "asr_provider": "火山引擎",
         "asr_api_key": "",
         "asr_base_url": "https://dashscope.aliyuncs.com",
@@ -1019,6 +1021,7 @@ def _load_settings() -> dict[str, Any]:
     )
     defaults["ai_rules"] = ai_rules
     defaults["volc_region"] = _normalize_volc_region(defaults.get("volc_region"))
+    _normalize_local_asr_runtime_settings(defaults)
     _normalize_subtitle_style_settings(defaults)
     return _normalize_ai_model_defaults(defaults)
 
@@ -1049,6 +1052,7 @@ def _save_settings(settings: dict[str, Any]) -> bool:
         if planner_mode != M2_PLANNER_MODE_LEGACY else AI_DIRECTOR_MODE_LEGACY
     )
     data["volc_region"] = _normalize_volc_region(data.get("volc_region"))
+    _normalize_local_asr_runtime_settings(data)
     try:
         data["subtitle_font_size"] = max(32, min(96, int(float(data.get("subtitle_font_size", 52)))))
     except Exception:
@@ -1111,6 +1115,16 @@ def _normalize_volc_region(value: Any) -> str:
     text = str(value or "").strip()
     compact = text.replace(" ", "").replace("_", "-").lower()
     return VOLC_REGION_ALIASES.get(text) or VOLC_REGION_ALIASES.get(compact) or compact or "cn-beijing"
+
+
+def _normalize_local_asr_runtime_settings(settings: dict[str, Any]) -> None:
+    device = str(settings.get("local_asr_device") or "auto").strip().lower()
+    settings["local_asr_device"] = device if device in {"auto", "cpu"} else "auto"
+    try:
+        cpu_threads = int(settings.get("local_asr_cpu_threads", 0))
+    except (TypeError, ValueError):
+        cpu_threads = 0
+    settings["local_asr_cpu_threads"] = min(8, max(0, cpu_threads))
 
 
 def _get_user_data_dir() -> Path:
@@ -2026,6 +2040,8 @@ class SettingsPayload(BaseModel):
     enabled: bool = False
     asr_enabled: bool = False
     local_asr_quality_retry_enabled: bool = False
+    local_asr_device: str = "auto"
+    local_asr_cpu_threads: int = Field(default=0, ge=0, le=8)
     asr_provider: str = "火山引擎"
     asr_api_key: str = ""
     asr_base_url: str = ""
@@ -8455,6 +8471,46 @@ def _ready_director_direction(preview: dict[str, Any], proposal_id: str) -> dict
     return None
 
 
+def _pending_director_direction(preview: Mapping[str, Any], proposal_id: str) -> dict[str, Any] | None:
+    """Return the one in-flight paid direction so a second click never buys it twice."""
+    root_id = str(preview.get("id") or "").strip()
+    if not root_id or not proposal_id:
+        return None
+    with _CLIP_PREVIEW_LOCK:
+        pending = next((dict(item) for item in _CLIP_PREVIEWS.values() if (
+            str(item.get("director_family_root") or "") == root_id
+            and str(item.get("director_requested_proposal") or "") == proposal_id
+            and str(item.get("status") or "").lower() in {"queued", "running"}
+        )), None)
+    if not pending:
+        return None
+    return {
+        "ok": True,
+        "preview_id": str(pending.get("id") or ""),
+        "task_id": pending.get("task_id"),
+        "additional_ai_calls": 0,
+        "reused": True,
+        "running": True,
+        "message": "所选方案正在生成，继续查看同一任务，不会重复调用 AI。",
+    }
+
+
+def _director_on_demand_direction(proposal: Mapping[str, Any]) -> bool:
+    """Whether an M1-only alternative can safely be cast after confirmation.
+
+    A direction-only alternative intentionally has no M2 sentence sequence in
+    a one-plan preview. Its frozen M1 strategy id is sufficient to launch the
+    confirmed focused two-call run; this is different from a genuinely
+    unsupported proposal.
+    """
+
+    return bool(
+        proposal.get("requires_additional_ai_call")
+        and str(proposal.get("director_plan_role") or "").strip().lower() == "alternative"
+        and str(proposal.get("primary_story_id") or "").strip()
+    )
+
+
 def _get_preview(preview_id: str) -> dict[str, Any] | None:
     with _CLIP_PREVIEW_LOCK:
         preview = _CLIP_PREVIEWS.get(preview_id)
@@ -13199,6 +13255,7 @@ def _commerce_director_draft_review(
         "headline": "草案审阅：M2 计划未通过 M3 可物化合同",
         "m1_story": {
             "strategy_id": str(story.get("strategy_id") or ""),
+            "director_title": str(story.get("director_title") or ""),
             "thesis": str(story.get("thesis") or plan.get("thesis") or ""),
             "audience_tension": str(story.get("audience_tension") or ""),
             "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
@@ -13635,6 +13692,17 @@ def _run_commerce_director_preview(
         from cutter_logic import _planned_output_speed_factor
 
         director_strategy_contract = dict(director_strategy_contract or {})
+        # A confirmed on-demand alternative carries its selected M1 direction
+        # in the request contract as well as the worker argument.  Keeping one
+        # effective copy prevents a wrapper (for example mix preview setup)
+        # from silently dropping the user-selected focus.
+        contract_focus = director_strategy_contract.get("selected_alternative_direction")
+        if not isinstance(director_focus, Mapping) and isinstance(contract_focus, Mapping):
+            director_focus = dict(contract_focus)
+        elif isinstance(director_focus, Mapping):
+            director_focus = dict(director_focus)
+        else:
+            director_focus = None
         director_strategy_contract["output_speed_factor"] = _planned_output_speed_factor(
             payload.dedup_preset, payload.video,
         )
@@ -13803,6 +13871,7 @@ def _run_commerce_director_preview(
                 "headline": "AI 导演方案已建立，正在准备真实口播预览",
                 "m1_story": {
                     "strategy_id": str(story.get("strategy_id") or ""),
+                    "director_title": str(story.get("director_title") or ""),
                     "thesis": str(story.get("thesis") or ""),
                     "audience_tension": str(story.get("audience_tension") or ""),
                     "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
@@ -14118,6 +14187,7 @@ def _run_commerce_director_preview(
                 "headline": "AI 导演逐句预览",
                 "m1_story": {
                     "strategy_id": str(story.get("strategy_id") or ""),
+                    "director_title": str(story.get("director_title") or ""),
                     "thesis": str(story.get("thesis") or ""),
                     "audience_tension": str(story.get("audience_tension") or ""),
                     "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
@@ -14178,6 +14248,7 @@ def _run_commerce_director_preview(
                     "headline": "AI 导演逐句预览",
                     "m1_story": {
                         "strategy_id": str(variant_strategy.get("strategy_id") or ""),
+                        "director_title": str(variant_strategy.get("director_title") or ""),
                         "thesis": variant_core,
                         "audience_tension": str(variant_strategy.get("audience_tension") or ""),
                         "core_commercial_idea": variant_core,
@@ -14284,6 +14355,15 @@ def _run_commerce_director_preview(
             final_duration_audit = dict(
                 dict(duration_assessment.get("duration_control") or {}).get("final") or {}
             )
+            duration_quality_fulfilled = bool(
+                target_fulfilled
+                and not final_duration_audit.get("duplicate_subtitle_ids")
+                and not final_duration_audit.get("incomplete_chapter_ids")
+                and not final_duration_audit.get("unverified_completion_chapter_ids")
+                and not final_duration_audit.get("grouped_beat_issues")
+                and not final_duration_audit.get("long_continuous_utterance_group_count")
+                and not final_duration_audit.get("semantic_unit_span_issue_count")
+            )
             incomplete_chapters = [
                 str(item) for item in (final_duration_audit.get("incomplete_chapter_ids") or [])
                 if str(item).strip()
@@ -14339,7 +14419,10 @@ def _run_commerce_director_preview(
                     "planner_mode": planner_mode,
                     "planner_version": planner_mode_version(planner_mode),
                     "experiment_dir": str(experiment_dir),
-                    "m2_plan_valid": bool(plan_payload.get("plan_valid")),
+                    # A sentence preview remains editable when it misses the
+                    # duration/short-beat contract, but its persisted status
+                    # must not call that M2 plan valid.
+                    "m2_plan_valid": bool(plan_payload.get("plan_valid")) and duration_quality_fulfilled,
                     "m3_skipped": True,
                     "sentence_preview_editable": True,
                     "target_duration_fulfilled": target_fulfilled,
@@ -14472,6 +14555,7 @@ def _run_commerce_director_preview(
             "headline": "AI 导演方案与真实口播预览",
             "m1_story": {
                 "strategy_id": str(story.get("strategy_id") or ""),
+                "director_title": str(story.get("director_title") or ""),
                 "thesis": str(story.get("thesis") or ""),
                 "audience_tension": str(story.get("audience_tension") or ""),
                 "core_commercial_idea": str(story.get("core_commercial_idea") or ""),
@@ -15059,7 +15143,11 @@ def _director_batch_result_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
         state = "pending"
     return {
         "director_strategy_id": str(proposal.get("director_strategy_id") or ""),
-        "name": str(proposal.get("name") or "AI 导演方案"),
+        "name": str(
+            proposal.get("name")
+            or (review.get("m1_story") or {}).get("director_title")
+            or "AI 导演方案"
+        ),
         "icon": str(proposal.get("icon") or ""),
         "opening_promise": str(proposal.get("opening_promise") or ""),
         "commercial_goal": str(proposal.get("commercial_goal") or proposal.get("goal") or ""),
@@ -17553,7 +17641,6 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
     proposal_id = payload.director_strategy_id.strip()
     if not preview_id or not proposal_id:
         raise HTTPException(status_code=400, detail="请先选择一个 AI 导演方案。")
-    _ensure_scope_idle("smart-cut", "AI导演方案")
     previous = _get_preview(preview_id)
     if not previous or not previous.get("commercial_director_experiment"):
         raise HTTPException(status_code=409, detail="请先完成一次商业导演实验预览，建立商品故事地图。")
@@ -17561,6 +17648,10 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
     existing = _ready_director_direction(previous, proposal_id)
     if existing:
         return existing
+    pending = _pending_director_direction(previous, proposal_id)
+    if pending:
+        return pending
+    _ensure_scope_idle("smart-cut" if str(previous.get("scope") or "") != "mix" else "mix", "AI导演方案" if str(previous.get("scope") or "") != "mix" else "混剪AI导演备选方案")
     review = dict(previous.get("director_review") or {})
     story_library = dict(review.get("m1_story_library") or {})
     strategy_library = dict(review.get("director_strategy_library") or {})
@@ -17568,7 +17659,7 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
                      if isinstance(item, Mapping) and str(item.get("director_strategy_id") or "") == proposal_id), None)
     if proposal is None:
         raise HTTPException(status_code=404, detail="所选 AI 导演方案不在当前商品故事地图中。")
-    if not bool(proposal.get("available")):
+    if not bool(proposal.get("available")) and not _director_on_demand_direction(proposal):
         raise HTTPException(status_code=409, detail=str(proposal.get("unavailable_reason") or "当前素材无法支撑此方案。"))
     experiment_dir = Path(str((previous.get("dedup_summary") or {}).get("experiment_dir") or "")).resolve()
     experiment_root = _commerce_director_workspace_root()
@@ -17624,7 +17715,23 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
         )
         task_id = _new_task("smart-cut", f"AI导演备选方案：{proposal_id}")
         selected_preview_id = uuid.uuid4().hex
-        _store_preview(selected_preview_id, director_family_root=previous.get("id") or preview_id, director_requested_proposal=proposal_id)
+        root_preview_id = str(previous.get("id") or preview_id)
+        _store_preview(
+            selected_preview_id,
+            task_id=task_id,
+            scope="smart-cut",
+            status="queued",
+            message="已确认备选方向，正在启动导演编排和真实短句选片。",
+            created_at=time.time(),
+            target_duration=selected_payload.target_duration,
+            duration_tolerance=selected_payload.duration_tolerance,
+            clips=[],
+            hidden_from_latest=True,
+            commercial_director_experiment=True,
+            commercial_director_preview=True,
+            director_family_root=root_preview_id,
+            director_requested_proposal=proposal_id,
+        )
         focused_contract = {
             "single_ai_director_packet": True,
             "two_pass_director_packet": True,
@@ -17633,6 +17740,8 @@ def select_commerce_director_strategy(payload: CommerceDirectorStrategySelection
             "max_semantic_call_count": 2,
             "packet_mode": "confirmed_alternative",
             "requested_alternative_strategy_id": proposal_id,
+            # This is the user's frozen M1 direction, not a new program choice.
+            "selected_alternative_direction": dict(raw_direction),
         }
         threading.Thread(
             target=_run_task_worker,
@@ -17698,7 +17807,6 @@ def select_mix_commerce_director_strategy(
     proposal_id = payload.director_strategy_id.strip()
     if not preview_id or not proposal_id:
         raise HTTPException(status_code=400, detail="请先选择一个混剪 AI 导演方案。")
-    _ensure_scope_idle("mix", "混剪AI导演备选方案")
     previous = _get_preview(preview_id)
     if (
         not previous
@@ -17710,6 +17818,10 @@ def select_mix_commerce_director_strategy(
     existing = _ready_director_direction(previous, proposal_id)
     if existing:
         return existing
+    pending = _pending_director_direction(previous, proposal_id)
+    if pending:
+        return pending
+    _ensure_scope_idle("smart-cut" if str(previous.get("scope") or "") != "mix" else "mix", "AI导演方案" if str(previous.get("scope") or "") != "mix" else "混剪AI导演备选方案")
     review = dict(previous.get("director_review") or {})
     strategy_library = dict(review.get("director_strategy_library") or {})
     proposal = next(
@@ -17722,7 +17834,7 @@ def select_mix_commerce_director_strategy(
     )
     if proposal is None:
         raise HTTPException(status_code=404, detail="所选备选方向不在当前混剪导演方案中。")
-    if not bool(proposal.get("available")):
+    if not bool(proposal.get("available")) and not _director_on_demand_direction(proposal):
         raise HTTPException(
             status_code=409,
             detail=str(proposal.get("unavailable_reason") or "当前素材无法支撑此方向。"),
@@ -17770,7 +17882,22 @@ def select_mix_commerce_director_strategy(
     )
     task_id = _new_task("mix", f"混剪AI导演备选方案：{proposal_id}")
     selected_preview_id = uuid.uuid4().hex
-    _store_preview(selected_preview_id, director_family_root=previous.get("id") or preview_id, director_requested_proposal=proposal_id)
+    _store_preview(
+        selected_preview_id,
+        task_id=task_id,
+        scope="mix",
+        status="queued",
+        message="已确认备选方向，正在启动导演编排和真实短句选片。",
+        created_at=time.time(),
+        target_duration=selected_payload.duration,
+        duration_tolerance=selected_payload.duration_tolerance,
+        clips=[],
+        hidden_from_latest=True,
+        commercial_director_experiment=True,
+        commercial_director_preview=True,
+        director_family_root=str(previous.get("id") or preview_id),
+        director_requested_proposal=proposal_id,
+    )
     threading.Thread(
         target=_run_task_worker,
         args=(

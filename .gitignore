@@ -3,6 +3,16 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+
+# Local agent state and generated validation workspaces (retain on disk)
+.codex_logs/
+.codex_runtime/
+/artifacts/
+/workspace/
 
 # Build and release outputs
 build/

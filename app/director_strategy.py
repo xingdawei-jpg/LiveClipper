@@ -265,10 +265,14 @@ def _single_pass_proposal(strategy: Strategy, *, plan_role: str = "") -> dict[st
     return {
         "director_strategy_id": f"D_DIRECTOR_{strategy.strategy_id}",
         "director_mode": "single_pass_director",
-        "available": has_packet,
+        # A direction-only alternative is still a real, M1-authored option:
+        # it can be selected on demand after the operator confirms the extra
+        # AI cost. ``materialization_status`` tells the UI that it has no
+        # reusable sentence plan yet; it must not be presented as unavailable.
+        "available": has_packet or not is_primary,
         "unavailable_reason": (
             "主方案缺少至少两段真实口播，未进入物化。"
-            if not has_packet else ""
+            if not has_packet and is_primary else ""
         ),
         "primary_story_id": strategy.strategy_id,
         "supporting_story_ids": [],

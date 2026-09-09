@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import importlib
 import inspect
+import json
 import os
 import re
 import subprocess
@@ -22,16 +23,19 @@ from typing import Any, Callable
 
 from local_asr_chunking import (
     AudioChunk,
+    AudioChunkWriter,
     SHORT_FORM_MAX_CHUNK_SECONDS,
     SHORT_FORM_TARGET_CHUNK_SECONDS,
     build_pause_aware_audio_chunks,
-    write_audio_chunk,
 )
 
 
 _SENSEVOICE_MODEL: Any | None = None
 _SENSEVOICE_PUNCTUATION = False
-_MODEL_LOCK = threading.Lock()
+_SENSEVOICE_DEVICE = "cpu"
+_SENSEVOICE_DEVICE_REQUEST = "auto"
+_SENSEVOICE_CPU_THREADS = 4
+_MODEL_LOCK = threading.RLock()
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z]+(?:['-][A-Za-z]+)*|\d+(?:[.,:]\d+)*")
 
 # FunASR discovers registered components dynamically in a normal Python
@@ -68,6 +72,79 @@ _SENSEVOICE_REQUIRED_COMPONENTS = (
 
 class LocalASRUnavailable(RuntimeError):
     """The requested optional local ASR runtime or its model is unavailable."""
+
+
+def _local_asr_runtime_settings() -> dict[str, Any]:
+    """Read only the small ASR preferences without importing the AI pipeline.
+
+    The isolated worker can call this while a test or a running task has a
+    partially imported ``ai_clipper`` module.  Importing that full pipeline
+    here is both unnecessary and unsafe: it creates a large second import
+    graph while native ASR objects are being collected or initialized.
+    """
+    try:
+        from config import SETTINGS_PATH
+
+        with Path(SETTINGS_PATH).open("r", encoding="utf-8-sig") as handle:
+            settings = json.load(handle)
+        return dict(settings) if isinstance(settings, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cuda_is_available() -> bool:
+    """Return whether this bundled Torch runtime can actually use CUDA."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _resolve_sensevoice_device() -> tuple[str, str]:
+    """Choose the safe user-facing preference and its currently usable device."""
+    preference = str(_local_asr_runtime_settings().get("local_asr_device") or "auto").strip().lower()
+    if preference not in {"auto", "cpu"}:
+        preference = "auto"
+    if preference == "auto" and _cuda_is_available():
+        return preference, "cuda:0"
+    return preference, "cpu"
+
+
+def _sensevoice_cpu_threads() -> int:
+    """Bound FunASR's CPU pool so it remains fast without starving the desktop."""
+    configured = _local_asr_runtime_settings().get("local_asr_cpu_threads", 0)
+    try:
+        configured_threads = int(configured)
+    except (TypeError, ValueError):
+        configured_threads = 0
+    if configured_threads > 0:
+        return min(8, max(1, configured_threads))
+    logical_cpus = max(1, int(os.cpu_count() or 4))
+    return min(8, max(4, logical_cpus // 2))
+
+
+def _is_cuda_runtime_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "cuda", "cudnn", "cublas", "gpu", "device-side", "out of memory",
+    ))
+
+
+def _release_sensevoice_model() -> None:
+    """Forget the cached model before a one-time GPU-to-CPU recovery."""
+    global _SENSEVOICE_MODEL, _SENSEVOICE_PUNCTUATION, _SENSEVOICE_DEVICE
+    _SENSEVOICE_MODEL = None
+    _SENSEVOICE_PUNCTUATION = False
+    _SENSEVOICE_DEVICE = "cpu"
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _run_modelscope_quietly(operation: Callable[[], Any]) -> Any:
@@ -234,13 +311,29 @@ def _sensevoice_model_dir(log_fn: Callable[[str], None] | None = None) -> str:
     )
 
 
-def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
-    global _SENSEVOICE_MODEL, _SENSEVOICE_PUNCTUATION
-    if _SENSEVOICE_MODEL is not None:
+def _load_sensevoice(
+    log_fn: Callable[[str], None] | None = None,
+    *,
+    force_device: str | None = None,
+):
+    global _SENSEVOICE_MODEL, _SENSEVOICE_PUNCTUATION, _SENSEVOICE_DEVICE
+    global _SENSEVOICE_DEVICE_REQUEST, _SENSEVOICE_CPU_THREADS
+    # A loaded model is already bound to its execution device. Do not load
+    # Torch merely to rediscover that device for every audio file.
+    if _SENSEVOICE_MODEL is not None and force_device is None:
         return _SENSEVOICE_MODEL
     with _MODEL_LOCK:
-        if _SENSEVOICE_MODEL is not None:
+        if _SENSEVOICE_MODEL is not None and force_device is None:
             return _SENSEVOICE_MODEL
+        if force_device is not None:
+            selected_device = force_device
+            preference = "recovery"
+        else:
+            preference, selected_device = _resolve_sensevoice_device()
+        if _SENSEVOICE_MODEL is not None and _SENSEVOICE_DEVICE == selected_device:
+            return _SENSEVOICE_MODEL
+        if _SENSEVOICE_MODEL is not None:
+            _release_sensevoice_model()
         try:
             _register_sensevoice_components()
             from funasr.auto.auto_model import AutoModel
@@ -248,20 +341,30 @@ def _load_sensevoice(log_fn: Callable[[str], None] | None = None):
             raise LocalASRUnavailable("SenseVoice runtime is not installed") from exc
         if log_fn:
             log_fn("正在加载本地 SenseVoice（首次使用会下载模型）...")
+        cpu_threads = _sensevoice_cpu_threads()
         model_kwargs = {
             "model": _sensevoice_model_dir(log_fn),
             "vad_model": "fsmn-vad",
             "vad_kwargs": {"max_single_segment_time": 15000},
-            "device": "cpu",
+            "device": selected_device,
+            "ncpu": cpu_threads,
             "output_timestamp": True,
             "disable_update": True,
         }
         try:
             _SENSEVOICE_MODEL = _run_modelscope_quietly(lambda: AutoModel(**model_kwargs))
             _SENSEVOICE_PUNCTUATION = False
+            _SENSEVOICE_DEVICE = selected_device
+            _SENSEVOICE_DEVICE_REQUEST = preference
+            _SENSEVOICE_CPU_THREADS = cpu_threads
             if log_fn:
                 log_fn("SenseVoice 已跳过可选标点模型，使用停顿断句")
         except Exception as exc:
+            if selected_device.startswith("cuda") and preference == "auto":
+                _release_sensevoice_model()
+                if log_fn:
+                    log_fn("SenseVoice CUDA 初始化失败，已自动回退 CPU：" + str(exc))
+                return _load_sensevoice(log_fn, force_device="cpu")
             try:
                 debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
                 os.makedirs(os.path.dirname(debug_log), exist_ok=True)
@@ -375,10 +478,10 @@ def _sensevoice_segments(result: object, time_offset: float = 0.0) -> list[dict[
     return segments
 
 
-def _generate_sensevoice(model: Any, audio_path: str) -> object:
+def _generate_sensevoice(model: Any, audio_input: str | list[str]) -> object:
     """Keep all SenseVoice inference arguments identical for every chunk."""
     return model.generate(
-        input=audio_path,
+        input=audio_input,
         cache={},
         language="zh",
         use_itn=True,
@@ -389,6 +492,28 @@ def _generate_sensevoice(model: Any, audio_path: str) -> object:
         batch_size_s=120,
         merge_vad=False,
     )
+
+
+def _sensevoice_uses_cuda() -> bool:
+    return _SENSEVOICE_DEVICE.startswith("cuda")
+
+
+def _append_sensevoice_chunk_result(
+    segments: list[dict[str, Any]],
+    result: object,
+    chunk: AudioChunk,
+    index: int,
+    total: int,
+    log_fn: Callable[[str], None] | None,
+) -> None:
+    chunk_segments = _sensevoice_segments(result, time_offset=float(chunk.start))
+    if not chunk_segments:
+        # A pause-only tail may legitimately yield no tokens. Do not turn that
+        # into a failed job or fabricate a transcript.
+        if log_fn:
+            log_fn(f"SenseVoice 音频分段 {index}/{total} 未检测到语音，已跳过")
+        return
+    segments.extend(chunk_segments)
 
 
 def _sensevoice_pause_aware_segments(
@@ -414,32 +539,52 @@ def _sensevoice_pause_aware_segments(
 
     segments: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="liveclipper_sensevoice_") as temp_dir:
-        for index, chunk in enumerate(chunks, 1):
-            chunk_path = str(Path(temp_dir) / f"chunk_{index:04d}.wav")
-            write_audio_chunk(audio_path, chunk_path, chunk)
-            result = _generate_sensevoice(model, chunk_path)
-            chunk_segments = _sensevoice_segments(result, time_offset=float(chunk.start))
-            if not chunk_segments:
-                # A pause-only tail may legitimately yield no tokens. Do not
-                # turn that into a failed job or fabricate a transcript.
-                if log_fn:
-                    log_fn(f"SenseVoice 音频分段 {index}/{len(chunks)} 未检测到语音，已跳过")
-                continue
-            segments.extend(chunk_segments)
+        with AudioChunkWriter(audio_path) as writer:
+            chunk_paths: list[str] = []
+            for index, chunk in enumerate(chunks, 1):
+                chunk_path = str(Path(temp_dir) / f"chunk_{index:04d}.wav")
+                writer.write(chunk_path, chunk)
+                chunk_paths.append(chunk_path)
+
+            if _sensevoice_uses_cuda():
+                # FunASR accepts a list of inputs. Keeping these batches small
+                # limits VRAM pressure while reducing CUDA/VAD dispatch
+                # overhead. Every input remains the original 7–10 second
+                # interval, so CTC time restoration is unchanged.
+                batch_size = 8
+                for batch_start in range(0, len(chunks), batch_size):
+                    batch_chunks = chunks[batch_start:batch_start + batch_size]
+                    batch_paths = chunk_paths[batch_start:batch_start + batch_size]
+                    batch_result = _generate_sensevoice(model, batch_paths)
+                    if not isinstance(batch_result, list) or len(batch_result) != len(batch_chunks):
+                        if log_fn:
+                            log_fn("SenseVoice GPU 批量结果不完整，当前批次已改为逐段识别")
+                        batch_results = [_generate_sensevoice(model, path) for path in batch_paths]
+                    else:
+                        batch_results = batch_result
+                    for offset, (chunk, result) in enumerate(zip(batch_chunks, batch_results), 1):
+                        index = batch_start + offset
+                        _append_sensevoice_chunk_result(
+                            segments, result, chunk, index, len(chunks), log_fn,
+                        )
+            else:
+                for index, (chunk, chunk_path) in enumerate(zip(chunks, chunk_paths), 1):
+                    _append_sensevoice_chunk_result(
+                        segments,
+                        _generate_sensevoice(model, chunk_path),
+                        chunk,
+                        index,
+                        len(chunks),
+                        log_fn,
+                    )
 
     segments.sort(key=lambda segment: (float(segment["start"]), float(segment["end"])))
     return segments, len(chunks), hard_boundaries
 
 
 def _local_asr_review_settings() -> dict[str, Any]:
-    """Load existing ASR settings only after local recognition has succeeded."""
-    try:
-        from ai_clipper import load_settings
-
-        settings = load_settings()
-        return dict(settings) if isinstance(settings, dict) else {}
-    except Exception:
-        return {}
+    """Read review preferences through the same lightweight settings reader."""
+    return _local_asr_runtime_settings()
 
 
 def _offset_cloud_retry_segments(
@@ -562,11 +707,16 @@ def _review_sensevoice_segments(
 
 
 def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], None] | None = None) -> bool:
-    """Run SenseVoice CPU ASR and persist SRT plus CTC-aligned word timings."""
+    """Run local SenseVoice and persist SRT plus CTC-aligned word timings."""
     model = _load_sensevoice(log_fn)
     if log_fn:
         segmentation = "标点恢复" if _SENSEVOICE_PUNCTUATION else "停顿断句"
-        log_fn(f"启动本地 SenseVoice 高质量识别（{segmentation} + CTC 时间对齐）...")
+        execution = (
+            "NVIDIA CUDA GPU"
+            if _sensevoice_uses_cuda()
+            else f"CPU {int(_SENSEVOICE_CPU_THREADS)} 线程"
+        )
+        log_fn(f"启动本地 SenseVoice 高质量识别（{segmentation} + CTC 时间对齐 + {execution}）...")
     try:
         segments, input_chunk_count, _hard_boundaries = _sensevoice_pause_aware_segments(
             model,
@@ -574,7 +724,21 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
             log_fn=log_fn,
         )
     except Exception as exc:
-        raise LocalASRUnavailable(f"SenseVoice inference failed: {exc}") from exc
+        if _sensevoice_uses_cuda() and _is_cuda_runtime_error(exc):
+            if log_fn:
+                log_fn("SenseVoice CUDA 识别异常，已自动回退 CPU 并重试本次音频：" + str(exc))
+            _release_sensevoice_model()
+            try:
+                model = _load_sensevoice(log_fn, force_device="cpu")
+                segments, input_chunk_count, _hard_boundaries = _sensevoice_pause_aware_segments(
+                    model,
+                    audio_path,
+                    log_fn=log_fn,
+                )
+            except Exception as cpu_exc:
+                raise LocalASRUnavailable(f"SenseVoice CPU recovery failed: {cpu_exc}") from cpu_exc
+        else:
+            raise LocalASRUnavailable(f"SenseVoice inference failed: {exc}") from exc
     if not segments:
         raise LocalASRUnavailable("SenseVoice returned no timestamped speech segments")
 

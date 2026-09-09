@@ -18148,6 +18148,10 @@ def _safety_price_patterns():
         # with a wrong syllable (for example "经开价喽").
         re.compile(r'开\s*(?:个\s*)?价(?:了|喽|啦)?'),
         re.compile(r'价格'),
+        # Sellers often explain a low selling price without stating an amount.
+        # When price is blocked, keep that pricing rationale out of the pool too.
+        re.compile(r'(?:倍率|毛利)[^。！？!?]{0,8}(?:低|压|打)'),
+        re.compile(r'(?:低价|压价|控价)[^。！？!?]{0,10}(?:主推|品质|市场|成本)?'),
     ]
 
 
@@ -18182,6 +18186,8 @@ def _safety_cta_patterns():
         re.compile(r'321|三二一'),
         re.compile(r'拍.*链接|链接.*拍|去拍|赶紧拍|刷新拍|往[大小]拍'),
         re.compile(r'上链接|上连结|上連結|连结|連結|链接|号链接|左下角|小黄车|购物车|上车|下单|直接拍'),
+        re.compile(r'(?:给|让)?(?:新粉|大家|宝宝|姐妹)[^。！？!?]{0,8}带回去(?:感受|试试|体验)?'),
+        re.compile(r'(?:建议|推荐)[^。！？!?]{0,8}(?:购买|入手|带回去)'),
     ]
 
 
@@ -18203,7 +18209,7 @@ _POLICY_AFTER_SALE_PATTERNS = (
 )
 
 _POLICY_INVENTORY_PRESSURE_PATTERNS = (
-    re.compile(r"(?:库存|限量|断货|首批|现货|最后\d*件|没了|拼手速|手慢无|补不到|不补货)"),
+    re.compile(r"(?:库存|限量|断货|首批|现货|最后\d*件|没了|拼手速|手慢无|补不到|不补货|冲量|冲榜)"),
 )
 
 

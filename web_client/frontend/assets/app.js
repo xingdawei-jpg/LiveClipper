@@ -882,6 +882,8 @@ const settingFields = {
   enabled: "s-enabled",
   asr_enabled: "s-asr-enabled",
   local_asr_quality_retry_enabled: "s-local-asr-quality-retry-enabled",
+  local_asr_device: "s-local-asr-device",
+  local_asr_cpu_threads: "s-local-asr-cpu-threads",
   asr_provider: "s-asr-provider",
   volc_api_key: "s-volc-api-key",
   volc_tos_ak: "s-volc-tos-ak",
@@ -6239,46 +6241,75 @@ async function selectCommerceDirectorStrategy(directorStrategyId, requiresAdditi
     toast("请先完成一次商业导演实验，并从 AI 导演方案中选择", "warning");
     return;
   }
+  if (!state.commerceDirectorPendingStrategies) state.commerceDirectorPendingStrategies = {};
+  if (state.commerceDirectorPendingStrategies[scope]) {
+    toast("所选导演方案正在生成，请等待这次结果；不会重复调用 AI。", "warning");
+    return;
+  }
   const existing = commerceDirectorPlanRows(preview).find(item =>
     item.director_strategy_id === directorStrategyId && item.preview_id);
   if (existing) {
     await switchPreviewDirectorVariant(existing.preview_id, scope);
     return;
   }
-  if (requiresAdditionalAiCall && !window.confirm("生成这个备选方向通常调用 2 次 AI（故事章节、短句选片），在选片时按目标时长一次编排完整脚本，会产生新的模型费用；原始视频和字幕会复用。继续吗？")) {
+  const proposal = commerceDirectorPlanRows(preview).find((item) => (
+    item?.director_strategy_id === directorStrategyId
+  )) || {};
+  const strategyTitle = String(proposal?.title || proposal?.name || proposal?.director_title || proposal?.core_desire || "这个备选方向").trim();
+  if (requiresAdditionalAiCall && !window.confirm(`生成“${strategyTitle}”会额外调用 AI（最多 2 次：导演编排和短句选片），产生新的 token 费用；原始视频、字幕和主方案保持不变。确认生成吗？`)) {
     return;
   }
-  const result = await api(isMix ? "/api/mix/commerce-director/strategy/select" : "/api/smart-cut/commerce-director/strategy/select", {
-    method: "POST",
-    body: JSON.stringify({
-      preview_id: preview.id,
-      director_strategy_id: directorStrategyId,
-      confirm_additional_ai_call: Boolean(requiresAdditionalAiCall),
-    }),
-  });
-  if (result.reused) {
-    await switchPreviewDirectorVariant(result.preview_id, scope);
-    return;
+  state.commerceDirectorPendingStrategies[scope] = directorStrategyId;
+  try {
+    const result = await api(isMix ? "/api/mix/commerce-director/strategy/select" : "/api/smart-cut/commerce-director/strategy/select", {
+      method: "POST",
+      body: JSON.stringify({
+        preview_id: preview.id,
+        director_strategy_id: directorStrategyId,
+        confirm_additional_ai_call: Boolean(requiresAdditionalAiCall),
+      }),
+    });
+    if (result.reused) {
+      if (result.running) {
+        const message = result.message || "所选导演方案正在生成。";
+        toast(message, "success");
+        if (isMix) pollMixPreview(result.preview_id);
+        else pollSmartPreview(result.preview_id);
+        return;
+      }
+      delete state.commerceDirectorPendingStrategies[scope];
+      await switchPreviewDirectorVariant(result.preview_id, scope);
+      return;
+    }
+    // Keep the established plan group visible while the paid alternative runs.
+    // The returned child preview will replace this shell on the next poll.
+    const nextPreview = {
+      ...preview,
+      id: result.preview_id,
+      parent_preview_id: preview.parent_preview_id || preview.director_family_root || preview.id,
+      director_family_root: preview.director_family_root || preview.id,
+      status: "running",
+      message: requiresAdditionalAiCall ? "正在为所选备选方向确定故事章节并选择真实短句。" : "正在按所选 AI 导演方案生成真实口播预览。",
+      clips: [],
+      commercial_director_experiment: true,
+      commercial_director_preview: true,
+    };
+    if (isMix) {
+      state.mixPreview = nextPreview;
+      renderMixPreview(state.mixPreview);
+    } else {
+      state.smartPreview = nextPreview;
+      openCommerceDirectorStudio(state.smartPreview);
+      renderSmartPreview(state.smartPreview);
+    }
+    toast(result.message || "AI 导演方案已启动", "success");
+    refreshTasks();
+    if (isMix) pollMixPreview(result.preview_id);
+    else pollSmartPreview(result.preview_id);
+  } catch (error) {
+    delete state.commerceDirectorPendingStrategies[scope];
+    toast(error?.message || "启动所选导演方案失败", "error");
   }
-  const nextPreview = {
-    id: result.preview_id,
-    status: "running",
-    message: requiresAdditionalAiCall ? "正在为所选备选方向确定故事章节并选择真实短句。" : "正在按所选 AI 导演方案生成真实口播预览。",
-    clips: [],
-    commercial_director_experiment: true,
-  };
-  if (isMix) {
-    state.mixPreview = nextPreview;
-    renderMixPreview(state.mixPreview);
-  } else {
-    state.smartPreview = nextPreview;
-    openCommerceDirectorStudio(state.smartPreview);
-    renderSmartPreview(state.smartPreview);
-  }
-  toast(result.message || "AI 导演方案已启动", "success");
-  refreshTasks();
-  if (isMix) pollMixPreview(result.preview_id);
-  else pollSmartPreview(result.preview_id);
 }
 
 function selectCommerceDirectorProposal(directorStrategyId) {
@@ -6379,7 +6410,7 @@ function commerceDirectorStudioActiveResult(preview) {
     results: [], activeId: String(preview?.id || ""),
     result: {
       preview_id: preview?.id || "",
-      name: review.headline || "商业导演审阅",
+      name: commerceDirectorDisplayTitle(review, commerceDirectorDisplayTitle(review?.m1_story, "商业导演审阅")),
       icon: "",
       state: review.kind === "m3_materialized_review" ? "m3_materialized" : review.kind === "m2_draft_review_only" ? "m2_draft_review_only" : "pending",
       selected_seconds: timeline.reduce((sum, item) => sum + Number(item.duration || 0), 0),
@@ -6548,7 +6579,7 @@ function commerceDirectorStudioSolutionCards(results, activeId, activeResult) {
     const state = String(item?.state || "pending");
     const stateLabel = state === "m3_materialized" ? "M3 已完成" : state === "m2_draft_review_only" ? "M2 草案" : state === "blocked" ? "本方案失败" : "生成中";
     const journey = commerceDirectorJourneySummary(item?.m2_outline || []);
-    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""} is-${escapeHtml(state)}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(id)}" aria-pressed="${active ? "true" : "false"}"><header><strong>${escapeHtml(item?.icon || "")}${escapeHtml(item?.name || `方案 ${index + 1}`)}</strong><em>${active ? "当前方案" : stateLabel}</em></header><span class="commerce-director-solution-metrics">${Number(item?.selected_seconds || 0).toFixed(1)}s · ${Number(item?.clip_count || 0)} 段 · ${escapeHtml(stateLabel)}</span><p>${escapeHtml(item?.commercial_goal || item?.opening_promise || item?.error || "等待导演方案")}</p><small>购买路径：${escapeHtml(journey || "等待 M2 编排")}</small></button>`;
+    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""} is-${escapeHtml(state)}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(id)}" aria-pressed="${active ? "true" : "false"}"><header><strong>${escapeHtml(item?.icon || "")}${escapeHtml(commerceDirectorDisplayTitle(item, `方案 ${index + 1}`))}</strong><em>${active ? "当前方案" : stateLabel}</em></header><span class="commerce-director-solution-metrics">${Number(item?.selected_seconds || 0).toFixed(1)}s · ${Number(item?.clip_count || 0)} 段 · ${escapeHtml(stateLabel)}</span><p>${escapeHtml(item?.commercial_goal || item?.opening_promise || item?.error || "等待导演方案")}</p><small>购买路径：${escapeHtml(journey || "等待 M2 编排")}</small></button>`;
   }).join("")}</div>`;
 }
 
@@ -6587,8 +6618,10 @@ function commerceDirectorDiscoveryProposalCards(proposals, activeId) {
     const active = id === activeId || (!activeId && index === 0);
     const available = Boolean(proposal?.available);
     const extraAi = Boolean(proposal?.requires_additional_ai_call);
-    const actionLabel = extraAi ? "生成并查看（额外 AI 费用）" : "主方案已生成";
-    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""}" ${extraAi ? 'data-action="select-commerce-director-strategy"' : "disabled"} data-director-strategy-id="${escapeHtml(id)}" data-additional-ai-call="${extraAi ? "true" : "false"}" aria-pressed="${active ? "true" : "false"}" ${available ? "" : "disabled"}><strong>${escapeHtml(proposal?.icon || "")}${escapeHtml(proposal?.name || `方案 ${index + 1}`)}</strong><span>${escapeHtml(proposal?.opening_promise || proposal?.headline || "当前素材支持的导演方向")}</span><em>${extraAi ? actionLabel : "主方案预览已生成"}</em></button>`;
+    const canGenerate = commerceDirectorCanGenerateOnDemand(proposal);
+    const selectable = available || canGenerate;
+    const actionLabel = extraAi ? "生成并查看（需确认 AI 消耗）" : "主方案已生成";
+    return `<button type="button" class="commerce-director-studio-solution ${active ? "is-active" : ""}" ${extraAi && selectable ? 'data-action="select-commerce-director-strategy"' : "disabled"} data-director-strategy-id="${escapeHtml(id)}" data-additional-ai-call="${extraAi ? "true" : "false"}" aria-pressed="${active ? "true" : "false"}" ${selectable ? "" : "disabled"}><strong>${escapeHtml(proposal?.icon || "")}${escapeHtml(commerceDirectorDisplayTitle(proposal, `方案 ${index + 1}`))}</strong><span>${escapeHtml(proposal?.opening_promise || proposal?.headline || "当前素材支持的导演方向")}</span><em>${extraAi ? actionLabel : "主方案预览已生成"}</em></button>`;
   }).join("")}</div>`;
 }
 
@@ -8457,7 +8490,10 @@ async function pollSmartPreview(previewId, attempt = 0) {
       state.commerceDirectorLastServerRenderKey = nextRenderKey;
       renderSmartPreview(preview);
     }
-    if (preview.status === "ready" || preview.status === "failed") return;
+    if (preview.status === "ready" || preview.status === "failed") {
+      if (state.commerceDirectorPendingStrategies) delete state.commerceDirectorPendingStrategies.smart;
+      return;
+    }
   } catch (error) {
     if (attempt > 3) toast(error.message || "读取选片预览失败", "error");
   }
@@ -8470,7 +8506,10 @@ async function pollMixPreview(previewId, attempt = 0) {
     const preview = await api(`/api/mix/preview/${encodeURIComponent(previewId)}`);
     state.mixPreview = preview;
     renderMixPreview(preview);
-    if (preview.status === "ready" || preview.status === "failed") return;
+    if (preview.status === "ready" || preview.status === "failed") {
+      if (state.commerceDirectorPendingStrategies) delete state.commerceDirectorPendingStrategies.mix;
+      return;
+    }
   } catch (error) {
     if (attempt > 3) toast(error.message || "读取混剪选片预览失败", "error");
   }
@@ -9350,12 +9389,14 @@ function renderDirectorStrategyLibrary(review) {
     const structure = proposal.video_structure || {};
     const structureName = structure.name || proposal.narrative_archetype || "导演自定义结构";
     const extraAi = Boolean(proposal.requires_additional_ai_call);
-    const action = available
+    const canGenerate = commerceDirectorCanGenerateOnDemand(proposal);
+    const selectable = available || canGenerate;
+    const action = selectable
       ? (extraAi
-        ? `<button class="button button-primary button-small" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(proposal.director_strategy_id || "")}" data-additional-ai-call="true">生成并查看（额外 AI 费用）</button>`
+        ? `<button class="button button-primary button-small" data-action="select-commerce-director-strategy" data-director-strategy-id="${escapeHtml(proposal.director_strategy_id || "")}" data-additional-ai-call="true">生成并查看（需确认 AI 消耗）</button>`
         : `<span class="preview-notice">主方案已生成真实口播预览</span>`)
       : `<span class="preview-notice">${escapeHtml(proposal.unavailable_reason || "当前素材暂不支持")}</span>`;
-    return `<article class="commerce-director-strategy-card ${available ? "is-available" : "is-unavailable"}"><div class="commerce-director-strategy-card-head"><div><strong>${escapeHtml(proposal.icon || "")}${escapeHtml(proposal.name || "AI 导演方案")}</strong><span>${escapeHtml(proposal.commercial_goal || proposal.goal || "")}</span></div><em>${Number(proposal.estimated_natural_duration || 0).toFixed(1)}s</em></div><p>${escapeHtml(proposal.headline || "")}</p><dl><div><dt>视频结构</dt><dd>${escapeHtml(structureName)}</dd></div><div><dt>开场承诺</dt><dd>${escapeHtml(proposal.opening_promise || "未形成可验证承诺")}</dd></div><div><dt>故事组合</dt><dd>${escapeHtml(mix || "当前无可验证故事")}</dd></div></dl><footer>${action}</footer></article>`;
+    return `<article class="commerce-director-strategy-card ${selectable ? "is-available" : "is-unavailable"}"><div class="commerce-director-strategy-card-head"><div><strong>${escapeHtml(proposal.icon || "")}${escapeHtml(commerceDirectorDisplayTitle(proposal))}</strong><span>${escapeHtml(proposal.commercial_goal || proposal.goal || "")}</span></div><em>${Number(proposal.estimated_natural_duration || 0).toFixed(1)}s</em></div><p>${escapeHtml(proposal.headline || "")}</p><dl><div><dt>视频结构</dt><dd>${escapeHtml(structureName)}</dd></div><div><dt>开场承诺</dt><dd>${escapeHtml(proposal.opening_promise || "未形成可验证承诺")}</dd></div><div><dt>故事组合</dt><dd>${escapeHtml(mix || "当前无可验证故事")}</dd></div></dl><footer>${action}</footer></article>`;
   }).join("");
   return `<section class="commerce-director-strategies"><div class="commerce-director-section-head"><div><strong>AI 发现的 ${proposals.length} 种卖法</strong><span>本次只生成主方案；备选方向通常调用 2 次 AI，在选片时按目标时长一次编排完整脚本，再按真实原话生成预览。</span></div></div><div class="commerce-director-strategy-grid">${cards}</div></section>`;
 }
@@ -9603,13 +9644,13 @@ function renderCommerceDirectorBatch(review) {
     const outline = result.m2_outline || [];
     const timeline = commerceDirectorTimelineRows(result.timeline || [], outline);
     const video = playable && result.review_video_available
-      ? commerceDirectorPreviewPanel(result.preview_id, `${result.name || "AI 导演方案"}审阅视频`)
+      ? commerceDirectorPreviewPanel(result.preview_id, `${commerceDirectorDisplayTitle(result)}审阅视频`)
       : '<div class="commerce-director-video-unavailable">本方案没有可播放审阅视频</div>';
-    return `<article class="commerce-director-result-card" id="commerce-director-result-${escapeHtml(result.director_strategy_id || result.preview_id || "plan")}"><header><div><strong>${escapeHtml(result.icon || "")}${escapeHtml(result.name || "AI 导演方案")}</strong><span>${escapeHtml(stateCopy[state] || stateCopy.pending)}</span></div><em>${Number(result.selected_seconds || 0).toFixed(1)}s · ${Number(result.clip_count || 0)} 段</em></header><div class="commerce-director-plan-summary"><div><span>开场承诺</span><strong>${escapeHtml(result.opening_promise || "未标注")}</strong></div><div><span>商业目标</span><strong>${escapeHtml(result.commercial_goal || "未标注")}</strong></div></div><div class="commerce-director-studio-stage"><div class="commerce-director-studio-video">${video}</div><aside class="commerce-director-studio-path">${commerceDirectorM2Outline(outline)}</aside></div><div class="commerce-director-script-head"><strong>方案口播编排</strong><span>完整文本已展开，无需再查看日志</span></div>${timeline}${outcome ? `<p class="preview-notice">${escapeHtml(outcome)}</p>` : ""}<p class="commerce-director-experiment-note">实验审阅结果，不进入正式预览、导出或发布。</p></article>`;
+    return `<article class="commerce-director-result-card" id="commerce-director-result-${escapeHtml(result.director_strategy_id || result.preview_id || "plan")}"><header><div><strong>${escapeHtml(result.icon || "")}${escapeHtml(commerceDirectorDisplayTitle(result))}</strong><span>${escapeHtml(stateCopy[state] || stateCopy.pending)}</span></div><em>${Number(result.selected_seconds || 0).toFixed(1)}s · ${Number(result.clip_count || 0)} 段</em></header><div class="commerce-director-plan-summary"><div><span>开场承诺</span><strong>${escapeHtml(result.opening_promise || "未标注")}</strong></div><div><span>商业目标</span><strong>${escapeHtml(result.commercial_goal || "未标注")}</strong></div></div><div class="commerce-director-studio-stage"><div class="commerce-director-studio-video">${video}</div><aside class="commerce-director-studio-path">${commerceDirectorM2Outline(outline)}</aside></div><div class="commerce-director-script-head"><strong>方案口播编排</strong><span>完整文本已展开，无需再查看日志</span></div>${timeline}${outcome ? `<p class="preview-notice">${escapeHtml(outcome)}</p>` : ""}<p class="commerce-director-experiment-note">实验审阅结果，不进入正式预览、导出或发布。</p></article>`;
   };
   const jumpCards = results.map((result) => {
     const selected = String(result?.preview_id || "") === activeId;
-    return `<button type="button" class="commerce-director-result-jump ${selected ? "is-active" : ""}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(result.preview_id || "")}" aria-pressed="${selected ? "true" : "false"}"><strong>${escapeHtml(result.icon || "")}${escapeHtml(result.name || "AI 导演方案")}</strong><span>${escapeHtml(result.opening_promise || "未标注开场")}</span><em>${Number(result.selected_seconds || 0).toFixed(1)}s</em></button>`;
+    return `<button type="button" class="commerce-director-result-jump ${selected ? "is-active" : ""}" data-action="select-commerce-director-result" data-director-preview-id="${escapeHtml(result.preview_id || "")}" aria-pressed="${selected ? "true" : "false"}"><strong>${escapeHtml(result.icon || "")}${escapeHtml(commerceDirectorDisplayTitle(result))}</strong><span>${escapeHtml(result.opening_promise || "未标注开场")}</span><em>${Number(result.selected_seconds || 0).toFixed(1)}s</em></button>`;
   }).join("");
   return `<section class="commerce-director-batch"><div class="commerce-director-section-head"><div><strong>直接比较 ${results.length} 条导演方案</strong><span>先选择一种卖法；视频、购买路径和完整口播在下方同屏审阅。</span></div></div><nav class="commerce-director-result-jumps" aria-label="审阅方案">${jumpCards}</nav><div class="commerce-director-result-grid">${renderResult(activeResult)}</div></section>`;
 }
@@ -13710,6 +13751,34 @@ function commerceDirectorProposalId(item) {
   return String(item?.primary_story_id || item?.strategy_id || item?.director_strategy_id || "").trim();
 }
 
+function commerceDirectorDisplayTitle(item, fallback = "AI 导演方案") {
+  const values = [
+    item?.title,
+    item?.name,
+    item?.director_title,
+    item?.m1_story?.director_title,
+    item?.story?.director_title,
+    item?.angle,
+    item?.core_desire,
+    item?.core_commercial_idea,
+    item?.thesis,
+    item?.headline,
+  ];
+  const title = values.map((value) => String(value || "").trim()).find((value) => (
+    value && !/^S\d+$/i.test(value)
+  ));
+  return title || fallback;
+}
+
+function commerceDirectorCanGenerateOnDemand(item) {
+  const role = String(item?.director_plan_role || "").trim().toLowerCase();
+  return Boolean(
+    item?.requires_additional_ai_call
+    && String(item?.primary_story_id || item?.strategy_id || "").trim()
+    && (Boolean(item?.available) || role === "alternative" || item?.materialization_status === "direction_only")
+  );
+}
+
 function commerceDirectorPlanRows(preview) {
   const review = preview?.director_review || {};
   const proposals = review?.director_strategy_library?.proposals || [];
@@ -13720,9 +13789,10 @@ function commerceDirectorPlanRows(preview) {
       || String(v.strategy_id || "") === strategyId);
     const active = strategyId === String(review.active_director_strategy_id || "")
       || item.director_strategy_id === review.active_director_strategy_id;
+    const canGenerate = commerceDirectorCanGenerateOnDemand(item);
     return {...item, strategy_id: strategyId,
       preview_id: variant?.preview_id || (active ? preview.id : ""),
-      can_generate: Boolean(item.available && item.requires_additional_ai_call),
+      can_generate: canGenerate,
       available: Boolean(variant?.preview_id || active), ...variant};
   });
   variants.forEach(v => { if (!rows.some(r => r.preview_id === v.preview_id)) rows.push(v); });
@@ -13789,7 +13859,13 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
   if (!primary && !String(story?.thesis || story?.core_commercial_idea || "").trim()) return "";
 
   const primaryStory = stories.find((item) => String(item?.story_id || "") === String(primary?.primary_story_id || story?.strategy_id || "")) || {};
-  const title = String(primary?.name || primaryStory?.angle || review?.headline || "AI \u63a8\u8350\u65b9\u6848").trim();
+  const activePlan = planRows.find((item) => String(item?.preview_id || "") === String(preview?.id || ""))
+    || planRows.find((item) => String(item?.strategy_id || "") === activeStrategyId)
+    || null;
+  const title = commerceDirectorDisplayTitle(
+    activePlan,
+    commerceDirectorDisplayTitle(primary, commerceDirectorDisplayTitle(story, "AI 推荐方案")),
+  );
   const promise = String(primary?.why_this_plan || primaryStory?.purchase_reason || story?.core_commercial_idea || story?.thesis || "").trim();
   const openingPromise = String(primary?.opening_promise || primaryStory?.payoff || story?.payoff || "").trim();
   const structure = primary?.video_structure || {};
@@ -13833,7 +13909,7 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
   const alternativeCards = alternatives.map((item, index) => {
     const previewId = String(item?.preview_id || "").trim();
     const ready = Boolean(previewId && item?.available !== false);
-    const cardTitle = String(item?.title || item?.name || `备用导演方案 ${index + 1}`).trim();
+    const cardTitle = commerceDirectorDisplayTitle(item, `备用导演方案 ${index + 1}`);
     const cardCore = String(item?.core_desire || item?.commercial_goal || item?.why_this_plan || "").trim();
     const cardStructure = String(item?.video_structure?.name || item?.narrative_archetype || "差异化方向").trim();
     const selectedForRender = ready && renderSelection.has(previewId);

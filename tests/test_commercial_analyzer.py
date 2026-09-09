@@ -30,6 +30,7 @@ from commercial_analyzer import (
     compute_duration_feasibility,
     detect_content_dependencies,
     director_duration_depth_contract,
+    director_casting_output_max_tokens,
     director_target_duration_range,
     filter_director_executable_ids_for_content_policy,
     matches_story_semantic_signature,
@@ -570,6 +571,15 @@ class PromptTests(unittest.TestCase):
 
 
 class TwoPassDirectorTests(unittest.TestCase):
+    def test_one_version_story_prompt_requires_two_selectable_direction_cards(self) -> None:
+        story_prompt = build_two_pass_story_prompt(
+            product="白衬衫", subtitles=SAMPLE_SUBTITLES, director_plan_count=1,
+        )
+        self.assertIn("恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要", story_prompt)
+        self.assertIn('"strategy_id":"S2"', story_prompt)
+        self.assertIn('"strategy_id":"S3"', story_prompt)
+        self.assertIn("不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段", story_prompt)
+
     def test_three_version_story_and_cast_prompts_request_three_complete_plans(self) -> None:
         story_prompt = build_two_pass_story_prompt(
             product="白衬衫", subtitles=SAMPLE_SUBTITLES, director_plan_count=3,
@@ -800,6 +810,37 @@ class TwoPassDirectorTests(unittest.TestCase):
             self.assertNotIn("99元", prompt)
             self.assertNotIn("尺码表", prompt)
 
+    def test_content_policy_removes_pricing_and_cta_euphemisms_before_director_calls(self) -> None:
+        subtitles = [
+            {"id": 1, "start": 0.0, "end": 2.0, "text": "这件毛衣的倍率打得很低"},
+            {"id": 2, "start": 2.1, "end": 4.1, "text": "这是拿出来冲量冲榜的宝贝"},
+            {"id": 3, "start": 4.2, "end": 6.2, "text": "给所有新粉带回去感受品质"},
+            {"id": 4, "start": 6.3, "end": 8.3, "text": "腰部收口会显得比例更高"},
+        ]
+
+        safe_ids, audit = filter_director_executable_ids_for_content_policy(
+            subtitles, None,
+            {"price": "block", "cta": "block", "inventory_pressure": "block"},
+        )
+
+        self.assertEqual(safe_ids, [4])
+        self.assertEqual([item["subtitle_id"] for item in audit["excluded"]], [1, 2, 3])
+
+    def test_content_policy_removes_delivery_timing_euphemisms_before_director_calls(self) -> None:
+        subtitles = [
+            {"id": 1, "start": 0.0, "end": 2.0, "text": "这个灰色上身更显利落"},
+            {"id": 2, "start": 2.1, "end": 4.1, "text": "今天发明天你就收到了"},
+            {"id": 3, "start": 4.2, "end": 6.2, "text": "拍下以后很快就能到货"},
+        ]
+
+        safe_ids, audit = filter_director_executable_ids_for_content_policy(
+            subtitles, None, {"after_sale": "block"},
+        )
+
+        self.assertEqual(safe_ids, [1])
+        self.assertEqual([item["subtitle_id"] for item in audit["excluded"]], [2, 3])
+        self.assertTrue(all(item["blocked_kinds"] == ["after_sale"] for item in audit["excluded"]))
+
     def test_policy_trimmed_60_second_story_stops_before_casting(self) -> None:
         story = {"strategies": [{
             "strategy_id": "S1",
@@ -912,7 +953,10 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertIn("long_complete_exception", prompt)
         self.assertNotIn("[ID 005]", prompt)
         self.assertIn("没有 Strong Ranking、没有 TopK", prompt)
-        self.assertIn("程序逐 ID 展开并精确计时，不改变选择", prompt)
+        self.assertIn("只返回最终可执行 beats", prompt)
+        self.assertNotIn('"alternative_beats":', prompt)
+        self.assertNotIn('"compared_packages":', prompt)
+        self.assertIn("每个最终 beat 的 ids 必须恰好写一个 ID", prompt)
         self.assertIn('"subtitle_ids"', prompt)
         self.assertNotIn('"chapter_readthrough":', prompt)
         self.assertIn("程序按 ID 还原全文并实测时长", prompt)
@@ -924,6 +968,11 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertNotIn("expected_total_beats", TWO_PASS_CAST_SYSTEM_PROMPT + prompt)
         self.assertNotIn("00:00:", prompt)
         self.assertLess(prompt.index("[ID 002]"), prompt.index("第一遍的完整故事"))
+
+    def test_single_plan_casting_receives_completion_margin_without_raising_multi_plan_budget(self) -> None:
+        self.assertEqual(director_casting_output_max_tokens(1), 5200)
+        self.assertEqual(director_casting_output_max_tokens(2), 8000)
+        self.assertEqual(director_casting_output_max_tokens(3), 12000)
 
     def test_chapter_alternatives_survive_without_entering_final_sequence(self) -> None:
         strategy = Strategy.from_dict({
@@ -1062,7 +1111,7 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertNotIn("chapter_readthrough", post.call_args_list[1].kwargs["user_prompt"])
         self.assertIn('"version":"director-cast-exec-v1"', post.call_args_list[1].kwargs["user_prompt"])
         self.assertEqual(post.call_args_list[0].kwargs["max_tokens"], 3000)
-        self.assertEqual(post.call_args_list[1].kwargs["max_tokens"], 4000)
+        self.assertEqual(post.call_args_list[1].kwargs["max_tokens"], 5200)
         self.assertEqual(progress_stages, [
             "story_contract_started", "story_contract_completed",
             "beat_casting_started", "beat_casting_completed",

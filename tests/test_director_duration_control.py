@@ -12,6 +12,7 @@ from commercial_analyzer import (
     _casting_chapter_duration_budgets,
     _casting_execution_contract,
     _semantic_unit_issues, _story_evidence_issues,
+    _story_evidence_location_conflicts, _apply_casting_chapter_revisions,
 )
 
 
@@ -27,6 +28,9 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(result.director_sequence), 21)
         self.assertIn("casting_format_normalization", captured)
+        audit = result.whole_video_audit["duration_control"]["final"]
+        self.assertEqual(audit["grouped_beat_issues"][0]["subtitle_ids"], list(range(1, 8)))
+        self.assertFalse(audit["target_range_fulfilled"])
 
     def test_policy_removes_only_forbidden_requirements_from_mixed_chapter(self):
         story = {"strategies": [{"strategy_id": "S2", "chapter_packets": [{
@@ -106,6 +110,97 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertEqual(chapter["evidence_locations"], [41, 69])
         self.assertNotIn("beats", chapter)
 
+    def test_cast_contract_carries_new_buyer_advance_and_shared_evidence_hint(self):
+        story = {"strategies": [{"strategy_id": "S1", "chapter_packets": [
+            {"chapter_id": "C1", "buyer_advance": "知道裙子能遮住胯部", "source_budget_seconds": 20,
+             "evidence_locations": [49, 50]},
+            {"chapter_id": "C2", "buyer_advance": "明白高腰怎么拉长比例", "source_budget_seconds": 20,
+             "evidence_locations": [28, 50]},
+        ]}]}
+        contract = _casting_execution_contract(story, duration_range=director_delivery_duration_range(60))
+        strategy = contract["strategies"][0]
+        self.assertEqual(strategy["chapters"][0]["advance"], "知道裙子能遮住胯部")
+        self.assertEqual(strategy["evidence_conflicts"], [{
+            "strategy_id": "S1", "subtitle_ids": [50], "chapter_ids": ["C1", "C2"],
+        }])
+        self.assertEqual(_story_evidence_location_conflicts(story["strategies"][0]), [{
+            "strategy_id": "S1", "subtitle_ids": [50], "chapter_ids": ["C1", "C2"],
+        }])
+
+    def test_casting_can_merge_and_drop_chapters_within_the_same_second_call(self):
+        story = {"strategies": [{"strategy_id": "S1", "chapter_packets": [
+            {"chapter_id": "C1", "title": "胯宽困扰", "buyer_advance": "认识腿型问题", "chapter_job": "提出问题",
+             "completion_requirements": ["说清胯宽困扰"]},
+            {"chapter_id": "C2", "title": "高腰显高", "buyer_advance": "理解高腰作用", "chapter_job": "解释原因",
+             "completion_requirements": ["说清高腰穿法"]},
+            {"chapter_id": "C3", "title": "空场景", "buyer_advance": "适合所有场合", "chapter_job": "讲场景",
+             "completion_requirements": ["说明场景"]},
+        ]}]}
+        cast = {"strategies": [{"strategy_id": "S1", "chapter_packets": [
+            {"chapter_id": "C1", "beats": [{"subtitle_ids": [1]}], "chapter_revision": {
+                "action": "merge", "source_chapter_ids": ["C1", "C2"],
+                "title": "身材适配与穿法", "buyer_advance": "知道如何通过穿法兼顾遮胯和比例",
+                "chapter_job": "把身材问题落到高低腰穿法", "completion_requirements": ["说明身材适配和穿法"],
+            }},
+            {"chapter_id": "C3", "beats": [], "chapter_revision": {
+                "action": "drop", "source_chapter_ids": ["C3"], "reason": "没有真实场景口播",
+            }},
+        ]}]}
+        effective_story, effective_cast, audit = _apply_casting_chapter_revisions(story, cast)
+        chapters = effective_story["strategies"][0]["chapter_packets"]
+        self.assertEqual([chapter["chapter_id"] for chapter in chapters], ["C1"])
+        self.assertEqual(chapters[0]["title"], "身材适配与穿法")
+        self.assertEqual(chapters[0]["cast_chapter_revision"]["source_chapter_ids"], ["C1", "C2"])
+        self.assertEqual(audit["strategies"][0]["status"], "applied")
+        self.assertEqual(effective_cast["strategies"][0]["chapter_packets"][1]["chapter_revision"]["action"], "drop")
+
+    def test_invalid_chapter_revision_does_not_change_the_first_story_contract(self):
+        story = {"strategies": [{"strategy_id": "S1", "chapter_packets": [
+            {"chapter_id": "C1", "title": "第一章"}, {"chapter_id": "C2", "title": "第二章"},
+        ]}]}
+        cast = {"strategies": [{"strategy_id": "S1", "chapter_packets": [{
+            "chapter_id": "C2", "beats": [{"subtitle_ids": [2]}], "chapter_revision": {
+                "action": "merge", "source_chapter_ids": ["C2", "C1"],
+                "title": "错误合并", "buyer_advance": "错误", "chapter_job": "错误", "completion_requirements": ["错误"],
+            },
+        }]}]}
+        effective_story, effective_cast, audit = _apply_casting_chapter_revisions(story, cast)
+        self.assertEqual([chapter["chapter_id"] for chapter in effective_story["strategies"][0]["chapter_packets"]], ["C1", "C2"])
+        self.assertEqual(audit["strategies"][0]["status"], "ignored_invalid")
+        self.assertNotIn("chapter_revision", effective_cast["strategies"][0]["chapter_packets"][0])
+
+    def test_duration_audit_reports_long_continuous_source_group_without_splitting_it(self):
+        rows = [
+            {"id": 1, "start": 0.0, "end": 3.0, "text": "第一句完整解释"},
+            {"id": 2, "start": 3.2, "end": 6.2, "text": "第二句继续解释"},
+            {"id": 3, "start": 6.4, "end": 9.4, "text": "第三句完成结论"},
+        ]
+        story = {"strategies": [{"chapter_packets": [{"chapter_id": "C1"}]}]}
+        cast = {"strategies": [{"chapter_packets": [{"chapter_id": "C1", "beats": [
+            {"subtitle_ids": [1]}, {"subtitle_ids": [2]}, {"subtitle_ids": [3]},
+        ]}]}]}
+        audit = build_director_duration_audit(
+            casting_payload=cast, story_contract=story, subtitles=rows, target_duration=10,
+        )
+        self.assertEqual(audit["long_continuous_utterance_group_count"], 1)
+        self.assertEqual(audit["chapters"][0]["long_continuous_utterance_groups"][0]["subtitle_ids"], [1, 2, 3])
+
+    def test_execution_frontloads_each_chapter_duration_window(self):
+        story = {"strategies": [{"strategy_id": "S1", "chapter_packets": [
+            {"chapter_id": "C1", "source_budget_seconds": 20, "completion_requirements": ["结果"]},
+            {"chapter_id": "C2", "source_budget_seconds": 40, "completion_requirements": ["证明"]},
+        ]}]}
+        duration = director_delivery_duration_range(60, 10, 1.15)
+        contract = _casting_execution_contract(story, duration_range=duration)
+        chapters = contract["strategies"][0]["chapters"]
+
+        self.assertAlmostEqual(sum(chapter["budget_floor"] for chapter in chapters), duration["source_min"])
+        self.assertAlmostEqual(sum(chapter["budget"] for chapter in chapters), duration["source_target"])
+        self.assertAlmostEqual(sum(chapter["budget_ceiling"] for chapter in chapters), duration["source_max"])
+        self.assertEqual(chapters[-1]["budget_end_floor"], duration["source_min"])
+        self.assertEqual(chapters[-1]["budget_end"], duration["source_target"])
+        self.assertEqual(chapters[-1]["budget_end_ceiling"], duration["source_max"])
+
     def test_cross_line_units_require_selected_adjacent_ordered_ids(self):
         chapter = {"semantic_units": [[41, 42], [68, 69]]}
         self.assertEqual(_semantic_unit_issues(chapter, [41, 42, 43, 68, 69]), [])
@@ -134,6 +229,19 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertIn('"approximate_beats":21', prompt)
         self.assertNotIn("每章最多 4", prompt)
         self.assertNotIn("15-22", prompt)
+
+    def test_casting_prompt_requires_one_call_duration_self_check(self):
+        prompt = build_two_pass_cast_prompt(
+            story_contract=self.story, subtitles=self.rows,
+            target_duration=60, output_speed_factor=1.15,
+        )
+
+        self.assertIn('"budget_floor"', prompt)
+        self.assertIn('"budget_end_floor"', prompt)
+        self.assertIn('"duration_receipt"', prompt)
+        self.assertIn("若不在 source_min/source_max 内，不得写 pass", prompt)
+        self.assertIn("每个最终 beat 的 ids 必须恰好写一个 ID", prompt)
+        self.assertIn("总原声不超过 8 秒", prompt)
 
     def test_execution_preserves_fourth_completion_requirement(self):
         requirements = ["回应顾虑", "斜肩", "小白鞋", "帽子"]

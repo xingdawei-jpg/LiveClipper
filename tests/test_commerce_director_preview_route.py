@@ -178,7 +178,7 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                     "director_strategy_id": "D2",
                     "primary_story_id": "S2",
                     "name": "夏日松弛感",
-                    "available": True,
+                    "available": False, "director_plan_role": "alternative",
                     "requires_additional_ai_call": True,
                 }]}},
             }
@@ -223,7 +223,8 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                 "commercial_director_experiment": True, "video": "C:/source.mp4", "srt_path": "C:/source.srt",
                 "target_duration": 60, "dedup_summary": {"experiment_dir": str(experiment_dir)},
                 "director_review": {"director_strategy_library": {"proposals": [{
-                    "director_strategy_id": "D2", "primary_story_id": "S2", "available": True,
+                    "director_strategy_id": "D2", "primary_story_id": "S2", "available": False,
+                    "director_plan_role": "alternative",
                     "requires_additional_ai_call": True,
                 }]}},
             }
@@ -240,7 +241,46 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
             args = thread.call_args.kwargs["args"]
             self.assertEqual(args[4].ai_controls, {**controls, "content_policy": {"price": "block"}})
             self.assertEqual(args[-1]["strategy_id"], "S2")
+            self.assertEqual(args[8]["selected_alternative_direction"]["strategy_id"], "S2")
+            queued = server._get_preview(result["preview_id"])
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["director_requested_proposal"], "D2")
             self.assertEqual(result["additional_ai_calls"], 2)
+
+    def test_pending_smart_alternative_reuses_queued_task_without_new_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(server._CLIP_PREVIEWS, {}, clear=True):
+            root = Path(tmp)
+            experiment_dir = root / "workspace" / "ui_commerce_director_experiment" / "source-task"
+            experiment_dir.mkdir(parents=True)
+            (experiment_dir / "m1_story_brief.json").write_text(json.dumps({
+                "m1_result": {"strategies": [{"strategy_id": "S2", "director_plan_role": "alternative"}]},
+            }), encoding="utf-8")
+            (experiment_dir / "source_info.json").write_text(json.dumps({"director_controls": {}}, ensure_ascii=False), encoding="utf-8")
+            server._store_preview(
+                "root", status="ready", scope="smart-cut", commercial_director_experiment=True,
+                video="C:/source.mp4", srt_path="C:/source.srt", target_duration=60,
+                dedup_summary={"experiment_dir": str(experiment_dir)},
+                director_review={"director_strategy_library": {"proposals": [{
+                    "director_strategy_id": "D2", "primary_story_id": "S2", "available": False,
+                    "director_plan_role": "alternative", "requires_additional_ai_call": True,
+                }]}},
+            )
+            payload = server.CommerceDirectorStrategySelectionPayload(
+                preview_id="root", director_strategy_id="D2", confirm_additional_ai_call=True,
+            )
+            with (
+                mock.patch.object(server, "REPO_ROOT", root),
+                mock.patch.object(server, "_ensure_scope_idle"),
+                mock.patch.object(server, "_new_task", return_value="alt-task") as new_task,
+                mock.patch.object(server.threading, "Thread") as thread,
+            ):
+                first = server.select_commerce_director_strategy(payload)
+                second = server.select_commerce_director_strategy(payload)
+            self.assertEqual(first["preview_id"], second["preview_id"])
+            self.assertTrue(second["running"])
+            self.assertEqual(second["additional_ai_calls"], 0)
+            self.assertEqual(new_task.call_count, 1)
+            self.assertEqual(thread.call_count, 1)
 
     def test_mix_director_virtual_ranges_map_back_to_each_real_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

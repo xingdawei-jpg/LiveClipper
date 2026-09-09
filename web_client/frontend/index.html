@@ -1832,6 +1832,23 @@
                   <label>本地备用识别</label>
                   <span>SenseVoice（带时间对齐）</span>
                 </div>
+                <div class="field-row">
+                  <label for="s-local-asr-device">本地识别加速</label>
+                  <select id="s-local-asr-device">
+                    <option value="auto">自动（优先 NVIDIA GPU）</option>
+                    <option value="cpu">仅使用 CPU</option>
+                  </select>
+                </div>
+                <div class="field-row">
+                  <label for="s-local-asr-cpu-threads">CPU 识别线程</label>
+                  <select id="s-local-asr-cpu-threads">
+                    <option value="0">自动（建议）</option>
+                    <option value="4">4 线程</option>
+                    <option value="6">6 线程</option>
+                    <option value="8">8 线程</option>
+                  </select>
+                </div>
+                <p class="panel-note">GPU 初始化或识别异常会自动回退 CPU；短视频分段与词级时间轴保持不变。</p>
               </div>
 
               <div class="panel">

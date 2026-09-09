@@ -192,17 +192,40 @@ def build_pause_aware_audio_chunks(
     return chunks
 
 
-def write_audio_chunk(audio_path: str | Path, output_path: str | Path, chunk: AudioChunk) -> None:
-    """Write one exact PCM WAV interval without resampling or changing samples."""
-    with wave.open(str(audio_path), "rb") as reader:
-        sample_rate = int(reader.getframerate())
-        total_frames = int(reader.getnframes())
+class AudioChunkWriter:
+    """Write PCM WAV chunks while keeping the source file open for the batch."""
+
+    def __init__(self, audio_path: str | Path) -> None:
+        self.audio_path = Path(audio_path)
+        self._reader: wave.Wave_read | None = None
+
+    def __enter__(self) -> "AudioChunkWriter":
+        self._reader = wave.open(str(self.audio_path), "rb")
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+
+    def write(self, output_path: str | Path, chunk: AudioChunk) -> None:
+        """Write one interval. This object must be used as a context manager."""
+        if self._reader is None:
+            raise RuntimeError("AudioChunkWriter must be used as a context manager")
+
+        sample_rate = int(self._reader.getframerate())
+        total_frames = int(self._reader.getnframes())
         start_frame = min(total_frames, max(0, int(round(float(chunk.start) * sample_rate))))
         end_frame = min(total_frames, max(start_frame, int(round(float(chunk.end) * sample_rate))))
-        reader.setpos(start_frame)
-        payload = reader.readframes(end_frame - start_frame)
-        params = reader.getparams()
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(output_path), "wb") as writer:
-        writer.setparams(params)
-        writer.writeframes(payload)
+        self._reader.setpos(start_frame)
+        payload = self._reader.readframes(end_frame - start_frame)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as writer:
+            writer.setparams(self._reader.getparams())
+            writer.writeframes(payload)
+
+
+def write_audio_chunk(audio_path: str | Path, output_path: str | Path, chunk: AudioChunk) -> None:
+    """Write one exact PCM WAV interval without resampling or changing samples."""
+    with AudioChunkWriter(audio_path) as writer:
+        writer.write(output_path, chunk)

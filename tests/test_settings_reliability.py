@@ -66,6 +66,15 @@ class SettingsReliabilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 500)
         self.assertEqual(raised.exception.detail, "设置保存失败：用户数据目录不可写")
 
+    def test_local_asr_runtime_settings_are_safe_by_default_and_normalized(self) -> None:
+        payload = server.SettingsPayload()
+        self.assertEqual(payload.local_asr_device, "auto")
+        self.assertEqual(payload.local_asr_cpu_threads, 0)
+
+        values = {"local_asr_device": "CUDA", "local_asr_cpu_threads": 99}
+        server._normalize_local_asr_runtime_settings(values)
+        self.assertEqual(values, {"local_asr_device": "auto", "local_asr_cpu_threads": 8})
+
     def test_planner_mode_save_is_experimental_only_for_lite_and_legacy_is_fail_closed(self) -> None:
         values = {"m2_planner_mode": "lite_director_experiment"}
         with mock.patch.object(ai_clipper, "save_settings", return_value=True) as save:

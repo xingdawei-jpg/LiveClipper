@@ -146,9 +146,11 @@ class LocalAsrQualityTests(unittest.TestCase):
         }):
             with mock.patch.object(local_asr, "_register_sensevoice_components"):
                 with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
-                    local_asr._SENSEVOICE_MODEL = None
-                    local_asr._SENSEVOICE_PUNCTUATION = False
-                    loaded = local_asr._load_sensevoice()
+                    with mock.patch.object(local_asr, "_resolve_sensevoice_device", return_value=("cpu", "cpu")):
+                        with mock.patch.object(local_asr, "_sensevoice_cpu_threads", return_value=4):
+                            local_asr._SENSEVOICE_MODEL = None
+                            local_asr._SENSEVOICE_PUNCTUATION = False
+                            loaded = local_asr._load_sensevoice()
 
         self.assertIs(loaded, sentinel)
         self.assertFalse(local_asr._SENSEVOICE_PUNCTUATION)
@@ -177,15 +179,110 @@ class LocalAsrQualityTests(unittest.TestCase):
                 }):
                     with mock.patch.object(local_asr, "_register_sensevoice_components"):
                         with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
-                            local_asr._SENSEVOICE_MODEL = None
-                            local_asr._SENSEVOICE_PUNCTUATION = False
-                            with self.assertRaisesRegex(local_asr.LocalASRUnavailable, "core model unavailable"):
-                                local_asr._load_sensevoice()
+                            with mock.patch.object(local_asr, "_resolve_sensevoice_device", return_value=("cpu", "cpu")):
+                                with mock.patch.object(local_asr, "_sensevoice_cpu_threads", return_value=4):
+                                    local_asr._SENSEVOICE_MODEL = None
+                                    local_asr._SENSEVOICE_PUNCTUATION = False
+                                    with self.assertRaisesRegex(local_asr.LocalASRUnavailable, "core model unavailable"):
+                                        local_asr._load_sensevoice()
 
         self.assertFalse(local_asr._SENSEVOICE_PUNCTUATION)
         self.assertEqual(len(calls), 1)
         self.assertNotIn("punc_model", calls[0])
         local_asr._SENSEVOICE_MODEL = None
+
+    def test_runtime_settings_read_only_the_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "ai_settings.json"
+            settings_path.write_text(
+                json.dumps({"local_asr_device": "cpu", "local_asr_cpu_threads": 6}),
+                encoding="utf-8",
+            )
+            fake_config = types.ModuleType("config")
+            fake_config.SETTINGS_PATH = str(settings_path)
+            with mock.patch.dict(sys.modules, {"config": fake_config}):
+                self.assertEqual(
+                    local_asr._local_asr_runtime_settings(),
+                    {"local_asr_device": "cpu", "local_asr_cpu_threads": 6},
+                )
+
+    def test_loaded_model_is_reused_without_another_device_probe(self) -> None:
+        sentinel = object()
+        local_asr._SENSEVOICE_MODEL = sentinel
+        local_asr._SENSEVOICE_DEVICE = "cpu"
+        try:
+            with mock.patch.object(local_asr, "_resolve_sensevoice_device") as resolve:
+                self.assertIs(local_asr._load_sensevoice(), sentinel)
+            resolve.assert_not_called()
+        finally:
+            local_asr._SENSEVOICE_MODEL = None
+            local_asr._SENSEVOICE_DEVICE = "cpu"
+
+    def test_auto_cuda_loader_falls_back_to_cpu_when_gpu_initialization_fails(self) -> None:
+        calls = []
+        sentinel = object()
+
+        def fake_auto_model(**kwargs):
+            calls.append(kwargs)
+            if kwargs["device"] == "cuda:0":
+                raise RuntimeError("CUDA driver unavailable")
+            return sentinel
+
+        fake_auto_module = types.ModuleType("funasr.auto.auto_model")
+        fake_auto_module.AutoModel = fake_auto_model
+        fake_auto_package = types.ModuleType("funasr.auto")
+        fake_funasr = types.ModuleType("funasr")
+        logs: list[str] = []
+        with mock.patch.dict(sys.modules, {
+            "funasr": fake_funasr,
+            "funasr.auto": fake_auto_package,
+            "funasr.auto.auto_model": fake_auto_module,
+        }):
+            with mock.patch.object(local_asr, "_register_sensevoice_components"):
+                with mock.patch.object(local_asr, "_sensevoice_model_dir", return_value="C:\\models\\SenseVoice"):
+                    with mock.patch.object(local_asr, "_resolve_sensevoice_device", return_value=("auto", "cuda:0")):
+                        with mock.patch.object(local_asr, "_sensevoice_cpu_threads", return_value=6):
+                            local_asr._SENSEVOICE_MODEL = None
+                            local_asr._SENSEVOICE_DEVICE = "cpu"
+                            loaded = local_asr._load_sensevoice(logs.append)
+
+        self.assertIs(loaded, sentinel)
+        self.assertEqual([call["device"] for call in calls], ["cuda:0", "cpu"])
+        self.assertTrue(any("CUDA 初始化失败" in entry for entry in logs))
+        self.assertEqual(calls[-1]["ncpu"], 6)
+        local_asr._SENSEVOICE_MODEL = None
+        local_asr._SENSEVOICE_DEVICE = "cpu"
+
+    def test_cuda_inference_failure_retries_the_same_audio_on_cpu(self) -> None:
+        source_segments = [{
+            "text": "很好",
+            "start": 0.0,
+            "end": 0.2,
+            "words": _timed_characters("很好"),
+        }]
+        logs: list[str] = []
+        local_asr._SENSEVOICE_DEVICE = "cuda:0"
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                srt_path = Path(temp_dir) / "recovered.srt"
+                with (
+                    mock.patch.object(local_asr, "_load_sensevoice", side_effect=[object(), object()]) as load,
+                    mock.patch.object(
+                        local_asr,
+                        "_sensevoice_pause_aware_segments",
+                        side_effect=[RuntimeError("CUDA out of memory"), (source_segments, 2, 0)],
+                    ) as recognize,
+                    mock.patch.object(local_asr, "_review_sensevoice_segments", side_effect=lambda segments, *_args, **_kwargs: segments),
+                ):
+                    self.assertTrue(local_asr.sensevoice_to_srt("source.wav", str(srt_path), logs.append))
+
+            self.assertEqual(load.call_count, 2)
+            self.assertEqual(load.call_args_list[1].kwargs, {"force_device": "cpu"})
+            self.assertEqual(recognize.call_count, 2)
+            self.assertTrue(any("CUDA 识别异常" in entry for entry in logs))
+        finally:
+            local_asr._SENSEVOICE_MODEL = None
+            local_asr._SENSEVOICE_DEVICE = "cpu"
 
     def test_model_dir_reuses_modelscope_snapshot_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

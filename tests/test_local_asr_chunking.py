@@ -52,11 +52,12 @@ class LocalAsrChunkingTests(unittest.TestCase):
             self.assertTrue(all(chunk.boundary_reason != "hard_limit" for chunk in chunks[:-1]))
 
             copied_frames = 0
-            for index, chunk in enumerate(chunks, 1):
-                output = Path(temp_dir) / f"chunk-{index}.wav"
-                chunking.write_audio_chunk(audio, output, chunk)
-                with wave.open(str(output), "rb") as reader:
-                    copied_frames += reader.getnframes()
+            with chunking.AudioChunkWriter(audio) as writer:
+                for index, chunk in enumerate(chunks, 1):
+                    output = Path(temp_dir) / f"chunk-{index}.wav"
+                    writer.write(output, chunk)
+                    with wave.open(str(output), "rb") as reader:
+                        copied_frames += reader.getnframes()
             self.assertEqual(copied_frames, total_frames)
 
     def test_continuous_audio_uses_hard_limit_without_gaps(self) -> None:
@@ -107,14 +108,17 @@ class LocalAsrChunkingTests(unittest.TestCase):
                 }]
 
         model = FakeModel()
-        with (
-            mock.patch.object(local_asr, "build_pause_aware_audio_chunks", return_value=chunks),
-            mock.patch.object(local_asr, "write_audio_chunk"),
-        ):
-            segments, chunk_count, hard_count = local_asr._sensevoice_pause_aware_segments(
-                model,
-                "source.wav",
-            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "source.wav"
+            _write_pcm_wave(audio, 10.0, [(0.0, 10.0)])
+            with (
+                mock.patch.object(local_asr, "build_pause_aware_audio_chunks", return_value=chunks),
+                mock.patch.object(local_asr, "_SENSEVOICE_DEVICE", "cpu"),
+            ):
+                segments, chunk_count, hard_count = local_asr._sensevoice_pause_aware_segments(
+                    model,
+                    str(audio),
+                )
 
         self.assertEqual((chunk_count, hard_count), (2, 0))
         self.assertEqual(len(model.inputs), 2)
@@ -125,6 +129,45 @@ class LocalAsrChunkingTests(unittest.TestCase):
         self.assertEqual(segments[1]["end"], 5.6)
         self.assertEqual(segments[1]["words"][0]["start"], 5.0)
         self.assertEqual(segments[1]["words"][-1]["end"], 5.6)
+
+    def test_cuda_batches_short_chunks_without_changing_ctc_offsets(self) -> None:
+        chunks = [
+            chunking.AudioChunk(0.0, 5.0, "pause"),
+            chunking.AudioChunk(5.0, 10.0, "source_end"),
+        ]
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.inputs: list[object] = []
+
+            def generate(self, **kwargs):
+                value = kwargs["input"]
+                self.inputs.append(value)
+                self.assertIsInstance(value, list)
+                return [
+                    {"text": "好", "timestamp": [[0, 200]]}
+                    for _ in value
+                ]
+
+            def assertIsInstance(self, value: object, expected: type) -> None:
+                if not isinstance(value, expected):
+                    raise AssertionError(f"expected {expected}, got {type(value)}")
+
+        model = FakeModel()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "source.wav"
+            _write_pcm_wave(audio, 10.0, [(0.0, 10.0)])
+            with (
+                mock.patch.object(local_asr, "build_pause_aware_audio_chunks", return_value=chunks),
+                mock.patch.object(local_asr, "_SENSEVOICE_DEVICE", "cuda:0"),
+            ):
+                segments, chunk_count, _ = local_asr._sensevoice_pause_aware_segments(model, str(audio))
+
+        self.assertEqual(chunk_count, 2)
+        self.assertEqual(len(model.inputs), 1)
+        self.assertIsInstance(model.inputs[0], list)
+        self.assertEqual(len(model.inputs[0]), 2)
+        self.assertEqual([segment["start"] for segment in segments], [0.0, 5.0])
 
 
 if __name__ == "__main__":

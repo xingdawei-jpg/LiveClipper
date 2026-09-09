@@ -197,6 +197,19 @@ class ContentPolicyTests(unittest.TestCase):
         self.assertTrue(any("CTA" in issue for issue in blocked))
         self.assertFalse(any("CTA" in issue for issue in allowed))
 
+    def test_pricing_and_cta_euphemisms_follow_task_policy(self) -> None:
+        blocked = _policy(price="block", cta="block", inventory_pressure="block")
+        allowed = _policy(price="allow", cta="allow", inventory_pressure="allow")
+        phrases = [
+            "这件毛衣的倍率打得很低",
+            "这是拿出来冲量冲榜的宝贝",
+            "给所有新粉带回去感受品质",
+        ]
+
+        for phrase in phrases:
+            self.assertTrue(ai_clipper._policy_block_reasons(phrase, blocked), phrase)
+            self.assertFalse(ai_clipper._policy_block_reasons(phrase, allowed), phrase)
+
     def test_body_only_content_never_promotes_to_hook(self) -> None:
         price = "今天到手价199，但这件肩线向内收，视觉更利落。"
         size_reply = "我身高160体重98，穿S码正合适。"
