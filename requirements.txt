@@ -1,5 +1,6 @@
 # Local SenseVoice ASR (bundled in the desktop release)
 torch>=2.5
+torchaudio>=2.5
 funasr>=1.3.16
 modelscope>=1.20
 

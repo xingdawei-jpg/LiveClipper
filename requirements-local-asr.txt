@@ -2,5 +2,6 @@
 # Install this extra only in development/build environments; it intentionally
 # stays separate from the lightweight default Whisper dependency set.
 torch>=2.5
+torchaudio>=2.5
 funasr>=1.3.16
 modelscope>=1.20
