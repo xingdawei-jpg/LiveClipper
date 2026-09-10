@@ -26,6 +26,25 @@ class DesktopMediaImportTests(unittest.TestCase):
             self.assertIsNone(desktop._bundled_webview2_runtime())
             self.assertTrue(desktop._has_webview2_runtime())
 
+    def test_macos_video_picker_uses_native_osascript(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=b"/Users/demo/one.mp4\n/Users/demo/two.mov\n", stderr=b"")
+        with mock.patch.object(server.sys, "platform", "darwin"), mock.patch.object(
+            server.subprocess, "run", return_value=completed
+        ) as run:
+            paths = server._dialog_subprocess("files", "\u9009\u62e9\u89c6\u9891\u6587\u4ef6", "video")
+
+        self.assertEqual(paths, ["/Users/demo/one.mp4", "/Users/demo/two.mov"])
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "osascript")
+        self.assertIn("multiple selections allowed", command[2])
+
+    def test_macos_picker_cancel_is_not_an_error(self) -> None:
+        completed = mock.Mock(returncode=1, stdout=b"", stderr=b"User canceled.")
+        with mock.patch.object(server.sys, "platform", "darwin"), mock.patch.object(
+            server.subprocess, "run", return_value=completed
+        ):
+            self.assertEqual(server._dialog_subprocess("file", "\u9009\u62e9\u6587\u4ef6"), [])
+
     def test_folder_resolver_is_zero_copy_recursive_and_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "中文素材"

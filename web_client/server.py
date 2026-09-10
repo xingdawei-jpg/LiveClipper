@@ -1828,7 +1828,72 @@ def _file_dialog_types(kind: str) -> list[tuple[str, str]]:
     return [("所有文件", "*.*")]
 
 
+def _macos_dialog_subprocess(mode: str, title: str) -> list[str]:
+    """Open the native macOS picker without depending on Homebrew Tk support."""
+    if mode == "directory":
+        script = r'''
+on run argv
+    set dialogTitle to item 1 of argv
+    try
+        set pickedItem to choose folder with prompt dialogTitle
+        return POSIX path of pickedItem
+    on error number -128
+        return ""
+    end try
+end run
+'''
+    elif mode == "files":
+        script = r'''
+on run argv
+    set dialogTitle to item 1 of argv
+    try
+        set pickedItems to choose file with prompt dialogTitle with multiple selections allowed
+        set outputPaths to {}
+        repeat with pickedItem in pickedItems
+            set end of outputPaths to POSIX path of pickedItem
+        end repeat
+        set AppleScript's text item delimiters to linefeed
+        return outputPaths as text
+    on error number -128
+        return ""
+    end try
+end run
+'''
+    else:
+        script = r'''
+on run argv
+    set dialogTitle to item 1 of argv
+    try
+        set pickedItem to choose file with prompt dialogTitle
+        return POSIX path of pickedItem
+    on error number -128
+        return ""
+    end try
+end run
+'''
+
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script, title],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("文件选择超时，请重新点击选择。") from exc
+
+    if proc.returncode != 0:
+        error = proc.stderr.decode("utf-8", errors="replace").strip()
+        if "User canceled" in error or "-128" in error:
+            return []
+        raise RuntimeError(error or "macOS 文件选择窗口打开失败")
+    return [path.strip() for path in proc.stdout.decode("utf-8", errors="replace").splitlines() if path.strip()]
+
+
 def _dialog_subprocess(mode: str, title: str, kind: str = "file") -> list[str]:
+    if sys.platform == "darwin":
+        return _macos_dialog_subprocess(mode, title)
+
     filetypes = _file_dialog_types(kind)
     if getattr(sys, "frozen", False):
         import tkinter as tk
