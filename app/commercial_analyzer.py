@@ -3918,6 +3918,23 @@ def _repair_json_terminal_strategy_role(text: str) -> str:
     )
 
 
+def _repair_json_completion_requirements_evidence_locations(text: str) -> str:
+    """Repair the observed M1 array-close omission before evidence locations.
+
+    DeepSeek returned a story chapter as
+    ``"completion_requirements":["...","evidence_locations":[13,14]}``.
+    The requirements value is contractually a string array, so this exact form
+    is missing only its closing bracket before the next chapter field.
+    """
+    pattern = re.compile(
+        r'(?P<requirements>"completion_requirements"[ \t\r\n]*:[ \t\r\n]*'
+        r'\[(?:[ \t\r\n]*"(?:\\.|[^"\\])*")*)'
+        r'(?P<separator>[ \t\r\n]*,[ \t\r\n]*)'
+        r'(?P<evidence>"evidence_locations"[ \t\r\n]*:[ \t\r\n]*\[)'
+    )
+    return pattern.sub(r'\g<requirements>]\g<separator>\g<evidence>', str(text or ""))
+
+
 def _escape_json_string_controls(text: str) -> str:
     """Escape literal controls only inside quoted values, preserving content."""
     output = []
@@ -3944,7 +3961,11 @@ def _json_format_repairs(text: str) -> str:
         _repair_json_leading_zero_integers(
             _escape_json_string_controls(
                 _repair_json_narrative_quotes(
-                    _repair_json_relation_quote(_repair_json_terminal_strategy_role(text))
+                    _repair_json_relation_quote(
+                        _repair_json_completion_requirements_evidence_locations(
+                            _repair_json_terminal_strategy_role(text)
+                        )
+                    )
                 )
             )
         )

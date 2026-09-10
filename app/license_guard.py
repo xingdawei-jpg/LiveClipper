@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """Shared feature access guard for activation/trial checks."""
 
-from tkinter import messagebox
-
 
 LOCKED_REASON = "试用次数已用完，请激活后继续使用。"
+
+
+def _show_messagebox(method, title, message, root):
+    """Show an optional desktop dialog without requiring Tk for web runtime."""
+    if root is None:
+        return
+    try:
+        from tkinter import messagebox
+
+        getattr(messagebox, method)(title, message, parent=root)
+    except Exception:
+        pass
 
 
 def _log(log_fn, message, level="info"):
@@ -114,14 +124,12 @@ def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=Tru
     _record_event("feature_denied", feature_name, metadata={"reason": reason})
     _log(log_fn, f"{feature_name}已锁定：{reason}", "err")
     if show_dialog and root is not None:
-        try:
-            messagebox.showwarning(
-                "功能已锁定",
-                f"{feature_name}需要激活后使用。\n\n{reason}",
-                parent=root,
-            )
-        except Exception:
-            pass
+        _show_messagebox(
+            "showwarning",
+            "功能已锁定",
+            f"{feature_name}需要激活后使用。\n\n{reason}",
+            root,
+        )
     return False
 
 
@@ -165,10 +173,7 @@ def consume_trial_after_success(feature_name, units=1, root=None, log_fn=None):
             except Exception:
                 pass
             if root is not None:
-                try:
-                    messagebox.showinfo("试用已用完", LOCKED_REASON, parent=root)
-                except Exception:
-                    pass
+                _show_messagebox("showinfo", "试用已用完", LOCKED_REASON, root)
         return remaining
     except Exception as exc:
         _log(log_fn, "试用次数扣减异常：" + str(exc), "warn")

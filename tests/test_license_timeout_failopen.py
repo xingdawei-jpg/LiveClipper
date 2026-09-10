@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import builtins
 import io
 import sys
 import threading
@@ -42,6 +43,23 @@ class LicenseTimeoutFailOpenTests(unittest.TestCase):
         self.assertTrue(all(result["ok"] for result in results))
         self.assertEqual(cached.call_count, 3)
         verify.assert_not_called()
+
+    def test_license_guard_import_does_not_require_tkinter(self) -> None:
+        module_name = "license_guard_without_tkinter"
+        spec = importlib.util.spec_from_file_location(module_name, APP / "license_guard.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        real_import = builtins.__import__
+
+        def reject_tkinter(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tkinter" or name.startswith("tkinter."):
+                raise ModuleNotFoundError("No module named '_tkinter'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with mock.patch("builtins.__import__", side_effect=reject_tkinter):
+            spec.loader.exec_module(module)
+            with mock.patch.object(module, "get_feature_access", return_value={"ok": True, "raw": {}}):
+                self.assertTrue(module.require_feature_access("智能成片", show_dialog=False))
 
     def test_http_500_timeout_is_retryable_and_keeps_valid_token(self) -> None:
         error = urllib.error.HTTPError(

@@ -1280,6 +1280,20 @@ class JsonRecoveryTests(unittest.TestCase):
         self.assertEqual(beat["subtitle_ids"], [1])
         self.assertEqual(beat["product_relation"], "main_product")
 
+    def test_story_completion_requirements_array_close_is_recovered(self):
+        raw = (
+            '{"strategies":[{"strategy_id":"S1","chapter_packets":[{'
+            '"chapter_id":"C1","completion_requirements":['
+            '"观众能确认这件皮衣是收腰版，扣起来穿有收腰感。",'
+            '"evidence_locations":[13,14,15]}]}]}'
+        )
+
+        parsed = _extract_json(raw)
+
+        chapter = parsed["strategies"][0]["chapter_packets"][0]
+        self.assertEqual(chapter["completion_requirements"], ["观众能确认这件皮衣是收腰版，扣起来穿有收腰感。"])
+        self.assertEqual(chapter["evidence_locations"], [13, 14, 15])
+
     def test_literal_newline_inside_story_value_preserves_content(self):
         raw = '{"core_desire":"第一行\n    第二行\t细节", "evidence_locations":[12,34]}'
         parsed = _extract_json(raw)
