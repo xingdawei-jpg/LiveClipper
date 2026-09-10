@@ -17355,6 +17355,23 @@ def clear_cache() -> dict[str, Any]:
     }
 
 
+def _open_directory_in_file_manager(target: Path) -> None:
+    """Open a directory with the host platform's native file manager."""
+    if sys.platform == "darwin":
+        command = ["open", str(target)]
+    elif os.name == "nt":
+        os.startfile(str(target))
+        return
+    else:
+        command = ["xdg-open", str(target)]
+    subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
 @app.post("/api/path/open")
 def open_path(payload: PathPayload) -> dict[str, Any]:
     raw = (payload.path or "").strip().strip('"')
@@ -17366,7 +17383,7 @@ def open_path(payload: PathPayload) -> dict[str, Any]:
             target = target.parent
         elif not target.exists():
             target.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(target))
+        _open_directory_in_file_manager(target)
         return {"ok": True, "message": "已打开目录", "path": str(target)}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"打开目录失败：{exc}") from exc

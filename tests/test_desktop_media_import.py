@@ -45,6 +45,16 @@ class DesktopMediaImportTests(unittest.TestCase):
         ):
             self.assertEqual(server._dialog_subprocess("file", "\u9009\u62e9\u6587\u4ef6"), [])
 
+    def test_macos_open_path_uses_native_finder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            server.sys, "platform", "darwin"
+        ), mock.patch.object(server.subprocess, "Popen") as popen:
+            result = server.open_path(server.PathPayload(path=temporary))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["path"], temporary)
+        self.assertEqual(popen.call_args.args[0], ["open", temporary])
+
     def test_folder_resolver_is_zero_copy_recursive_and_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "中文素材"
