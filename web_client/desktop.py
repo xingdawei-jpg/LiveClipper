@@ -10,7 +10,18 @@ import json
 import urllib.request
 from pathlib import Path
 from typing import Any
-import winreg
+
+
+IS_WINDOWS = os.name == "nt"
+IS_MACOS = sys.platform == "darwin"
+
+# The source tree is also used on macOS.  Keep the Windows registry API out of
+# the module import path there so the local server can start with pywebview's
+# Cocoa backend.
+if IS_WINDOWS:
+    import winreg
+else:
+    winreg = None
 
 import uvicorn
 
@@ -402,7 +413,9 @@ def _version_at_least(version: str, minimum: str) -> bool:
     return parts(version) >= parts(minimum)
 
 
-def _registry_value(root: int, path: str, name: str) -> str:
+def _registry_value(root: Any, path: str, name: str) -> str:
+    if not IS_WINDOWS or winreg is None:
+        return ""
     try:
         with winreg.OpenKey(root, path) as key:
             value, _ = winreg.QueryValueEx(key, name)
@@ -412,6 +425,8 @@ def _registry_value(root: int, path: str, name: str) -> str:
 
 
 def _bundled_webview2_runtime() -> Path | None:
+    if not IS_WINDOWS:
+        return None
     candidates = []
     if getattr(sys, "frozen", False):
         candidates.append(BUNDLE_DIR / "webview2_runtime")
@@ -430,6 +445,9 @@ def _bundled_webview2_runtime() -> Path | None:
 
 
 def _has_webview2_runtime() -> bool:
+    # macOS uses pywebview's Cocoa backend rather than Edge/WebView2.
+    if not IS_WINDOWS:
+        return True
     if _bundled_webview2_runtime():
         return True
 
@@ -466,13 +484,21 @@ def _has_webview2_runtime() -> bool:
 
 def _show_webview2_error(url: str, error: Exception | None = None) -> None:
     detail = f"\n\n错误信息：{error}" if error else ""
-    message = (
-        "LiveClipper 需要 WebView2 Runtime 才能显示桌面界面。\n\n"
-        "当前没有检测到可用的系统 WebView2，且包内固定版 Runtime 未能启动。\n"
-        "为了避免旧 IE 内核导致界面错乱，本次不会继续打开内置窗口。\n\n"
-        f"本次将临时用系统浏览器打开：{url}"
-        f"{detail}"
-    )
+    if IS_WINDOWS:
+        message = (
+            "LiveClipper 需要 WebView2 Runtime 才能显示桌面界面。\n\n"
+            "当前没有检测到可用的系统 WebView2，且包内固定版 Runtime 未能启动。\n"
+            "为了避免旧 IE 内核导致界面错乱，本次不会继续打开内置窗口。\n\n"
+            f"本次将临时用系统浏览器打开：{url}"
+            f"{detail}"
+        )
+    else:
+        message = (
+            "LiveClipper 的 macOS 原生窗口未能启动。\n\n"
+            "本次将临时用系统浏览器打开本地页面。\n\n"
+            f"地址：{url}"
+            f"{detail}"
+        )
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -814,10 +840,6 @@ def main() -> None:
 
     try:
         import webview
-        bundled_runtime = _bundled_webview2_runtime()
-        if bundled_runtime:
-            webview.settings["WEBVIEW2_RUNTIME_PATH"] = str(bundled_runtime)
-
         window = webview.create_window(
             "LiveClipper - 零拷贝测试" if _zero_copy_test_mode() else "LiveClipper",
             url,
@@ -827,23 +849,37 @@ def main() -> None:
             text_select=True,
         )
         _protect_running_tasks_on_close(window, port, emit_log)
-        icon_path = _icon_path()
-        try:
-            kwargs = {
-                "gui": "edgechromium",
-                "func": _enable_desktop_native_file_drop_support,
-                "args": (window, emit_log),
-            }
-            if icon_path:
-                kwargs["icon"] = icon_path
-            webview.start(**kwargs)
-        except TypeError:
-            webview.start(
-                _enable_desktop_native_file_drop_support,
-                args=(window, emit_log),
-                gui="edgechromium",
+        if IS_WINDOWS:
+            bundled_runtime = _bundled_webview2_runtime()
+            if bundled_runtime:
+                webview.settings["WEBVIEW2_RUNTIME_PATH"] = str(bundled_runtime)
+            icon_path = _icon_path()
+            try:
+                kwargs = {
+                    "gui": "edgechromium",
+                    "func": _enable_desktop_native_file_drop_support,
+                    "args": (window, emit_log),
+                }
+                if icon_path:
+                    kwargs["icon"] = icon_path
+                webview.start(**kwargs)
+            except TypeError:
+                webview.start(
+                    _enable_desktop_native_file_drop_support,
+                    args=(window, emit_log),
+                    gui="edgechromium",
+                )
+            _dispose_native_file_drop_support(window, emit_log)
+        else:
+            emit_log(
+                "info",
+                "macOS 桌面端使用 Cocoa WebView；Windows 原生零拷贝拖放桥未启用。",
+                "system",
             )
-        _dispose_native_file_drop_support(window, emit_log)
+            try:
+                webview.start(gui="cocoa" if IS_MACOS else None)
+            except TypeError:
+                webview.start()
         server.should_exit = True
         return
     except Exception as exc:

@@ -526,10 +526,15 @@ TIME_WINDOW_MINUTES = 8
 # ============================================================
 # 主题系统 — 跟随 Windows 深色/浅色模式
 # ============================================================
-import winreg as _wr
+try:
+    import winreg as _wr
+except ImportError:
+    _wr = None
 
 def _is_dark_mode():
     """检测 Windows 系统是否为深色模式"""
+    if _wr is None:
+        return True
     try:
         key = _wr.OpenKey(_wr.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")

@@ -20,6 +20,12 @@ server = importlib.import_module("server")
 
 
 class DesktopMediaImportTests(unittest.TestCase):
+    def test_non_windows_desktop_skips_windows_registry_and_webview2(self) -> None:
+        with mock.patch.object(desktop, "IS_WINDOWS", False), mock.patch.object(desktop, "winreg", None):
+            self.assertEqual(desktop._registry_value(0, "unused", "unused"), "")
+            self.assertIsNone(desktop._bundled_webview2_runtime())
+            self.assertTrue(desktop._has_webview2_runtime())
+
     def test_folder_resolver_is_zero_copy_recursive_and_stable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "中文素材"
