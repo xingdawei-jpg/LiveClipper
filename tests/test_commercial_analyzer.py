@@ -1234,6 +1234,52 @@ class TwoPassDirectorTests(unittest.TestCase):
 
 
 class JsonRecoveryTests(unittest.TestCase):
+    def test_director_wire_packet_shell_expands_for_two_pass_casting(self):
+        raw = json.dumps({
+            "schema_version": "director-wire-v1",
+            "products": [{"name": "格子衬衣拼针织开衫假两件上衣", "type": "top"}],
+            "packet": {"strategies": [{
+                "strategy_id": "S1",
+                "director_plan_role": "primary",
+                "chapter_packets": [{
+                    "chapter_id": "C1",
+                    "beats": [{"role": "result", "ids": [1], "rel": "main_product",
+                               "evidence": [1], "support": "", "product_ref": 0}],
+                }],
+            }]},
+        }, ensure_ascii=False)
+
+        parsed = _extract_json(raw)
+
+        strategy = parsed["strategies"][0]
+        beat = strategy["chapter_packets"][0]["beats"][0]
+        self.assertEqual(strategy["director_plan_role"], "primary")
+        self.assertEqual(beat["beat_function"], "result")
+        self.assertEqual(beat["subtitle_ids"], [1])
+        self.assertEqual(beat["subject_product"], "格子衬衣拼针织开衫假两件上衣")
+        self.assertEqual(beat["subject_product_type"], "top")
+
+    def test_director_wire_terminal_strategy_role_misnesting_is_recovered(self):
+        raw = (
+            '{"schema_version":"director-wire-v1",'
+            '"products":[{"name":"格子衬衣拼针织开衫假两件上衣","type":"top"}],'
+            '"packet":{"strategies":[{"strategy_id":"S1","chapter_packets":[{'
+            '"chapter_id":"C1","beats":[{"role":"result","ids":[1],"rel":"main_product",'
+            '"evidence":[1],"support":"","product_ref":0}],"completion_status":"complete"}],'
+            '"whole_video_audit":{"status":"natural_complete_below_target",'
+            '"duration_receipt":{"C1":"6.54","total":"43.64"}}}}],'
+            '"director_plan_role":"primary"}}'
+        )
+
+        parsed = _extract_json(raw)
+
+        strategy = parsed["strategies"][0]
+        self.assertEqual(strategy["director_plan_role"], "primary")
+        self.assertEqual(strategy["whole_video_audit"]["duration_receipt"]["total"], "43.64")
+        beat = strategy["chapter_packets"][0]["beats"][0]
+        self.assertEqual(beat["subtitle_ids"], [1])
+        self.assertEqual(beat["product_relation"], "main_product")
+
     def test_literal_newline_inside_story_value_preserves_content(self):
         raw = '{"core_desire":"第一行\n    第二行\t细节", "evidence_locations":[12,34]}'
         parsed = _extract_json(raw)

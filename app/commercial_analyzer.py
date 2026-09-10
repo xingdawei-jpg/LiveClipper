@@ -3902,6 +3902,22 @@ def _repair_json_narrative_quotes(text: str) -> str:
     return "".join(repaired_lines)
 
 
+def _repair_json_terminal_strategy_role(text: str) -> str:
+    """Repair DeepSeek's observed terminal single-strategy role misnesting.
+
+    The real failing response ended a compact wire packet with:
+    ``...}}],"director_plan_role":"primary"}}``.  That places the role after
+    the strategies array and leaves one extra object close before the array.
+    Repair only this exact terminal scalar form; all earlier strategy data and
+    braces remain untouched.
+    """
+    return re.sub(
+        r'\}\}(\],[ \t\r\n]*"director_plan_role"[ \t\r\n]*:[ \t\r\n]*"(?:primary|alternative)"[ \t\r\n]*\}\}[ \t\r\n]*)$',
+        r'}\1',
+        str(text or ""),
+    )
+
+
 def _escape_json_string_controls(text: str) -> str:
     """Escape literal controls only inside quoted values, preserving content."""
     output = []
@@ -3926,7 +3942,11 @@ def _escape_json_string_controls(text: str) -> str:
 def _json_format_repairs(text: str) -> str:
     return _repair_json_trailing_commas(
         _repair_json_leading_zero_integers(
-            _escape_json_string_controls(_repair_json_narrative_quotes(_repair_json_relation_quote(text)))
+            _escape_json_string_controls(
+                _repair_json_narrative_quotes(
+                    _repair_json_relation_quote(_repair_json_terminal_strategy_role(text))
+                )
+            )
         )
     )
 
@@ -3935,9 +3955,23 @@ def _expand_director_wire_if_needed(parsed: dict[str, Any]) -> dict[str, Any]:
     if parsed.get("schema_version") != WIRE_VERSION:
         return parsed
     try:
-        return expand_director_wire_payload(parsed)
+        expanded = expand_director_wire_payload(parsed)
     except ValueError as exc:
         raise AnalyzerError(f"Director wire JSON 无法还原：{exc}") from exc
+    misplaced_role = expanded.pop("director_plan_role", None)
+    strategies = expanded.get("strategies")
+    if (
+        isinstance(misplaced_role, str)
+        and misplaced_role in {"primary", "alternative"}
+        and isinstance(strategies, list)
+        and len(strategies) == 1
+        and isinstance(strategies[0], dict)
+        and "director_plan_role" not in strategies[0]
+    ):
+        strategies[0]["director_plan_role"] = misplaced_role
+    elif misplaced_role is not None:
+        expanded["director_plan_role"] = misplaced_role
+    return expanded
 
 
 def _extract_json(text: str) -> dict[str, Any]:
