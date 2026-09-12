@@ -1491,6 +1491,7 @@ def _run_case(
         "hard_safe_candidate_count": ledger_context["hard_safe_candidate_count"],
         "m2_materializable_hard_safe_candidate_count": len(candidates),
         "m2_narrative_mode_p0_5a2_beat_candidate_count": len(narrative_mode_beat_candidates),
+        "candidate_ledger": ledger_context["candidate_ledger"],
         "m2_materializability_preflight": {
             "blocked": materializability_blocked,
             "candidate_word_lineage_rejections": list(all_candidate_word_rejections),

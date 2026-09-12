@@ -13167,6 +13167,14 @@ def _write_commerce_director_preview_artifacts(
             "director_controls": effective_controls,
         },
         "director_controls.json": effective_controls,
+        "candidate_ledger.json": case.get("candidate_ledger", {}),
+        "hook_candidates.json": {
+            str(item.get("strategy_id") or f"S{index}"): dict(item.get("opening_selection") or {})
+            for index, item in enumerate([
+                dict(case.get("selected_m1_hero") or {}),
+                *[dict(entry.get("strategy") or {}) for entry in case.get("director_variant_plans") or []],
+            ], 1)
+        },
         "m1_story_brief.json": {
             "selected_m1_hero": case.get("selected_m1_hero", {}),
             "m1_result": case.get("m1_result", {}),
@@ -14264,6 +14272,7 @@ def _run_commerce_director_preview(
                 "m2_outline": _commerce_director_m2_outline(plan_payload),
                 "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
                 "duration_assessment": duration_assessment,
+                "opening_selection": dict(primary_strategy.get("opening_selection") or {}),
                 "candidate_pool_summary": {
                     "recommended_count": len(public_clips),
                     "alternative_count": len(alternative_public_clips),
@@ -14327,6 +14336,7 @@ def _run_commerce_director_preview(
                         **dict(case), "m2_plan": variant_plan, "chapter_lineage": [],
                     }),
                     "duration_assessment": variant_duration,
+                    "opening_selection": dict(variant_strategy.get("opening_selection") or {}),
                     "candidate_pool_summary": {
                         "recommended_count": len(prepared_variant["clips"]),
                         "alternative_count": 0,
@@ -14455,6 +14465,11 @@ def _run_commerce_director_preview(
             if preview_fidelity["status"] == "warning":
                 message += " " + preview_fidelity["message"]
                 emit_log("warning", preview_fidelity["message"], scope)
+            opening_verification = dict(dict(primary_strategy.get("opening_selection") or {}).get("verification") or {})
+            if opening_verification.get("status") == "warning":
+                warning = "开场候选回执与实际选句存在待审项，请核对首句和紧接的兑现句；未自动替换原话。"
+                message += " " + warning
+                emit_log("warning", warning, scope)
             resolved_product = dict(dict(product_control.get("final") or {}).get("resolved_scope") or {}).get("main_product")
             product_warnings = [str(item).strip() for item in (product_control.get("warnings") or []) if str(item).strip()]
             if resolved_product and product_warnings:

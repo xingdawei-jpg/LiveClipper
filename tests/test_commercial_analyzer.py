@@ -42,6 +42,7 @@ from commercial_analyzer import (
     _post_two_pass_director_request,
     _story_delivery_depth_audit,
     resolve_commercial_director_model,
+    sanitize_two_pass_story_for_content_policy,
 )
 
 
@@ -955,7 +956,7 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertIn("没有 Strong Ranking、没有 TopK", prompt)
         self.assertIn("只返回最终可执行 beats", prompt)
         self.assertNotIn('"alternative_beats":', prompt)
-        self.assertNotIn('"compared_packages":', prompt)
+        self.assertIn('"compared_packages":', prompt)
         self.assertIn("每个最终 beat 的 ids 必须恰好写一个 ID", prompt)
         self.assertIn('"subtitle_ids"', prompt)
         self.assertNotIn('"chapter_readthrough":', prompt)
@@ -1013,6 +1014,91 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertEqual(audit["unexpected_selected_subtitle_ids"], [7])
         self.assertIn("story_stage_must_not_select_subtitle_ids", audit["warnings"])
 
+    def test_story_opening_evidence_is_feasibility_not_first_pass_selection(self) -> None:
+        contract = {"strategies": [{
+            "strategy_id": "S1", "director_plan_role": "primary",
+            "core_desire": "穿得更利落", "central_promise": "版型给出利落结果",
+            "opening_evidence_packages": [{
+                "hook_subtitle_ids": [1], "payoff_subtitle_ids": [2],
+                "purchase_value": "先看见显窄结果", "payoff_basis": "下一句解释肩线内收",
+            }],
+            "chapter_packets": [{"chapter_id": "C1", "coverage": "required"}],
+        }]}
+
+        audit = build_two_pass_story_audit(
+            contract, available_subtitle_ids=[1, 2, 3],
+        )
+
+        self.assertTrue(audit["story_contract_valid"])
+        self.assertEqual(audit["unexpected_selected_subtitle_ids"], [])
+        self.assertEqual(audit["opening_evidence"][0]["status"], "valid")
+        self.assertEqual(
+            audit["opening_evidence"][0]["valid_packages"][0]["hook_subtitle_ids"], [1],
+        )
+
+    def test_story_opening_evidence_rejects_ids_outside_safe_pool(self) -> None:
+        audit = build_two_pass_story_audit({"strategies": [{
+            "strategy_id": "S1", "director_plan_role": "primary",
+            "core_desire": "穿得更利落", "central_promise": "版型给出利落结果",
+            "opening_evidence_packages": [{
+                "hook_subtitle_ids": [1], "payoff_subtitle_ids": [99],
+                "purchase_value": "先看见显窄结果", "payoff_basis": "下一句解释肩线内收",
+            }],
+            "chapter_packets": [{"chapter_id": "C1", "coverage": "required"}],
+        }]}, available_subtitle_ids=[1, 2])
+
+        self.assertIn("invalid_opening_evidence_packages", audit["warnings"])
+        self.assertEqual(audit["opening_evidence"][0]["valid_packages"], [])
+        self.assertIn(
+            "package_1_payoff_subtitle_ids_outside_safe_pool:99",
+            audit["opening_evidence"][0]["issues"],
+        )
+
+    def test_content_policy_removes_blocked_claim_from_opening_evidence(self) -> None:
+        payload, audit = sanitize_two_pass_story_for_content_policy({"strategies": [{
+            "strategy_id": "S1",
+            "opening_evidence_packages": [{
+                "hook_subtitle_ids": [1], "payoff_subtitle_ids": [2],
+                "purchase_value": "这件衣服值这个价", "payoff_basis": "下一句解释设计",
+            }],
+        }]}, {"price": "block"})
+
+        self.assertEqual(payload["strategies"][0]["opening_evidence_packages"], [])
+        self.assertEqual(audit["removed_opening_evidence_packages"][0]["blocked_kinds"], ["price"])
+
+    def test_story_prompt_and_cast_contract_keep_opening_evidence_nonbinding(self) -> None:
+        story = {"strategies": [{
+            "strategy_id": "S1", "director_plan_role": "primary",
+            "core_desire": "穿得更利落", "central_promise": "版型给出利落结果",
+            "opening_promise": "先看显窄结果",
+            "opening_evidence_packages": [{
+                "hook_subtitle_ids": [1], "payoff_subtitle_ids": [2],
+                "purchase_value": "先看见显窄结果", "payoff_basis": "下一句解释肩线内收",
+            }],
+            "chapter_packets": [{
+                "chapter_id": "C1", "coverage": "required", "chapter_kind": "result",
+                "buyer_advance": "先看显窄", "chapter_job": "给出结果",
+                "completion_requirements": ["看见显窄结果"], "source_budget_seconds": 4,
+            }],
+        }]}
+        subtitles = [
+            {"id": 1, "start": 0.0, "end": 2.0, "text": "穿上正面很显窄"},
+            {"id": 2, "start": 2.1, "end": 4.1, "text": "肩线会往里收"},
+        ]
+        story_prompt = build_two_pass_story_prompt(
+            product="上衣", subtitles=subtitles, executable_subtitle_ids=[1, 2], target_duration=4,
+        )
+        cast_prompt = build_two_pass_cast_prompt(
+            story_contract=story,
+            story_audit=build_two_pass_story_audit(story, available_subtitle_ids=[1, 2]),
+            subtitles=subtitles, executable_subtitle_ids=[1, 2], target_duration=4,
+        )
+
+        self.assertIn('"opening_evidence_packages"', story_prompt)
+        self.assertIn("不是最终片单", story_prompt)
+        self.assertIn('"opening_evidence":[{"hook_subtitle_ids":[1]', cast_prompt)
+        self.assertIn("不是最终片单、不是必须使用的开头", cast_prompt)
+
     def test_draft_audit_measures_exact_ids_without_semantic_mutation(self) -> None:
         draft = {"strategies": [{
             "director_plan_role": "primary",
@@ -1057,6 +1143,10 @@ class TwoPassDirectorTests(unittest.TestCase):
                 "core_desire": "大身材也能穿得利落",
                 "central_promise": "用真实版型说明大身材也能利落",
                 "opening_promise": "先看到显窄结果",
+                "opening_evidence_packages": [{
+                    "hook_subtitle_ids": [1], "payoff_subtitle_ids": [2],
+                    "purchase_value": "先看显窄结果", "payoff_basis": "肩线内收解释结果",
+                }],
                 "narrative_archetype": "pain_point",
                 "video_structure": {"id": "pain_point", "name": "痛点切入", "selection_reason": "有结果和机制"},
                 "chapter_packets": [{
@@ -1119,6 +1209,7 @@ class TwoPassDirectorTests(unittest.TestCase):
         primary, alternative = result.strategies
         self.assertEqual(primary.director_title, "冻结标题")
         self.assertEqual(primary.core_desire, "大身材也能穿得利落")
+        self.assertEqual(primary.opening_evidence_packages[0]["hook_subtitle_ids"], [1])
         self.assertEqual([beat.subtitle_ids for beat in primary.director_sequence], [(1,), (2,)])
         self.assertEqual(primary.director_chapter_packets[0].title, "先给结果")
         self.assertEqual(

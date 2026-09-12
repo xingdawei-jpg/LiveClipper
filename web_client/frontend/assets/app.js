@@ -13676,7 +13676,8 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
   const fidelity = review.export_fidelity?.status === "warning"
     ? review.export_fidelity : (review.preview_fidelity || preview?.dedup_summary?.director_preview_fidelity || {});
   const boundaryWarning = fidelity.status === "warning";
-  const currentStatus = overview.status === "block" ? "block" : (boundaryWarning ? "warn" : overview.status);
+  const openingWarning = review.opening_selection?.verification?.status === "warning";
+  const currentStatus = overview.status === "block" ? "block" : ((boundaryWarning || openingWarning) ? "warn" : overview.status);
   const duplicates = overview.issues.filter(function (item) { return item.kind === "duplicate"; }).length;
   const firstFunction = String(selected[0]?.director_beat_function || selected[0]?.director_chapter_kind || "").toLowerCase();
   const lastFunction = String(selected[selected.length - 1]?.director_beat_function || selected[selected.length - 1]?.director_chapter_kind || "").toLowerCase();
@@ -13686,8 +13687,9 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
     ...overview,
     status: currentStatus,
     boundaryMessage: boundaryWarning ? String(fidelity.message || "内容边界影响了部分短句，请连读复核") : "",
+    openingMessage: openingWarning ? "开场比较或原话来源待复核，请核对首句与紧接的兑现句。" : "",
     duplicates,
-    openingLabel: fidelity.opening_affected ? "开场受内容边界影响" : (openingReady ? "开场已设置" : "开场待复核"),
+    openingLabel: fidelity.opening_affected ? "开场受内容边界影响" : (openingWarning ? "开场回执待复核" : (openingReady ? "开场已设置" : "开场待复核")),
     progressionLabel: duplicates ? `重复提示 ${duplicates}` : "未见完全重复",
     endingLabel: endingReady ? "结尾可连读" : "结尾待复核",
     overallLabel: currentStatus === "block" ? "暂不可成片" : (boundaryWarning ? "边界删减待复核" : (currentStatus === "warn" ? "建议调整" : "可继续审核")),
@@ -13933,6 +13935,7 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
     ${chapterRows ? `<nav class="commerce-director-recommendation-path" aria-label="说服路径"><span>说服路径</span><ol>${chapterRows}</ol>${moreChapters}</nav>` : ""}
     <div class="commerce-director-status-row" role="status"><span class="commerce-director-opening"><b>开场承诺</b>${escapeHtml(openingPromise || "尚未形成明确开场承诺")}</span><div class="commerce-director-status-metrics"><span>可编辑候选约 ${Number(candidateStats.duration || 0).toFixed(1)}s</span><span>已选 ${selected.length} 段</span><span>${escapeHtml(status.progressionLabel)}</span><span>${escapeHtml(status.openingLabel)}</span><span>${escapeHtml(status.endingLabel)}</span></div><span class="commerce-director-status-badge is-${statusTone}"><small>${escapeHtml(statusSource)}</small>${escapeHtml(status.overallLabel)}</span></div>
     ${status.boundaryMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.boundaryMessage)}</p>` : ""}
+    ${status.openingMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.openingMessage)}</p>` : ""}
     <span class="visually-hidden" aria-live="polite">当前查看 ${escapeHtml(outline.find(function (item) { return String(item?.chapter_id || "") === activeChapterId; })?.goal || "导演方案")}</span>
   </section>`;
 }

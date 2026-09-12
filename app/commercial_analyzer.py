@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from ai_model_config import ai_chat_completions_url
 from ai_cost_ledger import record_ai_call
+from director_opening_audit import OPENING_RECEIPT_VERSION, audit_opening_candidates
 from director_wire_schema import WIRE_VERSION, compact_director_wire_payload, expand_director_wire_payload
 from ssl_context import create_ssl_context
 from director_product_contract import (
@@ -583,6 +584,9 @@ class Strategy:
     director_title: str = ""
     core_desire: str = ""
     opening_promise: str = ""
+    # M1 feasibility evidence only: these IDs prove that a Hook -> immediate
+    # payoff is available.  They are deliberately not a selected cut list.
+    opening_evidence_packages: tuple[Mapping[str, Any], ...] = ()
     director_quality_tier: str = ""
     # Exactly one item in a normal one-call response is the fully authored
     # primary plan.  Alternative directions intentionally contain no source
@@ -680,6 +684,12 @@ class Strategy:
         director_title = str(raw.get("director_title") or raw.get("title") or "").strip()
         core_desire = str(raw.get("core_desire") or raw.get("core_commercial_idea") or raw.get("thesis") or "").strip()
         opening_promise = str(raw.get("opening_promise") or core_desire).strip()
+        opening_evidence_raw = raw.get("opening_evidence_packages") or ()
+        if isinstance(opening_evidence_raw, Mapping):
+            opening_evidence_raw = (opening_evidence_raw,)
+        opening_evidence_packages = tuple(
+            dict(item) for item in opening_evidence_raw if isinstance(item, Mapping)
+        )
         return cls(
             strategy_id=str(raw.get("strategy_id") or f"S{index}").strip(),
             type=str(raw.get("type") or raw.get("narrative_archetype") or "").strip(),
@@ -704,6 +714,7 @@ class Strategy:
             director_title=director_title,
             core_desire=core_desire,
             opening_promise=opening_promise,
+            opening_evidence_packages=opening_evidence_packages,
             director_quality_tier=str(raw.get("director_quality_tier") or raw.get("quality_tier") or "").strip().lower(),
             director_plan_role=str(raw.get("director_plan_role") or raw.get("plan_role") or "").strip().lower(),
             director_sequence=director_sequence,
@@ -783,6 +794,7 @@ class Strategy:
             "director_title": self.director_title,
             "core_desire": self.core_desire,
             "opening_promise": self.opening_promise,
+            "opening_evidence_packages": [dict(item) for item in self.opening_evidence_packages],
             "director_quality_tier": self.director_quality_tier,
             "director_plan_role": self.director_plan_role,
             "director_sequence": [item.to_dict() for item in self.director_sequence],
@@ -1678,14 +1690,14 @@ def build_analyzer_user_prompt(
 # Two-pass Director: story contract first, exact Beat casting second
 # ──────────────────────────────────────────────────────────────
 
-TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。你只负责决定这条视频为什么存在、围绕什么购买欲望、按什么顺序说服观众；本轮绝对不能选择任何具体字幕句子。
+TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。你只负责决定这条视频为什么存在、围绕什么购买欲望、按什么顺序说服观众；本轮不选择最终片单。
 
 硬原则：
 1. 完整阅读全部安全字幕，先比较不同故事方向，再冻结一个证据最充足、最值得发布的主故事；备选方向只保留方向卡。
 2. core_desire 必须是一句观众视角的完整购买判断，不是卖点列表。
 3. Opening 必须用反差、痛点、强结果或强场景让人继续看，并在最前面的必要章节中兑现，不能只铺垫。
 4. 每个章节必须改变一次观众的购买判断。章节之间要有因果、追问、扩大证明、顾虑解除或使用场景关系。
-5. 本轮只输出章节职责，不输出 beats、subtitle_ids、source_span、原话、时间戳或成片连读；具体选句全部留给下一遍 Beat Casting。
+5. 本轮只输出章节职责；唯一例外是每个完整方案最多 3 组 opening_evidence_packages，用真实 ID 记录“Hook -> 紧接 payoff”是否有可行证据。它们不是最终片单、不是 beats，也不锁定顺序；具体选句、排序和取舍全部留给下一遍 Beat Casting。除此之外不得输出 beats、subtitle_ids、source_span、原话、时间戳或成片连读。
 6. 用户禁止或限制的内容已在输入前过滤；不得猜测、依赖或为未提供内容安排故事章节。每项 completion_requirements 只写一个具体购买问题，价格、催单等禁选要求不能混入材质、设计由来等正常职责；各方案都应仅凭允许内容构成完整故事。
 7. 只使用字幕明确支持的商品事实，不根据文件名或常识补写商品卖点。先确定 product_scope：主商品名称、single_product/explicit_set、搭配品使用边界。以用户主商品为先，用素材标题和字幕核对身份；若是单件，另一件只能证明搭配，不能把另一件的遮腿、裙摆、裤型等效果归给主商品。标题缺失时从字幕确定一个明确主商品，不能把同场多个商品默认拼成套装。
 8. 用户时长是交付目标，不是可忽略的建议。开场悬念只安排一个可迅速兑现的问题，通常占全片10%-15%；不要以城市天气、直播热度等长铺垫代替商品故事。按原声预算为每章分配 source_budget_seconds，合计尽量接近原声目标；同时写 completion_requirements，明确问题、解释、具体证据和结论怎样闭合。长目标首先把章节讲充分，再探索服务主故事的新购买价值；不能靠同义重复、无关卖点或固定章数填满。
@@ -1921,11 +1933,103 @@ def _two_pass_beat_rows(primary: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return rows
 
 
+def _story_opening_evidence_audit(
+    story_contract: Mapping[str, Any],
+    *,
+    available_subtitle_ids: Sequence[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Validate M1 opening feasibility citations without selecting footage.
+
+    These records are intentionally separate from chapter beats.  M2 receives
+    only valid possibilities and remains responsible for final selection,
+    sequence, and whether any candidate actually belongs in the final prefix.
+    """
+    allowed_ids = (
+        {int(value) for value in available_subtitle_ids}
+        if available_subtitle_ids is not None else None
+    )
+    raw_strategies = story_contract.get("strategies") or ()
+    if isinstance(raw_strategies, Mapping):
+        raw_strategies = (raw_strategies,)
+    records: list[dict[str, Any]] = []
+    for strategy_index, strategy in enumerate(raw_strategies, 1):
+        if not isinstance(strategy, Mapping):
+            continue
+        strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
+        raw_packages = strategy.get("opening_evidence_packages") or ()
+        if isinstance(raw_packages, Mapping):
+            raw_packages = (raw_packages,)
+        issues: list[str] = []
+        valid_packages: list[dict[str, Any]] = []
+        if not isinstance(raw_packages, (list, tuple)):
+            issues.append("opening_evidence_packages_not_list")
+            raw_packages = ()
+        if len(raw_packages) > 3:
+            issues.append("too_many_opening_evidence_packages")
+        for package_index, raw_package in enumerate(raw_packages[:3], 1):
+            if not isinstance(raw_package, Mapping):
+                issues.append(f"package_{package_index}_not_object")
+                continue
+            package = dict(raw_package)
+            converted: dict[str, list[int]] = {}
+            package_valid = True
+            for key in ("hook_subtitle_ids", "payoff_subtitle_ids"):
+                raw_ids = package.get(key)
+                if isinstance(raw_ids, (int, str)):
+                    raw_ids = (raw_ids,)
+                if not isinstance(raw_ids, (list, tuple)) or not raw_ids:
+                    issues.append(f"package_{package_index}_{key}_missing")
+                    package_valid = False
+                    continue
+                ids: list[int] = []
+                for value in raw_ids:
+                    try:
+                        subtitle_id = int(value)
+                    except (TypeError, ValueError):
+                        package_valid = False
+                        issues.append(f"package_{package_index}_{key}_invalid")
+                        continue
+                    if allowed_ids is not None and subtitle_id not in allowed_ids:
+                        package_valid = False
+                        issues.append(f"package_{package_index}_{key}_outside_safe_pool:{subtitle_id}")
+                        continue
+                    ids.append(subtitle_id)
+                if len(ids) != len(set(ids)):
+                    package_valid = False
+                    issues.append(f"package_{package_index}_{key}_duplicate")
+                converted[key] = ids
+            if set(converted.get("hook_subtitle_ids", ())) & set(converted.get("payoff_subtitle_ids", ())):
+                package_valid = False
+                issues.append(f"package_{package_index}_hook_payoff_overlap")
+            for key in ("purchase_value", "payoff_basis"):
+                if not str(package.get(key) or "").strip():
+                    package_valid = False
+                    issues.append(f"package_{package_index}_{key}_missing")
+            if package_valid:
+                valid_packages.append({
+                    "hook_subtitle_ids": converted["hook_subtitle_ids"],
+                    "payoff_subtitle_ids": converted["payoff_subtitle_ids"],
+                    "purchase_value": str(package.get("purchase_value") or "").strip(),
+                    "payoff_basis": str(package.get("payoff_basis") or "").strip(),
+                })
+        records.append({
+            "strategy_id": strategy_id,
+            "status": "valid" if valid_packages and not issues else (
+                "missing" if not raw_packages else "invalid"
+            ),
+            "candidate_count": len(raw_packages),
+            "valid_packages": valid_packages,
+            "issues": issues,
+        })
+    return records
+
+
 def build_two_pass_story_audit(
     story_contract: Mapping[str, Any],
     *,
     target_duration: float = 60.0,
     duration_tolerance: float | None = None,
+    available_subtitle_ids: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     """Validate only the story/Arc boundary before paid Beat Casting.
 
@@ -1972,6 +2076,11 @@ def build_two_pass_story_audit(
         warnings.append("missing_purchase_journey")
     if unexpected_selected_ids:
         warnings.append("story_stage_must_not_select_subtitle_ids")
+    opening_evidence = _story_opening_evidence_audit(
+        story_contract, available_subtitle_ids=available_subtitle_ids,
+    )
+    if any(record["status"] == "invalid" for record in opening_evidence):
+        warnings.append("invalid_opening_evidence_packages")
     return {
         **director_target_duration_range(target_duration, duration_tolerance),
         "chapter_count": len(chapters),
@@ -1981,6 +2090,7 @@ def build_two_pass_story_audit(
         # later pass may still assign a shared fact to one chapter and replace,
         # merge, or remove the other chapter.
         "evidence_location_conflicts": evidence_location_conflicts,
+        "opening_evidence": opening_evidence,
         "warnings": warnings,
         "story_contract_valid": not warnings,
     }
@@ -1990,7 +2100,7 @@ _STORY_POLICY_EXTRA_PATTERNS: dict[str, tuple[str, ...]] = {
     # Story language often says “99块” or “三倍” rather than the literal
     # policy keyword “价格”; catch those promises before Casting spends a
     # request trying to make them executable.
-    "price": (r"\d+(?:\.\d+)?\s*(?:元|块|块钱|倍)", r"一顿饭钱", r"定价", r"昂贵|价格不菲|帽子贵", r"[数几一二三四五六七八九十两百千]+(?:十|百|千|万)(?:元|块)", r"(?:售卖|卖到|卖)[^，。；\n]{0,6}[一二三四五六七八九两]+(?:百|千|万)", r"(?:倍率|毛利)[^，。；\n]{0,8}(?:低|压|打)", r"(?:低价|压价|控价)[^，。；\n]{0,10}(?:主推|品质|市场|成本)?"),
+    "price": (r"\d+(?:\.\d+)?\s*(?:元|块|块钱|倍)", r"一顿饭钱", r"定价", r"昂贵|价格不菲|帽子贵", r"值这个价", r"[数几一二三四五六七八九十两百千]+(?:十|百|千|万)(?:元|块)", r"(?:售卖|卖到|卖)[^，。；\n]{0,6}[一二三四五六七八九两]+(?:百|千|万)", r"(?:倍率|毛利)[^，。；\n]{0,8}(?:低|压|打)", r"(?:低价|压价|控价)[^，。；\n]{0,10}(?:主推|品质|市场|成本)?"),
     "cta": (r"(?:给|让)?(?:新粉|大家|宝宝|姐妹)[^，。；\n]{0,8}带回去(?:感受|试试|体验)?", r"(?:建议|推荐)[^，。；\n]{0,8}(?:购买|入手|带回去)"),
     "inventory_pressure": (r"冲量|冲榜",),
     # Delivery timing is after-sale/logistics content even when the speaker
@@ -2110,6 +2220,7 @@ def sanitize_two_pass_story_for_content_policy(
         "removed_chapters": [],
         "trimmed_chapters": [],
         "cleared_story_fields": [],
+        "removed_opening_evidence_packages": [],
         "status": "consistent",
     }
     if not blocked_kinds and not _body_only_kinds(content_contract):
@@ -2128,6 +2239,33 @@ def sanitize_two_pass_story_for_content_policy(
                 audit["cleared_story_fields"].append({
                     "strategy_id": strategy_id, "field": field, "blocked_kinds": hits,
                 })
+        # M1's opening evidence is not a final clip list, but its short
+        # explanation still becomes input to M2.  Do not let a blocked claim
+        # re-enter the second request through that metadata.
+        raw_opening_packages = strategy.get("opening_evidence_packages") or ()
+        if isinstance(raw_opening_packages, Mapping):
+            raw_opening_packages = (raw_opening_packages,)
+        kept_opening_packages: list[dict[str, Any]] = []
+        for package_index, package in enumerate(raw_opening_packages, 1):
+            if not isinstance(package, Mapping):
+                continue
+            package_hits = _story_policy_hits(
+                "\n".join([
+                    str(package.get("purchase_value") or ""),
+                    str(package.get("payoff_basis") or ""),
+                ]),
+                blocked_kinds,
+            )
+            if package_hits:
+                audit["removed_opening_evidence_packages"].append({
+                    "strategy_id": strategy_id,
+                    "package_index": package_index,
+                    "blocked_kinds": package_hits,
+                })
+                continue
+            kept_opening_packages.append(dict(package))
+        if "opening_evidence_packages" in strategy:
+            strategy["opening_evidence_packages"] = kept_opening_packages
         kept_chapters: list[dict[str, Any]] = []
         for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
             chapter_blocked = blocked_kinds | (_body_only_kinds(content_contract) if not kept_chapters else set())
@@ -2168,7 +2306,10 @@ def sanitize_two_pass_story_for_content_policy(
                 })
             kept_chapters.append(chapter)
         strategy["chapter_packets"] = kept_chapters
-    if audit["removed_chapters"] or audit["trimmed_chapters"] or audit["cleared_story_fields"]:
+    if (
+        audit["removed_chapters"] or audit["trimmed_chapters"]
+        or audit["cleared_story_fields"] or audit["removed_opening_evidence_packages"]
+    ):
         audit["status"] = "policy_trimmed"
     return payload, audit
 
@@ -3204,6 +3345,12 @@ def build_two_pass_story_prompt(
                                              "identity_evidence_ids": [1]}],
             },
             "opening_promise": "开头为什么能停人以及立即兑现什么",
+            "opening_evidence_packages": [{
+                "hook_subtitle_ids": [1],
+                "payoff_subtitle_ids": [2],
+                "purchase_value": "陌生观众立即听懂的具体购买价值",
+                "payoff_basis": "紧接原话给出的结果、机制、证明或穿法",
+            }],
             "narrative_archetype": "最合适的叙事原型",
             "video_structure": {
                 "id": "结构 id",
@@ -3279,11 +3426,11 @@ def build_two_pass_story_prompt(
             "本次只执行一个完整主方案；必须同时给出恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要（S2、S3）。"
             "不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段；用户确认选择后才会单独为所选方向生成完整方案。"
         ),
-        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。开场必须来自已核实的主商品范围，并在紧接的真实口播中兑现承诺；找不到可兑现的反差开场时，直接用主商品最强结果或机制开场，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只是身份依据，不是选片；所有备选方向也必须是同一个主商品。",
+        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先在完整安全字幕中为每个完整方案寻找最多 3 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。它们只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可少报或不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只是身份依据，不是选片；所有备选方向也必须是同一个主商品。",
         "identity_evidence_ids 只列3-6条分布在不同位置、能明确核实商品名/指代的代表依据，不要抄全片ID。每条 Beat 的 product_evidence_ids 只需1-2个最直接的指代依据。",
         "先顺读全片，在 product_scope.source_product_sections 用连续ID范围记录换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。临时聊裤子、另一件羊毛衣、与商品无关的聊天都不能默认属于T恤。范围内 product_type/subject_product 记录实际讲述对象，证据不足用unknown；单句讲其他商品的自身优点不能包装成主商品的搭配支持。",
         "长目标通过探索更多真实存在的新购买章节来体现，禁止重复同一结果、同一机制或同义口号。",
-        "chapter_packets 只能描述章节职责；JSON 中不得出现 beats、subtitle_ids、source_span、verbatim、时间戳或 final_readthrough。",
+        "chapter_packets 只能描述章节职责。opening_evidence_packages 是唯一允许出现的字幕 ID 字段：每个完整方案最多 3 组，必须同时填写非空 hook_subtitle_ids、payoff_subtitle_ids、purchase_value、payoff_basis，且 Hook 与 payoff 不得重复 ID。除此之外 JSON 中不得出现 beats、subtitle_ids、source_span、verbatim、时间戳或 final_readthrough。S2/S3 方向摘要不得带 opening_evidence_packages。",
         "可选视频结构仅供导演判断，不需要逐个覆盖：",
         json.dumps(available_video_structures(content_contract), ensure_ascii=False, separators=(",", ":")),
         "返回结构：",
@@ -3365,6 +3512,12 @@ def _casting_execution_contract(
     raw_strategies = story_contract.get("strategies") or ()
     if isinstance(raw_strategies, Mapping):
         raw_strategies = (raw_strategies,)
+    audit = dict(story_audit or {})
+    opening_evidence_by_strategy = {
+        str(item.get("strategy_id") or ""): list(item.get("valid_packages") or ())
+        for item in audit.get("opening_evidence") or ()
+        if isinstance(item, Mapping)
+    }
     strategies: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_strategies, 1):
         if not isinstance(raw, Mapping):
@@ -3424,6 +3577,9 @@ def _casting_execution_contract(
             "desire": raw.get("core_desire"),
             "promise": raw.get("central_promise"),
             "opening": raw.get("opening_promise"),
+            # M1 evidence is a feasibility hint, never an instruction to use
+            # these IDs or to put them at the start of the final sequence.
+            "opening_evidence": opening_evidence_by_strategy.get(strategy_id, []),
             "product": {
                 "main": scope.get("main_product"),
                 "type": scope.get("product_type"),
@@ -3434,7 +3590,6 @@ def _casting_execution_contract(
             "chapters": chapters,
             "evidence_conflicts": _story_evidence_location_conflicts(raw, strategy_id=strategy_id),
         })
-    audit = dict(story_audit or {})
     overloaded_requirements = [
         {
             "strategy_id": str(strategy.get("id") or "S1"),
@@ -3503,7 +3658,16 @@ def build_two_pass_cast_prompt(
     strategy_schema = {
             "strategy_id": "S1",
             "opening_selection": {
+                "receipt_version": OPENING_RECEIPT_VERSION,
                 "selected_subtitle_ids": [101, 102],
+                "quality": "strong/usable/limited",
+                "compared_packages": [{
+                    "subtitle_ids": [101],
+                    "payoff_subtitle_ids": [102],
+                    "product_evidence_ids": [101],
+                    "decision": "selected/alternative/rejected",
+                    "reason": "一句短评：具体停留理由、承接新增信息或淘汰缺口；不抄写口播",
+                }],
             },
             "chapter_packets": [{
                 "chapter_id": "冻结章节 ID",
@@ -3575,18 +3739,23 @@ def build_two_pass_cast_prompt(
         "approximate_beats 仅为预算规模参考，没有固定句数上下限。每个最终 beat 的 ids 必须恰好写一个 ID；不得把多条字幕塞进一个 ids 数组来隐藏连续长口播。字幕行不等于一句话：必要相邻句必须分别写成连续 beats，并在 semantic_units 中列成一个完整语义单元。单句或完整语义单元通常 2-5 秒；只有必要上下句才能闭合意思时才可延至 5-8 秒。超过 8 秒的连续原口播不作为成片单元；回到完整安全池另选更短、更能自立的原话，不能为凑短句截断半句话。",
         "章节兑现只看最终口播：标题和 role 标签不算证据；介绍材质不等于说明不扎，鼓励尝试不等于教会搭配，说到网眼洞口不等于已经讲出做工结论，说到某一版不等于完成版本对比。每项 needs 用最短的一个完整语义单元直接说出问题、解释或证据和结论；只有补句不可或缺时才增加相邻句。alternative_beats 不参与兑现。不要把尚未选入的关键句只放在备选里。",
         "按原字幕前后核对口语依赖：‘没有这个点’必须保留所指结论，‘因为/所以/它/那种’必须有明确对象和完整谓语。先保留必要的前后短句再检查预算；不能为限制句数跳过结论或截掉句尾。开场不得保留‘刚刚讲过了’等依赖直播现场的铺垫。",
-        "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序连读：保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。开场先在内部比较真实组合，再只把最强、可兑现的已执行 IDs 写入 opening_selection。",
+        "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序连读：保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
+        "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。没有足够候选就如实少报。",
+        "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，不是最终片单、不是必须使用的开头。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
+        "开场排序比较的是‘原话 Hook → 紧接的真实 payoff’整体。先排除商品不明、现场依赖、半句和没有兑现证据的组合，再比较陌生观众能否立即听懂具体结果、疑问或反差，下一句是否新增机制/证明/穿法；普通介绍不因安全而成为强 Hook，疑问和强情绪也不自动优先。若原话没有强开头，quality=limited，保留最完整的真实介绍，不制造悬念。",
+        "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
+        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向当前安全池的实际指代依据，并给一句可核对的结果短评。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
         "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。",
         "字幕行不等于完整语义：仅当必要相邻原字幕跨多个 beats 时才输出 semantic_units；单行完整句省略。每组只列跨行依赖的 ID 数组，按原话顺序连续出现在本章最终 beats 中，不能引用其他章或未选句，并且总原声不超过 8 秒。程序只检查声明是否完整执行，不自动补句、拼句、截断或重排。",
         "严格按 product.ranges 回查‘它/这条/这套’。开场和非 styling 章节只能选择已核实的主商品范围；未知范围或其他商品的泛情绪不能承担主商品卖点。每条最终或备选 Beat 都填写关系、实际商品、类型和 1-2 条指代依据；搭配品只能作为 styling_support，不能把它自身效果归给主商品。",
-        "本次只返回最终可执行 beats，不返回 alternative_beats、候选开场、比较理由或候选清单。每个标记 complete 的 chapter 的每项 needs 都用 completion_receipts 逐项列出 requirement_index（从 1 开始）和本章最短已选 semantic unit 的 subtitle_ids；回执只写数字，不写解释，不能引用 context 或其他章。只有全部有回执才写 complete；否则写 needs_context/source_limited，并用 missing_content 写一个具体缺口。",
+        "正文只返回最终可执行 beats，不返回 alternative_beats；开场比较只保存在 opening_selection。每个标记 complete 的 chapter 的每项 needs 都用 completion_receipts 逐项列出 requirement_index（从 1 开始）和本章最短已选 semantic unit 的 subtitle_ids；回执只写数字，不写解释，不能引用 context 或其他章。只有全部有回执才写 complete；否则写 needs_context/source_limited，并用 missing_content 写一个具体缺口。",
         "章节调整只为让最终口播真实成立：可取消没有新价值的 optional/recommended 章节；可把回答同一购买问题的相邻章节合并；可按实际口播收窄 title、advance、job、needs。此时在保留的 chapter_packet 填 chapter_revision。merge 的 source_chapter_ids 必须是连续的原章节，且保留其中第一个 chapter_id；drop 的 chapter_packet 不放 beats，并只引用自身。剩余 chapter_id 必须保持第一遍顺序。不得新增章节、改变主商品、改写 core_desire 或用章节调整掩盖重复。未调整不要输出 chapter_revision。",
         "输出前在本次回复内部完成三次检查：逐章连读是否完整兑现 needs；以每个最终 beat 的单个 ID 的真实秒数逐章累计，确认没有超过 8 秒连续语义单元；整片是否兑现标题和 central promise 且没有重复。whole_video_audit.duration_receipt 用紧凑的 {章节ID:原声秒数,total:总原声秒数} 回报你的加总；若不在 source_min/source_max 内，不得写 pass，先在同一次选片中调整。程序按 ID 还原全文并实测时长，任何不一致以实测为准。",
         "返回结构：",
         f"实际回复必须使用 {WIRE_VERSION}：products 是去重商品表；每个 Beat 使用 role/ids/rel/evidence/support/replaces/product_ref 的紧凑键名。product_ref 指向 products 的从 0 开始序号；不得返回完整字段名 subject_product 或 subject_product_type。",
         json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "",
-        "先在内部完成选择和检查，再序列化最终结果。正文不抄口播、预算、累计过程、整片读稿、候选、比较理由或长篇审计；除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。只返回紧凑 JSON。",
+        "先在内部完成选择和检查，再序列化最终结果。正文不抄口播、预算、累计过程、整片读稿或长篇审计；只在 opening_selection 留紧凑比较回执。除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。只返回紧凑 JSON。",
     ])
 
 
@@ -4191,6 +4360,9 @@ def parse_strategy_result(
             director_title=strategy.director_title,
             core_desire=strategy.core_desire,
             opening_promise=strategy.opening_promise,
+            opening_evidence_packages=tuple(
+                dict(item) for item in strategy.opening_evidence_packages
+            ),
             director_quality_tier=strategy.director_quality_tier,
             director_plan_role=strategy.director_plan_role,
             director_sequence=tuple(strategy.director_sequence),
@@ -4652,6 +4824,11 @@ def _normalize_two_pass_director_payload(
             for subtitle_id in DirectorBeat.from_dict(package, 1).subtitle_ids
         ):
             warnings.append("开场比较引用了素材池外的字幕，请复核。")
+        opening["candidate_audit"] = audit_opening_candidates(
+            opening, source_rows=casting_rows, executed_ids=selected_ids,
+        )
+        if opening["candidate_audit"]["status"] == "warning":
+            warnings.append("开场候选回执的来源或实际承接不一致，请复核；未自动换句。")
         audit = dict(primary.get("whole_video_audit") or {})
         links = audit.get("continuity_links") or ()
         if not isinstance(links, (list, tuple)):
@@ -4873,6 +5050,7 @@ def analyze_commercial_story(
             story_payload,
             target_duration=target_duration,
             duration_tolerance=duration_tolerance,
+            available_subtitle_ids=story_executable_ids,
         )
         story_audit.update(director_delivery_duration_range(target_duration, duration_tolerance, output_speed_factor))
         story_audit["content_policy"] = story_policy_audit
