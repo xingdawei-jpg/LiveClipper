@@ -1023,7 +1023,26 @@ def _load_settings() -> dict[str, Any]:
     defaults["volc_region"] = _normalize_volc_region(defaults.get("volc_region"))
     _normalize_local_asr_runtime_settings(defaults)
     _normalize_subtitle_style_settings(defaults)
-    return _normalize_ai_model_defaults(defaults)
+    return _with_ai_provider_profiles(_normalize_ai_model_defaults(defaults))
+
+
+def _with_ai_provider_profiles(settings: dict[str, Any]) -> dict[str, Any]:
+    data = dict(settings)
+    url = normalize_ai_base_url(data.get("base_url"))
+    provider = (
+        "deepseek" if url.lower() == "https://api.deepseek.com" else
+        "doubao-ark" if url.lower() == "https://ark.cn-beijing.volces.com/api/v3" else
+        "custom"
+    )
+    profiles = dict(data.get("ai_provider_profiles") or {})
+    # Legacy active fields remain authoritative for existing Director callers.
+    profiles[provider] = {
+        "api_key": str(data.get("api_key") or ""),
+        "base_url": url,
+        "model": str(data.get("model") or ""),
+    }
+    data["ai_provider_profiles"] = profiles
+    return data
 
 
 def _save_settings(settings: dict[str, Any]) -> bool:
@@ -2034,6 +2053,7 @@ def _upload_dir() -> Path:
 
 
 class SettingsPayload(BaseModel):
+    ai_provider_profiles: dict[str, dict[str, str]] = Field(default_factory=dict)
     api_key: str = ""
     base_url: str = ""
     model: str = ""
@@ -13102,6 +13122,14 @@ def _write_commerce_director_preview_artifacts(
             "director_controls": effective_controls,
         },
         "director_controls.json": effective_controls,
+        "candidate_ledger.json": case.get("candidate_ledger", {}),
+        "hook_candidates.json": {
+            str(item.get("strategy_id") or f"S{index}"): dict(item.get("opening_selection") or {})
+            for index, item in enumerate([
+                dict(case.get("selected_m1_hero") or {}),
+                *[dict(entry.get("strategy") or {}) for entry in case.get("director_variant_plans") or []],
+            ], 1)
+        },
         "m1_story_brief.json": {
             "selected_m1_hero": case.get("selected_m1_hero", {}),
             "m1_result": case.get("m1_result", {}),
@@ -14199,6 +14227,7 @@ def _run_commerce_director_preview(
                 "m2_outline": _commerce_director_m2_outline(plan_payload),
                 "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
                 "duration_assessment": duration_assessment,
+                "opening_selection": dict(primary_strategy.get("opening_selection") or {}),
                 "candidate_pool_summary": {
                     "recommended_count": len(public_clips),
                     "alternative_count": len(alternative_public_clips),
@@ -14262,6 +14291,7 @@ def _run_commerce_director_preview(
                         **dict(case), "m2_plan": variant_plan, "chapter_lineage": [],
                     }),
                     "duration_assessment": variant_duration,
+                    "opening_selection": dict(variant_strategy.get("opening_selection") or {}),
                     "candidate_pool_summary": {
                         "recommended_count": len(prepared_variant["clips"]),
                         "alternative_count": 0,
@@ -14390,6 +14420,11 @@ def _run_commerce_director_preview(
             if preview_fidelity["status"] == "warning":
                 message += " " + preview_fidelity["message"]
                 emit_log("warning", preview_fidelity["message"], scope)
+            opening_verification = dict(dict(primary_strategy.get("opening_selection") or {}).get("verification") or {})
+            if opening_verification.get("status") == "warning":
+                warning = "开场候选回执与实际选句存在待审项，请核对首句和紧接的兑现句；未自动替换原话。"
+                message += " " + warning
+                emit_log("warning", warning, scope)
             resolved_product = dict(dict(product_control.get("final") or {}).get("resolved_scope") or {}).get("main_product")
             product_warnings = [str(item).strip() for item in (product_control.get("warnings") or []) if str(item).strip()]
             if resolved_product and product_warnings:
@@ -16884,7 +16919,11 @@ def get_settings() -> dict[str, Any]:
 
 @app.post("/api/settings")
 def save_settings(payload: SettingsPayload) -> dict[str, Any]:
-    data = payload.model_dump()
+    existing = _load_settings()
+    updates = payload.model_dump(exclude_unset=True)
+    profiles = dict(existing.get("ai_provider_profiles") or {})
+    profiles.update(updates.pop("ai_provider_profiles", {}))
+    data = _with_ai_provider_profiles({**existing, **updates, "ai_provider_profiles": profiles})
     provided_fields = set(getattr(payload, "model_fields_set", set()) or set())
     if "style_profile_enabled" not in provided_fields:
         data.pop("style_profile_enabled", None)
@@ -17096,6 +17135,8 @@ def _ai_provider_warning(base_url: str, model: str) -> str:
         return "当前 Base URL 是 DeepSeek，但模型名不像 DeepSeek；建议模型填写 deepseek-v4-flash。"
     if ("volces" in lower_url or "ark.cn-" in lower_url) and "deepseek" in lower_model:
         return "当前 Base URL 是火山/豆包，但模型名是 DeepSeek；请把 Base URL 改为 https://api.deepseek.com。"
+    if ("volces" in lower_url or "ark.cn-" in lower_url) and not (model or "").strip():
+        return "豆包方舟需要填写已开通的模型 ID，或推理接入点 ID（ep-...）。"
     return ""
 
 
@@ -17139,6 +17180,9 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
     model = (cfg.get("model") or "").strip()
     if not api_key or not base_url:
         return {"ok": False, "message": "请先填写 AI API Key 和 Base URL。"}
+    warning = _ai_provider_warning(base_url, model)
+    if warning:
+        return {"ok": False, "message": f"AI 配置不一致：{warning}"}
 
     url = ai_models_url(base_url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
@@ -17146,9 +17190,6 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
         ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
             if 200 <= resp.status < 300:
-                warning = _ai_provider_warning(base_url, model)
-                if warning:
-                    return {"ok": False, "message": f"AI Key 验证通过，但配置不一致：{warning}"}
                 emit_log("success", "AI 连接测试通过。", "settings")
                 return {"ok": True, "message": "AI 连接测试通过。"}
             return {"ok": False, "message": f"AI 连接异常: HTTP {resp.status}"}

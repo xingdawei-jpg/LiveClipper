@@ -932,7 +932,7 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
             ):
                 server._run_commerce_director_preview("task-1", "preview-1", payload)
 
-            self.assertEqual(observed["output_dir"], root / "workspace" / "ui_commerce_director_experiment" / "task-1")
+            self.assertEqual(observed["output_dir"], (root / "workspace" / "ui_commerce_director_experiment" / "task-1").resolve())
             self.assertTrue((observed["output_dir"] / "run_manifest.json").exists())
             controls = observed["director_controls"]
             self.assertEqual(controls["director_direction"], "场景种草")

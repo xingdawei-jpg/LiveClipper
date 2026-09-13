@@ -891,10 +891,10 @@ class ContentReviewBundle:
             tag_text = "/".join(card.quality_tags)
             lines.append(
                 f"- #{card.candidate_id:02d} [{card.tier}] {card.topic}/{card.subtopic}; "
-                f"\u4ef7\u503c:{card.buyer_value}; \u8bc1\u636e:{card.evidence_type or '\u65e0'}; "
+                f"\u4ef7\u503c:{card.buyer_value}; \u8bc1\u636e:{card.evidence_type or '无'}; "
                 f"\u539f\u6587\u8bc1\u636e:\"{card.evidence_quote}\"; "
-                f"\u4e3b\u4f53:{card.primary_subject or '\u672a\u5224\u660e'}; \u4e0e\u4e3b\u5546\u54c1:{card.target_relation}; "
-                f"\u4e3b\u4f53\u8bc1\u636e:\"{card.subject_evidence or '\u65e0'}\"; "
+                f"\u4e3b\u4f53:{card.primary_subject or '未判明'}; \u4e0e\u4e3b\u5546\u54c1:{card.target_relation}; "
+                f"\u4e3b\u4f53\u8bc1\u636e:\"{card.subject_evidence or '无'}\"; "
                 f"\u89d2\u8272:{role_text}; \u4f9d\u8d56:{card.dependency}"
                 + (f"; \u6807\u7b7e:{tag_text}" if tag_text else "")
             )
@@ -1960,9 +1960,9 @@ def _review_prompts(
         )
     schema_text = json.dumps(schema_example, ensure_ascii=False, separators=(",", ":"))
     user_prompt = f"""{retry_rule}
-\u54c1\u7c7b:{category or '\u901a\u7528'}
-\u4e3b\u5546\u54c1:{main_product or '\u672a\u6307\u5b9a'}
-\u7528\u6237\u8981\u6c42\u907f\u5f00:{'\u3001'.join(avoid) if avoid else '\u65e0'}
+\u54c1\u7c7b:{category or '通用'}
+\u4e3b\u5546\u54c1:{main_product or '未指定'}
+\u7528\u6237\u8981\u6c42\u907f\u5f00:{'、'.join(avoid) if avoid else '无'}
 {source_rule}
 \u5185\u5bb9\u4f7f\u7528\u653f\u7b56:\n{content_policy_rule}
 
@@ -2933,8 +2933,8 @@ def review_final_sequence(
             + ". A revised sequence may use only one of these IDs as its first Hook; do not choose another reviewed line as the opening.\n"
         )
     user_prompt = (
-        f"\u54c1\u7c7b:{category or '\u901a\u7528'}\n"
-        f"\u504f\u597d\u4e3b\u7ebf:{preference or '\u81ea\u52a8'}\n"
+        f"\u54c1\u7c7b:{category or '通用'}\n"
+        f"\u504f\u597d\u4e3b\u7ebf:{preference or '自动'}\n"
         f"\u539f\u7247\u65f6\u957f\u5408\u540c:{float(duration_low):.1f}-{float(duration_high):.1f}\u79d2\n"
         f"\u5f53\u524d\u7247\u5355\u539f\u7247\u5408\u8ba1:{selected_duration:.1f}\u79d2\uff1b\u5168\u90e8\u5ba1\u7a3f\u5019\u9009\u5408\u8ba1:{inventory_duration:.1f}\u79d2\uff1b"
         f"\u82e5revise\u5efa\u8bae\u7ea6{recommended_min_clips}-{recommended_max_clips}\u4e2a\u7247\u6bb5\uff0c\u4f18\u5148\u75282-3\u4e2a\u8fde\u7eed\u4e14\u8bed\u4e49\u5bc6\u5207\u7684\u5019\u9009\u7ec4\u62106-10\u79d2\u5b8c\u6574\u7247\u6bb5\uff0c"

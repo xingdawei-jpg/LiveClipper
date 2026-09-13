@@ -3969,6 +3969,13 @@ h2 {
   font-size: 13px;
 }
 
+.settings-field-hint {
+  margin: 10px 0 0 106px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .preset-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
