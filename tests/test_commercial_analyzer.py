@@ -618,6 +618,14 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertNotIn("只给工作台看的长篇选择理由", prompt)
         self.assertNotIn('"selected_source_seconds"', prompt)
 
+    def test_cast_prompt_requires_a_spoken_transition_for_every_adjacent_beat(self) -> None:
+        prompt = build_two_pass_cast_prompt(story_contract={}, subtitles=SAMPLE_SUBTITLES)
+
+        self.assertIn("前句提出顾虑/结论而后句回答或证明", prompt)
+        self.assertIn("不能把“有三种穿法”接到“又没什么特点”", prompt)
+        self.assertIn("每一处切换都必须让陌生观众听出上一句与下一句为什么相连", prompt)
+        self.assertIn("不能用连续操作指令代替购买判断", prompt)
+
     def test_normalize_preserves_all_fully_cast_strategies(self) -> None:
         story = {"strategies": [
             {"strategy_id": "S1", "director_plan_role": "primary", "core_desire": "显瘦",
