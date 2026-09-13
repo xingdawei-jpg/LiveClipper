@@ -3409,7 +3409,7 @@ def build_two_pass_story_prompt(
             f"{float(duration_range['preferred_high']):.1f} 秒。原声选句预算见下；不能拿半句或重复内容填充。"
         ),
         "交付时长合同（含导出变速，原声预算可以超过120秒）：" + json.dumps(duration_range, ensure_ascii=False),
-        "M1 输出必须紧凑：主方案最多 4 个 chapter_packets、最多 1 组 opening_evidence_packages；只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。每个短文本字段限一句，每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements，各章预算合计应接近 source_target 且不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
+        "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 1 组 opening_evidence_packages。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。每个短文本字段限一句，每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements，各章预算合计应接近 source_target 且不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         "章节数量不构成交付要求：宁可只保留能推进故事的少数章节，也不能为达到任何章节或 beat 数量拆碎同一段教学。若素材无法支撑新的购买判断，明确 source_limited 或自然收束，不能用未提供内容补足。",
         "本轮先决定观众为什么想买，再按观众自然追问安排章节。每章 buyer_advance 必须写出与上一章不同的新增购买认知；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
         (

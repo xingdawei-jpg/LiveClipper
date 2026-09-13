@@ -982,7 +982,7 @@ class TwoPassDirectorTests(unittest.TestCase):
             product="西装", subtitles=SAMPLE_SUBTITLES, target_duration=60,
         )
 
-        self.assertIn("主方案最多 4 个 chapter_packets", prompt)
+        self.assertIn("章节数量由完整故事决定，不设上限", prompt)
         self.assertIn("最多 1 组 opening_evidence_packages", prompt)
         self.assertIn("每章 evidence_locations 最多 2 个 ID", prompt)
         self.assertNotIn('"selection_basis"', prompt)
