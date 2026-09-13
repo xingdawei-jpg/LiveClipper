@@ -969,12 +969,23 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertIn("可拆→还能拆", prompt)
         self.assertIn("不能靠不同 role 标签把同义句分装进两章", prompt)
         self.assertIn("整片最多保留一个以操作步骤为主的证明块", prompt)
+        self.assertIn("先在内部按最终 ID 从头连读整片，再归入章节", prompt)
         self.assertIn("隐藏章节标题和画面，只听前 6-10 秒", prompt)
         self.assertIn("又没什么特点", prompt)
         self.assertIn("必须在本次回复先删同义句、重复教程和 optional 章", prompt)
         self.assertNotIn("expected_total_beats", TWO_PASS_CAST_SYSTEM_PROMPT + prompt)
         self.assertNotIn("00:00:", prompt)
         self.assertLess(prompt.index("[ID 002]"), prompt.index("第一遍的完整故事"))
+
+    def test_story_prompt_caps_m1_contract_before_the_model_can_overproduce(self) -> None:
+        prompt = build_two_pass_story_prompt(
+            product="西装", subtitles=SAMPLE_SUBTITLES, target_duration=60,
+        )
+
+        self.assertIn("主方案最多 4 个 chapter_packets", prompt)
+        self.assertIn("最多 1 组 opening_evidence_packages", prompt)
+        self.assertIn("每章 evidence_locations 最多 2 个 ID", prompt)
+        self.assertNotIn('"selection_basis"', prompt)
 
     def test_single_plan_casting_receives_completion_margin_without_raising_multi_plan_budget(self) -> None:
         self.assertEqual(director_casting_output_max_tokens(1), 5200)

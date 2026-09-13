@@ -130,6 +130,7 @@ class DirectorHookComparisonTests(unittest.TestCase):
         self.assertIn("Hook 与 payoff 必须分别传达两个不同事实", prompt)
         self.assertIn("selected 的 reason 必须点明 payoff 新增的具体事实", prompt)
         self.assertIn("任一答案缺失就换候选或 quality=limited", prompt)
+        self.assertIn("不得加入未选原话的视觉细节、设计名或结论", prompt)
         self.assertIn("默改疑似 ASR 错词", prompt)
         self.assertNotIn("不返回 alternative_beats、候选开场", prompt)
 

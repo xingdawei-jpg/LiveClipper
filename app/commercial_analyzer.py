@@ -3337,12 +3337,9 @@ def build_two_pass_story_prompt(
                 "product_type": "/".join(PRODUCT_TYPES),
                 "target_confirmation": "match/ambiguous/not_found；match表示与用户目标及原字幕一致",
                 "identity_evidence_ids": [1],
-                "selection_basis": "全片主要展示/讲解的是谁；哪些只是短暂搭配提及，不按强句分数或一次提词认主商品",
                 "sales_scope": "single_product/explicit_set",
-                "supporting_products_rule": "其他商品仅可怎样支持主商品；不得归因哪些效果",
                 "source_product_sections": [{"start_id": 1, "end_id": 20, "product_type": "tshirt",
-                                             "subject_product": "该原片范围实际讲的商品；无法确认写unknown，不套用主商品",
-                                             "identity_evidence_ids": [1]}],
+                                             "subject_product": "该原片范围实际讲的商品；无法确认写unknown"}],
             },
             "opening_promise": "开头为什么能停人以及立即兑现什么",
             "opening_evidence_packages": [{
@@ -3412,7 +3409,7 @@ def build_two_pass_story_prompt(
             f"{float(duration_range['preferred_high']):.1f} 秒。原声选句预算见下；不能拿半句或重复内容填充。"
         ),
         "交付时长合同（含导出变速，原声预算可以超过120秒）：" + json.dumps(duration_range, ensure_ascii=False),
-        "为每个完整方案的每章填写 source_budget_seconds 和 completion_requirements，各方案分别逐章加总，预算合计应接近 source_target 且不得超过 source_max（不能只凑到下限或把成片秒数当原声预算）；不要只写六七个章名，合计却只够半条片。长目标需要更充分的具体解释、证据和不同使用问题，不是重复口号。相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
+        "M1 输出必须紧凑：主方案最多 4 个 chapter_packets、最多 1 组 opening_evidence_packages；只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。每个短文本字段限一句，每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements，各章预算合计应接近 source_target 且不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         "章节数量不构成交付要求：宁可只保留能推进故事的少数章节，也不能为达到任何章节或 beat 数量拆碎同一段教学。若素材无法支撑新的购买判断，明确 source_limited 或自然收束，不能用未提供内容补足。",
         "本轮先决定观众为什么想买，再按观众自然追问安排章节。每章 buyer_advance 必须写出与上一章不同的新增购买认知；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
         (
@@ -3423,7 +3420,7 @@ def build_two_pass_story_prompt(
             "本次只执行一个完整主方案；必须同时给出恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要（S2、S3）。"
             "不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段；用户确认选择后才会单独为所选方向生成完整方案。"
         ),
-        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先在完整安全字幕中为每个完整方案寻找最多 3 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把每组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它们只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可少报或不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只是身份依据，不是选片；所有备选方向也必须是同一个主商品。",
+        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。只为主方案寻找 1 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把这组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只列1-2个最直接依据；所有备选方向也必须是同一个主商品。",
         "identity_evidence_ids 只列3-6条分布在不同位置、能明确核实商品名/指代的代表依据，不要抄全片ID。每条 Beat 的 product_evidence_ids 只需1-2个最直接的指代依据。",
         "先顺读全片，在 product_scope.source_product_sections 用连续ID范围记录换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。临时聊裤子、另一件羊毛衣、与商品无关的聊天都不能默认属于T恤。范围内 product_type/subject_product 记录实际讲述对象，证据不足用unknown；单句讲其他商品的自身优点不能包装成主商品的搭配支持。",
         "长目标通过探索更多真实存在的新购买章节来体现，禁止重复同一结果、同一机制或同义口号。",
@@ -3752,7 +3749,7 @@ def build_two_pass_cast_prompt(
         f"实际回复必须使用 {WIRE_VERSION}：products 是去重商品表；每个 Beat 使用 role/ids/rel/evidence/support/replaces/product_ref 的紧凑键名。product_ref 指向 products 的从 0 开始序号；不得返回完整字段名 subject_product 或 subject_product_type。",
         json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "",
-        "先在内部完成选择和检查，再序列化最终结果。正文不抄口播、预算、累计过程、整片读稿或长篇审计；只在 opening_selection 留紧凑比较回执。除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。只返回紧凑 JSON。",
+        "先在内部按最终 ID 从头连读整片，再归入章节：盲读时每句都必须独立成立，章节只能标记已经连顺的购买推进，不能用章节标题替代句意。先删掉读不通、依赖画面、重复教程和无新增购买价值的句子，确认时长后才序列化最终结果。正文不抄口播、预算、累计过程、整片读稿或长篇审计；只在 opening_selection 留紧凑比较回执。除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。开场 reason 只能陈述 Hook/Payoff 原话实际说出的文字事实，不得加入未选原话的视觉细节、设计名或结论；无法逐字对应就写 quality=limited。只返回紧凑 JSON。",
     ])
 
 
