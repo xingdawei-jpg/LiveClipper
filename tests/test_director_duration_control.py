@@ -240,6 +240,8 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertIn('"budget_end_floor"', prompt)
         self.assertIn('"duration_receipt"', prompt)
         self.assertIn("若不在 source_min/source_max 内，不得写 pass", prompt)
+        self.assertIn('"safe_pool_can_reach_source_min":true', prompt)
+        self.assertIn("source_min 是本次交付下限", prompt)
         self.assertIn("每个最终 beat 的 ids 必须恰好写一个 ID", prompt)
         self.assertIn("总原声不超过 8 秒", prompt)
 

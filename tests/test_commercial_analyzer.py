@@ -1,6 +1,8 @@
 import json
+import io
 import os
 import sys
+import urllib.error
 import unittest
 from unittest import mock
 
@@ -31,6 +33,7 @@ from commercial_analyzer import (
     detect_content_dependencies,
     director_duration_depth_contract,
     director_casting_output_max_tokens,
+    director_casting_request_timeout,
     director_target_duration_range,
     filter_director_executable_ids_for_content_policy,
     matches_story_semantic_signature,
@@ -957,7 +960,7 @@ class TwoPassDirectorTests(unittest.TestCase):
 
         self.assertIn("[ID 002]", prompt)
         self.assertIn("[ID 003]", prompt)
-        self.assertNotIn("[ID 001]", prompt)
+        self.assertIn("[ID 001][0.80s]", prompt)
         self.assertIn("[ID 004]", prompt)
         self.assertIn("long_complete_exception", prompt)
         self.assertNotIn("[ID 005]", prompt)
@@ -1003,6 +1006,11 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertEqual(director_casting_output_max_tokens(1), 5200)
         self.assertEqual(director_casting_output_max_tokens(2), 8000)
         self.assertEqual(director_casting_output_max_tokens(3), 12000)
+
+    def test_seed_casting_waits_longer_without_extending_other_models(self) -> None:
+        self.assertEqual(director_casting_request_timeout("doubao-seed-2-1-pro-260628", 120), 360)
+        self.assertEqual(director_casting_request_timeout("deepseek-v4-flash", 120), 180)
+        self.assertEqual(director_casting_request_timeout("doubao-seed-2-1-pro-260628", 420), 420)
 
     def test_chapter_alternatives_survive_without_entering_final_sequence(self) -> None:
         strategy = Strategy.from_dict({
@@ -1307,6 +1315,113 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertFalse(ledger.call_args.kwargs["success"])
         self.assertEqual(ledger.call_args.kwargs["error_type"], "output_truncated")
 
+    def test_two_pass_seed_reasoning_does_not_consume_visible_json_budget(self) -> None:
+        provider_response = {
+            "choices": [{
+                "message": {"content": "```json\n{\"strategies\": []}\n```"},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "completion_tokens": 6060,
+                "completion_tokens_details": {"reasoning_tokens": 3601},
+            },
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(provider_response).encode("utf-8")
+
+        captured = []
+        with (
+            mock.patch("commercial_analyzer.urllib.request.urlopen", return_value=FakeResponse()),
+            mock.patch("commercial_analyzer.record_ai_call") as ledger,
+        ):
+            response = _post_two_pass_director_request(
+                api_key="test", base_url="https://ark.cn-beijing.volces.com/api/v3",
+                model="doubao-seed-2-1-pro-260628", system_prompt="system", user_prompt="user",
+                stage="Director_story_contract", max_tokens=3000, timeout=30,
+                response_hook=captured.append,
+            )
+
+        self.assertEqual(response, "```json\n{\"strategies\": []}\n```")
+        self.assertEqual(captured, [response])
+        self.assertTrue(ledger.call_args.kwargs["success"])
+
+    def test_two_pass_persists_partial_body_before_truncation_error(self) -> None:
+        provider_response = {
+            "choices": [{
+                "message": {"content": '{"strategies": ['},
+                "finish_reason": "length",
+            }],
+            "usage": {"completion_tokens": 3000},
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(provider_response).encode("utf-8")
+
+        captured = []
+        with (
+            mock.patch("commercial_analyzer.urllib.request.urlopen", return_value=FakeResponse()),
+            mock.patch("commercial_analyzer.record_ai_call"),
+        ):
+            with self.assertRaisesRegex(AnalyzerError, "JSON 被截断"):
+                _post_two_pass_director_request(
+                    api_key="test", base_url="https://example.invalid/v1", model="test-model",
+                    system_prompt="system", user_prompt="user", stage="Director_story_contract",
+                    max_tokens=3000, timeout=30, response_hook=captured.append,
+                )
+
+        self.assertEqual(captured, ['{"strategies": ['])
+
+    def test_two_pass_retries_provider_rate_limit_without_replaying_m1(self) -> None:
+        provider_response = {
+            "choices": [{"message": {"content": '{"strategies": []}'}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 12},
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(provider_response).encode("utf-8")
+
+        rate_limit = urllib.error.HTTPError(
+            "https://ark.example/chat/completions", 429, "Too Many Requests",
+            {"Retry-After": "1"}, io.BytesIO(b"rate limited"),
+        )
+        with (
+            mock.patch("commercial_analyzer.urllib.request.urlopen", side_effect=[rate_limit, FakeResponse()]) as urlopen,
+            mock.patch("commercial_analyzer.time.sleep") as sleep,
+            mock.patch("commercial_analyzer.record_ai_call") as ledger,
+        ):
+            response = _post_two_pass_director_request(
+                api_key="test", base_url="https://ark.cn-beijing.volces.com/api/v3",
+                model="doubao-seed-2-1-pro-260628", system_prompt="system", user_prompt="user",
+                stage="Director_beat_casting", max_tokens=5200, timeout=30,
+            )
+
+        self.assertEqual(response, '{"strategies": []}')
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertTrue(ledger.call_args.kwargs["success"])
+
     def test_deepseek_director_stages_use_fixed_nonthinking_budget(self) -> None:
         captured = {}
         provider_response = {
@@ -1352,8 +1467,82 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertEqual(captured["body"]["thinking"], {"type": "disabled"})
         self.assertEqual(captured["body"]["max_tokens"], 8000)
 
+    def test_qwen38_director_stages_disable_default_thinking(self) -> None:
+        captured = {}
+        provider_response = {
+            "choices": [{"message": {"content": '{"strategies":[]}'}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 8},
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(provider_response).encode("utf-8")
+
+        def fake_urlopen(request, **_kwargs):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        with (
+            mock.patch("commercial_analyzer.urllib.request.urlopen", side_effect=fake_urlopen),
+            mock.patch("commercial_analyzer.record_ai_call"),
+        ):
+            _post_two_pass_director_request(
+                api_key="test", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model="qwen3.8-flash", system_prompt="system", user_prompt="user",
+                stage="Director_story_contract", max_tokens=3000, timeout=30,
+            )
+
+        self.assertFalse(captured["body"]["enable_thinking"])
+        self.assertNotIn("thinking", captured["body"])
+        self.assertNotIn("reasoning_effort", captured["body"])
+
 
 class JsonRecoveryTests(unittest.TestCase):
+    def test_director_prompts_keep_safe_subsecond_completion_and_priorities(self):
+        rows = [
+            {"id": 128, "start": 0, "end": 2.1, "text": "这个衣服其实是三种。"},
+            {"id": 129, "start": 2.1, "end": 3.0, "text": "穿法都很好看。"},
+            {"id": 130, "start": 3.0, "end": 3.8, "text": "禁止的内容"},
+        ]
+        shared = dict(subtitles=rows, executable_subtitle_ids=[128, 129])
+        story = build_two_pass_story_prompt(product="西装", **shared)
+        cast = build_two_pass_cast_prompt(story_contract={}, **shared)
+        for prompt in (story, cast):
+            self.assertIn("[ID 129]", prompt)
+            self.assertIn("穿法都很好看", prompt)
+            self.assertNotIn("禁止的内容", prompt)
+        self.assertIn("不足1秒的片段只用于补全", cast)
+        self.assertIn("先从安全池识别完整语义单元", cast)
+        self.assertNotIn("先为每章挑出", cast)
+        self.assertIn("payoff必须开始回答本款怎样解决", cast)
+        self.assertIn("开场例外", cast)
+        self.assertIn("source_min 是本次交付下限", cast)
+        self.assertIn("安全池容量足够时", cast)
+        self.assertNotIn("全片必须落在 source_min/source_max", cast)
+        self.assertIn("不能抽出含卖点的半句", cast)
+
+    def test_director_wire_recovers_padded_id_and_missing_root_close(self):
+        # Exact two formatting defects returned by Doubao Seed M2: a padded
+        # rejected-candidate ID and the missing final wire-object close.
+        raw = (
+            '{"schema_version":"director-wire-v1","products":[],'
+            '"packet":{"strategies":[{"strategy_id":"S1",'
+            '"opening_selection":{"compared_packages":[{"subtitle_ids":[002],'
+            '"payoff_subtitle_ids":[],"product_evidence_ids":[],"decision":"rejected"}]},'
+            '"chapter_packets":[]}]}'
+        )
+
+        parsed = _extract_json(raw)
+
+        strategy = parsed["strategies"][0]
+        self.assertEqual(strategy["opening_selection"]["compared_packages"][0]["subtitle_ids"], [2])
+
     def test_director_wire_packet_shell_expands_for_two_pass_casting(self):
         raw = json.dumps({
             "schema_version": "director-wire-v1",

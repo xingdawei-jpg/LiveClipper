@@ -905,6 +905,36 @@ const settingFields = {
   m2_planner_mode: "s-m2-planner-mode",
 };
 
+const aiProviderConfigs = {
+  deepseek: {
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+    apiKeyLabel: "DeepSeek API Key",
+    modelLabel: "模型",
+    modelPlaceholder: "deepseek-v4-flash",
+    hint: "使用 DeepSeek 控制台的 API Key。",
+  },
+  "doubao-ark": {
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "",
+    apiKeyLabel: "方舟 API Key",
+    modelLabel: "模型或接入点",
+    modelPlaceholder: "doubao-seed-2-1-pro-260628 或 ep-...",
+    hint: "使用火山方舟 API Key；填写已开通的豆包模型 ID，或推理接入点 ID（ep-...）。",
+  },
+  custom: {
+    baseUrl: "",
+    model: "",
+    apiKeyLabel: "API Key",
+    modelLabel: "模型",
+    modelPlaceholder: "服务商模型名",
+    hint: "填写服务商提供的 OpenAI 兼容 Base URL、API Key 和模型名。",
+  },
+};
+
+let aiProviderProfiles = {};
+let activeAiProvider = "deepseek";
+
 const keywordFields = {
   clip_keywords: "kw-clip-keywords",
   forbidden_phrases: "kw-forbidden-phrases",
@@ -1345,6 +1375,7 @@ document.addEventListener("DOMContentLoaded", () => {
   startBackgroundRefreshLoops();
   bindNavigation();
   bindSettingsTabs();
+  bindAiProviderControls();
   bindAiSelectionAutoSave();
   bindLiveRecTabs();
   bindLiveRoomFilters();
@@ -3587,6 +3618,10 @@ async function loadSettings(showToast = false) {
       element.value = value ?? "";
     }
   });
+  aiProviderProfiles = structuredClone(data.ai_provider_profiles || {});
+  activeAiProvider = selectedAiProvider(data.base_url);
+  rememberAiProvider();
+  syncAiProviderUi({ detectFromSettings: true });
   applyUiFontSize(data.ui_font_size || 14);
   syncSubtitleFontSize();
   syncSubtitleStyleValues();
@@ -3597,8 +3632,53 @@ async function loadSettings(showToast = false) {
   if (showToast) toast("设置已重新载入", "success");
 }
 
+function selectedAiProvider(baseUrl = $("s-base-url")?.value) {
+  const normalized = String(baseUrl || "").trim().replace(/\/$/, "").toLowerCase();
+  if (normalized === aiProviderConfigs.deepseek.baseUrl) return "deepseek";
+  if (normalized === aiProviderConfigs["doubao-ark"].baseUrl) return "doubao-ark";
+  return "custom";
+}
+
+function syncAiProviderUi({ detectFromSettings = false, applyProviderDefaults = false } = {}) {
+  const select = $("s-ai-provider");
+  const baseUrl = $("s-base-url");
+  const model = $("s-model");
+  if (!select || !baseUrl || !model) return;
+
+  if (detectFromSettings) select.value = selectedAiProvider(baseUrl.value);
+  const provider = aiProviderConfigs[select.value] || aiProviderConfigs.custom;
+  if (applyProviderDefaults) {
+    const saved = aiProviderProfiles[select.value];
+    baseUrl.value = saved?.base_url ?? provider.baseUrl;
+    model.value = saved?.model ?? provider.model;
+    if ($("s-api-key")) $("s-api-key").value = saved?.api_key ?? "";
+  }
+  $("s-api-key-label").textContent = provider.apiKeyLabel;
+  $("s-model-label").textContent = provider.modelLabel;
+  model.placeholder = provider.modelPlaceholder;
+  $("s-ai-provider-hint").textContent = provider.hint;
+}
+
+function bindAiProviderControls() {
+  $("s-ai-provider")?.addEventListener("change", () => {
+    rememberAiProvider();
+    activeAiProvider = $("s-ai-provider").value;
+    syncAiProviderUi({ applyProviderDefaults: true });
+  });
+}
+
+function rememberAiProvider() {
+  aiProviderProfiles[activeAiProvider] = {
+    api_key: $("s-api-key")?.value.trim() || "",
+    base_url: $("s-base-url")?.value.trim() || "",
+    model: $("s-model")?.value.trim() || "",
+  };
+}
+
 function collectSettings() {
+  rememberAiProvider();
   const data = {};
+  data.ai_provider_profiles = structuredClone(aiProviderProfiles);
   Object.entries(settingFields).forEach(([key, id]) => {
     const element = $(id);
     if (!element) return;
@@ -10587,14 +10667,22 @@ function formatSeconds(value) {
 
 const deepSeekPreviewRatesCnyPerMillion = {
   "deepseek-v4-flash": {
-    offpeak: { cachedInput: 0.05, input: 1.5, output: 4.5 },
-    peak: { cachedInput: 0.1, input: 3, output: 9 },
+    offpeak: { cachedInput: 0.02, input: 1, output: 4 },
+    peak: { cachedInput: 0.04, input: 2, output: 8 },
     label: "DeepSeek V4 Flash",
   },
   "deepseek-v4-pro": {
     offpeak: { cachedInput: 0.15, input: 4.5, output: 13.5 },
     peak: { cachedInput: 0.3, input: 9, output: 27 },
     label: "DeepSeek V4 Pro",
+  },
+  "qwen3.8-flash": {
+    flat: { cachedInput: 0.1, input: 0.8, output: 2.7 },
+    label: "Qwen 3.8 Flash",
+  },
+  "doubao-seed-2-1-pro-260628": {
+    flat: { cachedInput: 1.2, input: 6, output: 30 },
+    label: "Doubao Seed 2.1 Pro",
   },
 };
 
@@ -10674,17 +10762,20 @@ function commerceDirectorPreviewCostSummary(preview) {
   const details = rows.map(row => {
     const window = beijingPeakWindowFromReport(row);
     const rate = deepSeekPreviewRatesCnyPerMillion[String(row.model || "").toLowerCase()];
-    const tier = rate && window.peak !== null ? (window.peak ? rate.peak : rate.offpeak) : null;
+    const flatRate = Boolean(rate?.flat);
+    const tier = rate?.flat || (rate && window.peak !== null ? (window.peak ? rate.peak : rate.offpeak) : null);
     const input = Number(row.input_tokens), output = Number(row.output_tokens), cached = Number(row.cached_input_tokens);
     const known = row.cached_input_tokens != null && Number.isFinite(input) && Number.isFinite(output)
       && input >= cached && cached >= 0 && output >= 0;
     const amount = tier && known ? ((input - cached) * tier.input + cached * tier.cachedInput + output * tier.output) / 1000000 : null;
-    return {stage: row.stage, model: row.model, window, tier, input, output, cached, amount,
+    return {stage: row.stage, model: row.model, window, tier, flatRate, input, output, cached, amount,
       basis: row.request_started_at ? "请求开始时间" : row.timestamp ? "历史回执时间估算" : "历史报告时间估算"};
   });
   const cost = details.every(d => d.amount !== null) ? details.reduce((sum, d) => sum + d.amount, 0) : null;
   const labels = [...new Set(details.map(d => d.window.label))];
-  const priceWindowLabel = labels.length > 1 ? "跨峰谷" : (labels[0] || "时段未知");
+  const priceWindowLabel = details.length && details.every(d => d.flatRate)
+    ? "标准价"
+    : (labels.length > 1 ? "跨峰谷" : (labels[0] || "时段未知"));
 
   return {
     totalTokens,

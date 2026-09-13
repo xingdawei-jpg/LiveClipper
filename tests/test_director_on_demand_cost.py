@@ -42,7 +42,7 @@ amount:summary.cost,label:summary.priceWindowLabel,basis:summary.details[0].basi
 '''
         result = self.run_js(code)
         self.assertEqual(result['windows'], [False, True, False, True, False, False, False])
-        self.assertAlmostEqual(result['amount'], 17.13)
+        self.assertAlmostEqual(result['amount'], 14.412)
         self.assertEqual(result['label'], '跨峰谷')
         self.assertEqual(result['basis'], '请求开始时间')
         self.assertIsNone(result['missing'])
@@ -52,6 +52,26 @@ amount:summary.cost,label:summary.priceWindowLabel,basis:summary.details[0].basi
         self.assertIn('${escapeHtml(summary.priceWindowLabel)}约 ¥${summary.cost.toFixed(3)}', strip)
         self.assertNotIn('<details>', strip)
         self.assertNotIn('峰谷费用明细', strip)
+
+    def test_qwen_and_doubao_preview_costs_use_their_provider_rates(self):
+        code = section('const deepSeekPreviewRatesCnyPerMillion =', 'function versionCostNoteText(')
+        code += section('function beijingPeakWindowFromReport(', 'function renderCommerceDirectorCostStrip(')
+        code += '''
+const reportFor = (model, input, cached, output) => ({
+  tokens:{known_total_tokens:input+output,known_input_tokens:input,known_cached_input_tokens:cached,known_output_tokens:output},
+  by_model:[{model}], output_diagnostics:[{model,request_started_at:'2026-09-13T19:30:00+08:00',input_tokens:input,cached_input_tokens:cached,output_tokens:output}]
+});
+const qwen = commerceDirectorPreviewCostSummary({cost_report:reportFor('qwen3.8-flash',23537,13824,3874)});
+const doubao = commerceDirectorPreviewCostSummary({cost_report:reportFor('doubao-seed-2-1-pro-260628',23378,0,12475)});
+console.log(JSON.stringify({qwen:{cost:qwen.cost,label:qwen.priceWindowLabel,model:qwen.modelLabel},doubao:{cost:doubao.cost,label:doubao.priceWindowLabel,model:doubao.modelLabel}}));
+'''
+        result = self.run_js(code)
+        self.assertAlmostEqual(result['qwen']['cost'], 0.0196126)
+        self.assertEqual(result['qwen']['label'], '标准价')
+        self.assertEqual(result['qwen']['model'], 'Qwen 3.8 Flash')
+        self.assertAlmostEqual(result['doubao']['cost'], 0.514518)
+        self.assertEqual(result['doubao']['label'], '标准价')
+        self.assertEqual(result['doubao']['model'], 'Doubao Seed 2.1 Pro')
 
     def test_unbuilt_titles_remain_visible_after_one_alternative_is_built(self):
         code = section('function commerceDirectorProposalId(', 'function commerceDirectorRenderSelectionKey(')

@@ -1653,7 +1653,15 @@
                   <input id="s-enabled" type="checkbox">
                 </label>
                 <div class="field-row">
-                  <label for="s-api-key">API Key</label>
+                  <label for="s-ai-provider">服务商</label>
+                  <select id="s-ai-provider">
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="doubao-ark">豆包方舟</option>
+                    <option value="custom">其他 OpenAI 兼容服务</option>
+                  </select>
+                </div>
+                <div class="field-row">
+                  <label for="s-api-key" id="s-api-key-label">API Key</label>
                   <div class="secret-field">
                     <input id="s-api-key" type="password" autocomplete="off">
                     <button class="secret-toggle" type="button" data-action="toggle-secret" data-target="s-api-key" aria-label="显示或隐藏 AI API Key">
@@ -1666,9 +1674,10 @@
                   <input id="s-base-url" type="text">
                 </div>
                 <div class="field-row">
-                  <label for="s-model">模型</label>
+                  <label for="s-model" id="s-model-label">模型</label>
                   <input id="s-model" type="text">
                 </div>
+                <p class="settings-field-hint" id="s-ai-provider-hint"></p>
               </div>
             </section>
 

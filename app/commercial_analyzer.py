@@ -19,6 +19,7 @@ import copy
 import json
 import math
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -1700,7 +1701,7 @@ TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。�
 5. 本轮只输出章节职责；唯一例外是每个完整方案最多 3 组 opening_evidence_packages，用真实 ID 记录“Hook -> 紧接 payoff”是否有可行证据。payoff 必须给出与 Hook 不同的新事实（结果之后的机制、证明、穿法或体验）；把同一卖点换词、加重语气或再次介绍，不能算 payoff，也不要报成候选。它们不是最终片单、不是 beats，也不锁定顺序；具体选句、排序和取舍全部留给下一遍 Beat Casting。除此之外不得输出 beats、subtitle_ids、source_span、原话、时间戳或成片连读。
 6. 用户禁止或限制的内容已在输入前过滤；不得猜测、依赖或为未提供内容安排故事章节。每项 completion_requirements 只写一个具体购买问题，价格、催单等禁选要求不能混入材质、设计由来等正常职责；各方案都应仅凭允许内容构成完整故事。
 7. 只使用字幕明确支持的商品事实，不根据文件名或常识补写商品卖点。先确定 product_scope：主商品名称、single_product/explicit_set、搭配品使用边界。以用户主商品为先，用素材标题和字幕核对身份；若是单件，另一件只能证明搭配，不能把另一件的遮腿、裙摆、裤型等效果归给主商品。标题缺失时从字幕确定一个明确主商品，不能把同场多个商品默认拼成套装。
-8. 用户时长是交付目标，不是可忽略的建议。开场悬念只安排一个可迅速兑现的问题，通常占全片10%-15%；不要以城市天气、直播热度等长铺垫代替商品故事。按原声预算为每章分配 source_budget_seconds，合计接近原声目标且不得超过交付上限；同时写 completion_requirements，明确问题、解释、具体证据和结论怎样闭合。相邻章节若都只能回答同一个购买问题，必须在本轮合并、删去其一，或明确第二章新增的不同问题。长目标首先把章节讲充分，再探索服务主故事的新购买价值；不能靠同义重复、无关卖点或固定章数填满。
+8. 用户时长是应努力达到的交付目标；事实准确、完整表达和不重复优先，素材不足时收窄承诺并报告缺口。开场只安排一个可迅速兑现的问题，开场预算必须包括痛点和紧接的本款答案，不能整章只铺痛点；不要以城市天气、直播热度等长铺垫代替商品故事。按原声预算为每章分配 source_budget_seconds，合计接近原声目标且不得超过交付上限；同时写 completion_requirements，明确问题、解释、具体证据和结论怎样闭合。相邻章节若都只能回答同一个购买问题，必须在本轮合并、删去其一，或明确第二章新增的不同问题。长目标首先把章节讲充分，再探索服务主故事的新购买价值；不能靠同义重复、无关卖点或固定章数填满。
 9. required 只给成立主故事不可缺少的章节；recommended 是素材强时值得讲的章节；optional 无增益可以主动舍弃，不要求 Q1-Q7 全覆盖。
 10. 用户只要求1版时，备选方向只写标题、核心欲望和开场承诺，不设计完整章节、更不能选句。用户明确要求2-3版时，每个方案都必须成为同一商品下可独立执行的完整故事合同，拥有不同购买切入点、开场和前段章节路径；仍然不能在本阶段选句。差异不要求证据互斥，后段可共享必要的购买证明。每个方向必须有支撑本次目标时长的叙事深度，不要把一条完整购买故事拆成只讲颜色、只讲剪裁等证据不足的短版。
 11. 先比较‘为什么想要’与‘已经有同类为什么还选这一件’等购买问题。选择能被干净短句和具体证据连续兑现的中心，不选择听起来宏大却需要拼凑跨商品证据的中心。不要为凑七章把同一细节改名重复讲。
@@ -1710,7 +1711,7 @@ TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。�
 
 TWO_PASS_CAST_SYSTEM_PROMPT = """你是直播女装短视频的 Beat Casting 导演。上游已冻结故事，本轮只从完整安全字幕池一次选出最终真实口播。
 
-保持执行合同的购买判断、商品边界和章节顺序；逐句选择真实原话，不改写、不跨商品、同一 ID 不重复。每个方案以真实原声时长为准，选够且不超长；逐句连读，保留必要上下句，删除重复和残句。开头须立即抓人并兑现：在同一次调用中先比较 2–3 个真实短句开场组合。每个标记 complete 的章节都必须逐项给出仅含本章已选 ID 的 completion_receipts；没有可执行证据就写 needs_context/source_limited，context ID 不能充当证据。只返回用户指定的紧凑 JSON，不输出思考过程。"""
+保持购买判断和商品边界；先选完整语义单元、联合编排开场与正文，再按章节调整规则归章计时；逐句选择真实原话，不改写、不跨商品、同一 ID 不重复。每个方案以真实原声时长为准，选够且不超长；逐句连读，保留必要上下句，删除重复和残句。开头须立即抓人并兑现：在同一次调用中先比较 2–3 个真实短句开场组合。每个标记 complete 的章节都必须逐项给出仅含本章已选 ID 的 completion_receipts；没有可执行证据就写 needs_context/source_limited，context ID 不能充当证据。只返回用户指定的紧凑 JSON，不输出思考过程。"""
 
 
 DIRECTOR_PREFERRED_BEAT_MIN_SECONDS = 1.0
@@ -1735,20 +1736,37 @@ def director_casting_output_max_tokens(director_plan_count: int | None) -> int:
     return max(5200, 4000 * plan_count)
 
 
+def director_casting_request_timeout(model: str, requested_timeout: int | float | None) -> int:
+    """Return a bounded read timeout for the final Director selection call.
+
+    Seed can spend substantial time reasoning before returning a compact JSON
+    receipt. The story-contract call has already completed by this point, so
+    timing out Casting at the generic three-minute floor wastes that completed
+    work. Do not retry a read timeout: the provider may still have executed
+    the request, and replaying it could charge twice.
+    """
+    try:
+        timeout = int(requested_timeout or 0)
+    except (TypeError, ValueError):
+        timeout = 0
+    timeout = max(180, timeout)
+    if "seed" in str(model or "").lower():
+        return max(360, timeout)
+    return timeout
+
+
 def _director_casting_rows(
     subtitles: Sequence[Mapping[str, Any]],
     executable_subtitle_ids: Sequence[int] | None,
 ) -> list[dict[str, Any]]:
     """Return the full short-Beat pool without making a semantic decision.
 
-    One-to-five seconds remains the normal editing grain.  A five-to-eight
-    second subtitle is kept only as an AI-visible exception so a genuinely
-    complete spoken sentence is not mechanically deleted before casting.
+    Keep sub-second fragments available to complete adjacent utterances.
+    Eligibility does not imply that a subtitle is a complete spoken sentence.
     """
     return [
         row for row in _director_executable_subtitles(subtitles, executable_subtitle_ids)
-        if DIRECTOR_PREFERRED_BEAT_MIN_SECONDS
-        <= float(row["end"] - row["start"])
+        if 0 < float(row["end"] - row["start"])
         <= DIRECTOR_LONG_COMPLETE_BEAT_MAX_SECONDS
     ]
 
@@ -3396,7 +3414,7 @@ def build_two_pass_story_prompt(
     # transcript.  That saves prompt tokens and prevents excluded raw content
     # from leaking back into the story chain.
     return "\n".join([
-        "完整安全可执行字幕按时间顺序（没有 Strong Ranking、没有 TopK）：每个 [ID] 都可选。受用户内容边界排除的原话不会提供，不能作为故事承诺。",
+        "安全候选字幕片段按时间顺序（没有 Strong Ranking、没有 TopK）：可选不代表句意完整，先核对必要上下句。受用户内容边界排除的原话不会提供，不能作为故事承诺。",
         transcript or "（没有满足 1-8 秒且可执行的字幕）",
         "",
         subject_line,
@@ -3409,7 +3427,7 @@ def build_two_pass_story_prompt(
             f"{float(duration_range['preferred_high']):.1f} 秒。原声选句预算见下；不能拿半句或重复内容填充。"
         ),
         "交付时长合同（含导出变速，原声预算可以超过120秒）：" + json.dumps(duration_range, ensure_ascii=False),
-        "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 1 组 opening_evidence_packages。整个 JSON（含标点）控制在 6000 个中文字符以内，宁可让章节字段更短，也不能删掉一个真实且必要的故事章节。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。director_title、core_desire、central_promise、opening_promise、title、buyer_advance、chapter_job、stop_condition、purchase_value、payoff_basis 每项最多 24 个汉字；completion_requirements 只写一项、最多 30 个汉字。每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements，各章预算合计应接近 source_target 且不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
+        "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 1 组 opening_evidence_packages。整个 JSON（含标点）控制在 6000 个中文字符以内，宁可让章节字段更短，也不能删掉一个真实且必要的故事章节。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。director_title、core_desire、central_promise、opening_promise、title、buyer_advance、chapter_job、stop_condition、purchase_value、payoff_basis 每项最多 24 个汉字；completion_requirements 只写一项、最多 30 个汉字。每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements：当安全素材可支撑时，各章预算合计必须覆盖 source_min，并以 source_target 为中心、不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         "章节数量不构成交付要求：宁可只保留能推进故事的少数章节，也不能为达到任何章节或 beat 数量拆碎同一段教学。若素材无法支撑新的购买判断，明确 source_limited 或自然收束，不能用未提供内容补足。",
         "本轮先决定观众为什么想买，再按观众自然追问安排章节。每章 buyer_advance 必须写出与上一章不同的新增购买认知；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
         (
@@ -3632,6 +3650,16 @@ def build_two_pass_cast_prompt(
         duration_range=duration_range,
         story_audit=story_audit or draft_audit,
     )
+    safe_pool_seconds = round(
+        sum(float(row["end"] - row["start"]) for row in rows), 3,
+    )
+    execution_contract["duration"].update({
+        "safe_candidate_count": len(rows),
+        "safe_candidate_source_seconds": safe_pool_seconds,
+        "safe_pool_can_reach_source_min": (
+            safe_pool_seconds >= float(duration_range["source_min"])
+        ),
+    })
     mean_seconds = sum(float(row["end"] - row["start"]) for row in rows) / max(1, len(rows))
     pacing_reference = {
         "pool_mean_seconds": round(mean_seconds, 3),
@@ -3705,7 +3733,7 @@ def build_two_pass_cast_prompt(
     # The transcript remains complete and ordered.  The following contract is
     # deliberately a small execution receipt, not a second copy of M1 prose.
     return "\n".join([
-        "完整安全可执行字幕按时间顺序：每个 [ID] 都是可选的真实短句。受用户内容边界排除的原话没有提供，不能作为选片或商品依据。1-5 秒优先，5-8 秒完整句仅作例外；没有 Strong Ranking、没有 TopK、没有卖点预分类。",
+        "安全候选字幕片段按原片顺序：可选不代表句意完整。不足1秒的片段只用于补全必要相邻语义；缺失ID不能视为上下句相邻，缺少必要上下文且无法补全的片段必须弃用。受用户内容边界排除的原话没有提供，不能作为选片或商品依据。1-5 秒优先，5-8 秒完整句仅作例外；没有 Strong Ranking、没有 TopK、没有卖点预分类。",
         _director_product_context(
             source_context_subtitles or subtitles,
             rows,
@@ -3717,7 +3745,8 @@ def build_two_pass_cast_prompt(
         json.dumps(execution_contract, ensure_ascii=False, separators=(",", ":")),
         "若 story_check.overloaded_chapter_requirements 非空，第一遍把多个独立购买判断塞进了同一章。你必须在本次回复用 chapter_revision 把该章收窄为一个可由最短完整原话兑现的判断，或与相邻重复章合并/删除；不得为了逐项打回执而堆叠同义口播。",
         "budget 是本章原声目标，budget_ceiling 是本章超长预警；budget_end 是到本章结束的累计目标。budget_floor 和 budget_end_floor 仅表示整片规划深度，不构成每章最低时长命令。逐章完成取舍，避免前几章耗尽全片预算；无需换算播放速度。",
-        "执行顺序：先为每章挑出能完整回答 needs 的语义单元，再用素材标注秒数核算本章与全片。相邻章先逐项比较：若只是重复同一教程、同一卖点或同一购买问题，必须合并、删去其一，或把后一章改成不同的新增购买问题；不能靠不同 role 标签把同义句分装进两章。整片最多保留一个以操作步骤为主的证明块；第一种/第二种/第三种穿法只可作为该块里的证据，不可各自成为章节。偏长先删同义证明、重复步骤和无关铺垫，偏短优先补未讲清的解释、证据或必要上下句；不要拆散完整意思来凑秒数。完成这些取舍后才输出最终 beats，不把待精简片单当成结果。",
+        "时长门槛：若 duration.safe_pool_can_reach_source_min=true，source_min 是本次交付下限。先剔除残句、重复和无关内容；其后必须继续寻找服务当前故事的新机制、证明、体验、场景或顾虑解除，直到实测累计达到 source_min。不能因为首轮章节讲得简短、预计句数是参考或想保持精炼就提前交卷。只有逐章说明缺失的具体购买判断、且确实没有可选原话可补时，才允许 source_material_limited/natural_complete_below_target。",
+        "执行顺序：先从安全池识别完整语义单元；再联合选择Hook、紧接兑现与正文，按播放顺序连读、去重；最后归章计时。章节职责服务已经连顺的口播，不能为了填章抽取半句；不能靠不同 role 标签把同义句分装进两章。整片最多保留一个以操作步骤为主的证明块，第一种/第二种/第三种穿法只作证据，不各自凑章。",
         "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。",
         "",
         f"用户内容合同：{_contract_forbidden_lines(content_contract)}",
@@ -3728,28 +3757,28 @@ def build_two_pass_cast_prompt(
             if len(executable_story_ids) > 1 else
             "只执行冻结的一个主方案。"
         ),
-        "预算执行：每章先保留兑现 needs 所必需的最短完整意思，再从同一购买问题中补充真正新增的解释或证明，主动接近 budget。budget_floor 是整片深度的规划参考，不是把一章拉长或重复播放的命令；一章已经讲清时，只能由后续真实的新购买价值补回。预算允许章节间调剂，但全片必须落在 source_min/source_max 内并靠近 source_target。超过预算优先舍弃同义证明与非必要铺垫，不拆散因果或指代；不足优先补未讲明的必要解释、证明、结论和上下句，无素材才标 source_limited。逐章选择后对照 budget_end 和 budget_end_ceiling 检查累计秒数；前章偏差在本轮完成取舍，不把欠账留到输出以后。",
+        "取舍优先级：商品与事实准确、语义完整、前后顺畅和不重复是不可突破的前提；在此前提满足后，source_min/source_target 是交付要求，不是可忽略的参考。不得为达到下限保留残句、重复或无关内容，也不得在安全池容量足够时仅因想精炼而提前结束。超过source_max先删除非必要完整单元，不截半句；无法兼顾时必须报告具体缺口，不能冒报pass。",
         "真实句长参考：" + json.dumps(pacing_reference, ensure_ascii=False, separators=(",", ":")),
-        "approximate_beats 仅为预算规模参考，没有固定句数上下限。每个最终 beat 的 ids 必须恰好写一个 ID；不得把多条字幕塞进一个 ids 数组来隐藏连续长口播。字幕行不等于一句话：必要相邻句必须分别写成连续 beats，并在 semantic_units 中列成一个完整语义单元。单句或完整语义单元通常 2-5 秒；只有必要上下句才能闭合意思时才可延至 5-8 秒。超过 8 秒的连续原口播不作为成片单元；回到完整安全池另选更短、更能自立的原话，不能为凑短句截断半句话。",
+        "approximate_beats 仅为预算规模参考，没有固定句数上下限。每个最终 beat 的 ids 必须恰好写一个 ID；不得把多条字幕塞进一个 ids 数组来隐藏连续长口播。字幕行不等于一句话：必要相邻句必须分别写成连续 beats，并在 semantic_units 中列成一个完整语义单元。单句或完整语义单元通常 2-5 秒；只有必要上下句才能闭合意思时才可延至 5-8 秒。完整表达若超过8秒，另选更短完整表达，或放弃该卖点并收窄章节承诺；不能抽出含卖点的半句，不能用拆分semantic_units规避限制。",
         "章节兑现只看最终口播：标题和 role 标签不算证据；介绍材质不等于说明不扎，鼓励尝试不等于教会搭配，说到网眼洞口不等于已经讲出做工结论，说到某一版不等于完成版本对比。每项 needs 用最短的一个完整语义单元直接说出问题、解释或证据和结论；只有补句不可或缺时才增加相邻句。alternative_beats 不参与兑现。不要把尚未选入的关键句只放在备选里。",
         "按原字幕前后核对口语依赖：‘没有这个点’必须保留所指结论，‘因为/所以/它/那种’必须有明确对象和完整谓语。先保留必要的前后短句再检查预算；不能为限制句数跳过结论或截掉句尾。开场不得保留‘又没什么特点’、‘刚刚讲过了’、‘放在这里就’、‘捏着这一根’等依赖直播现场或画面才能成立的铺垫/指令；正文也不能用它们替代一个完整购买判断。",
         "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序逐对连读，并为每次衔接在内部确认一种真实关系：前句提出顾虑/结论而后句回答或证明；前句给机制而后句给结果；前句给结果而后句解释原因；前句结束一个完整判断而后句自然引入不同但相关的新购买价值。若两句只能靠章节标题、画面、被跳过的直播上下文或模型改写才能连上，必须删掉其中一句、补一条真正的连接句，或合并/取消章节。不能把“有三种穿法”接到“又没什么特点”这类无承接残句，也不能用连续操作指令代替购买判断。保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
         "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。选定前先做纯文本盲读：隐藏章节标题和画面，只听前 6-10 秒仍须知道在讲什么商品、它带来什么具体好处、下一句新增了什么；任一答案缺失就换候选或 quality=limited。没有足够候选就如实少报。",
         "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，不是最终片单、不是必须使用的开头。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
-        "开场排序比较的是‘原话 Hook → 紧接的真实 payoff’整体。先排除商品不明、现场依赖、半句和没有兑现证据的组合，再比较陌生观众能否立即听懂具体结果、疑问或反差，下一句是否新增机制/证明/穿法。Hook 与 payoff 必须分别传达两个不同事实：重复‘可拆→还能拆’、‘抗皱→抗皱很强’或只加重语气，一律不是兑现，不得作为 selected；这种候选应降为 rejected 并说明重复缺口。普通介绍不因安全而成为强 Hook，疑问和强情绪也不自动优先。若原话没有强开头，quality=limited，保留最完整的真实介绍，不制造悬念。",
+        "开场联合选择Hook与紧接兑现。痛点型Hook之后，payoff必须开始回答本款怎样解决该顾虑，给出具体效果、机制或证明；继续吐槽普通款、把痛点讲得更具体、或宣称不用再买，都不算本款兑现。结果型Hook之后须增加解释或证据；可拆→还能拆这类同义重复不能算兑现。不能仅因两句内容不同就判定兑现；找不到完整组合时quality=limited。",
         "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
         "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向当前安全池的实际指代依据，并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
         "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。",
         "字幕行不等于完整语义：仅当必要相邻原字幕跨多个 beats 时才输出 semantic_units；单行完整句省略。每组只列跨行依赖的 ID 数组，按原话顺序连续出现在本章最终 beats 中，不能引用其他章或未选句，并且总原声不超过 8 秒。程序只检查声明是否完整执行，不自动补句、拼句、截断或重排。",
         "严格按 product.ranges 回查‘它/这条/这套’。开场和非 styling 章节只能选择已核实的主商品范围；未知范围或其他商品的泛情绪不能承担主商品卖点。每条最终或备选 Beat 都填写关系、实际商品、类型和 1-2 条指代依据；搭配品只能作为 styling_support，不能把它自身效果归给主商品。",
         "正文只返回最终可执行 beats，不返回 alternative_beats；开场比较只保存在 opening_selection。每个标记 complete 的 chapter 的每项 needs 都用 completion_receipts 逐项列出 requirement_index（从 1 开始）和本章最短已选 semantic unit 的 subtitle_ids；回执只写数字，不写解释，不能引用 context 或其他章。只有全部有回执才写 complete；否则写 needs_context/source_limited，并用 missing_content 写一个具体缺口。",
-        "章节调整只为让最终口播真实成立：可取消没有新价值的 optional/recommended 章节；可把回答同一购买问题的相邻章节合并；可按实际口播收窄 title、advance、job、needs。此时在保留的 chapter_packet 填 chapter_revision。merge 的 source_chapter_ids 必须是连续的原章节，且保留其中第一个 chapter_id；drop 的 chapter_packet 不放 beats，并只引用自身。剩余 chapter_id 必须保持第一遍顺序。不得新增章节、改变主商品、改写 core_desire 或用章节调整掩盖重复。未调整不要输出 chapter_revision。",
-        "输出前在本次回复内部完成三次检查：逐章连读是否完整兑现 needs；以每个最终 beat 的单个 ID 的真实秒数逐章累计，确认没有超过 8 秒连续语义单元；整片是否兑现标题和 central promise 且没有重复。若总时长超过 source_max，必须在本次回复先删同义句、重复教程和 optional 章，直到不超上限；不能把超长片单写成 pass。whole_video_audit.duration_receipt 用紧凑的 {章节ID:原声秒数,total:总原声秒数} 回报你的加总；若不在 source_min/source_max 内，不得写 pass，先在同一次选片中调整。程序按 ID 还原全文并实测时长，任何不一致以实测为准。",
+        "章节调整只为让最终口播真实成立：可取消没有新价值的 optional/recommended 章节；可把回答同一购买问题的相邻章节合并；可按实际口播收窄 title、advance、job、needs。此时在保留的 chapter_packet 填 chapter_revision。merge 的 source_chapter_ids 必须是连续的原章节，且保留其中第一个 chapter_id；drop 的 chapter_packet 不放 beats，并只引用自身。正文剩余chapter_id保持第一遍顺序；开场例外：允许把后章兑现Hook的完整单元提前到首章，原章不得重复引用，并用首章chapter_revision收窄或调整职责及兑现要求。不得新增章节、改变主商品、改写 core_desire 或用章节调整掩盖重复。未调整不要输出 chapter_revision。",
+        "输出前在本次回复内部完成三次检查：逐章连读是否完整兑现 needs；以每个最终 beat 的单个 ID 的真实秒数逐章累计，确认没有超过 8 秒连续语义单元；整片是否兑现标题和 central promise 且没有重复。若总时长超过 source_max，必须在本次回复先删同义句、重复教程和 optional 章，尽量满足上限；若完整单元无法满足区间则如实标记素材限制；不能把超长片单写成 pass。whole_video_audit.duration_receipt 用紧凑的 {章节ID:原声秒数,total:总原声秒数} 回报你的加总；若不在 source_min/source_max 内，不得写 pass，先在同一次选片中调整。程序按 ID 还原全文并实测时长，任何不一致以实测为准。",
         "返回结构：",
         f"实际回复必须使用 {WIRE_VERSION}：products 是去重商品表；每个 Beat 使用 role/ids/rel/evidence/support/replaces/product_ref 的紧凑键名。product_ref 指向 products 的从 0 开始序号；不得返回完整字段名 subject_product 或 subject_product_type。",
         json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "",
-        "先在内部按最终 ID 从头连读整片，再归入章节：先只听口播，不看章节标题或画面。每句必须独立成立，且每一处切换都必须让陌生观众听出上一句与下一句为什么相连；章节只能标记已经连顺的购买推进，不能用章节标题替代句意。任何句子若只是在重复、跳题、留下悬空指代，或仅是“放这里/扣上去”之类操作口令，就不是保留理由。先删掉读不通、依赖画面、重复教程和无新增购买价值的句子，确认时长后才序列化最终结果。正文不抄口播、预算、累计过程、整片读稿或长篇审计；只在 opening_selection 留紧凑比较回执。除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。开场 reason 只能陈述 Hook/Payoff 原话实际说出的文字事实，不得加入未选原话的视觉细节、设计名或结论；无法逐字对应就写 quality=limited。只返回紧凑 JSON。",
+        "先在内部按最终 ID 从头连读整片，再归入章节：先只听口播，不看章节标题或画面。每个完整语义单元必须成立，单个字幕片段可依赖同单元内连续保留的必要上下句，且每一处切换都必须让陌生观众听出上一句与下一句为什么相连；章节只能标记已经连顺的购买推进，不能用章节标题替代句意。任何句子若只是在重复、跳题、留下悬空指代，或仅是“放这里/扣上去”之类操作口令，就不是保留理由。先删掉读不通、依赖画面、重复教程和无新增购买价值的句子，确认时长后才序列化最终结果。正文不抄口播、预算、累计过程、整片读稿或长篇审计；只在 opening_selection 留紧凑比较回执。除 whole_video_audit.duration_receipt 的紧凑自检数字外，不输出其他秒数或 continuity_links。没有跨行依赖、章节调整或缺口时，省略对应字段。开场 reason 只能陈述 Hook/Payoff 原话实际说出的文字事实，不得加入未选原话的视觉细节、设计名或结论；无法逐字对应就写 quality=limited。只返回紧凑 JSON。",
     ])
 
 
@@ -3759,6 +3788,21 @@ def build_two_pass_cast_prompt(
 
 class AnalyzerError(Exception):
     """Analyzer 调用失败（网络/空响应/解析失败）。"""
+
+
+def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> None:
+    """Apply provider-supported execution controls for structured director JSON."""
+    model_name = str(model or "").lower()
+    if "deepseek" in model_name and "seed" not in model_name:
+        # V4 charges reasoning as output. The director's JSON is a compact ID
+        # receipt, so use the explicit response cap as its full budget.
+        body["thinking"] = {"type": "disabled"}
+    elif "seed" in model_name:
+        body["reasoning_effort"] = "low"
+    elif "qwen3.8" in model_name:
+        # Qwen 3.8 enables xhigh thinking by default. For deterministic JSON
+        # selection, that can spend minutes before the response starts.
+        body["enable_thinking"] = False
 
 
 def _post_analyzer_request(
@@ -3783,10 +3827,7 @@ def _post_analyzer_request(
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    if "deepseek" in model.lower() and "seed" not in model.lower():
-        body["thinking"] = {"type": "disabled"}
-    if "seed" in model.lower():
-        body["reasoning_effort"] = "low"
+    _apply_analyzer_model_runtime_options(body, model)
 
     request = urllib.request.Request(
         ai_chat_completions_url(base_url),
@@ -3831,6 +3872,7 @@ def _post_two_pass_director_request(
     stage: str,
     max_tokens: int,
     timeout: int,
+    response_hook: Callable[[str], None] | None = None,
 ) -> str:
     """Run one of the two paid semantic Director stages with a fixed budget."""
     body: dict[str, Any] = {
@@ -3842,16 +3884,7 @@ def _post_two_pass_director_request(
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    model_name = str(model or "").lower()
-    if "deepseek" in model_name and "seed" not in model_name:
-        # V4 charges reasoning as output.  The director's JSON is a compact
-        # ID receipt, so hidden reasoning is not commercially viable here:
-        # it used 28k tokens for one 54-second preview.  Keep both M1 and M2
-        # non-thinking and let their explicit fixed output caps be the whole
-        # per-preview budget.
-        body["thinking"] = {"type": "disabled"}
-    elif "seed" in model_name:
-        body["reasoning_effort"] = "low"
+    _apply_analyzer_model_runtime_options(body, model)
 
     request_started_at = datetime.now(timezone.utc).isoformat()
     request = urllib.request.Request(
@@ -3860,30 +3893,58 @@ def _post_two_pass_director_request(
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(
-            request, timeout=timeout, context=create_ssl_context()
-        ) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
+    # M1 and M2 are dependent calls.  A transient provider rate limit after a
+    # successful M1 should not discard that paid response or force an operator
+    # to launch an entirely new preview.
+    http_error: urllib.error.HTTPError | None = None
+    network_error: BaseException | None = None
+    for rate_limit_attempt in range(3):
+        try:
+            with urllib.request.urlopen(
+                request, timeout=timeout, context=create_ssl_context()
+            ) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            http_error = None
+            break
+        except urllib.error.HTTPError as error:
+            http_error = error
+            if error.code != 429 or rate_limit_attempt >= 2:
+                break
+            retry_after = ""
+            if error.headers:
+                retry_after = str(error.headers.get("Retry-After") or "").strip()
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = float(2 ** (rate_limit_attempt + 1))
+            time.sleep(max(1.0, min(15.0, delay)))
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            network_error = error
+            break
+    if http_error is not None:
         record_ai_call(
             module="commercial_analyzer", stage=stage, model=model,
             request_started_at=request_started_at,
-            request_payload=body, success=False, error_type=f"http_{error.code}",
+            request_payload=body, success=False, error_type=f"http_{http_error.code}",
         )
-        raise AnalyzerError(f"Director {stage} HTTP {error.code}") from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise AnalyzerError(f"Director {stage} HTTP {http_error.code}") from http_error
+    if network_error is not None:
         record_ai_call(
             module="commercial_analyzer", stage=stage, model=model,
             request_started_at=request_started_at,
-            request_payload=body, success=False, error_type=type(error).__name__,
+            request_payload=body, success=False, error_type=type(network_error).__name__,
         )
-        raise AnalyzerError(f"Director {stage} 网络错误: {error}") from error
+        raise AnalyzerError(f"Director {stage} 网络错误: {network_error}") from network_error
     choice = result.get("choices", [{}])[0]
     if not isinstance(choice, Mapping):
         choice = {}
     message = choice.get("message") if isinstance(choice.get("message"), Mapping) else {}
     content = str(message.get("content", "") or "").strip()
+    # Persist the provider-visible body before any budget/JSON diagnostic can
+    # reject it.  Director artifacts are the only way to distinguish a real
+    # truncation from a provider's JSON-format deviation after a paid call.
+    if response_hook:
+        response_hook(content)
     finish_reason = str(choice.get("finish_reason") or "").strip().lower()
     usage = result.get("usage") if isinstance(result.get("usage"), Mapping) else {}
     try:
@@ -3892,9 +3953,19 @@ def _post_two_pass_director_request(
         )
     except (TypeError, ValueError):
         completion_tokens = 0
+    details = usage.get("completion_tokens_details")
+    if not isinstance(details, Mapping):
+        details = usage.get("output_tokens_details")
+    try:
+        reasoning_tokens = int((details or {}).get("reasoning_tokens") or 0)
+    except (TypeError, ValueError):
+        reasoning_tokens = 0
+    visible_completion_tokens = completion_tokens
+    if 0 < reasoning_tokens <= completion_tokens:
+        visible_completion_tokens -= reasoning_tokens
     reached_limit = (
         finish_reason in {"length", "max_tokens", "token_limit"}
-        or completion_tokens >= max(1, int(max_tokens) - 2)
+        or visible_completion_tokens >= max(1, int(max_tokens) - 2)
     )
     if reached_limit:
         try:
@@ -4081,6 +4152,24 @@ def _repair_json_terminal_strategy_role(text: str) -> str:
     )
 
 
+def _repair_director_wire_missing_terminal_close(text: str) -> str:
+    """Recover one missing root close in the observed compact Director wire.
+
+    Seed returned a complete ``packet.strategies`` payload but omitted only the
+    final close for the outer wire object. Restrict this to a declared Director
+    wire ending in ``]}``; arbitrary partial JSON must remain a hard failure.
+    """
+    source = str(text or "")
+    trailing = source[len(source.rstrip()):]
+    body = source[:-len(trailing)] if trailing else source
+    if (
+        re.search(r'"schema_version"\s*:\s*"director-wire-v1"', body)
+        and body.endswith("]}")
+    ):
+        return body + "}" + trailing
+    return source
+
+
 def _repair_json_completion_requirements_evidence_locations(text: str) -> str:
     """Repair the observed M1 array-close omission before evidence locations.
 
@@ -4126,7 +4215,9 @@ def _json_format_repairs(text: str) -> str:
                 _repair_json_narrative_quotes(
                     _repair_json_relation_quote(
                         _repair_json_completion_requirements_evidence_locations(
-                            _repair_json_terminal_strategy_role(text)
+                            _repair_director_wire_missing_terminal_close(
+                                _repair_json_terminal_strategy_role(text)
+                            )
                         )
                     )
                 )
@@ -5007,6 +5098,9 @@ def analyze_commercial_story(
             # while keeping the commercial peak-time budget predictable.
             max_tokens=3000 * max(1, min(3, int(director_plan_count or 1))),
             timeout=max(180, int(timeout)),
+            response_hook=(
+                lambda value: stage_response_hook("story_contract", value)
+            ) if stage_response_hook else None,
         )
         if stage_response_hook:
             stage_response_hook("story_contract", story_raw)
@@ -5124,7 +5218,10 @@ def analyze_commercial_story(
             # complete 60-second selection still needs a small JSON-completion
             # margin; this is a ceiling, not a prepaid token allocation.
             max_tokens=director_casting_output_max_tokens(director_plan_count),
-            timeout=max(180, int(timeout)),
+            timeout=director_casting_request_timeout(director_model, timeout),
+            response_hook=(
+                lambda value: stage_response_hook("beat_casting", value)
+            ) if stage_response_hook else None,
         )
         if stage_response_hook:
             stage_response_hook("beat_casting", cast_raw)
@@ -5258,7 +5355,11 @@ def analyze_commercial_story(
                     api_key=api_key, base_url=base_url, model=director_model,
                     system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT, user_prompt=correction_prompt,
                     stage="Director_duration_calibration",
-                    max_tokens=director_casting_output_max_tokens(director_plan_count), timeout=max(180, int(timeout)),
+                    max_tokens=director_casting_output_max_tokens(director_plan_count),
+                    timeout=director_casting_request_timeout(director_model, timeout),
+                    response_hook=(
+                        lambda value: stage_response_hook("duration_calibration", value)
+                    ) if stage_response_hook else None,
                 )
                 if stage_response_hook:
                     stage_response_hook("duration_calibration", revised_raw)

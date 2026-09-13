@@ -10,6 +10,7 @@ LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
 
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
 _MODELS_SUFFIX = "/models"
+_RESPONSES_SUFFIX = "/responses"
 
 
 def normalize_ai_base_url(base_url: str | None, default: str = DEEPSEEK_DEFAULT_BASE_URL) -> str:
@@ -19,7 +20,7 @@ def normalize_ai_base_url(base_url: str | None, default: str = DEEPSEEK_DEFAULT_
         return default
 
     lower = url.lower()
-    for suffix in (_CHAT_COMPLETIONS_SUFFIX, _MODELS_SUFFIX):
+    for suffix in (_CHAT_COMPLETIONS_SUFFIX, _MODELS_SUFFIX, _RESPONSES_SUFFIX):
         if lower.endswith(suffix):
             url = url[: -len(suffix)].rstrip("/")
             lower = url.lower()
@@ -38,7 +39,7 @@ def normalize_ai_model_defaults(settings: dict | None) -> dict:
     model = str(data.get("model") or "").strip()
 
     data["base_url"] = base_url
-    if not model:
+    if not model and base_url != LEGACY_DOUBAO_BASE_URL:
         data["model"] = DEEPSEEK_DEFAULT_MODEL
     data["enabled"] = bool(api_key)
 
