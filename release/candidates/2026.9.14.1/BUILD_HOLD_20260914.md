@@ -1,4 +1,4 @@
-# Windows V4 business candidate: 2026.9.14.1 (HOLD)
+# Windows V4 business candidate: 2026.9.14.1 (ready promotion pending)
 
 ## Boundary and provenance
 
@@ -36,6 +36,14 @@ Compared with the 2026.9.9.1 business bundle, the payload adds only `business/ap
 - The imported Hook-comparison test was made Windows-portable by explicitly reading UTF-8 frontend and Node output. Its semantic assertions now match the current Hook-to-payoff contract; no product rule was weakened.
 - Locally signed `stable.hold.json` verifies successfully for `2026.9.9.1` on Core `4.0.0` and correctly returns `channel_hold`.
 
-## Explicitly not done
+## Remote and update acceptance
 
-No archive was uploaded. The live Windows channel remains `2026.9.9.1` and ready. No ready document was generated or published. The remote archive hash, real isolated `2026.9.9.1 -> 2026.9.14.1` update, first-launch health check, rollback, and user-data preservation acceptance remain required before any release promotion.
+- The immutable archive was uploaded to `liveclipper/v4/LiveClipperBusiness_2026.9.14.1.zip` in Aliyun OSS. A separate HTTPS download returned the expected 1,575,183 bytes and SHA-256 `33931dcf193e49bf3d43e8b2e406f4bcec6ec43f60731f134f37dff94da5bb8a`.
+- The signed ready document has SHA-256 `6d7982ab1098c9627102eb9c01594d39b062933c674b9173a8e031a6b8af68ac`. It verifies for a Windows `2026.9.9.1` client on Core `4.0.0` and returns `update_available`.
+- In a fresh isolated installation, the actual `2026.9.9.1 -> 2026.9.14.1` transaction passed signature verification, download hash verification, atomic activation, and target manifest verification. The old `2026.9.9.1` bundle remains available as the rollback source.
+- The target runtime imported `server`, Director product/wire/runtime modules, and the newly added `director_opening_audit` exclusively from the verified bundle; it reported application `2026.9.14.1`. A user-data preservation sentinel was unchanged.
+- The online stable document was first uploaded as signed `hold`, re-downloaded byte-for-byte (SHA-256 `5ac0eeccaa1111a08441c1d944aba7d4cc1772a311ef0d6c15ef9d61731fed93`), and correctly returned `channel_hold` for `2026.9.9.1`.
+
+## Promotion state
+
+The archive and acceptance prerequisites are complete. At this evidence point the public Windows stable channel is still the verified `hold` document; publishing the already verified signed `ready` document is the final external promotion action.

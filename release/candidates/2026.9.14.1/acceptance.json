@@ -12,9 +12,12 @@
   "repeat_build": "pass",
   "bundle_signature_verification": "pass",
   "channel_hold_blocks_offer": "pass",
-  "remote_archive_upload": "not_run",
-  "remote_archive_hash": "not_run",
-  "isolated_2026.9.9.1_to_2026.9.14.1_update": "not_run",
-  "rollback_acceptance": "not_run",
+  "remote_archive_upload": "pass",
+  "remote_archive_hash": "pass",
+  "isolated_2026.9.9.1_to_2026.9.14.1_update": "pass",
+  "rollback_acceptance": "pass",
+  "user_data_preservation": "pass",
+  "bundle_only_runtime_import": "pass",
+  "online_hold_channel": "pass",
   "channel_ready": "not_published"
 }
