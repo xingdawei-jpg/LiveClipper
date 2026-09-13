@@ -40,8 +40,8 @@ a = Analysis(
         (_required(PUBLIC_KEY, "release verification key"), "core_keys"),
         (_required(LICENSE_KEY, "license verification key"), "core_keys"),
         (_required(UPDATE_SOURCES, "macOS update source configuration"), "core_config/runtime_v4_update_sources.json"),
-        (_required(os.path.join(WEB_DIR, "__init__.py"), "web_client"),
-        (_required(os.path.join(WEB_DIR, "desktop.py"), "web_client"),
+        (_required(os.path.join(WEB_DIR, "__init__.py"), "web_client package initializer"), "web_client"),
+        (_required(os.path.join(WEB_DIR, "desktop.py"), "web_client desktop shell"), "web_client"),
     ],
     hiddenimports=[
         "release_signing",

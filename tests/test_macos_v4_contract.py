@@ -33,6 +33,13 @@ class MacOSV4ContractTests(unittest.TestCase):
         self.assertTrue(all("/v4/macos-arm64/" in url for url in urls))
         self.assertTrue(all("/v4/stable.json" not in url for url in urls))
 
+    def test_macos_host_build_spec_is_valid_python(self) -> None:
+        spec = ROOT / "runtime_v4" / "liveclipper_host_macos_arm64.spec"
+        source = spec.read_text(encoding="utf-8")
+        compile(source, str(spec), "exec")
+        self.assertIn('bundle_identifier="com.liveclipper.host.v4.macos-arm64"', source)
+        self.assertIn("runtime_v4_macos_arm64_update_sources.json", source)
+
     def test_macos_core_identity_is_valid_but_not_windows_core_identity(self) -> None:
         identity = "4.0.0-macos-arm64"
         self.assertNotEqual(identity, "4.0.0")
