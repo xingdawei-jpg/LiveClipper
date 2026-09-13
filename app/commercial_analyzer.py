@@ -1697,10 +1697,10 @@ TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。�
 2. core_desire 必须是一句观众视角的完整购买判断，不是卖点列表。
 3. Opening 必须用反差、痛点、强结果或强场景让人继续看，并在最前面的必要章节中兑现，不能只铺垫。
 4. 每个章节必须改变一次观众的购买判断。章节之间要有因果、追问、扩大证明、顾虑解除或使用场景关系。
-5. 本轮只输出章节职责；唯一例外是每个完整方案最多 3 组 opening_evidence_packages，用真实 ID 记录“Hook -> 紧接 payoff”是否有可行证据。它们不是最终片单、不是 beats，也不锁定顺序；具体选句、排序和取舍全部留给下一遍 Beat Casting。除此之外不得输出 beats、subtitle_ids、source_span、原话、时间戳或成片连读。
+5. 本轮只输出章节职责；唯一例外是每个完整方案最多 3 组 opening_evidence_packages，用真实 ID 记录“Hook -> 紧接 payoff”是否有可行证据。payoff 必须给出与 Hook 不同的新事实（结果之后的机制、证明、穿法或体验）；把同一卖点换词、加重语气或再次介绍，不能算 payoff，也不要报成候选。它们不是最终片单、不是 beats，也不锁定顺序；具体选句、排序和取舍全部留给下一遍 Beat Casting。除此之外不得输出 beats、subtitle_ids、source_span、原话、时间戳或成片连读。
 6. 用户禁止或限制的内容已在输入前过滤；不得猜测、依赖或为未提供内容安排故事章节。每项 completion_requirements 只写一个具体购买问题，价格、催单等禁选要求不能混入材质、设计由来等正常职责；各方案都应仅凭允许内容构成完整故事。
 7. 只使用字幕明确支持的商品事实，不根据文件名或常识补写商品卖点。先确定 product_scope：主商品名称、single_product/explicit_set、搭配品使用边界。以用户主商品为先，用素材标题和字幕核对身份；若是单件，另一件只能证明搭配，不能把另一件的遮腿、裙摆、裤型等效果归给主商品。标题缺失时从字幕确定一个明确主商品，不能把同场多个商品默认拼成套装。
-8. 用户时长是交付目标，不是可忽略的建议。开场悬念只安排一个可迅速兑现的问题，通常占全片10%-15%；不要以城市天气、直播热度等长铺垫代替商品故事。按原声预算为每章分配 source_budget_seconds，合计尽量接近原声目标；同时写 completion_requirements，明确问题、解释、具体证据和结论怎样闭合。长目标首先把章节讲充分，再探索服务主故事的新购买价值；不能靠同义重复、无关卖点或固定章数填满。
+8. 用户时长是交付目标，不是可忽略的建议。开场悬念只安排一个可迅速兑现的问题，通常占全片10%-15%；不要以城市天气、直播热度等长铺垫代替商品故事。按原声预算为每章分配 source_budget_seconds，合计接近原声目标且不得超过交付上限；同时写 completion_requirements，明确问题、解释、具体证据和结论怎样闭合。相邻章节若都只能回答同一个购买问题，必须在本轮合并、删去其一，或明确第二章新增的不同问题。长目标首先把章节讲充分，再探索服务主故事的新购买价值；不能靠同义重复、无关卖点或固定章数填满。
 9. required 只给成立主故事不可缺少的章节；recommended 是素材强时值得讲的章节；optional 无增益可以主动舍弃，不要求 Q1-Q7 全覆盖。
 10. 用户只要求1版时，备选方向只写标题、核心欲望和开场承诺，不设计完整章节、更不能选句。用户明确要求2-3版时，每个方案都必须成为同一商品下可独立执行的完整故事合同，拥有不同购买切入点、开场和前段章节路径；仍然不能在本阶段选句。差异不要求证据互斥，后段可共享必要的购买证明。每个方向必须有支撑本次目标时长的叙事深度，不要把一条完整购买故事拆成只讲颜色、只讲剪裁等证据不足的短版。
 11. 先比较‘为什么想要’与‘已经有同类为什么还选这一件’等购买问题。选择能被干净短句和具体证据连续兑现的中心，不选择听起来宏大却需要拼凑跨商品证据的中心。不要为凑七章把同一细节改名重复讲。
@@ -3412,7 +3412,7 @@ def build_two_pass_story_prompt(
             f"{float(duration_range['preferred_high']):.1f} 秒。原声选句预算见下；不能拿半句或重复内容填充。"
         ),
         "交付时长合同（含导出变速，原声预算可以超过120秒）：" + json.dumps(duration_range, ensure_ascii=False),
-        "为每个完整方案的每章填写 source_budget_seconds 和 completion_requirements，各方案分别逐章加总，预算合计应接近 source_target（不能只凑到下限或把成片秒数当原声预算）；不要只写六七个章名，合计却只够半条片。长目标需要更充分的具体解释、证据和不同使用问题，不是重复口号。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
+        "为每个完整方案的每章填写 source_budget_seconds 和 completion_requirements，各方案分别逐章加总，预算合计应接近 source_target 且不得超过 source_max（不能只凑到下限或把成片秒数当原声预算）；不要只写六七个章名，合计却只够半条片。长目标需要更充分的具体解释、证据和不同使用问题，不是重复口号。相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         (
             f"本次时长要求至少形成 {math.ceil(int(depth_contract['expected_total_beats']['low']) / max(1, int(depth_contract['beats_per_chapter']['high'])))} 个"
             "彼此推进的安全章节；若素材无法支撑，明确 source_limited，不能用未提供内容补足。"
@@ -3426,7 +3426,7 @@ def build_two_pass_story_prompt(
             "本次只执行一个完整主方案；必须同时给出恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要（S2、S3）。"
             "不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段；用户确认选择后才会单独为所选方向生成完整方案。"
         ),
-        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先在完整安全字幕中为每个完整方案寻找最多 3 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。它们只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可少报或不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只是身份依据，不是选片；所有备选方向也必须是同一个主商品。",
+        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先在完整安全字幕中为每个完整方案寻找最多 3 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它们只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可少报或不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只是身份依据，不是选片；所有备选方向也必须是同一个主商品。",
         "identity_evidence_ids 只列3-6条分布在不同位置、能明确核实商品名/指代的代表依据，不要抄全片ID。每条 Beat 的 product_evidence_ids 只需1-2个最直接的指代依据。",
         "先顺读全片，在 product_scope.source_product_sections 用连续ID范围记录换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。临时聊裤子、另一件羊毛衣、与商品无关的聊天都不能默认属于T恤。范围内 product_type/subject_product 记录实际讲述对象，证据不足用unknown；单句讲其他商品的自身优点不能包装成主商品的搭配支持。",
         "长目标通过探索更多真实存在的新购买章节来体现，禁止重复同一结果、同一机制或同义口号。",
@@ -3723,7 +3723,7 @@ def build_two_pass_cast_prompt(
         json.dumps(execution_contract, ensure_ascii=False, separators=(",", ":")),
         "若 story_check.overloaded_chapter_requirements 非空，第一遍把多个独立购买判断塞进了同一章。你必须在本次回复用 chapter_revision 把该章收窄为一个可由最短完整原话兑现的判断，或与相邻重复章合并/删除；不得为了逐项打回执而堆叠同义口播。",
         "budget 是本章原声目标，budget_ceiling 是本章超长预警；budget_end 是到本章结束的累计目标。budget_floor 和 budget_end_floor 仅表示整片规划深度，不构成每章最低时长命令。逐章完成取舍，避免前几章耗尽全片预算；无需换算播放速度。",
-        "执行顺序：先为每章挑出能完整回答 needs 的语义单元，再用素材标注秒数核算本章与全片。偏长先删同义证明和无关铺垫，偏短优先补未讲清的解释、证据或必要上下句；不要拆散完整意思来凑秒数。完成这些取舍后才输出最终 beats，不把待精简片单当成结果。",
+        "执行顺序：先为每章挑出能完整回答 needs 的语义单元，再用素材标注秒数核算本章与全片。相邻章先逐项比较：若只是重复同一教程、同一卖点或同一购买问题，必须合并、删去其一，或把后一章改成不同的新增购买问题；不能靠不同 role 标签把同义句分装进两章。偏长先删同义证明和无关铺垫，偏短优先补未讲清的解释、证据或必要上下句；不要拆散完整意思来凑秒数。完成这些取舍后才输出最终 beats，不把待精简片单当成结果。",
         "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。",
         "",
         f"用户内容合同：{_contract_forbidden_lines(content_contract)}",
@@ -3742,15 +3742,15 @@ def build_two_pass_cast_prompt(
         "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序连读：保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
         "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。没有足够候选就如实少报。",
         "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，不是最终片单、不是必须使用的开头。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
-        "开场排序比较的是‘原话 Hook → 紧接的真实 payoff’整体。先排除商品不明、现场依赖、半句和没有兑现证据的组合，再比较陌生观众能否立即听懂具体结果、疑问或反差，下一句是否新增机制/证明/穿法；普通介绍不因安全而成为强 Hook，疑问和强情绪也不自动优先。若原话没有强开头，quality=limited，保留最完整的真实介绍，不制造悬念。",
+        "开场排序比较的是‘原话 Hook → 紧接的真实 payoff’整体。先排除商品不明、现场依赖、半句和没有兑现证据的组合，再比较陌生观众能否立即听懂具体结果、疑问或反差，下一句是否新增机制/证明/穿法。Hook 与 payoff 必须分别传达两个不同事实：重复‘可拆→还能拆’、‘抗皱→抗皱很强’或只加重语气，一律不是兑现，不得作为 selected；这种候选应降为 rejected 并说明重复缺口。普通介绍不因安全而成为强 Hook，疑问和强情绪也不自动优先。若原话没有强开头，quality=limited，保留最完整的真实介绍，不制造悬念。",
         "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
-        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向当前安全池的实际指代依据，并给一句可核对的结果短评。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
+        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向当前安全池的实际指代依据，并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
         "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。",
         "字幕行不等于完整语义：仅当必要相邻原字幕跨多个 beats 时才输出 semantic_units；单行完整句省略。每组只列跨行依赖的 ID 数组，按原话顺序连续出现在本章最终 beats 中，不能引用其他章或未选句，并且总原声不超过 8 秒。程序只检查声明是否完整执行，不自动补句、拼句、截断或重排。",
         "严格按 product.ranges 回查‘它/这条/这套’。开场和非 styling 章节只能选择已核实的主商品范围；未知范围或其他商品的泛情绪不能承担主商品卖点。每条最终或备选 Beat 都填写关系、实际商品、类型和 1-2 条指代依据；搭配品只能作为 styling_support，不能把它自身效果归给主商品。",
         "正文只返回最终可执行 beats，不返回 alternative_beats；开场比较只保存在 opening_selection。每个标记 complete 的 chapter 的每项 needs 都用 completion_receipts 逐项列出 requirement_index（从 1 开始）和本章最短已选 semantic unit 的 subtitle_ids；回执只写数字，不写解释，不能引用 context 或其他章。只有全部有回执才写 complete；否则写 needs_context/source_limited，并用 missing_content 写一个具体缺口。",
         "章节调整只为让最终口播真实成立：可取消没有新价值的 optional/recommended 章节；可把回答同一购买问题的相邻章节合并；可按实际口播收窄 title、advance、job、needs。此时在保留的 chapter_packet 填 chapter_revision。merge 的 source_chapter_ids 必须是连续的原章节，且保留其中第一个 chapter_id；drop 的 chapter_packet 不放 beats，并只引用自身。剩余 chapter_id 必须保持第一遍顺序。不得新增章节、改变主商品、改写 core_desire 或用章节调整掩盖重复。未调整不要输出 chapter_revision。",
-        "输出前在本次回复内部完成三次检查：逐章连读是否完整兑现 needs；以每个最终 beat 的单个 ID 的真实秒数逐章累计，确认没有超过 8 秒连续语义单元；整片是否兑现标题和 central promise 且没有重复。whole_video_audit.duration_receipt 用紧凑的 {章节ID:原声秒数,total:总原声秒数} 回报你的加总；若不在 source_min/source_max 内，不得写 pass，先在同一次选片中调整。程序按 ID 还原全文并实测时长，任何不一致以实测为准。",
+        "输出前在本次回复内部完成三次检查：逐章连读是否完整兑现 needs；以每个最终 beat 的单个 ID 的真实秒数逐章累计，确认没有超过 8 秒连续语义单元；整片是否兑现标题和 central promise 且没有重复。若总时长超过 source_max，必须在本次回复先删同义句、重复教程和 optional 章，直到不超上限；不能把超长片单写成 pass。whole_video_audit.duration_receipt 用紧凑的 {章节ID:原声秒数,total:总原声秒数} 回报你的加总；若不在 source_min/source_max 内，不得写 pass，先在同一次选片中调整。程序按 ID 还原全文并实测时长，任何不一致以实测为准。",
         "返回结构：",
         f"实际回复必须使用 {WIRE_VERSION}：products 是去重商品表；每个 Beat 使用 role/ids/rel/evidence/support/replaces/product_ref 的紧凑键名。product_ref 指向 products 的从 0 开始序号；不得返回完整字段名 subject_product 或 subject_product_type。",
         json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
