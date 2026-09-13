@@ -992,7 +992,11 @@ class TwoPassDirectorTests(unittest.TestCase):
 
         self.assertIn("章节数量由完整故事决定，不设上限", prompt)
         self.assertIn("最多 1 组 opening_evidence_packages", prompt)
+        self.assertIn("6000 个中文字符以内", prompt)
+        self.assertIn("每项最多 24 个汉字", prompt)
         self.assertIn("每章 evidence_locations 最多 2 个 ID", prompt)
+        self.assertIn("每个完整方案最多 1 组", prompt)
+        self.assertNotIn("每个完整方案最多 3 组", prompt)
         self.assertNotIn('"selection_basis"', prompt)
 
     def test_single_plan_casting_receives_completion_margin_without_raising_multi_plan_budget(self) -> None:
