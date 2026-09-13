@@ -1,0 +1,20 @@
+{
+  "candidate_version": "2026.9.14.1",
+  "core_version": "4.0.0",
+  "source_commit": "9421f4a90da09141e7cef67adbca57ebd2b6e6b6",
+  "previous_published_version": "2026.9.9.1",
+  "bundle_scope": "windows-business-only",
+  "bundle_sha256": "33931dcf193e49bf3d43e8b2e406f4bcec6ec43f60731f134f37dff94da5bb8a",
+  "bundle_manifest_sha256": "12c5798d98db9e54eba88ffa9ab1a2996f6d011f89df010bfca45967825a7a4f",
+  "signing_key_id": "1905329f73f719d3",
+  "bundle_file_count": 88,
+  "bundle_size_bytes": 1575183,
+  "repeat_build": "pass",
+  "bundle_signature_verification": "pass",
+  "channel_hold_blocks_offer": "pass",
+  "remote_archive_upload": "not_run",
+  "remote_archive_hash": "not_run",
+  "isolated_2026.9.9.1_to_2026.9.14.1_update": "not_run",
+  "rollback_acceptance": "not_run",
+  "channel_ready": "not_published"
+}
