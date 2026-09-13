@@ -32,7 +32,12 @@ from runtime_v4.update_service import RuntimeV4UpdateService, load_update_source
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
 DIAGNOSTIC_FLAG = "--liveclipper-v4-diagnostic"
-CORE_VERSION = "4.0.0"
+# The frozen Apple-Silicon Core is intentionally distinct from Windows Core
+# 4.0.0.  Source mode retains the historical value so cross-platform contract
+# fixtures keep exercising the generic V4 protocol.
+CORE_VERSION = "4.0.0-macos-arm64" if (
+    sys.platform == "darwin" and getattr(sys, "frozen", False)
+) else "4.0.0"
 
 
 @dataclass(frozen=True)
@@ -104,7 +109,12 @@ def _core_resource(relative: str) -> Path | None:
 def _update_channel_urls() -> tuple[str, ...]:
     config = _core_resource("core_config/runtime_v4_update_sources.json")
     if config is None and not getattr(sys, "frozen", False):
-        config = _core_resource("release/runtime_v4_update_sources.json")
+        source_name = (
+            "runtime_v4_macos_arm64_update_sources.json"
+            if sys.platform == "darwin"
+            else "runtime_v4_update_sources.json"
+        )
+        config = _core_resource(f"release/{source_name}")
     if config is None:
         raise BundleVerificationError("V4 core is missing its update source config")
     try:
@@ -115,6 +125,18 @@ def _update_channel_urls() -> tuple[str, ...]:
 
 def _stable_launcher_path(install_root: Path) -> Path | None:
     root = install_root.resolve()
+    if sys.platform == "darwin":
+        # The signed V4 root lives under the app's Resources directory.  Find
+        # its sibling launcher without accepting a caller-provided path.
+        for parent in (root, *root.parents):
+            if parent.suffix != ".app":
+                continue
+            candidate = parent / "Contents" / "MacOS" / "LiveClipper"
+            if candidate.is_file() and not candidate.is_symlink():
+                return candidate.resolve()
+        # Source tests deliberately use a bare temporary V4 root.  It is not a
+        # production macOS layout, but retaining the normal stable-name lookup
+        # preserves the cross-platform launcher invariant for those tests.
     for name in ("LiveClipperWeb.exe", "LiveClipperLauncherV4.exe"):
         candidate = root / name
         if not candidate.is_file() or candidate.is_symlink():
@@ -132,15 +154,21 @@ def _schedule_launcher_restart(layout: HostLayout, delay: float = 1.2) -> bool:
     if launcher is None:
         return False
 
-    launcher_ps = str(launcher).replace("'", "''")
-    workdir_ps = str(layout.install_root).replace("'", "''")
-    command = (
-        f"$old = Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
-        "if ($old) { $old.WaitForExit() }; "
-        "Start-Sleep -Milliseconds 350; "
-        f"Start-Process -FilePath '{launcher_ps}' "
-        f"-WorkingDirectory '{workdir_ps}' -WindowStyle Hidden"
-    )
+    if sys.platform == "darwin":
+        command = ["/usr/bin/open", "-n", str(launcher.parents[2])]
+    else:
+        launcher_ps = str(launcher).replace("'", "''")
+        workdir_ps = str(layout.install_root).replace("'", "''")
+        command = [
+            "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
+            (
+                f"$old = Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
+                "if ($old) { $old.WaitForExit() }; "
+                "Start-Sleep -Milliseconds 350; "
+                f"Start-Process -FilePath '{launcher_ps}' "
+                f"-WorkingDirectory '{workdir_ps}' -WindowStyle Hidden"
+            ),
+        ]
     flags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -148,15 +176,7 @@ def _schedule_launcher_restart(layout: HostLayout, delay: float = 1.2) -> bool:
     )
     try:
         subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                command,
-            ],
+            command,
             cwd=str(layout.install_root),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

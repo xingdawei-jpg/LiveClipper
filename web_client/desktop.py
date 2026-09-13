@@ -608,6 +608,12 @@ def _dispose_native_file_drop_support(window: Any, emit_log=None) -> None:
         dispose = getattr(registration, "Dispose", None)
         if callable(dispose):
             dispose()
+        if IS_MACOS and isinstance(handlers, tuple) and len(handlers) == 2:
+            document, callback = handlers
+            try:
+                document.off("drop", callback)
+            except Exception:
+                pass
     except Exception as exc:
         if emit_log:
             try:
@@ -716,6 +722,50 @@ def _dispatch_native_video_drop_after_callback(window: Any, detail: dict[str, An
             emit_log("warning", f"桌面端拖入路径通知失败：{exc}", "system")
 
     threading.Thread(target=_notify, daemon=True, name="liveclipper-drop-notify").start()
+
+
+def _enable_macos_native_file_drop_support(window: Any, emit_log) -> None:
+    """Bridge Cocoa WKWebView drops to the existing absolute-path import API."""
+    if not IS_MACOS:
+        return
+    try:
+        from webview.dom import DOMEventHandler
+    except Exception as exc:
+        emit_log("warning", f"macOS 原生拖放桥不可用：{exc}", "system")
+        return
+
+    def _on_drop(event: dict[str, Any]) -> None:
+        transfer = event.get("dataTransfer") if isinstance(event, dict) else None
+        files = transfer.get("files") if isinstance(transfer, dict) else []
+        paths = _dedupe_native_drop_paths(
+            file.get("pywebviewFullPath")
+            for file in files
+            if isinstance(file, dict)
+        )
+        if not paths:
+            emit_log("warning", "macOS 拖放未提供本机文件路径。", "system")
+            return
+        detail = {
+            "paths": paths,
+            "x": int(event.get("clientX") or 0),
+            "y": int(event.get("clientY") or 0),
+            "dpi": 0,
+        }
+        _dispatch_native_video_drop_after_callback(window, detail, emit_log)
+
+    handler = DOMEventHandler(
+        _on_drop,
+        prevent_default=True,
+        stop_propagation=True,
+        stop_immediate_propagation=True,
+    )
+    document = window.dom.document
+    event = document.events.drop
+    event += handler
+    # DOMEvent keeps the callable after unwrapping DOMEventHandler, so retain
+    # that callable for an exact unregister on close.
+    window._liveclipper_native_file_drop_handlers = (document, handler.callback)
+    emit_log("info", "macOS Cocoa 原生拖放桥已启用。", "system")
 
 
 def _native_file_drop_bridge_path() -> Path:
@@ -874,11 +924,15 @@ def main() -> None:
         else:
             emit_log(
                 "info",
-                "macOS 桌面端使用 Cocoa WebView；Windows 原生零拷贝拖放桥未启用。",
+                "macOS 桌面端使用 Cocoa WebView。",
                 "system",
             )
             try:
-                webview.start(gui="cocoa" if IS_MACOS else None)
+                webview.start(
+                    _enable_macos_native_file_drop_support if IS_MACOS else None,
+                    args=(window, emit_log) if IS_MACOS else (),
+                    gui="cocoa" if IS_MACOS else None,
+                )
             except TypeError:
                 webview.start()
         server.should_exit = True

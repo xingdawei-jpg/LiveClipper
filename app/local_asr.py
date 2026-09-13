@@ -366,7 +366,12 @@ def _load_sensevoice(
                     log_fn("SenseVoice CUDA 初始化失败，已自动回退 CPU：" + str(exc))
                 return _load_sensevoice(log_fn, force_device="cpu")
             try:
-                debug_log = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper", "sensevoice_error.log")
+                try:
+                    from config import USER_DATA_DIR
+                    debug_root = str(USER_DATA_DIR)
+                except Exception:
+                    debug_root = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LiveClipper")
+                debug_log = os.path.join(debug_root, "sensevoice_error.log")
                 os.makedirs(os.path.dirname(debug_log), exist_ok=True)
                 with open(debug_log, "a", encoding="utf-8") as _df:
                     _df.write(f"--- SenseVoice AutoModel FAILED at {datetime.now()} ---\n")

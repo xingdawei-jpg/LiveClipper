@@ -25,7 +25,9 @@ RUNTIME_LAYOUT_VERSION = 4
 MANIFEST_NAME = "core_manifest.json"
 SIGNATURE_NAME = "core_manifest.sig"
 SIGNATURE_ALGORITHM = "ed25519"
-VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
+# Core identities may carry a platform suffix.  Business versions remain
+# numeric dates; only Core names identify an immutable platform runtime.
+VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$")
 
 
 class CoreBuildError(ValueError):

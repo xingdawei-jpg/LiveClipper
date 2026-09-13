@@ -24,6 +24,7 @@ STATE_SCHEMA_VERSION = 1
 LAUNCHER_VERSION = "4.0.0"
 STATE_FILE = "current.json"
 VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
+CORE_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$")
 RUNTIME_OWNED_ENV = (
     "LIVECLIPPER_BUNDLE_DIR",
     "LIVECLIPPER_FROZEN",
@@ -71,11 +72,18 @@ def _install_root(argument: str = "") -> Path:
     if argument:
         return Path(argument).resolve()
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            executable = Path(sys.executable).resolve()
+            app_root = next((parent for parent in executable.parents if parent.suffix == ".app"), None)
+            if app_root is not None:
+                return app_root / "Contents" / "Resources" / "LiveClipperV4"
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
 def _data_root() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "LiveClipper"
     base = Path(
         os.environ.get("LOCALAPPDATA")
         or os.environ.get("APPDATA")
@@ -93,7 +101,8 @@ def _write_log(message: str) -> None:
 
 def _safe_version(value: object, *, label: str) -> str:
     version = str(value or "").strip()
-    if not VERSION_PATTERN.fullmatch(version):
+    pattern = CORE_VERSION_PATTERN if "core" in label else VERSION_PATTERN
+    if not pattern.fullmatch(version):
         raise LaunchError(f"invalid {label}: {version!r}")
     return version
 

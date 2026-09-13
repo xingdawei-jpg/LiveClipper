@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "runtime_layout_version": 4,
+  "channel": "stable",
+  "urls": [
+    "https://lc-update.oss-cn-beijing.aliyuncs.com/liveclipper/v4/macos-arm64/stable.json",
+    "https://cdn.jsdelivr.net/gh/xingdawei-jpg/LiveClipper@main/release/channel/v4/macos-arm64/stable.json"
+  ]
+}

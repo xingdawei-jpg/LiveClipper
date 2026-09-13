@@ -35,6 +35,7 @@ ACTIVE_CHANNEL_STATUS = "ready"
 INACTIVE_CHANNEL_STATUSES = frozenset({"hold", "paused", "disabled"})
 ALLOWED_CHANNEL_STATUSES = frozenset({ACTIVE_CHANNEL_STATUS, *INACTIVE_CHANNEL_STATUSES})
 VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
+CORE_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+\.zip$")
 MAX_CHANNEL_BYTES = 1024 * 1024
@@ -139,7 +140,8 @@ def _load_public_key(path: Path) -> Ed25519PublicKey:
 
 def _safe_version(value: object, *, label: str) -> str:
     version = str(value or "").strip()
-    if not VERSION_PATTERN.fullmatch(version):
+    pattern = CORE_VERSION_PATTERN if "core" in label else VERSION_PATTERN
+    if not pattern.fullmatch(version):
         raise UpdateChannelError(f"invalid {label}: {version!r}")
     return version
 

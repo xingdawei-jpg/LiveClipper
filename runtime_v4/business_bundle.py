@@ -39,7 +39,7 @@ MANIFEST_NAME = "bundle_manifest.json"
 SIGNATURE_NAME = "bundle_manifest.sig"
 SIGNATURE_ALGORITHM = "ed25519"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
-CORE_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}$")
+CORE_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){1,3}(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$")
 LEGACY_RUN_LOG_NAME_PATTERN = re.compile(
     r"^\d{8}_\d{6}_.+_(?:\u6210\u529f|\u5931\u8d25)\.json$"
 )

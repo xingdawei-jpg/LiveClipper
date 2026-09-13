@@ -37,7 +37,18 @@ try:
 except (TypeError, ValueError):
     RUNTIME_LAYOUT_VERSION = 3
 ZERO_COPY_TEST_ENV = "LIVECLIPPER_ZERO_COPY_TEST"
-USER_DATA_ROOT = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
+def _initial_user_data_root() -> Path:
+    """Resolve the mutable root before server routes import application modules."""
+    try:
+        import config
+        return Path(config.USER_DATA_DIR)
+    except Exception:
+        if sys.platform == "darwin":
+            return Path.home() / "Library" / "Application Support" / "LiveClipper"
+        return Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper"
+
+
+USER_DATA_ROOT = _initial_user_data_root()
 MODULE_WEB_DIR = Path(__file__).resolve().parent
 IS_FROZEN_RUNTIME = bool(getattr(sys, "frozen", False))
 ENV_BUNDLE_DIR = Path(os.environ["LIVECLIPPER_BUNDLE_DIR"]).resolve() if os.environ.get("LIVECLIPPER_BUNDLE_DIR") else None

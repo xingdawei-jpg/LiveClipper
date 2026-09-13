@@ -99,6 +99,7 @@ class DesktopMediaImportTests(unittest.TestCase):
             self.assertEqual(result["paths"], [str(path)])
             self.assertEqual(result["storage"], "original_local_paths")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only OLE bridge")
     def test_native_ole_file_drop_bridge_dispatches_absolute_paths_and_coordinates(self) -> None:
         class LoadedSignal:
             @staticmethod

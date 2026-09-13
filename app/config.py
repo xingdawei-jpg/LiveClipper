@@ -6,9 +6,14 @@
 import json
 import os
 import re
+import sys
 
 
 def _default_user_data_dir():
+    if sys.platform == "darwin":
+        # Keep mutable state outside the .app bundle.  A per-user location is
+        # required for drag-installed apps and survives atomic V4 swaps.
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), 'LiveClipper')
     return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'LiveClipper')
 
 

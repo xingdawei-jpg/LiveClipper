@@ -5,6 +5,7 @@
 import os
 import sys
 import platform
+from glob import glob
 from functools import lru_cache
 
 IS_MAC = sys.platform == "darwin"
@@ -17,11 +18,15 @@ if IS_MAC:
     FONT_NAME = "PingFang SC"
     FONT_BOLD_NAME = "PingFang SC"
     # Mac 字体路径（打包后在 _internal/fonts/，开发时用系统路径）
-    if getattr(sys, "frozen", False):
-        FONT_DIR = os.path.join(os.path.dirname(sys.executable), "_internal", "fonts")
-    else:
-        FONT_DIR = "/System/Library/Fonts"
-    FONT_PATH = os.path.join(FONT_DIR, "PingFang.ttc")
+    # PingFang is a system font on supported macOS releases.  Do not package a
+    # copy: it is licensed by Apple and including it would make the Core vary
+    # with the build machine.
+    FONT_DIR = "/System/Library/Fonts"
+    _mac_font_candidates = (
+        [os.path.join(FONT_DIR, "PingFang.ttc")]
+        + glob("/System/Library/AssetsV2/com_apple_MobileAsset_Font*/**/PingFang.ttc", recursive=True)
+    )
+    FONT_PATH = next((path for path in _mac_font_candidates if os.path.isfile(path)), "")
     FONT_BOLD_PATH = FONT_PATH  # PingFang SC 不区分粗体文件
     # FFmpeg drawtext 用的路径（Mac 路径在滤镜里不需要转义冒号）
     DRAWTEXT_FONT_PATH = FONT_PATH
@@ -194,11 +199,15 @@ def _hw_error_summary(stderr):
 def _hardware_encoder_enabled_from_settings():
     try:
         import json
-        settings_path = os.path.join(
-            os.environ.get("APPDATA", os.path.expanduser("~")),
-            "LiveClipper",
-            "ai_settings.json",
-        )
+        if IS_MAC:
+            from config import SETTINGS_PATH
+            settings_path = SETTINGS_PATH
+        else:
+            settings_path = os.path.join(
+                os.environ.get("APPDATA", os.path.expanduser("~")),
+                "LiveClipper",
+                "ai_settings.json",
+            )
         if os.path.exists(settings_path):
             with open(settings_path, "r", encoding="utf-8-sig") as f:
                 return bool(json.load(f).get("hardware_encoder_enabled", False))
@@ -275,7 +284,7 @@ elif ENABLE_HARDWARE_ENCODER:
 # 应用数据目录（缓存、许可证等）
 # ============================================================
 if IS_MAC:
-    APP_DATA_DIR = os.path.expanduser("~/Library/Application Support/LiveClipper")
+    APP_DATA_DIR = os.path.expanduser("~/Library/Application Support")
 else:
     APP_DATA_DIR = os.environ.get("APPDATA", os.path.expanduser("~"))
 
