@@ -1,4 +1,4 @@
-# Windows V4 business candidate: 2026.9.14.1 (ready promotion pending)
+# Windows V4 business release: 2026.9.14.1 (READY)
 
 ## Boundary and provenance
 
@@ -46,4 +46,6 @@ Compared with the 2026.9.9.1 business bundle, the payload adds only `business/ap
 
 ## Promotion state
 
-The archive and acceptance prerequisites are complete. At this evidence point the public Windows stable channel is still the verified `hold` document; publishing the already verified signed `ready` document is the final external promotion action.
+The signed `ready` document was published to the Windows stable channel after all acceptance gates above. A fresh public download has the expected document SHA-256 `6d7982ab1098c9627102eb9c01594d39b062933c674b9173a8e031a6b8af68ac`; a `2026.9.9.1` client on Core `4.0.0` receives `update_available` for `2026.9.14.1`.
+
+The primary Aliyun OSS channel and archive both pass public endpoint verification. The configured jsDelivr and `pages.dev` mirror URLs each returned HTTP 404 at release time; they are fallback-only and are not used while the primary source is healthy. They must be deployed or removed from a future Core baseline configuration, but are not represented as healthy mirrors in this release evidence.

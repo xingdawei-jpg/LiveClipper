@@ -19,5 +19,9 @@
   "user_data_preservation": "pass",
   "bundle_only_runtime_import": "pass",
   "online_hold_channel": "pass",
-  "channel_ready": "not_published"
+  "channel_ready": "published_verified_primary",
+  "primary_oss_endpoint": "pass",
+  "primary_oss_archive": "pass",
+  "jsdelivr_mirror_endpoint": "not_deployed_http_404",
+  "pages_mirror_endpoint": "not_deployed_http_404"
 }
