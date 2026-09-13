@@ -137,10 +137,21 @@ def _find_ffmpeg():
     """从多个位置自动定位 FFmpeg"""
     # 1. PyInstaller 打包模式
     if getattr(sys, "frozen", False):
-        d = os.path.join(os.path.dirname(sys.executable), "_internal", "ffmpeg")
-        cmd = os.path.join(d, "ffmpeg" + (".exe" if IS_WIN else ""))
-        if os.path.exists(cmd):
-            return d, cmd
+        frozen_roots = [
+            os.path.join(os.path.dirname(sys.executable), "_internal", "ffmpeg"),
+        ]
+        if IS_MAC:
+            # PyInstaller .app onedir bundles live in Contents/Frameworks;
+            # resolving only the Windows-style _internal directory would fall
+            # back to a build-machine Homebrew binary after installation.
+            frozen_roots.extend([
+                os.path.join(str(getattr(sys, "_MEIPASS", "") or ""), "ffmpeg"),
+                os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "Frameworks", "ffmpeg")),
+            ])
+        for d in frozen_roots:
+            cmd = os.path.join(d, "ffmpeg" + (".exe" if IS_WIN else ""))
+            if os.path.exists(cmd):
+                return d, cmd
 
     candidates = []
     

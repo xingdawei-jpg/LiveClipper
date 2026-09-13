@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "web_client"))
 
 import config
 import desktop
+import platform_config
 from runtime_v4 import desktop_host, launcher, update_service
 from runtime_v4 import business_bundle, core_manifest, update_channel
 
@@ -87,6 +88,25 @@ class MacOSV4ContractTests(unittest.TestCase):
                 launcher._data_root(),
                 Path.home() / "Library" / "Application Support" / "LiveClipper",
             )
+
+    def test_macos_frozen_ffmpeg_prefers_the_app_frameworks_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "LiveClipper.app"
+            executable = app / "Contents" / "MacOS" / "LiveClipper"
+            ffmpeg = app / "Contents" / "Frameworks" / "ffmpeg" / "ffmpeg"
+            executable.parent.mkdir(parents=True)
+            ffmpeg.parent.mkdir(parents=True)
+            executable.write_bytes(b"host")
+            ffmpeg.write_bytes(b"ffmpeg")
+            with (
+                mock.patch.object(platform_config, "IS_MAC", True),
+                mock.patch.object(platform_config.sys, "frozen", True, create=True),
+                mock.patch.object(platform_config.sys, "executable", str(executable)),
+                mock.patch.object(platform_config.sys, "_MEIPASS", str(app / "Contents" / "Frameworks"), create=True),
+            ):
+                directory, command = platform_config._find_ffmpeg()
+            self.assertEqual(Path(directory), ffmpeg.parent)
+            self.assertEqual(Path(command), ffmpeg)
 
     def test_macos_host_source_selects_only_macos_channel(self) -> None:
         with mock.patch.object(desktop_host.sys, "platform", "darwin"), mock.patch.object(
