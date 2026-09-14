@@ -3790,7 +3790,9 @@ class AnalyzerError(Exception):
     """Analyzer 调用失败（网络/空响应/解析失败）。"""
 
 
-def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> None:
+def _apply_analyzer_model_runtime_options(
+    body: dict[str, Any], model: str, stage: str = ""
+) -> None:
     """Apply provider-supported execution controls for structured director JSON."""
     model_name = str(model or "").lower()
     if "deepseek" in model_name and "seed" not in model_name:
@@ -3798,7 +3800,13 @@ def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> N
         # receipt, so use the explicit response cap as its full budget.
         body["thinking"] = {"type": "disabled"}
     elif "seed" in model_name:
-        body["reasoning_effort"] = "low"
+        # Story planning still needs enough room to identify the main product
+        # and a coherent sale path. M2 already receives that contract plus
+        # structured candidate rows, so minimal reasoning is the speed-first
+        # experiment for the repeatedly slow casting call only.
+        body["reasoning_effort"] = (
+            "minimal" if stage == "Director_beat_casting" else "low"
+        )
     elif "qwen3.8" in model_name:
         # Qwen 3.8 enables xhigh thinking by default. For deterministic JSON
         # selection, that can spend minutes before the response starts.
@@ -3940,7 +3948,7 @@ def _post_two_pass_director_request(
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    _apply_analyzer_model_runtime_options(body, model)
+    _apply_analyzer_model_runtime_options(body, model, stage=stage)
     use_stream = _director_seed_casting_uses_stream(model, stage)
     if use_stream:
         # Ark emits reasoning/content chunks before its final JSON. The
