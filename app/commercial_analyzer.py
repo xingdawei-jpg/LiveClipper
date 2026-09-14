@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -3792,6 +3793,25 @@ class AnalyzerError(Exception):
     """Analyzer 调用失败（网络/空响应/解析失败）。"""
 
 
+class DirectorStageFormatError(AnalyzerError):
+    """A paid Director stage returned content that cannot be safely recovered.
+
+    Keep only a non-reversible diagnostic on the exception.  Provider output
+    can include source transcript material, so it must not be copied into a
+    task error, UI log, or release diagnostic.
+    """
+
+    def __init__(self, stage: str, diagnostics: Mapping[str, Any]) -> None:
+        self.stage = str(stage)
+        self.diagnostics = dict(diagnostics)
+        fingerprint = str(self.diagnostics.get("response_sha256") or "")[:12]
+        length = int(self.diagnostics.get("response_chars") or 0)
+        super().__init__(
+            f"Director {self.stage} 返回格式异常，已尝试一次仅格式恢复仍失败"
+            f"（响应指纹 {fingerprint or 'unknown'}，长度 {length}）。请重试本次预览。"
+        )
+
+
 def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> None:
     """Apply provider-supported execution controls for structured director JSON."""
     model_name = str(model or "").lower()
@@ -4359,6 +4379,119 @@ def _extract_json(text: str) -> dict[str, Any]:
                 except json.JSONDecodeError:
                     pass
     raise AnalyzerError("Analyzer 返回无法解析为 JSON")
+
+
+def _director_json_parse_diagnostics(text: str) -> dict[str, Any]:
+    """Return safe diagnostics for a malformed provider response.
+
+    The fingerprint lets support correlate a paid request with its protected
+    experiment artifact without exposing the model response in logs or UI.
+    """
+    raw = str(text or "")
+    details: dict[str, Any] = {
+        "response_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "response_chars": len(raw),
+        "starts_with_fence": raw.lstrip().startswith("```"),
+        "open_braces": raw.count("{"),
+        "close_braces": raw.count("}"),
+        "open_brackets": raw.count("["),
+        "close_brackets": raw.count("]"),
+    }
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError as exc:
+        details.update({
+            "json_error": str(exc.msg),
+            "json_error_position": int(exc.pos),
+            "json_error_line": int(exc.lineno),
+            "json_error_column": int(exc.colno),
+        })
+    return details
+
+
+def _parse_director_stage_json_with_recovery(
+    raw: str,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    stage: str,
+    system_prompt: str,
+    max_tokens: int,
+    timeout: int,
+    log_fn: Callable[[str], None] | None = None,
+    stage_response_hook: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    """Parse a Director stage, retrying only one malformed stage as JSON.
+
+    The paid M1 and M2 calls are intentionally independent here: if M2 is
+    malformed, the completed M1 contract stays frozen and is not sent through
+    discovery again.  The recovery request is a format-only request; it may
+    not create, remove, reorder, or reinterpret any facts or source IDs.
+    """
+    try:
+        return _extract_json(raw)
+    except AnalyzerError as first_error:
+        diagnostics = _director_json_parse_diagnostics(raw)
+        diagnostics.update({
+            "stage": str(stage),
+            "recovery_attempted": True,
+            "recovery_attempts": 1,
+            "initial_error": type(first_error).__name__,
+        })
+        if log_fn:
+            log_fn(
+                f"AI 导演 {stage} 返回格式异常，正在仅恢复本阶段 JSON；"
+                "不会重跑已完成的导演阶段。"
+            )
+        if stage_response_hook:
+            stage_response_hook(
+                f"{stage}_format_diagnostic",
+                json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+            )
+        repair_prompt = "\n\n".join([
+            "你的上一条回复未能被严格 JSON 解析。请只做格式修复。",
+            "必须只返回一个有效 JSON 对象，不要 Markdown、解释或代码围栏。",
+            "不得新增、删除、改写、重排任何事实、章节、商品、字幕 ID、数组项或字段值；"
+            "仅修复引号、逗号、转义、括号等 JSON 语法。",
+            "上一条原文如下：",
+            str(raw),
+        ])
+        try:
+            recovered_raw = _post_two_pass_director_request(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=repair_prompt,
+                stage=f"{stage}_json_repair",
+                max_tokens=max_tokens,
+                timeout=timeout,
+                response_hook=(
+                    lambda value: stage_response_hook(f"{stage}_json_repair", value)
+                ) if stage_response_hook else None,
+            )
+            parsed = _extract_json(recovered_raw)
+        except (AnalyzerError, ValueError, TypeError, KeyError) as recovery_error:
+            diagnostics.update({
+                "recovery_status": "failed",
+                "recovery_error": type(recovery_error).__name__,
+            })
+            if stage_response_hook:
+                stage_response_hook(
+                    f"{stage}_format_recovery_failed",
+                    json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+                )
+            raise DirectorStageFormatError(stage, diagnostics) from recovery_error
+        diagnostics["recovery_status"] = "recovered"
+        if stage_response_hook:
+            stage_response_hook(
+                f"{stage}_format_recovered",
+                json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+            )
+        if log_fn:
+            log_fn(f"AI 导演 {stage} 的 JSON 格式已自动恢复；继续使用同一阶段结果。")
+        return parsed
 
 
 def _subtitle_duration_map(subtitles: Sequence[Mapping[str, Any]]) -> dict[int, float]:
@@ -5178,9 +5311,20 @@ def analyze_commercial_story(
         )
         if stage_response_hook:
             stage_response_hook("story_contract", story_raw)
+        story_payload = _parse_director_stage_json_with_recovery(
+            story_raw,
+            api_key=api_key,
+            base_url=base_url,
+            model=director_model,
+            stage="Director_story_contract",
+            system_prompt=TWO_PASS_STORY_SYSTEM_PROMPT,
+            max_tokens=3000 * max(1, min(3, int(director_plan_count or 1))),
+            timeout=max(180, int(timeout)),
+            log_fn=log,
+            stage_response_hook=stage_response_hook,
+        )
         if stage_progress_hook:
             stage_progress_hook("story_contract_completed")
-        story_payload = _extract_json(story_raw)
         story_payload, story_policy_audit = sanitize_two_pass_story_for_content_policy(
             story_payload, content_contract,
         )
@@ -5299,9 +5443,20 @@ def analyze_commercial_story(
         )
         if stage_response_hook:
             stage_response_hook("beat_casting", cast_raw)
+        cast_payload = _parse_director_stage_json_with_recovery(
+            cast_raw,
+            api_key=api_key,
+            base_url=base_url,
+            model=director_model,
+            stage="Director_beat_casting",
+            system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT,
+            max_tokens=director_casting_output_max_tokens(director_plan_count),
+            timeout=director_casting_request_timeout(director_model, timeout),
+            log_fn=log,
+            stage_response_hook=stage_response_hook,
+        )
         if stage_progress_hook:
             stage_progress_hook("beat_casting_completed")
-        cast_payload = _extract_json(cast_raw)
         # New Director replies must keep one source ID in each Beat.  Capture
         # legacy grouped replies before normalizing them for editable preview;
         # the normalizer preserves every AI-selected line but the audit must

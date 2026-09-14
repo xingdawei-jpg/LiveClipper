@@ -80,6 +80,36 @@ class CommerceDirectorPreviewRouteTests(unittest.TestCase):
                     "task-held", payload, finalize_task=False, raise_errors=True,
                 )
 
+    def test_untouched_held_director_preview_is_rejected_before_creating_task(self) -> None:
+        preview = {
+            "status": "ready",
+            "raw_clips": [("C1", "原始口播", 0.0, 2.0, 0.0, 2.0, "", "C:/source.mp4")],
+            "dedup_summary": {"director_quality_hold": {
+                "held": True, "reasons": ["超出时长上限"],
+            }},
+        }
+        payload = server.SmartPreviewCutPayload(
+            preview_id="held-preview", selected_indices=[0], order=[0],
+        )
+        draft = {
+            "selected_indices": [0], "order": [0], "order_keys": [],
+            "selected_keys": [], "selected_segments": {}, "selected_words": {},
+            "selected_segments_by_key": {}, "selected_words_by_key": {},
+        }
+        with (
+            mock.patch.object(server, "_ensure_scope_idle"),
+            mock.patch.object(server, "_get_preview", return_value=preview),
+            mock.patch.object(server, "_merge_preview_draft_into_payload"),
+            mock.patch.object(server, "_apply_preview_payload_draft", return_value=draft),
+            mock.patch.object(server, "_new_task") as new_task,
+        ):
+            with self.assertRaises(server.HTTPException) as raised:
+                server.start_smart_from_preview(payload)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("超出时长上限", raised.exception.detail)
+        new_task.assert_not_called()
+
     def test_main_product_and_leaf_changes_invalidate_preview_cache_for_both_modes(self) -> None:
         with mock.patch.object(server, "_preview_selection_config_signature", return_value={"director_contract": "director-duration-v2-product-v1"}):
             for mode, payload_type in (("smart", server.SmartCutPayload), ("mix", server.MixPayload)):

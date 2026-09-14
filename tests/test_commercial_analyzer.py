@@ -15,6 +15,7 @@ if APP not in sys.path:
 from commercial_analyzer import (
     ANALYZER_SYSTEM_PROMPT,
     AnalyzerError,
+    DirectorStageFormatError,
     TWO_PASS_CAST_SYSTEM_PROMPT,
     TWO_PASS_STORY_SYSTEM_PROMPT,
     DirectorBeat,
@@ -44,6 +45,7 @@ from commercial_analyzer import (
     _cast_beat_cardinality_issues,
     _apply_analyzer_model_runtime_options,
     _extract_json,
+    _parse_director_stage_json_with_recovery,
     _normalize_two_pass_director_payload,
     _post_two_pass_director_request,
     _story_delivery_depth_audit,
@@ -1537,6 +1539,62 @@ class TwoPassDirectorTests(unittest.TestCase):
 
 
 class JsonRecoveryTests(unittest.TestCase):
+    def test_stage_format_recovery_retries_only_the_malformed_stage(self):
+        events = []
+        logs = []
+        original = '{"strategies":[{"strategy_id":"S1"}]'
+        repaired = '{"strategies":[{"strategy_id":"S1"}]}'
+        with mock.patch(
+            "commercial_analyzer._post_two_pass_director_request",
+            return_value=repaired,
+        ) as post:
+            parsed = _parse_director_stage_json_with_recovery(
+                original,
+                api_key="test-key",
+                base_url="https://example.invalid/v1",
+                model="deepseek-v4-flash",
+                stage="Director_beat_casting",
+                system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT,
+                max_tokens=1234,
+                timeout=45,
+                log_fn=logs.append,
+                stage_response_hook=lambda stage, value: events.append((stage, value)),
+            )
+
+        self.assertEqual(parsed["strategies"][0]["strategy_id"], "S1")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["stage"], "Director_beat_casting_json_repair")
+        self.assertNotIn("Director_story_contract", str(post.call_args))
+        self.assertTrue(any("不会重跑已完成" in line for line in logs))
+        diagnostic = json.loads(events[0][1])
+        self.assertEqual(events[0][0], "Director_beat_casting_format_diagnostic")
+        self.assertEqual(diagnostic["recovery_attempts"], 1)
+        self.assertNotIn(original, events[0][1])
+        self.assertEqual(events[-1][0], "Director_beat_casting_format_recovered")
+
+    def test_stage_format_recovery_exposes_only_safe_diagnostics_on_second_failure(self):
+        original = '{"private_source_text":"不要泄露这段原文"'
+        with mock.patch(
+            "commercial_analyzer._post_two_pass_director_request",
+            return_value='{"still":"broken"',
+        ):
+            with self.assertRaises(DirectorStageFormatError) as raised:
+                _parse_director_stage_json_with_recovery(
+                    original,
+                    api_key="test-key",
+                    base_url="https://example.invalid/v1",
+                    model="deepseek-v4-flash",
+                    stage="Director_beat_casting",
+                    system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT,
+                    max_tokens=1234,
+                    timeout=45,
+                )
+
+        self.assertEqual(raised.exception.stage, "Director_beat_casting")
+        self.assertEqual(raised.exception.diagnostics["recovery_status"], "failed")
+        self.assertNotIn("不要泄露", str(raised.exception))
+        self.assertNotIn("不要泄露", json.dumps(raised.exception.diagnostics, ensure_ascii=False))
+
     def test_director_prompts_keep_safe_subsecond_completion_and_priorities(self):
         rows = [
             {"id": 128, "start": 0, "end": 2.1, "text": "这个衣服其实是三种。"},

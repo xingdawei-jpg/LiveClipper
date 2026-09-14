@@ -6473,6 +6473,37 @@ def _director_preview_quality_hold(
     }
 
 
+def _director_preview_hold_requires_manual_edit(
+    preview: Mapping[str, Any],
+    selected_indices: Sequence[int],
+    order: Sequence[int],
+    selected_segments: Mapping[str, Any] | None = None,
+    selected_words: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Return hold reasons only when the user has not changed an M2 draft.
+
+    A held Director preview remains useful as an editable draft.  It is not an
+    approval to render its original sentence list unchanged, but a user who
+    has made a real sentence/order edit can continue through the existing
+    preview-render path for review.
+    """
+    quality_hold = dict((preview.get("dedup_summary") or {}).get("director_quality_hold") or {})
+    if not quality_hold.get("held"):
+        return []
+    raw_clips = _preview_selection_raw_clips(preview)
+    default_order = list(range(len(raw_clips)))
+    effective_order = list(order or default_order)
+    selection_changed = (
+        list(selected_indices) != default_order
+        or effective_order != default_order
+        or bool(selected_segments)
+        or bool(selected_words)
+    )
+    if selection_changed:
+        return []
+    return [str(item) for item in quality_hold.get("reasons") or [] if str(item).strip()]
+
+
 def _drop_unusable_preview_clips(
     raw_clips: list[Any],
     public_clips: list[dict[str, Any]],
@@ -12746,23 +12777,20 @@ def _run_mix_from_preview(
             payload.order or draft.get("order"),
             len(raw_clips),
         )
-        quality_hold = dict((preview.get("dedup_summary") or {}).get("director_quality_hold") or {})
-        if quality_hold.get("held"):
-            default_order = list(range(len(raw_clips)))
-            effective_order = list(payload.order or draft.get("order") or default_order)
-            selection_changed = (
-                selected_indices != default_order
-                or effective_order != default_order
-                or bool(selected_segments)
-                or bool(selected_words)
+        hold_reasons = _director_preview_hold_requires_manual_edit(
+            preview,
+            selected_indices,
+            payload.order or draft.get("order") or [],
+            selected_segments,
+            selected_words,
+        )
+        if hold_reasons:
+            reasons = "、".join(hold_reasons)
+            raise RuntimeError(
+                "AI 导演草案尚未通过正式成片校验"
+                + (f"（{reasons}）" if reasons else "")
+                + "；请先在逐句预览中删改并复核。"
             )
-            if not selection_changed:
-                reasons = "、".join(str(item) for item in quality_hold.get("reasons") or [])
-                raise RuntimeError(
-                    "AI 导演草案尚未通过正式成片校验"
-                    + (f"（{reasons}）" if reasons else "")
-                    + "；请先在逐句预览中删改并复核。"
-                )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         before_filter = list(clips)
         clips = _hard_filter_preview_selection(
@@ -14332,6 +14360,10 @@ def _run_commerce_director_preview(
                 variant_strategy = dict(prepared_variant["strategy"])
                 variant_plan = dict(prepared_variant["plan"])
                 variant_duration = dict(variant_plan.get("duration_assessment") or {})
+                variant_quality_hold = _director_preview_quality_hold(
+                    variant_duration, variant_strategy.get("opening_selection"),
+                )
+                variant_formal_export_allowed = not bool(variant_quality_hold["held"])
                 variant_actual_seconds = round(sum(
                     float(item.get("duration") or 0.0)
                     for item in list(variant_plan.get("selected_candidates") or [])
@@ -14392,7 +14424,7 @@ def _run_commerce_director_preview(
                         "strategy_switch_requires_ai": False,
                         "m3_materialized": False,
                         "sentence_preview_editable": True,
-                        "formal_export_allowed": True,
+                        "formal_export_allowed": variant_formal_export_allowed,
                         "render_path": "existing_smart_or_mix_from_preview",
                     },
                     "director_variants": director_variant_cards,
@@ -14428,8 +14460,9 @@ def _run_commerce_director_preview(
                         "director_strategy_id": str(variant_strategy.get("strategy_id") or ""),
                         "m3_skipped": True,
                         "sentence_preview_editable": True,
-                        "formal_export_allowed": True,
-                        "publication_allowed": True,
+                        "director_quality_hold": dict(variant_quality_hold),
+                        "formal_export_allowed": variant_formal_export_allowed,
+                        "publication_allowed": variant_formal_export_allowed,
                         "cost_report": dict(cost_report),
                     },
                     commercial_director_experiment=True,
@@ -15692,23 +15725,20 @@ def _run_smart_cut_from_preview(
             payload.order or draft.get("order"),
             len(raw_clips),
         )
-        quality_hold = dict((preview.get("dedup_summary") or {}).get("director_quality_hold") or {})
-        if quality_hold.get("held"):
-            default_order = list(range(len(raw_clips)))
-            effective_order = list(payload.order or draft.get("order") or default_order)
-            selection_changed = (
-                selected_indices != default_order
-                or effective_order != default_order
-                or bool(selected_segments)
-                or bool(selected_words)
+        hold_reasons = _director_preview_hold_requires_manual_edit(
+            preview,
+            selected_indices,
+            payload.order or draft.get("order") or [],
+            selected_segments,
+            selected_words,
+        )
+        if hold_reasons:
+            reasons = "、".join(hold_reasons)
+            raise RuntimeError(
+                "AI 导演草案尚未通过正式成片校验"
+                + (f"（{reasons}）" if reasons else "")
+                + "；请先在逐句预览中删改并复核。"
             )
-            if not selection_changed:
-                reasons = "、".join(str(item) for item in quality_hold.get("reasons") or [])
-                raise RuntimeError(
-                    "AI 导演草案尚未通过正式成片校验"
-                    + (f"（{reasons}）" if reasons else "")
-                    + "；请先在逐句预览中删改并复核。"
-                )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         before_filter = list(clips)
         clips = _hard_filter_preview_selection(
@@ -18349,6 +18379,22 @@ def start_smart_from_preview(payload: SmartPreviewCutPayload) -> dict[str, Any]:
     payload.selected_words = dict(draft.get("selected_words") or {})
     payload.selected_segments_by_key = dict(draft.get("selected_segments_by_key") or {})
     payload.selected_words_by_key = dict(draft.get("selected_words_by_key") or {})
+    hold_reasons = _director_preview_hold_requires_manual_edit(
+        preview,
+        selected,
+        payload.order,
+        payload.selected_segments,
+        payload.selected_words,
+    )
+    if hold_reasons:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "AI 导演草案尚未通过正式成片校验（"
+                + "、".join(hold_reasons)
+                + "）；请先在逐句预览中删改并复核。"
+            ),
+        )
     _raise_preflight_errors("smart-from-preview", payload)
     _record_preview_selection_feedback(preview, "smart", draft, "smart_from_preview")
     task_id = _new_task("smart-cut", "预览成片")
@@ -18507,6 +18553,22 @@ def start_mix_from_preview(payload: MixPreviewCutPayload) -> dict[str, Any]:
     payload.selected_words = dict(draft.get("selected_words") or {})
     payload.selected_segments_by_key = dict(draft.get("selected_segments_by_key") or {})
     payload.selected_words_by_key = dict(draft.get("selected_words_by_key") or {})
+    hold_reasons = _director_preview_hold_requires_manual_edit(
+        preview,
+        selected,
+        payload.order,
+        payload.selected_segments,
+        payload.selected_words,
+    )
+    if hold_reasons:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "AI 导演草案尚未通过正式成片校验（"
+                + "、".join(hold_reasons)
+                + "）；请先在逐句预览中删改并复核。"
+            ),
+        )
     _raise_preflight_errors("mix-from-preview", payload)
     _record_preview_selection_feedback(preview, "mix", draft, "mix_from_preview")
     task_id = _new_task("mix", "预览混剪成片")
