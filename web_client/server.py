@@ -6492,6 +6492,55 @@ def _director_preview_fidelity_audit(public_clips: list[dict[str, Any]]) -> dict
     }
 
 
+def _director_preview_quality_hold(duration_assessment: Mapping[str, Any]) -> dict[str, Any]:
+    """Block an untouched Director draft when its measured audit is unsafe.
+
+    This is deliberately an acceptance gate, not a fallback editor. It never
+    selects, removes, or reorders an AI-authored sentence; it only preserves a
+    flawed M2 result for the operator to review and edit.
+    """
+    control = duration_assessment.get("duration_control")
+    control = dict(control) if isinstance(control, Mapping) else {}
+    final = control.get("final")
+    final = dict(final) if isinstance(final, Mapping) else {}
+    contract = final.get("duration_contract")
+    contract = dict(contract) if isinstance(contract, Mapping) else {}
+    reasons: list[str] = []
+
+    try:
+        source_seconds = float(final.get("source_seconds") or 0.0)
+        source_max = float(contract.get("source_max") or 0.0)
+        projected_seconds = float(
+            final.get("projected_final_seconds")
+            or duration_assessment.get("projected_final_seconds")
+            or 0.0
+        )
+        final_max = float(contract.get("final_max") or 0.0)
+    except (TypeError, ValueError):
+        source_seconds = source_max = projected_seconds = final_max = 0.0
+    if (
+        float(final.get("excess_source_seconds") or 0.0) > 0.01
+        or (source_max > 0 and source_seconds > source_max + 0.01)
+        or (final_max > 0 and projected_seconds > final_max + 0.01)
+    ):
+        reasons.append("超出时长上限")
+    if final.get("duplicate_subtitle_ids"):
+        reasons.append("包含重复原句")
+    if final.get("incomplete_chapter_ids"):
+        reasons.append("存在未完成章节")
+    if final.get("unverified_completion_chapter_ids"):
+        reasons.append("存在未验证章节")
+    if final.get("grouped_beat_issues") or final.get("long_continuous_utterance_group_count"):
+        reasons.append("连续口播单元不合格")
+    if final.get("semantic_unit_span_issue_count"):
+        reasons.append("语义单元跨度不合格")
+    return {
+        "held": bool(reasons),
+        "reasons": reasons,
+        "audit_source": "m2_duration_control.final",
+    }
+
+
 def _drop_unusable_preview_clips(
     raw_clips: list[Any],
     public_clips: list[dict[str, Any]],
@@ -12765,6 +12814,23 @@ def _run_mix_from_preview(
             payload.order or draft.get("order"),
             len(raw_clips),
         )
+        quality_hold = dict((preview.get("dedup_summary") or {}).get("director_quality_hold") or {})
+        if quality_hold.get("held"):
+            default_order = list(range(len(raw_clips)))
+            effective_order = list(payload.order or draft.get("order") or default_order)
+            selection_changed = (
+                selected_indices != default_order
+                or effective_order != default_order
+                or bool(selected_segments)
+                or bool(selected_words)
+            )
+            if not selection_changed:
+                reasons = "、".join(str(item) for item in quality_hold.get("reasons") or [])
+                raise RuntimeError(
+                    "AI 导演草案尚未通过正式成片校验"
+                    + (f"（{reasons}）" if reasons else "")
+                    + "；请先在逐句预览中删改并复核。"
+                )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         before_filter = list(clips)
         clips = _hard_filter_preview_selection(
@@ -14277,6 +14343,8 @@ def _run_commerce_director_preview(
                 })
             preview_fidelity = _director_preview_fidelity_audit(public_clips)
             duration_assessment = dict(plan_payload.get("duration_assessment") or {})
+            quality_hold = _director_preview_quality_hold(duration_assessment)
+            formal_export_allowed = not bool(quality_hold["held"])
             actual_seconds = round(sum(float(item.get("duration") or 0.0) for item in public_clips), 3)
             story = dict(plan_payload.get("story_brief") or case.get("selected_m1_hero") or {})
             final_story = dict(plan_payload.get("final_story_brief") or {})
@@ -14320,7 +14388,7 @@ def _run_commerce_director_preview(
                     "sentence_source": "M2 selected candidates in exact AI-authored order",
                     "m3_materialized": False,
                     "sentence_preview_editable": True,
-                    "formal_export_allowed": True,
+                    "formal_export_allowed": formal_export_allowed,
                     "render_path": "existing_smart_or_mix_from_preview",
                 },
                 "director_variants": director_variant_cards,
@@ -14470,6 +14538,14 @@ def _run_commerce_director_preview(
                 and not final_duration_audit.get("long_continuous_utterance_group_count")
                 and not final_duration_audit.get("semantic_unit_span_issue_count")
             )
+            if quality_hold["held"]:
+                warning = (
+                    "本次选片因"
+                    + "、".join(str(item) for item in quality_hold["reasons"])
+                    + "仅保留为可编辑草案；请删改并复核后再成片。"
+                )
+                message += " " + warning
+                emit_log("warning", warning, scope, task_id=task_id)
             incomplete_chapters = [
                 str(item) for item in (final_duration_audit.get("incomplete_chapter_ids") or [])
                 if str(item).strip()
@@ -14542,8 +14618,9 @@ def _run_commerce_director_preview(
                     "duration_control": dict(duration_assessment.get("duration_control") or {}),
                     "word_timing_summary": dict(word_timing_summary),
                     "task_content_policy": settings["content_policy"],
-                    "formal_export_allowed": True,
-                    "publication_allowed": True,
+                    "director_quality_hold": dict(quality_hold),
+                    "formal_export_allowed": formal_export_allowed,
+                    "publication_allowed": formal_export_allowed,
                     "cost_report": dict(cost_report),
                 },
                 commercial_director_experiment=True,
@@ -15681,6 +15758,23 @@ def _run_smart_cut_from_preview(
             payload.order or draft.get("order"),
             len(raw_clips),
         )
+        quality_hold = dict((preview.get("dedup_summary") or {}).get("director_quality_hold") or {})
+        if quality_hold.get("held"):
+            default_order = list(range(len(raw_clips)))
+            effective_order = list(payload.order or draft.get("order") or default_order)
+            selection_changed = (
+                selected_indices != default_order
+                or effective_order != default_order
+                or bool(selected_segments)
+                or bool(selected_words)
+            )
+            if not selection_changed:
+                reasons = "、".join(str(item) for item in quality_hold.get("reasons") or [])
+                raise RuntimeError(
+                    "AI 导演草案尚未通过正式成片校验"
+                    + (f"（{reasons}）" if reasons else "")
+                    + "；请先在逐句预览中删改并复核。"
+                )
         clips = _clips_from_preview_selection(preview, selected_indices, selected_segments, selected_words)
         before_filter = list(clips)
         clips = _hard_filter_preview_selection(
