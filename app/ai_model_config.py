@@ -8,6 +8,13 @@ DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 LEGACY_DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 LEGACY_DOUBAO_MODEL = "doubao-1-5-pro-32k-250115"
 
+# The Ark console presents Seed 2.1 with title-case display names, while the
+# chat-completions API requires the versioned model IDs listed below.
+ARK_MODEL_DISPLAY_ALIASES = {
+    "doubao-seed-2.1-pro": "doubao-seed-2-1-pro-260628",
+    "doubao-seed-2.1-turbo": "doubao-seed-2-1-turbo-260628",
+}
+
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
 _MODELS_SUFFIX = "/models"
 _RESPONSES_SUFFIX = "/responses"
@@ -39,6 +46,9 @@ def normalize_ai_model_defaults(settings: dict | None) -> dict:
     model = str(data.get("model") or "").strip()
 
     data["base_url"] = base_url
+    if base_url == LEGACY_DOUBAO_BASE_URL:
+        data["model"] = ARK_MODEL_DISPLAY_ALIASES.get(model.lower(), model)
+        model = data["model"]
     if not model and base_url != LEGACY_DOUBAO_BASE_URL:
         data["model"] = DEEPSEEK_DEFAULT_MODEL
     data["enabled"] = bool(api_key)
