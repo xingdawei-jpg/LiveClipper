@@ -34,6 +34,8 @@ from commercial_analyzer import (
     director_duration_depth_contract,
     director_casting_output_max_tokens,
     director_casting_request_timeout,
+    _director_seed_casting_uses_stream,
+    _read_director_sse_response,
     director_target_duration_range,
     filter_director_executable_ids_for_content_policy,
     matches_story_semantic_signature,
@@ -1012,6 +1014,24 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertEqual(director_casting_request_timeout("deepseek-v4-flash", 120), 180)
         self.assertEqual(director_casting_request_timeout("doubao-seed-2-1-pro-260628", 420), 420)
 
+    def test_seed_m2_streams_but_other_director_stages_remain_non_streaming(self) -> None:
+        self.assertTrue(_director_seed_casting_uses_stream("doubao-seed-2-1-pro-260628", "Director_beat_casting"))
+        self.assertFalse(_director_seed_casting_uses_stream("doubao-seed-2-1-pro-260628", "Director_story_contract"))
+        self.assertFalse(_director_seed_casting_uses_stream("deepseek-v4-flash", "Director_beat_casting"))
+
+    def test_seed_stream_response_preserves_content_finish_reason_and_usage(self) -> None:
+        response = io.BytesIO(
+            b'data: {"choices":[{"delta":{"reasoning_content":"planning"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"{\\"strategies\\":"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"[]}"},"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        parsed = _read_director_sse_response(response)
+        self.assertEqual(parsed["choices"][0]["message"]["content"], '{"strategies":[]}')
+        self.assertEqual(parsed["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(parsed["usage"]["prompt_tokens"], 12)
+
     def test_chapter_alternatives_survive_without_entering_final_sequence(self) -> None:
         strategy = Strategy.from_dict({
             "strategy_id": "S1",
@@ -1420,6 +1440,9 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertEqual(response, '{"strategies": []}')
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(1.0)
+        request_body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertTrue(request_body["stream"])
+        self.assertEqual(request_body["stream_options"], {"include_usage": True})
         self.assertTrue(ledger.call_args.kwargs["success"])
 
     def test_deepseek_director_stages_use_fixed_nonthinking_budget(self) -> None:
