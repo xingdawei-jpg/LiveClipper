@@ -115,6 +115,22 @@ class MacOSV4ContractTests(unittest.TestCase):
             self.assertEqual(Path(directory), ffmpeg.parent)
             self.assertEqual(Path(command), ffmpeg)
 
+    def test_macos_ffmpeg_library_fallback_keeps_existing_dirs_and_adds_x265(self) -> None:
+        with mock.patch.object(
+            platform_config,
+            "_mac_homebrew_legacy_library_dirs",
+            return_value=("/opt/homebrew/Cellar/x265/4.2/lib", "/opt/homebrew/Cellar/x265/4.3/lib"),
+        ), mock.patch.dict(
+            platform_config.os.environ,
+            {"DYLD_FALLBACK_LIBRARY_PATH": "/custom/lib:/opt/homebrew/Cellar/x265/4.2/lib"},
+            clear=False,
+        ):
+            platform_config._configure_macos_ffmpeg_library_fallback()
+            self.assertEqual(
+                platform_config.os.environ["DYLD_FALLBACK_LIBRARY_PATH"],
+                "/custom/lib:/opt/homebrew/Cellar/x265/4.2/lib:/opt/homebrew/Cellar/x265/4.3/lib",
+            )
+
     def test_macos_host_source_selects_only_macos_channel(self) -> None:
         with mock.patch.object(desktop_host.sys, "platform", "darwin"), mock.patch.object(
             desktop_host.sys, "frozen", False, create=True

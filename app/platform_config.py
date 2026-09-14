@@ -133,6 +133,36 @@ def resolve_subtitle_font(preferred_name):
 # ============================================================
 # FFmpeg 配置（自动检测）
 # ============================================================
+def _mac_homebrew_legacy_library_dirs():
+    """Return installed Homebrew x265 libraries usable by an older FFmpeg.
+
+    Homebrew upgrades x265 independently.  A still-installed FFmpeg can then
+    refer to the previous versioned dylib through ``/opt/homebrew/opt/x265``
+    and fail before it can inspect any media.  Keep the system's configured
+    library locations first, then make the locally installed compatible x265
+    libraries available as a fallback for source runs.
+    """
+    if not IS_MAC:
+        return ()
+    locations = []
+    for cellar in ("/opt/homebrew/Cellar", "/usr/local/Cellar"):
+        locations.extend(glob(os.path.join(cellar, "x265", "*", "lib")))
+    return tuple(sorted({os.path.normpath(path) for path in locations if os.path.isdir(path)}))
+
+
+def _configure_macos_ffmpeg_library_fallback():
+    """Preserve existing dyld lookup paths while adding compatible x265 libs."""
+    legacy_dirs = _mac_homebrew_legacy_library_dirs()
+    if not legacy_dirs:
+        return
+    configured = [item for item in os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").split(os.pathsep) if item]
+    merged = list(dict.fromkeys(configured + list(legacy_dirs)))
+    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = os.pathsep.join(merged)
+
+
+_configure_macos_ffmpeg_library_fallback()
+
+
 def _find_ffmpeg():
     """从多个位置自动定位 FFmpeg"""
     # 1. PyInstaller 打包模式
