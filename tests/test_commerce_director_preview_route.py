@@ -20,6 +20,57 @@ server = importlib.import_module("server")
 
 
 class CommerceDirectorPreviewRouteTests(unittest.TestCase):
+    def test_director_quality_hold_uses_measured_overflow_and_integrity_audit(self) -> None:
+        hold = server._director_preview_quality_hold({
+            "projected_final_seconds": 90.262,
+            "duration_control": {"final": {
+                "source_seconds": 103.801,
+                "excess_source_seconds": 23.301,
+                "duration_contract": {"source_max": 80.5, "final_max": 70},
+                "unverified_completion_chapter_ids": ["C2", "C3"],
+                "semantic_unit_span_issue_count": 1,
+            }},
+        })
+
+        self.assertTrue(hold["held"])
+        self.assertEqual(
+            hold["reasons"],
+            ["超出时长上限", "存在未验证章节", "语义单元跨度不合格"],
+        )
+
+    def test_director_quality_hold_keeps_short_but_verified_draft_editable(self) -> None:
+        hold = server._director_preview_quality_hold({
+            "projected_final_seconds": 23.1,
+            "duration_control": {"final": {
+                "source_seconds": 26.5,
+                "duration_contract": {"source_max": 80.5, "final_max": 70},
+            }},
+        })
+
+        self.assertFalse(hold["held"])
+
+    def test_untouched_held_director_preview_cannot_render(self) -> None:
+        preview = {
+            "status": "ready",
+            "raw_clips": [("C1", "原始口播", 0.0, 2.0, 0.0, 2.0, "", "C:/source.mp4")],
+            "dedup_summary": {"director_quality_hold": {
+                "held": True, "reasons": ["超出时长上限"],
+            }},
+        }
+        payload = server.SmartPreviewCutPayload(
+            preview_id="held-preview", selected_indices=[0], order=[0],
+        )
+        with (
+            mock.patch.object(server, "_ensure_feature_access"),
+            mock.patch.object(server, "_get_preview", return_value=preview),
+            mock.patch.object(server, "_set_task"),
+            mock.patch.object(server, "emit_log"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "超出时长上限"):
+                server._run_smart_cut_from_preview(
+                    "task-held", payload, finalize_task=False, raise_errors=True,
+                )
+
     def test_main_product_and_leaf_changes_invalidate_preview_cache_for_both_modes(self) -> None:
         with mock.patch.object(server, "_preview_selection_config_signature", return_value={"director_contract": "director-duration-v2-product-v1"}):
             for mode, payload_type in (("smart", server.SmartCutPayload), ("mix", server.MixPayload)):
