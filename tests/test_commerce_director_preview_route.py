@@ -20,6 +20,15 @@ server = importlib.import_module("server")
 
 
 class CommerceDirectorPreviewRouteTests(unittest.TestCase):
+    def test_valid_duration_cannot_override_invalid_or_limited_opening(self) -> None:
+        for opening, reason in (
+            ({"verification": {"status": "warning"}, "quality": "strong"}, "开场回执与实际选句不一致"),
+            ({"verification": {"status": "consistent"}, "quality": "limited"}, "开场素材不足"),
+        ):
+            hold = server._director_preview_quality_hold({}, opening)
+            self.assertTrue(hold["held"])
+            self.assertIn(reason, hold["reasons"])
+
     def test_director_quality_hold_uses_measured_overflow_and_integrity_audit(self) -> None:
         hold = server._director_preview_quality_hold({
             "projected_final_seconds": 90.262,

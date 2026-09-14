@@ -6416,7 +6416,10 @@ def _director_preview_fidelity_audit(public_clips: list[dict[str, Any]]) -> dict
     }
 
 
-def _director_preview_quality_hold(duration_assessment: Mapping[str, Any]) -> dict[str, Any]:
+def _director_preview_quality_hold(
+    duration_assessment: Mapping[str, Any],
+    opening_selection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Block an untouched Director draft when its measured audit is unsafe.
 
     This is deliberately an acceptance gate, not a fallback editor. It never
@@ -6458,10 +6461,15 @@ def _director_preview_quality_hold(duration_assessment: Mapping[str, Any]) -> di
         reasons.append("连续口播单元不合格")
     if final.get("semantic_unit_span_issue_count"):
         reasons.append("语义单元跨度不合格")
+    opening = dict(opening_selection or {})
+    if (opening.get("verification") or {}).get("status") == "warning":
+        reasons.append("开场回执与实际选句不一致")
+    if opening.get("quality") == "limited":
+        reasons.append("开场素材不足")
     return {
         "held": bool(reasons),
         "reasons": reasons,
-        "audit_source": "m2_duration_control.final",
+        "audit_source": "m2_duration_control.final+opening_selection" if opening else "m2_duration_control.final",
     }
 
 
@@ -14267,7 +14275,9 @@ def _run_commerce_director_preview(
                 })
             preview_fidelity = _director_preview_fidelity_audit(public_clips)
             duration_assessment = dict(plan_payload.get("duration_assessment") or {})
-            quality_hold = _director_preview_quality_hold(duration_assessment)
+            quality_hold = _director_preview_quality_hold(
+                duration_assessment, primary_strategy.get("opening_selection"),
+            )
             formal_export_allowed = not bool(quality_hold["held"])
             actual_seconds = round(sum(float(item.get("duration") or 0.0) for item in public_clips), 3)
             story = dict(plan_payload.get("story_brief") or case.get("selected_m1_hero") or {})

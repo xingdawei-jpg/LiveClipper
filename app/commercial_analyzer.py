@@ -1790,13 +1790,13 @@ def _director_product_context(
     rows: Sequence[Mapping[str, Any]],
     *,
     include_nonselectable_context: bool = True,
+    include_duration: bool = True,
 ) -> str:
     """Build exact-ID casting context without making excluded rows selectable.
 
-    Price/interaction/long rows can name a garment before a short '它' line.
-    Callers that have an explicit content boundary can omit non-selectable raw
-    text entirely.  That keeps a forbidden price/size/CTA sentence out of both
-    Director prompts instead of merely telling the model not to select it.
+    Excluded rows can name a garment or contradict a nearby selling claim.
+    Selection policy must not erase that evidence. Context stays in source
+    order and cannot become a playable ID merely by appearing in this view.
     """
     selectable = {int(row["id"]): row for row in rows}
     lines = []
@@ -1807,7 +1807,8 @@ def _director_product_context(
         # Keep switches and their following pronouns adjacent. Appending only
         # excluded rows after the safe pool destroys the source chronology.
         if sid in selectable:
-            lines.append(_director_casting_transcript([selectable[sid]]))
+            formatter = _director_casting_transcript if include_duration else _director_story_transcript
+            lines.append(formatter([selectable[sid]]))
         elif include_nonselectable_context:
             lines.append(f"[context ID {sid:03d}][不可选，仅核对商品指代] {row.get('text', '')}")
     return "\n".join(lines)
@@ -1854,7 +1855,7 @@ def _director_executable_subtitles(
             end = max(start, float(subtitle.get("end") or start))
         except (AttributeError, TypeError, ValueError):
             continue
-        if executable_ids and subtitle_id not in executable_ids:
+        if executable_subtitle_ids is not None and subtitle_id not in executable_ids:
             continue
         text = str(subtitle.get("text") or "").strip()
         if not text or end <= start:
@@ -3325,7 +3326,9 @@ def build_two_pass_story_prompt(
 ) -> str:
     """Build the story-only call over the complete executable transcript."""
     rows = _director_casting_rows(subtitles, executable_subtitle_ids)
-    transcript = _director_story_transcript(rows)
+    transcript = _director_product_context(
+        source_context_subtitles or subtitles, rows, include_duration=False,
+    )
     duration_range = director_delivery_duration_range(target_duration, duration_tolerance, output_speed_factor)
     depth_contract = director_duration_depth_contract(target_duration)
     subject_line = (
@@ -3409,12 +3412,11 @@ def build_two_pass_story_prompt(
                 "chapter_packets": [],
             })
     schema = {"strategies": strategy_schemas}
-    # The complete safe transcript deliberately comes first.  It is already
-    # the full M1 input, so do not duplicate it as a second product-context
-    # transcript.  That saves prompt tokens and prevents excluded raw content
-    # from leaking back into the story chain.
+    # One chronological transcript distinguishes playable evidence from
+    # context. Removing excluded rows would also erase product switches and
+    # corrections, letting an adjacent safe pronoun inherit the wrong item.
     return "\n".join([
-        "安全候选字幕片段按时间顺序（没有 Strong Ranking、没有 TopK）：可选不代表句意完整，先核对必要上下句。受用户内容边界排除的原话不会提供，不能作为故事承诺。",
+        "原始字幕按时间顺序（没有 Strong Ranking、没有 TopK）：[ID] 是可选片段，可选不代表句意完整；[context ID] 是不可选上下文，只用于核对商品切换、指代和否定事实，不能成为故事承诺、开场或正文。",
         transcript or "（没有满足 1-8 秒且可执行的字幕）",
         "",
         subject_line,
@@ -3427,7 +3429,7 @@ def build_two_pass_story_prompt(
             f"{float(duration_range['preferred_high']):.1f} 秒。原声选句预算见下；不能拿半句或重复内容填充。"
         ),
         "交付时长合同（含导出变速，原声预算可以超过120秒）：" + json.dumps(duration_range, ensure_ascii=False),
-        "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 1 组 opening_evidence_packages。整个 JSON（含标点）控制在 6000 个中文字符以内，宁可让章节字段更短，也不能删掉一个真实且必要的故事章节。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。director_title、core_desire、central_promise、opening_promise、title、buyer_advance、chapter_job、stop_condition、purchase_value、payoff_basis 每项最多 24 个汉字；completion_requirements 只写一项、最多 30 个汉字。每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements：当安全素材可支撑时，各章预算合计必须覆盖 source_min，并以 source_target 为中心、不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
+        "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 3 组 opening_evidence_packages。整个 JSON（含标点）控制在 6000 个中文字符以内，宁可让章节字段更短，也不能删掉一个真实且必要的故事章节。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。director_title、core_desire、central_promise、opening_promise、title、buyer_advance、chapter_job、stop_condition、purchase_value、payoff_basis 每项最多 24 个汉字；completion_requirements 只写一项、最多 30 个汉字。每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements：当安全素材可支撑时，各章预算合计必须覆盖 source_min，并以 source_target 为中心、不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         "章节数量不构成交付要求：宁可只保留能推进故事的少数章节，也不能为达到任何章节或 beat 数量拆碎同一段教学。若素材无法支撑新的购买判断，明确 source_limited 或自然收束，不能用未提供内容补足。",
         "本轮先决定观众为什么想买，再按观众自然追问安排章节。每章 buyer_advance 必须写出与上一章不同的新增购买认知；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
         (
@@ -3438,11 +3440,11 @@ def build_two_pass_story_prompt(
             "本次只执行一个完整主方案；必须同时给出恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要（S2、S3）。"
             "不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段；用户确认选择后才会单独为所选方向生成完整方案。"
         ),
-        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。只为主方案寻找 1 组 Hook -> 紧接 payoff 的 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把这组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只列1-2个最直接依据；所有备选方向也必须是同一个主商品。",
+        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先为主商品寻找最多 3 组不同切入的 Hook -> 紧接 payoff 的 opening_evidence_packages，再决定主故事；按实际开场质量排序，不为填满数量重复同一组句子。这些 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把这组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只列1-2个最直接依据；所有备选方向也必须是同一个主商品。",
         "identity_evidence_ids 只列 1-2 条最直接、能明确核实商品名或指代的代表依据，不要抄全片 ID。",
         "先顺读全片，在 product_scope.source_product_sections 用连续 ID 范围简记换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。每个范围只写类型和不超过 12 个汉字的实际商品名，证据不足写 unknown，不解释原因；临时聊裤子、另一件羊毛衣、与商品无关的聊天都不能默认属于主商品。",
         "长目标通过探索更多真实存在的新购买章节来体现，禁止重复同一结果、同一机制或同义口号。",
-        "chapter_packets 只能描述章节职责。opening_evidence_packages 是唯一允许出现的字幕 ID 字段：每个完整方案最多 1 组，必须同时填写非空 hook_subtitle_ids、payoff_subtitle_ids、purchase_value、payoff_basis，且 Hook 与 payoff 不得重复 ID。除此之外 JSON 中不得出现 beats、subtitle_ids、source_span、verbatim、时间戳或 final_readthrough。S2/S3 方向摘要不得带 opening_evidence_packages。",
+        "chapter_packets 只能描述章节职责。opening_evidence_packages 是唯一允许出现的字幕 ID 字段：每个完整方案最多 3 组，必须同时填写非空 hook_subtitle_ids、payoff_subtitle_ids、purchase_value、payoff_basis，且 Hook 与 payoff 不得重复 ID。除此之外 JSON 中不得出现 beats、subtitle_ids、source_span、verbatim、时间戳或 final_readthrough。S2/S3 方向摘要不得带 opening_evidence_packages。",
         "可选视频结构仅供导演判断，不需要逐个覆盖：",
         json.dumps(available_video_structures(content_contract), ensure_ascii=False, separators=(",", ":")),
         "返回结构：",
@@ -3733,11 +3735,11 @@ def build_two_pass_cast_prompt(
     # The transcript remains complete and ordered.  The following contract is
     # deliberately a small execution receipt, not a second copy of M1 prose.
     return "\n".join([
-        "安全候选字幕片段按原片顺序：可选不代表句意完整。不足1秒的片段只用于补全必要相邻语义；缺失ID不能视为上下句相邻，缺少必要上下文且无法补全的片段必须弃用。受用户内容边界排除的原话没有提供，不能作为选片或商品依据。1-5 秒优先，5-8 秒完整句仅作例外；没有 Strong Ranking、没有 TopK、没有卖点预分类。",
+        "安全候选字幕片段按原片顺序：可选不代表句意完整。不足1秒的片段只用于补全必要相邻语义；缺失ID不能视为上下句相邻，缺少必要上下文且无法补全的片段必须弃用。[context ID] 是不可选原片上下文，只用于核对商品切换、指代和否定事实；不得进入任何 beat、Hook 或 payoff，也不能把其中被禁的卖点换一种说法写进故事。1-5 秒优先，5-8 秒完整句仅作例外；没有 Strong Ranking、没有 TopK、没有卖点预分类。",
         _director_product_context(
             source_context_subtitles or subtitles,
             rows,
-            include_nonselectable_context=False,
+            include_nonselectable_context=True,
         )
         or "（没有满足 1-8 秒且可执行的字幕）",
         "",
@@ -3767,7 +3769,7 @@ def build_two_pass_cast_prompt(
         "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，不是最终片单、不是必须使用的开头。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
         "开场联合选择Hook与紧接兑现。痛点型Hook之后，payoff必须开始回答本款怎样解决该顾虑，给出具体效果、机制或证明；继续吐槽普通款、把痛点讲得更具体、或宣称不用再买，都不算本款兑现。结果型Hook之后须增加解释或证据；可拆→还能拆这类同义重复不能算兑现。不能仅因两句内容不同就判定兑现；找不到完整组合时quality=limited。",
         "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
-        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向当前安全池的实际指代依据，并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
+        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向原片的实际指代依据（可引用 context ID，但绝不能将 context ID 剪进 Hook 或 payoff），并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
         "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。",
         "字幕行不等于完整语义：仅当必要相邻原字幕跨多个 beats 时才输出 semantic_units；单行完整句省略。每组只列跨行依赖的 ID 数组，按原话顺序连续出现在本章最终 beats 中，不能引用其他章或未选句，并且总原声不超过 8 秒。程序只检查声明是否完整执行，不自动补句、拼句、截断或重排。",
         "严格按 product.ranges 回查‘它/这条/这套’。开场和非 styling 章节只能选择已核实的主商品范围；未知范围或其他商品的泛情绪不能承担主商品卖点。每条最终或备选 Beat 都填写关系、实际商品、类型和 1-2 条指代依据；搭配品只能作为 styling_support，不能把它自身效果归给主商品。",
@@ -4775,6 +4777,7 @@ def _normalize_two_pass_director_payload(
     casting_payload: Mapping[str, Any],
     *,
     casting_rows: Sequence[Mapping[str, Any]] = (),
+    product_context_rows: Sequence[Mapping[str, Any]] = (),
     _single_strategy: bool = False,
 ) -> dict[str, Any]:
     """Hydrate the compact Casting receipt without making semantic choices.
@@ -4813,6 +4816,7 @@ def _normalize_two_pass_director_payload(
                     {"strategies": [story_item]},
                     {"strategies": [cast_item]},
                     casting_rows=casting_rows,
+                    product_context_rows=product_context_rows,
                     _single_strategy=True,
                 )["strategies"][0]
                 normalized["strategy_id"] = strategy_id
@@ -4980,6 +4984,7 @@ def _normalize_two_pass_director_payload(
             warnings.append("开场比较引用了素材池外的字幕，请复核。")
         opening["candidate_audit"] = audit_opening_candidates(
             opening, source_rows=casting_rows, executed_ids=selected_ids,
+            product_context_rows=product_context_rows,
         )
         if opening["candidate_audit"]["status"] == "warning":
             warnings.append("开场候选回执的来源或实际承接不一致，请复核；未自动换句。")
@@ -5502,6 +5507,7 @@ def analyze_commercial_story(
             story_payload,
             cast_payload,
             casting_rows=casting_rows,
+            product_context_rows=identity_source,
         )
         normalized_primary = normalized_payload["strategies"][0]
         normalized_primary.setdefault("whole_video_audit", {})["duration_control"] = duration_control
