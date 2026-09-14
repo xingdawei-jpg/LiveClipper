@@ -3805,6 +3805,62 @@ def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> N
         body["enable_thinking"] = False
 
 
+def _director_seed_casting_uses_stream(model: str, stage: str) -> bool:
+    """Keep a long Seed M2 response alive while it is being generated.
+
+    Ark's non-streaming endpoint does not send a byte until Seed has completed
+    its hidden reasoning and final JSON. The final Beat Casting prompt is the
+    only Director stage that has repeatedly exceeded a normal socket read
+    window. Streaming it lets each reasoning/content chunk refresh that read
+    window without changing M1 or any other provider's request contract.
+    """
+    return stage == "Director_beat_casting" and "seed" in str(model or "").lower()
+
+
+def _read_director_sse_response(response: Any) -> dict[str, Any]:
+    """Collect an OpenAI-compatible chat-completions SSE response as JSON."""
+    try:
+        lines = iter(response)
+    except TypeError:
+        # A proxy may accept ``stream`` but buffer and return one ordinary JSON
+        # document. Treat that as a valid response instead of manufacturing an
+        # empty Director reply.
+        return json.loads(response.read().decode("utf-8"))
+    content_parts: list[str] = []
+    finish_reason = ""
+    usage: Mapping[str, Any] | None = None
+    for raw_line in lines:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        payload_text = line[5:].strip()
+        if not payload_text or payload_text == "[DONE]":
+            continue
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        current_usage = payload.get("usage")
+        if isinstance(current_usage, Mapping):
+            usage = current_usage
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0] if isinstance(choices[0], Mapping) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), Mapping) else {}
+        content = delta.get("content")
+        if content:
+            content_parts.append(str(content))
+        if choice.get("finish_reason"):
+            finish_reason = str(choice["finish_reason"])
+    return {
+        "choices": [{"message": {"content": "".join(content_parts)}, "finish_reason": finish_reason}],
+        "usage": dict(usage or {}),
+    }
+
+
 def _post_analyzer_request(
     *,
     api_key: str,
@@ -3885,6 +3941,12 @@ def _post_two_pass_director_request(
         "response_format": {"type": "json_object"},
     }
     _apply_analyzer_model_runtime_options(body, model)
+    use_stream = _director_seed_casting_uses_stream(model, stage)
+    if use_stream:
+        # Ark emits reasoning/content chunks before its final JSON. The
+        # trailing usage chunk keeps the existing cost ledger complete.
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
 
     request_started_at = datetime.now(timezone.utc).isoformat()
     request = urllib.request.Request(
@@ -3903,7 +3965,11 @@ def _post_two_pass_director_request(
             with urllib.request.urlopen(
                 request, timeout=timeout, context=create_ssl_context()
             ) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                result = (
+                    _read_director_sse_response(response)
+                    if use_stream
+                    else json.loads(response.read().decode("utf-8"))
+                )
             http_error = None
             break
         except urllib.error.HTTPError as error:
