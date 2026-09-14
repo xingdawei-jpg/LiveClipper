@@ -42,6 +42,7 @@ from commercial_analyzer import (
     normalize_director_controls,
     parse_strategy_result,
     _cast_beat_cardinality_issues,
+    _apply_analyzer_model_runtime_options,
     _extract_json,
     _normalize_two_pass_director_payload,
     _post_two_pass_director_request,
@@ -1018,6 +1019,18 @@ class TwoPassDirectorTests(unittest.TestCase):
         self.assertTrue(_director_seed_casting_uses_stream("doubao-seed-2-1-pro-260628", "Director_beat_casting"))
         self.assertFalse(_director_seed_casting_uses_stream("doubao-seed-2-1-pro-260628", "Director_story_contract"))
         self.assertFalse(_director_seed_casting_uses_stream("deepseek-v4-flash", "Director_beat_casting"))
+
+    def test_seed_uses_minimal_reasoning_only_for_beat_casting(self) -> None:
+        casting_body = {}
+        story_body = {}
+        _apply_analyzer_model_runtime_options(
+            casting_body, "doubao-seed-2-1-pro-260628", stage="Director_beat_casting"
+        )
+        _apply_analyzer_model_runtime_options(
+            story_body, "doubao-seed-2-1-pro-260628", stage="Director_story_contract"
+        )
+        self.assertEqual(casting_body["reasoning_effort"], "minimal")
+        self.assertEqual(story_body["reasoning_effort"], "low")
 
     def test_seed_stream_response_preserves_content_finish_reason_and_usage(self) -> None:
         response = io.BytesIO(
