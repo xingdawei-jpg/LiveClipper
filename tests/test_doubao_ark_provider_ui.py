@@ -109,8 +109,21 @@ console.log(JSON.stringify(elements));
         self.assertEqual(elements["s-base-url"]["value"], "https://ark.cn-beijing.volces.com/api/v3")
         self.assertEqual(elements["s-model"]["value"], "")
         self.assertIn("doubao-seed-2-1-pro-260628", elements["s-model"]["placeholder"])
+        self.assertIn("doubao-seed-2-1-turbo-260628", elements["s-model"]["placeholder"])
         self.assertEqual(elements["s-model-label"]["textContent"], "模型或接入点")
         self.assertIn("方舟 API Key", elements["s-ai-provider-hint"]["textContent"])
+
+    def test_ark_seed_display_names_normalize_to_versioned_model_ids(self) -> None:
+        for display_name, expected in (
+            ("Doubao-Seed-2.1-pro", "doubao-seed-2-1-pro-260628"),
+            ("Doubao-Seed-2.1-turbo", "doubao-seed-2-1-turbo-260628"),
+        ):
+            settings = normalize_ai_model_defaults({
+                "api_key": "ark-key",
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                "model": display_name,
+            })
+            self.assertEqual(settings["model"], expected)
 
     def test_missing_ark_endpoint_is_rejected_before_connection_test(self) -> None:
         settings = normalize_ai_model_defaults({

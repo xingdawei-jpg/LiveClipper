@@ -919,7 +919,7 @@ const aiProviderConfigs = {
     model: "",
     apiKeyLabel: "方舟 API Key",
     modelLabel: "模型或接入点",
-    modelPlaceholder: "doubao-seed-2-1-pro-260628 或 ep-...",
+    modelPlaceholder: "doubao-seed-2-1-pro-260628、doubao-seed-2-1-turbo-260628 或 ep-...",
     hint: "使用火山方舟 API Key；填写已开通的豆包模型 ID，或推理接入点 ID（ep-...）。",
   },
   custom: {
@@ -10683,6 +10683,10 @@ const deepSeekPreviewRatesCnyPerMillion = {
   "doubao-seed-2-1-pro-260628": {
     flat: { cachedInput: 1.2, input: 6, output: 30 },
     label: "Doubao Seed 2.1 Pro",
+  },
+  "doubao-seed-2-1-turbo-260628": {
+    flat: { cachedInput: 0.6, input: 3, output: 15 },
+    label: "Doubao Seed 2.1 Turbo",
   },
 };
 

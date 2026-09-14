@@ -63,7 +63,8 @@ const reportFor = (model, input, cached, output) => ({
 });
 const qwen = commerceDirectorPreviewCostSummary({cost_report:reportFor('qwen3.8-flash',23537,13824,3874)});
 const doubao = commerceDirectorPreviewCostSummary({cost_report:reportFor('doubao-seed-2-1-pro-260628',23378,0,12475)});
-console.log(JSON.stringify({qwen:{cost:qwen.cost,label:qwen.priceWindowLabel,model:qwen.modelLabel},doubao:{cost:doubao.cost,label:doubao.priceWindowLabel,model:doubao.modelLabel}}));
+const turbo = commerceDirectorPreviewCostSummary({cost_report:reportFor('doubao-seed-2-1-turbo-260628',23378,0,12475)});
+console.log(JSON.stringify({qwen:{cost:qwen.cost,label:qwen.priceWindowLabel,model:qwen.modelLabel},doubao:{cost:doubao.cost,label:doubao.priceWindowLabel,model:doubao.modelLabel},turbo:{cost:turbo.cost,label:turbo.priceWindowLabel,model:turbo.modelLabel}}));
 '''
         result = self.run_js(code)
         self.assertAlmostEqual(result['qwen']['cost'], 0.0196126)
@@ -72,6 +73,9 @@ console.log(JSON.stringify({qwen:{cost:qwen.cost,label:qwen.priceWindowLabel,mod
         self.assertAlmostEqual(result['doubao']['cost'], 0.514518)
         self.assertEqual(result['doubao']['label'], '标准价')
         self.assertEqual(result['doubao']['model'], 'Doubao Seed 2.1 Pro')
+        self.assertAlmostEqual(result['turbo']['cost'], 0.257259)
+        self.assertEqual(result['turbo']['label'], '标准价')
+        self.assertEqual(result['turbo']['model'], 'Doubao Seed 2.1 Turbo')
 
     def test_unbuilt_titles_remain_visible_after_one_alternative_is_built(self):
         code = section('function commerceDirectorProposalId(', 'function commerceDirectorRenderSelectionKey(')
