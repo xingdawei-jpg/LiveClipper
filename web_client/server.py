@@ -17133,8 +17133,8 @@ def _ai_provider_warning(base_url: str, model: str) -> str:
     lower_model = (model or "").lower()
     if "deepseek" in lower_url and lower_model and "deepseek" not in lower_model:
         return "当前 Base URL 是 DeepSeek，但模型名不像 DeepSeek；建议模型填写 deepseek-v4-flash。"
-    if ("volces" in lower_url or "ark.cn-" in lower_url) and "deepseek" in lower_model:
-        return "当前 Base URL 是火山/豆包，但模型名是 DeepSeek；请把 Base URL 改为 https://api.deepseek.com。"
+    if not (model or "").strip():
+        return "请填写服务商已开通的模型 ID 或推理接入点 ID。"
     if ("volces" in lower_url or "ark.cn-" in lower_url) and not (model or "").strip():
         return "豆包方舟需要填写已开通的模型 ID，或推理接入点 ID（ep-...）。"
     return ""
@@ -17150,17 +17150,17 @@ def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
 def _ai_test_error_message(code: int, base_url: str, model: str, body: str = "") -> str:
     lower_url = normalize_ai_base_url(base_url).lower()
     lower_model = (model or "").lower()
-    is_deepseek = "deepseek" in lower_url or "deepseek" in lower_model
+    is_deepseek = urllib.parse.urlparse(lower_url).hostname == "api.deepseek.com"
     if code in (401, 403):
         if is_deepseek:
             return (
-                "AI 连接失败：HTTP 401。DeepSeek API Key 无效、已失效，"
+                f"AI 连接失败：HTTP {code}。DeepSeek API Key 无效、已失效，"
                 "或仍在使用豆包/火山的 Key。请确认 Base URL=https://api.deepseek.com，"
                 "模型=deepseek-v4-flash，并重新填写 DeepSeek 控制台里的 API Key。"
             )
         return f"AI 连接失败：HTTP {code}。API Key 无效或没有权限，请重新填写对应平台的 Key。"
     if code == 404:
-        return "AI 连接失败：HTTP 404。Base URL 不正确，请检查是否填写为 https://api.deepseek.com。"
+        return "AI 连接失败：HTTP 404。请核对当前服务商的 API 地址，以及模型或接入点是否存在并已开通。"
     if code == 429:
         return "AI 连接失败：HTTP 429。调用过于频繁或额度受限，请稍后再试。"
     if code in (500, 502, 503, 504):
@@ -17174,27 +17174,37 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
     cfg = _load_settings()
     if payload:
         cfg.update(payload.model_dump(exclude_unset=True))
-    cfg = _normalize_ai_model_defaults(cfg)
     api_key = (cfg.get("api_key") or "").strip()
-    base_url = normalize_ai_base_url(cfg.get("base_url"))
+    base_url = str(cfg.get("base_url") or "").strip()
     model = (cfg.get("model") or "").strip()
     if not api_key or not base_url:
         return {"ok": False, "message": "请先填写 AI API Key 和 Base URL。"}
     warning = _ai_provider_warning(base_url, model)
     if warning:
-        return {"ok": False, "message": f"AI 配置不一致：{warning}"}
-
-    url = ai_models_url(base_url)
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+        return {"ok": False, "message": warning}
+    from ai_model_config import ai_chat_completions_url
+    url = ai_chat_completions_url(base_url)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"model": model, "messages": [{"role": "user", "content": "Reply OK only."}], "max_tokens": 32, "stream": False}).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=12, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
             if 200 <= resp.status < 300:
+                result = json.loads(resp.read().decode("utf-8"))
+                choices = result.get("choices") if isinstance(result, dict) else None
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict) or not isinstance(choices[0].get("message"), dict):
+                    return {"ok": False, "message": "服务已响应，但未返回兼容的对话结果，请检查 API 地址和模型类型。"}
                 emit_log("success", "AI 连接测试通过。", "settings")
                 return {"ok": True, "message": "AI 连接测试通过。"}
             return {"ok": False, "message": f"AI 连接异常: HTTP {resp.status}"}
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "message": _ai_test_error_message(exc.code, base_url, model, _read_http_error_body(exc))}
+        body = _read_http_error_body(exc).replace(api_key, "[已隐藏]")
+        message = _ai_test_error_message(exc.code, base_url, model)
+        return {"ok": False, "message": message + (f"；服务返回：{body}" if body else "")}
     except Exception as exc:
         return {"ok": False, "message": f"AI 连接失败：{exc}"}
 
