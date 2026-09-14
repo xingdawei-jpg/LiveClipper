@@ -11,7 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from commercial_analyzer import (
-    Strategy, _normalize_two_pass_director_payload, build_two_pass_cast_prompt,
+    Strategy, _director_casting_rows, _normalize_two_pass_director_payload,
+    build_two_pass_cast_prompt, build_two_pass_story_prompt,
 )
 from director_opening_audit import OPENING_RECEIPT_VERSION, audit_opening_candidates
 from director_wire_schema import compact_director_wire_payload, expand_director_wire_payload
@@ -71,6 +72,41 @@ class DirectorHookComparisonTests(unittest.TestCase):
         self.rows = self.rows[:2]
         self.assertIn("candidate_2:subtitle_ids:missing_or_outside_safe_pool", self.audit()["issues"])
 
+    def test_product_counterevidence_survives_policy_filter_in_source_order(self):
+        rows = [
+            {"id": 1, "start": 0, "end": 2, "text": "上衣的设计是原创"},
+            {"id": 2, "start": 2, "end": 4, "text": "搭的裤子有水墨画的感觉"},
+            {"id": 3, "start": 4, "end": 6, "text": "这个裤子不是原创"},
+        ]
+        for prompt in (
+            build_two_pass_story_prompt(product="裤子", subtitles=rows, executable_subtitle_ids=[2]),
+            build_two_pass_cast_prompt(story_contract={}, subtitles=rows, executable_subtitle_ids=[2]),
+        ):
+            self.assertLess(prompt.index("[context ID 001]"), prompt.index("[ID 002]"))
+            self.assertLess(prompt.index("[ID 002]"), prompt.index("[context ID 003]"))
+            self.assertIn(rows[2]["text"], prompt)
+            self.assertNotIn("[ID 001]", prompt)
+            self.assertNotIn("[ID 003]", prompt)
+        self.assertEqual(_director_casting_rows(rows, [2]), [rows[1]])
+
+    def test_empty_safe_pool_cannot_reenable_context_rows(self):
+        self.assertEqual(_director_casting_rows(self.rows, []), [])
+        self.assertEqual(_director_casting_rows(self.rows, None), self.rows)
+
+    def test_context_can_prove_identity_but_cannot_become_hook_or_payoff(self):
+        context = {"id": 90, "start": 90, "end": 93, "text": "这件外套，不是刚才的衬衫"}
+        self.opening["compared_packages"][0]["product_evidence_ids"] = [90]
+        result = audit_opening_candidates(self.opening, source_rows=self.rows,
+                                         product_context_rows=[context], executed_ids=[1, 2])
+        self.assertEqual(result["status"], "references_consistent")
+        self.assertEqual(result["candidates"][0]["product_evidence_source"], [context])
+        for key in ("subtitle_ids", "payoff_subtitle_ids"):
+            opening = copy.deepcopy(self.opening)
+            opening["compared_packages"][0][key] = [90]
+            result = audit_opening_candidates(opening, source_rows=self.rows,
+                                             product_context_rows=[context], executed_ids=[90, 2])
+            self.assertIn(f"candidate_1:{key}:missing_or_outside_safe_pool", result["issues"])
+
     def test_repeated_hook_is_not_an_immediate_new_payoff(self):
         self.opening["compared_packages"][0]["payoff_subtitle_ids"] = [1]
         self.assertIn("candidate_1:repeated_opening_id", self.audit()["issues"])
@@ -127,7 +163,7 @@ class DirectorHookComparisonTests(unittest.TestCase):
         self.assertIn(OPENING_RECEIPT_VERSION, prompt)
         self.assertIn("同品类不等于同一件商品", prompt)
         self.assertIn("quality=limited", prompt)
-        self.assertIn("Hook 与 payoff 必须分别传达两个不同事实", prompt)
+        self.assertIn("结果型Hook之后须增加解释或证据", prompt)
         self.assertIn("selected 的 reason 必须点明 payoff 新增的具体事实", prompt)
         self.assertIn("任一答案缺失就换候选或 quality=limited", prompt)
         self.assertIn("不得加入未选原话的视觉细节、设计名或结论", prompt)

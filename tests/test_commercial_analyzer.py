@@ -822,8 +822,10 @@ class TwoPassDirectorTests(unittest.TestCase):
             prompt = call.kwargs["user_prompt"]
             self.assertIn("肩线往里收更显利落", prompt)
             self.assertIn("面料挺阔不容易软塌", prompt)
-            self.assertNotIn("99元", prompt)
-            self.assertNotIn("尺码表", prompt)
+            self.assertIn("[context ID 002]", prompt)
+            self.assertIn("[context ID 003]", prompt)
+            self.assertNotIn("[ID 002]", prompt)
+            self.assertNotIn("[ID 003]", prompt)
 
     def test_content_policy_removes_pricing_and_cta_euphemisms_before_director_calls(self) -> None:
         subtitles = [
@@ -997,12 +999,11 @@ class TwoPassDirectorTests(unittest.TestCase):
         )
 
         self.assertIn("章节数量由完整故事决定，不设上限", prompt)
-        self.assertIn("最多 1 组 opening_evidence_packages", prompt)
+        self.assertIn("最多 3 组 opening_evidence_packages", prompt)
         self.assertIn("6000 个中文字符以内", prompt)
         self.assertIn("每项最多 24 个汉字", prompt)
         self.assertIn("每章 evidence_locations 最多 2 个 ID", prompt)
-        self.assertIn("每个完整方案最多 1 组", prompt)
-        self.assertNotIn("每个完整方案最多 3 组", prompt)
+        self.assertIn("每个完整方案最多 3 组", prompt)
         self.assertNotIn('"selection_basis"', prompt)
 
     def test_single_plan_casting_receives_completion_margin_without_raising_multi_plan_budget(self) -> None:
@@ -1548,7 +1549,8 @@ class JsonRecoveryTests(unittest.TestCase):
         for prompt in (story, cast):
             self.assertIn("[ID 129]", prompt)
             self.assertIn("穿法都很好看", prompt)
-            self.assertNotIn("禁止的内容", prompt)
+            self.assertIn("[context ID 130][不可选，仅核对商品指代] 禁止的内容", prompt)
+            self.assertNotIn("[ID 130]", prompt)
         self.assertIn("不足1秒的片段只用于补全", cast)
         self.assertIn("先从安全池识别完整语义单元", cast)
         self.assertNotIn("先为每章挑出", cast)

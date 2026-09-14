@@ -78,12 +78,27 @@ def main():
         video=info.get("video_options", {}), ai_controls=controls,
     )
     save(out / "payload.json", payload.model_dump())
+    # The application ledger may include older runs with the same task ID.
+    # Capture only this arm's actual provider exchanges, including runtime
+    # options applied below _post_two_pass_director_request and failed calls.
+    record_call = analyzer.record_ai_call
+    exchanges = []
+
+    def capture_exchange(**kwargs):
+        exchanges.append({key: kwargs.get(key) for key in (
+            "stage", "model", "request_started_at", "request_payload",
+            "response_payload", "success", "error_type",
+        )})
+        save(out / "provider_exchanges.json", exchanges)
+        return record_call(**kwargs)
+
+    analyzer.record_ai_call = capture_exchange
     # Observe the real request. Do not persist Authorization or the API key.
     request = analyzer._post_two_pass_director_request
 
     def capture_request(**kwargs):
         stage = kwargs["stage"]
-        save(out / f"{stage}.request.json", {key: value for key, value in kwargs.items() if key != "api_key"})
+        save(out / f"{stage}.request.json", {key: value for key, value in kwargs.items() if key not in {"api_key", "response_hook"}})
         frozen = args.responses_from or (args.story_from if stage == "Director_story_contract" else None)
         if frozen:
             label = {"Director_story_contract": "story", "Director_beat_casting": "casting"}[stage]
@@ -112,7 +127,8 @@ def main():
 
     runner._asset_ledger_for_source = capture_ledger
     server._commerce_director_workspace_root = lambda: out
-    preview_id = "hook-ab-" + args.arm
+    # Native review-video caches are keyed by preview ID, across experiments.
+    preview_id = "hook-ab-" + hashlib.sha256(str(out).encode()).hexdigest()[:12] + "-" + args.arm
     server._run_commerce_director_preview_auto_batch("preview", preview_id, payload)
     preview = server._CLIP_PREVIEWS.get(preview_id, {})
     save(out / "editable_preview.json", preview)

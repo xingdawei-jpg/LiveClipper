@@ -12,6 +12,7 @@ def audit_opening_candidates(
     *,
     source_rows: Sequence[Mapping[str, Any]],
     executed_ids: Sequence[int],
+    product_context_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Reconstruct quotes and check membership/order without judging semantics.
 
@@ -22,6 +23,10 @@ def audit_opening_candidates(
     if opening.get("receipt_version") != OPENING_RECEIPT_VERSION:
         return {"status": "not_recorded", "quality_status": "not_assessed", "candidates": []}
     by_id = {row["id"]: row for row in source_rows if type(row.get("id")) is int}
+    evidence_by_id = {
+        **{row["id"]: row for row in product_context_rows if type(row.get("id")) is int},
+        **by_id,
+    }
     packages = opening.get("compared_packages")
     issues: list[str] = []
     candidates: list[dict[str, Any]] = []
@@ -38,8 +43,9 @@ def audit_opening_candidates(
         decision = package.get("decision")
         for key in ("subtitle_ids", "payoff_subtitle_ids", "product_evidence_ids"):
             ids = package.get(key)
+            allowed = evidence_by_id if key == "product_evidence_ids" else by_id
             empty_rejection = decision == "rejected" and key != "subtitle_ids" and ids == []
-            if not empty_rejection and (not isinstance(ids, list) or not ids or any(type(sid) is not int or sid not in by_id for sid in ids)):
+            if not empty_rejection and (not isinstance(ids, list) or not ids or any(type(sid) is not int or sid not in allowed for sid in ids)):
                 errors.append(f"{key}:missing_or_outside_safe_pool")
                 groups[key] = []
             else:
@@ -61,14 +67,14 @@ def audit_opening_candidates(
                 errors.append("selected_receipt_mismatch")
             if rank != 1:
                 errors.append("selected_package_not_first")
-        def source_units(ids):
-            return [{key: by_id[sid].get(key) for key in ("id", "text", "start", "end")} for sid in ids]
+        def source_units(ids, inventory=by_id):
+            return [{key: inventory[sid].get(key) for key in ("id", "text", "start", "end")} for sid in ids]
         candidates.append({
             "ai_rank": rank,
             "ai_receipt": dict(package),
             "hook_source": source_units(hook_ids),
             "payoff_source": source_units(payoff_ids),
-            "product_evidence_source": source_units(groups["product_evidence_ids"]),
+            "product_evidence_source": source_units(groups["product_evidence_ids"], evidence_by_id),
             "source_seconds": round(sum(float(by_id[sid].get("end") or 0) - float(by_id[sid].get("start") or 0) for sid in joined), 3),
             "issues": errors,
         })

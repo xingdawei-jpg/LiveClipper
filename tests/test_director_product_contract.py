@@ -138,11 +138,11 @@ class ProductContractTests(unittest.TestCase):
         self.assertFalse(scope_errors(scope, build_product_target({})))
         self.assertTrue(scope_errors(scope, build_product_target(self.controls)))
 
-    def test_nonselectable_source_context_does_not_enter_director_prompt(self):
+    def test_nonselectable_source_context_stays_visible_but_not_playable(self):
         story_prompt = build_two_pass_story_prompt(product="白衬衫", subtitles=self.rows, executable_subtitle_ids=[1, 2])
         cast_prompt = build_two_pass_cast_prompt(story_contract=self.story_payload(), subtitles=self.rows, executable_subtitle_ids=[1, 2])
         for prompt in [story_prompt, cast_prompt]:
-            self.assertNotIn("[context ID 003]", prompt)
+            self.assertIn("[context ID 003][不可选，仅核对商品指代]", prompt)
             self.assertNotIn("[ID 003]", prompt)
         self.assertEqual(cast_prompt.count("[ID 001]"), 1)
 
@@ -168,8 +168,8 @@ class ProductContractTests(unittest.TestCase):
         result, calls = self.run_ai(story, cast, source_context_subtitles=context)
         self.assertEqual(len(calls), 2)
         self.assertEqual([b.subtitle_ids for b in result.strategies[0].director_sequence], [(1,), (2,)])
-        self.assertNotIn("[context ID 090]", calls[0].kwargs["user_prompt"])
-        self.assertNotIn("这件白衬衫的价格介绍", calls[0].kwargs["user_prompt"])
+        self.assertIn("[context ID 090][不可选，仅核对商品指代]", calls[0].kwargs["user_prompt"])
+        self.assertIn("这件白衬衫的价格介绍", calls[0].kwargs["user_prompt"])
 
     def test_missing_identity_reference_can_be_repaired_in_second_call(self):
         story = self.story_payload()

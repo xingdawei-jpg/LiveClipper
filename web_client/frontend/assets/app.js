@@ -13772,7 +13772,8 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
     ? review.export_fidelity : (review.preview_fidelity || preview?.dedup_summary?.director_preview_fidelity || {});
   const boundaryWarning = fidelity.status === "warning";
   const openingWarning = review.opening_selection?.verification?.status === "warning";
-  const currentStatus = overview.status === "block" ? "block" : ((boundaryWarning || openingWarning) ? "warn" : overview.status);
+  const openingLimited = review.opening_selection?.quality === "limited";
+  const currentStatus = overview.status === "block" ? "block" : ((boundaryWarning || openingWarning || openingLimited) ? "warn" : overview.status);
   const duplicates = overview.issues.filter(function (item) { return item.kind === "duplicate"; }).length;
   const firstFunction = String(selected[0]?.director_beat_function || selected[0]?.director_chapter_kind || "").toLowerCase();
   const lastFunction = String(selected[selected.length - 1]?.director_beat_function || selected[selected.length - 1]?.director_chapter_kind || "").toLowerCase();
@@ -13782,9 +13783,9 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
     ...overview,
     status: currentStatus,
     boundaryMessage: boundaryWarning ? String(fidelity.message || "内容边界影响了部分短句，请连读复核") : "",
-    openingMessage: openingWarning ? "开场比较或原话来源待复核，请核对首句与紧接的兑现句。" : "",
+    openingMessage: openingLimited ? "AI 未找到足够好的真实开场；请连读候选，必要时补充素材。" : (openingWarning ? "开场比较或原话来源待复核，请核对首句与紧接的兑现句。" : ""),
     duplicates,
-    openingLabel: fidelity.opening_affected ? "开场受内容边界影响" : (openingWarning ? "开场回执待复核" : (openingReady ? "开场已设置" : "开场待复核")),
+    openingLabel: openingLimited ? "开场素材不足" : (fidelity.opening_affected ? "开场受内容边界影响" : (openingWarning ? "开场回执待复核" : (openingReady ? "开场已设置" : "开场待复核"))),
     progressionLabel: duplicates ? `重复提示 ${duplicates}` : "未见完全重复",
     endingLabel: endingReady ? "结尾可连读" : "结尾待复核",
     overallLabel: currentStatus === "block" ? "暂不可成片" : (boundaryWarning ? "边界删减待复核" : (currentStatus === "warn" ? "建议调整" : "可继续审核")),
