@@ -3921,11 +3921,19 @@ def _post_analyzer_request(
         with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
+        try:
+            _analyzer_error_body = error.read().decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            _analyzer_error_body = ""
+        from ai_model_config import describe_ai_http_error
         record_ai_call(
             module="commercial_analyzer", stage="M1_story_discovery", model=model,
             request_payload=body, success=False, error_type=f"http_{error.code}",
+            response_payload=(({"error_body": _analyzer_error_body[:500]}) if _analyzer_error_body else None),
         )
-        raise AnalyzerError(f"Analyzer HTTP {error.code}") from error
+        raise AnalyzerError(
+            "Analyzer " + describe_ai_http_error(error.code, base_url, model, _analyzer_error_body)
+        ) from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         record_ai_call(
             module="commercial_analyzer", stage="M1_story_discovery", model=model,
@@ -4013,12 +4021,23 @@ def _post_two_pass_director_request(
             network_error = error
             break
     if http_error is not None:
+        # 把平台原文带进报错：只给 “HTTP 401” 时，用户无法区分 key 无效 /
+        # 欠费 / 平台地址不对 / 被中间设备拦截。
+        try:
+            error_body = http_error.read().decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            error_body = ""
+        from ai_model_config import describe_ai_http_error
         record_ai_call(
             module="commercial_analyzer", stage=stage, model=model,
             request_started_at=request_started_at,
             request_payload=body, success=False, error_type=f"http_{http_error.code}",
+            response_payload=(({"error_body": error_body[:500]}) if error_body else None),
         )
-        raise AnalyzerError(f"Director {stage} HTTP {http_error.code}") from http_error
+        raise AnalyzerError(
+            f"Director {stage} "
+            + describe_ai_http_error(http_error.code, base_url, model, error_body)
+        ) from http_error
     if network_error is not None:
         record_ai_call(
             module="commercial_analyzer", stage=stage, model=model,

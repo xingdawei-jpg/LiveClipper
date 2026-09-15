@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.parse
+
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
@@ -62,6 +64,55 @@ def normalize_ai_model_defaults(settings: dict | None) -> dict:
         data["model"] = DEEPSEEK_DEFAULT_MODEL
 
     return data
+
+
+def describe_ai_http_error(code: int, base_url: str = "", model: str = "", body: str = "") -> str:
+    """Turn a provider HTTP failure into one actionable line.
+
+    设计原则：
+    * 平台自己返回的错误原文永远保留（区分“key 不对” / “欠费” / “模型不存在”最快）；
+    * **401/403 且响应体为空**是一个异常信号：真实平台一定会解释原因，
+      空体通常意味着中间有东西拦截（代理/安全软件/风控/IP 限制），必须单独提示。
+    """
+    text = " ".join(str(body or "").split())[:400]
+    lower = text.lower()
+    model_name = str(model or "").strip() or "（未填）"
+    host = ""
+    try:
+        host = urllib.parse.urlparse(normalize_ai_base_url(base_url)).hostname or ""
+    except Exception:  # noqa: BLE001 - 提示文案不允许抛错
+        host = ""
+
+    head = f"AI 连接失败（HTTP {code}）"
+    advice = ""
+    if code in (401, 403):
+        if not text:
+            advice = (
+                "服务端没有返回任何错误内容，这通常不是模型平台自己报的错。"
+                "请依次排查：① 本机是否开着代理 / VPN / 加速器（换手机热点重试一次即可判定）；"
+                "② 安全软件或企业网关是否拦截了 HTTPS；"
+                "③ 是否刚刚密集调用被平台风控（等 10~30 分钟再试）；"
+                "④ 当前出口 IP 是否被平台限制。"
+            )
+        elif any(k in lower for k in ("authentication", "invalid api key", "invalid_api_key", "unauthorized", "鉴权", "权限")):
+            advice = "API Key 无效、已失效，或与当前平台地址不匹配。"
+        elif any(k in lower for k in ("insufficient", "balance", "quota", "欠费", "余额")):
+            advice = "账号余额或调用额度不足，请到模型平台充值，或换一个可用 Key。"
+        else:
+            advice = "API Key 无效或没有该接口权限。"
+    elif code == 402:
+        advice = "账号余额不足，请到模型平台充值或更换 Key。"
+    elif code == 404:
+        advice = f"接口地址或模型不存在：请核对 Base URL（当前 {normalize_ai_base_url(base_url) or '（未填）'}）与模型名（当前 {model_name}）。"
+    elif code == 429:
+        advice = "调用过于频繁或额度受限，请稍后重试（选片预览会连续调用多次，属正常现象）。"
+    elif code in (500, 502, 503, 504):
+        advice = "模型平台暂时不可用，请稍后重试。"
+
+    lines = [head + ("：" + advice if advice else "")]
+    lines.append(f"当前配置：地址 {host or '（未填）'}，模型 {model_name}")
+    lines.append(f"平台原文：{text}" if text else "平台原文：（空——服务端未返回任何错误内容）")
+    return "\n".join(lines)
 
 
 def ai_chat_completions_url(base_url: str | None) -> str:

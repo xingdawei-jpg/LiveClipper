@@ -17282,25 +17282,14 @@ def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
 
 
 def _ai_test_error_message(code: int, base_url: str, model: str, body: str = "") -> str:
-    lower_url = normalize_ai_base_url(base_url).lower()
-    lower_model = (model or "").lower()
-    is_deepseek = urllib.parse.urlparse(lower_url).hostname == "api.deepseek.com"
-    if code in (401, 403):
-        if is_deepseek:
-            return (
-                f"AI 连接失败：HTTP {code}。DeepSeek API Key 无效、已失效，"
-                "或仍在使用豆包/火山的 Key。请确认 Base URL=https://api.deepseek.com，"
-                "模型=deepseek-v4-flash，并重新填写 DeepSeek 控制台里的 API Key。"
-            )
-        return f"AI 连接失败：HTTP {code}。API Key 无效或没有权限，请重新填写对应平台的 Key。"
-    if code == 404:
-        return "AI 连接失败：HTTP 404。请核对当前服务商的 API 地址，以及模型或接入点是否存在并已开通。"
-    if code == 429:
-        return "AI 连接失败：HTTP 429。调用过于频繁或额度受限，请稍后再试。"
-    if code in (500, 502, 503, 504):
-        return f"AI 连接失败：HTTP {code}。服务商暂时不可用，请稍后再试。"
-    detail = f"；服务返回：{body}" if body else ""
-    return f"AI 连接失败：HTTP {code}{detail}"
+    """共用 AI 报错描述器（与导演链路同一套）。
+
+    保留平台原文，并把“401/403 但响应体为空”单独识别出来 —— 那通常不是平台
+    自己报的错，而是中间设备拦截。
+    """
+    from ai_model_config import describe_ai_http_error
+
+    return describe_ai_http_error(code, base_url, model, body)
 
 
 @app.post("/api/settings/test-ai")
@@ -17337,8 +17326,7 @@ def test_ai(payload: SettingsPayload | None = None) -> dict[str, Any]:
             return {"ok": False, "message": f"AI 连接异常: HTTP {resp.status}"}
     except urllib.error.HTTPError as exc:
         body = _read_http_error_body(exc).replace(api_key, "[已隐藏]")
-        message = _ai_test_error_message(exc.code, base_url, model)
-        return {"ok": False, "message": message + (f"；服务返回：{body}" if body else "")}
+        return {"ok": False, "message": _ai_test_error_message(exc.code, base_url, model, body)}
     except Exception as exc:
         return {"ok": False, "message": f"AI 连接失败：{exc}"}
 
