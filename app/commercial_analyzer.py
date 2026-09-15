@@ -2120,7 +2120,7 @@ _STORY_POLICY_EXTRA_PATTERNS: dict[str, tuple[str, ...]] = {
     # Story language often says “99块” or “三倍” rather than the literal
     # policy keyword “价格”; catch those promises before Casting spends a
     # request trying to make them executable.
-    "price": (r"\d+(?:\.\d+)?\s*(?:元|块|块钱|倍)", r"一顿饭钱", r"定价", r"昂贵|价格不菲|帽子贵", r"值这个价", r"[数几一二三四五六七八九十两百千]+(?:十|百|千|万)(?:元|块)", r"(?:售卖|卖到|卖)[^，。；\n]{0,6}[一二三四五六七八九两]+(?:百|千|万)", r"(?:倍率|毛利)[^，。；\n]{0,8}(?:低|压|打)", r"(?:低价|压价|控价)[^，。；\n]{0,10}(?:主推|品质|市场|成本)?"),
+    "price": (r"\d+(?:\.\d+)?\s*(?:元|块|块钱|倍)", r"一顿饭钱", r"定价", r"昂贵|价格不菲|帽子贵", r"值这个价", r"[数几一二三四五六七八九十两百千]+(?:十|百|千|万)(?:元|块)", r"(?:售卖|卖到|卖)[^，。；\n]{0,6}[一二三四五六七八九两]+(?:百|千|万)", r"(?:倍率|毛利)[^，。；\n]{0,8}(?:低|压|打)", r"(?:低价|压价|控价)[^，。；\n]{0,10}(?:主推|品质|市场|成本)?", r"\d{2,5}(?!\d)\s*(?:太值|超值|值了|划算|拿下|带走|入手|入了|入|到手)", r"(?:花|卖|只卖|才|只要|仅|就|到手|到手价)\s*\d{2,5}(?!\d)"),
     "cta": (r"(?:给|让)?(?:新粉|大家|宝宝|姐妹)[^，。；\n]{0,8}带回去(?:感受|试试|体验)?", r"(?:建议|推荐)[^，。；\n]{0,8}(?:购买|入手|带回去)"),
     "inventory_pressure": (r"冲量|冲榜",),
     # Delivery timing is after-sale/logistics content even when the speaker
@@ -2249,6 +2249,8 @@ def sanitize_two_pass_story_for_content_policy(
     story_fields = (
         "director_title", "core_desire", "central_promise", "opening_promise",
         "stop_condition", "story_priority",
+        "thesis", "core_commercial_idea", "payoff", "story_premise",
+        "audience_tension", "sub_angle",
     )
     for strategy_index, strategy in enumerate(strategies, 1):
         strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
@@ -5416,6 +5418,7 @@ def analyze_commercial_story(
             output_speed_factor=output_speed_factor,
             source_context_subtitles=source_context_subtitles,
             director_plan_count=director_plan_count,
+            opening_hook_pool=opening_hook_prompt_rows,
         )
         if stage_progress_hook:
             stage_progress_hook("story_contract_started")

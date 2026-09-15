@@ -1377,6 +1377,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindSettingsTabs();
   bindAiProviderControls();
   bindAiSelectionAutoSave();
+  bindSettingsAutoSave();
   bindLiveRecTabs();
   bindLiveRoomFilters();
   bindActions();
@@ -3803,6 +3804,69 @@ function bindAiSelectionAutoSave() {
   });
   root.addEventListener("focusout", (event) => {
     if (event.target?.matches(textSelector)) queueAiSelectionSave(0);
+  });
+}
+
+// ---- 主设置自动保存：所有设置页的选项/填入项改动即保存，不再依赖“保存设置”按钮 ----
+let settingsAutoSaveTimer = null;
+let settingsAutoSaveInFlight = false;
+let settingsAutoSaveQueued = false;
+let settingsAutoSavedFingerprint = "";
+
+function queueSettingsAutoSave(delay = 0) {
+  if (settingsAutoSaveTimer) window.clearTimeout(settingsAutoSaveTimer);
+  settingsAutoSaveTimer = window.setTimeout(() => {
+    settingsAutoSaveTimer = null;
+    persistSettingsAuto();
+  }, Math.max(0, delay));
+}
+
+async function persistSettingsAuto() {
+  if (settingsAutoSaveInFlight) {
+    settingsAutoSaveQueued = true;
+    return;
+  }
+  const data = collectSettings();
+  const fingerprint = JSON.stringify(data);
+  if (fingerprint === settingsAutoSavedFingerprint) return;
+
+  settingsAutoSaveInFlight = true;
+  try {
+    applyTheme(data.ui_theme || "system");
+    await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
+    settingsAutoSavedFingerprint = fingerprint;
+  } catch (error) {
+    toast("设置未保存，请检查服务后重试", "error");
+  } finally {
+    settingsAutoSaveInFlight = false;
+    if (settingsAutoSaveQueued) {
+      settingsAutoSaveQueued = false;
+      queueSettingsAutoSave(0);
+    }
+  }
+}
+
+function bindSettingsAutoSave() {
+  const root = document.querySelector(".settings-pages");
+  if (!root) return;
+  const inSelection = (el) => el?.closest?.("#settings-selection");
+  const isTextLike = (el) =>
+    el?.matches?.("input[type=text], input[type=number], input[type=password], input[type=range], input:not([type]), textarea");
+
+  root.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || inSelection(target)) return;
+    if (target.matches("input, select, textarea")) queueSettingsAutoSave(0);
+  });
+  root.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!target || inSelection(target)) return;
+    if (isTextLike(target)) queueSettingsAutoSave(600);
+  });
+  root.addEventListener("focusout", (event) => {
+    const target = event.target;
+    if (!target || inSelection(target)) return;
+    if (isTextLike(target)) queueSettingsAutoSave(0);
   });
 }
 
@@ -7169,8 +7233,25 @@ function setPreviewLayoutState(scope = "smart", preview = null) {
 
 function hydratePreviewCandidatePool(preview) {
   if (!preview || !Array.isArray(preview.candidate_clips) || !preview.candidate_clips.length) return preview;
+  // 整池渲染前，先记住“方案自身片段”（故事脚本），供草稿清洗用。
+  if (!Array.isArray(preview.director_story_clips) && Array.isArray(preview.clips)) {
+    preview.director_story_clips = preview.clips;
+  }
   if (preview.clips !== preview.candidate_clips) preview.clips = preview.candidate_clips;
   return preview;
+}
+function sanitizePreviewDraftToStoryClips(draft, preview) {
+  // 切方案/加载时，草稿不应包含不属于本方案的片段（否则会把别的方案片段算进“已选片段（故事脚本）”）。
+  const story = preview && Array.isArray(preview.director_story_clips) ? preview.director_story_clips : null;
+  if (!draft || !story || !story.length) return draft;
+  const storyKeys = new Set(story.map(function (clip) { return previewCandidateKey(clip); }).filter(Boolean));
+  const storyIdx = new Set(story.map(function (clip) { return Number(clip.index); }).filter(Number.isInteger));
+  const out = Object.assign({}, draft);
+  if (Array.isArray(out.selected_keys)) out.selected_keys = out.selected_keys.filter(function (k) { return storyKeys.has(String(k)); });
+  if (Array.isArray(out.order_keys)) out.order_keys = out.order_keys.filter(function (k) { return storyKeys.has(String(k)); });
+  if (Array.isArray(out.selected_indices)) out.selected_indices = out.selected_indices.filter(function (i) { return storyIdx.has(Number(i)); });
+  if (Array.isArray(out.order)) out.order = out.order.filter(function (i) { return storyIdx.has(Number(i)); });
+  return out;
 }
 
 function getPreviewState(scope = "smart") {
@@ -7400,7 +7481,7 @@ function readStoredPreviewDraft(scope, preview) {
   const candidates = [local, server]
     .filter((draft) => draft && draft.preview_id === preview.id)
     .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
-  return candidates[0] || null;
+  return sanitizePreviewDraftToStoryClips(candidates[0] || null, preview);
 }
 
 function applyPreviewDraftToState(scope = "smart", draft = null) {
@@ -7452,7 +7533,7 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
 
 function savePreviewDraft(scope = "smart", draft = null, { remote = true } = {}) {
   const preview = getPreviewState(scope);
-  const nextDraft = draft || buildPreviewDraftFromState(scope);
+  const nextDraft = sanitizePreviewDraftToStoryClips(draft || buildPreviewDraftFromState(scope), preview);
   if (!preview?.id || !nextDraft.preview_id) return nextDraft;
   const key = previewDraftKey(scope, preview.id);
   state.previewDrafts[key] = nextDraft;
@@ -7482,6 +7563,7 @@ function ensurePreviewDraft(scope = "smart") {
   if (!preview?.id || !preview?.clips?.length) return null;
   const key = previewDraftKey(scope, preview.id);
   let draft = state.previewDrafts[key] || readStoredPreviewDraft(scope, preview);
+  draft = sanitizePreviewDraftToStoryClips(draft, preview);
   if (draft) {
     applyPreviewDraftToState(scope, draft);
   }

@@ -644,6 +644,7 @@ def _run_case(
             stage_progress_hook=director_progress_hook if two_pass_director else None,
             two_pass_director=two_pass_director,
             opening_hook_recall=opening_hook_recall,
+            enable_duration_calibration=bool(dict(director_strategy_contract or {}).get("duration_calibration", True)),
             output_speed_factor=float(dict(director_strategy_contract or {}).get("output_speed_factor") or 1.0),
             source_context_subtitles=ledger_context.get("source_context_units") if two_pass_director else None,
             director_plan_count=max(

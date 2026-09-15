@@ -557,9 +557,10 @@ def build_single_pass_director_plan(
         _candidates_by_id = {candidate.candidate_id: candidate for candidate in selected}
         _budget_seconds: float | None = None
         try:
-            _speed = float(speed_factor) if speed_factor else 1.0
-            _budget_seconds = float(requested_seconds) * 1.15 * _speed
-        except (TypeError, ValueError, NameError):
+            # 预算严格对齐目标时长。原代码引用了不存在的 requested_seconds/speed_factor，
+            # NameError 被静默吞掉 → budget 恒为 None → 裁剪从不执行，超时成片一直漏裁。
+            _budget_seconds = float(target_duration)
+        except (TypeError, ValueError):
             _budget_seconds = None
         beats, _removals, _polish_warnings = _polish_chapter_beats(
             beats, _candidates_by_id, budget_seconds=_budget_seconds,
