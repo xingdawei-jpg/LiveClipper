@@ -3154,6 +3154,17 @@ def save_settings(settings):
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 backup_path = _settings_backup_path(_save_path)
                 os.replace(_save_path, backup_path)
+        # 空密钥不得覆盖已存值：前端 collectSettings() 会把当前表单的全部字段一并
+        # 提交，在别的设置页点保存时密码框是空的 —— 之前会把已存的 key 洗成空串，
+        # 用户表现是“填对了却保存不了/读不到 key”，随后预览报 HTTP 401。
+        # 这里是所有保存路径的唯一收口（注意：必须在 _normalize_ai_model_defaults
+        # 之后，否则会被它重新填回空值）。
+        for _secret_field in (
+            "api_key", "asr_api_key", "volc_api_key", "volc_tos_ak", "volc_tos_sk",
+            "aliyun_api_key", "aliyun_oss_ak", "aliyun_oss_sk",
+        ):
+            if not str(settings.get(_secret_field) or "").strip():
+                settings.pop(_secret_field, None)
         existing.update(settings)
         temp_path = os.path.join(
             parent,

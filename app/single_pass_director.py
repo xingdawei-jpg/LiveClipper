@@ -171,6 +171,147 @@ def _verbatim_key(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "").strip())
 
 
+_CHAPTER_BEAT_ROLE_PRIORITY = {
+    "hook": 0, "result": 1, "mechanism": 2, "styling": 3,
+    "fit": 4, "proof": 5, "risk_remove": 6, "close": 7,
+}
+
+
+def _group_beats_by_chapter(beats: Sequence[Any]) -> list[tuple[str, list[Any]]]:
+    grouped: list[tuple[str, list[Any]]] = []
+    for beat in beats:
+        chapter_id = str(getattr(beat, "chapter_id", "") or "")
+        if grouped and grouped[-1][0] == chapter_id:
+            grouped[-1][1].append(beat)
+        else:
+            grouped.append((chapter_id, [beat]))
+    return grouped
+
+
+def _beat_seconds(beat: Any, candidates_by_id: Mapping[int, Any]) -> float:
+    return round(sum(
+        float(getattr(candidates_by_id[cid], "duration", 0.0) or 0.0)
+        for cid in getattr(beat, "candidate_evidence", ()) if cid in candidates_by_id
+    ), 3)
+
+
+def _beat_start(beat: Any, candidates_by_id: Mapping[int, Any]):
+    starts = [
+        float(candidates_by_id[cid].start)
+        for cid in getattr(beat, "candidate_evidence", ()) if cid in candidates_by_id
+    ]
+    return min(starts) if starts else None
+
+
+def _beat_text(beat: Any, candidates_by_id: Mapping[int, Any]) -> str:
+    return " ".join(
+        str(getattr(candidates_by_id[cid], "text", "") or "")
+        for cid in getattr(beat, "candidate_evidence", ()) if cid in candidates_by_id
+    ).strip()
+
+
+def _text_gram_overlap(left: str, right: str) -> float:
+    def _grams(value: str) -> set:
+        clean = "".join(ch for ch in str(value or "") if ch.isalnum())
+        return {clean[i:i + 2] for i in range(max(0, len(clean) - 1))}
+
+    a, b = _grams(left), _grams(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(len(a | b))
+
+
+def _polish_chapter_beats(
+    beats: Sequence[Any],
+    candidates_by_id: Mapping[int, Any],
+    *,
+    budget_seconds: float | None = None,
+    dedupe_threshold: float = 0.6,
+) -> tuple[list[Any], list[tuple[Any, str]], list[str]]:
+    """B/C/A 三道本地整改（全程留痕，不自作主张）。
+
+    C：同一章节内出现源时间回跳 → 按源时间重排（回跳是缺陷，不是编辑意图）。
+    B：同一章节内语义高度重复的拍 → 只保留最先出现的那一条。
+    A：总时长超出预算 → 按“角色优先级最弱 + 最长”的顺序逐条裁到预算内，
+       且**每个章节至少保留一拍**。
+
+    返回 ``(beats, removals, warnings)``；removals 中每条都为 ``(beat, reason)``。
+    """
+    warnings: list[str] = []
+    removals: list[tuple[Any, str]] = []
+
+    # C：章内时间顺序
+    ordered: list[Any] = []
+    for chapter_id, group in _group_beats_by_chapter(beats):
+        known = [(index, _beat_start(beat, candidates_by_id)) for index, beat in enumerate(group)]
+        known = [(index, start) for index, start in known if start is not None]
+        regressed = any(known[i][1] < known[i - 1][1] - 0.5 for i in range(1, len(known)))
+        if regressed:
+            ordered.extend(
+                beat for _, beat in sorted(
+                    enumerate(group),
+                    key=lambda pair: (
+                        _beat_start(pair[1], candidates_by_id) is None,
+                        _beat_start(pair[1], candidates_by_id) or 0.0,
+                    ),
+                )
+            )
+            warnings.append(f"chapter_time_order_fixed:{chapter_id}")
+        else:
+            ordered.extend(group)
+    beats = ordered
+
+    # B：章内去冗余
+    deduped: list[Any] = []
+    for chapter_id, group in _group_beats_by_chapter(beats):
+        survivors: list[Any] = []
+        for beat in group:
+            text = _beat_text(beat, candidates_by_id)
+            redundant = any(
+                _text_gram_overlap(text, _beat_text(other, candidates_by_id)) >= dedupe_threshold
+                for other in survivors
+            )
+            if redundant and len(survivors) >= 1 and len(survivors) + (len(group) - len(survivors)) > 1:
+                removals.append((beat, "intra_chapter_redundant"))
+                warnings.append(f"beat_removed_redundant:{chapter_id}")
+                continue
+            survivors.append(beat)
+        deduped.extend(survivors or list(group[:1]))
+    beats = deduped
+
+    # A：时长预算
+    if budget_seconds is not None:
+        total = sum(_beat_seconds(beat, candidates_by_id) for beat in beats)
+        trimmed = False
+        while total > budget_seconds:
+            counts: dict[str, int] = {}
+            for beat in beats:
+                key = str(getattr(beat, "chapter_id", "") or "")
+                counts[key] = counts.get(key, 0) + 1
+            victim = None
+            for beat in sorted(
+                beats,
+                key=lambda item: (
+                    -_CHAPTER_BEAT_ROLE_PRIORITY.get(str(getattr(item, "narrative_role", "") or ""), 9),
+                    -_beat_seconds(item, candidates_by_id),
+                ),
+            ):
+                key = str(getattr(beat, "chapter_id", "") or "")
+                if counts.get(key, 0) <= 1 or key == "OPENING":
+                    continue
+                victim = beat
+                break
+            if victim is None:
+                break
+            beats = [beat for beat in beats if beat is not victim]
+            removals.append((victim, "duration_budget_exceeded"))
+            total -= _beat_seconds(victim, candidates_by_id)
+            trimmed = True
+        if trimmed:
+            warnings.append("duration_budget_trim_applied")
+    return list(beats), removals, warnings
+
+
 def build_single_pass_director_plan(
     *,
     strategy: Strategy,
@@ -361,6 +502,80 @@ def build_single_pass_director_plan(
         if enforce_journey_contract:
             established_questions.add(question_id)
             seen_purchase_values.add((question_id, answer_role, outcome))
+
+    # P0-a（C 层）：把契约声明的独立开场真正落到片头。
+    # 背景：AI 现在会把 Hook 单独声明在 opening_selection 里（不在任何章节的
+    # beats 中），而历史物化只把 sequence 的第一拍当开场 → 片头直接从兑现句
+    # 开始、Hook 整条消失。这里把声明的开篇解析后显式前置为一个独立 beat。
+    # 开关：director_contract 的 opening_unit_split（默认关，保持旧行为）。
+    if director.get("opening_unit_split") and beats:
+        opening_selection = dict(getattr(strategy, "opening_selection", None) or {})
+        opening_ids: list[int] = []
+        for value in opening_selection.get("selected_subtitle_ids") or ():
+            try:
+                opening_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if opening_ids:
+            opening_resolved, opening_rejected = resolve_source_ids(
+                opening_ids, packet_label="OPENING", opening=True,
+            )
+            already_selected = {candidate.candidate_id for candidate in selected}
+            opening_candidates = [
+                item for item in opening_resolved if item.candidate_id not in already_selected
+            ]
+            if opening_candidates and not opening_rejected:
+                base_beat = beats[0]
+                opening_beat = replace(
+                    base_beat,
+                    chapter_id="OPENING",
+                    source_role="hook",
+                    narrative_role="hook",
+                    goal="契约声明的独立开篇（opening_selection）",
+                    candidate_evidence=tuple(item.candidate_id for item in opening_candidates),
+                    target_seconds=round(sum(item.duration for item in opening_candidates), 3),
+                    selection_instruction="contract_opening_selection",
+                    selection_origin="contract_opening_selection",
+                    transition_from_previous="",
+                )
+                beats = [opening_beat] + beats
+                selected = list(opening_candidates) + list(selected)
+                opening_fallbacks_used.append({
+                    "source": "contract_opening_selection",
+                    "subtitle_ids": list(opening_ids),
+                    "candidate_ids": [item.candidate_id for item in opening_candidates],
+                    "seconds": round(sum(item.duration for item in opening_candidates), 3),
+                })
+            elif opening_rejected:
+                quality_warnings.append(
+                    "single_pass_director_opening_selection_unresolved:"
+                    + ",".join(str(item) for item in opening_rejected[:4])
+                )
+
+    # A+B+C：时长预算 / 章内去冗余 / 章内时间顺序（可开关，全程留痕）
+    if director.get("duration_budget_trim") and beats:
+        _candidates_by_id = {candidate.candidate_id: candidate for candidate in selected}
+        _budget_seconds: float | None = None
+        try:
+            _speed = float(speed_factor) if speed_factor else 1.0
+            _budget_seconds = float(requested_seconds) * 1.15 * _speed
+        except (TypeError, ValueError, NameError):
+            _budget_seconds = None
+        beats, _removals, _polish_warnings = _polish_chapter_beats(
+            beats, _candidates_by_id, budget_seconds=_budget_seconds,
+        )
+        for _beat, _reason in _removals:
+            quality_warnings.append(
+                f"beat_removed:{_reason}:{getattr(_beat, 'chapter_id', '')}:"
+                + ",".join(str(item) for item in getattr(_beat, "candidate_evidence", ()))
+            )
+        quality_warnings.extend(_polish_warnings)
+        _surviving_ids = {
+            cid for _beat in beats for cid in getattr(_beat, "candidate_evidence", ())
+        }
+        selected = [
+            candidate for candidate in selected if candidate.candidate_id in _surviving_ids
+        ]
 
     selected_seconds = round(sum(candidate.duration for candidate in selected), 3)
     verified_readthrough = " ".join(str(candidate.text or "").strip() for candidate in selected).strip()
