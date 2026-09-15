@@ -43,16 +43,21 @@ def normalize_ai_base_url(base_url: str | None, default: str = DEEPSEEK_DEFAULT_
 
 def normalize_ai_model_defaults(settings: dict | None) -> dict:
     data = dict(settings or {})
-    api_key = str(data.get("api_key") or "").strip()
+    # 用户从控制台复制 key / 模型名时经常带上换行、空格或引号。base_url 一直在清洗，
+    # 但 api_key 与 model 之前没有写回清洗值 → Authorization 头会带着空白发出 → 平台 401。
+    api_key = str(data.get("api_key") or "").strip().strip('"').strip("'").strip()
     base_url = normalize_ai_base_url(data.get("base_url"))
-    model = str(data.get("model") or "").strip()
+    model = str(data.get("model") or "").strip().strip('"').strip("'").strip()
 
+    data["api_key"] = api_key
     data["base_url"] = base_url
     if base_url == LEGACY_DOUBAO_BASE_URL:
         data["model"] = ARK_MODEL_DISPLAY_ALIASES.get(model.lower(), model)
         model = data["model"]
     if not model and base_url != LEGACY_DOUBAO_BASE_URL:
         data["model"] = DEEPSEEK_DEFAULT_MODEL
+    else:
+        data["model"] = model
     data["enabled"] = bool(api_key)
 
     if (

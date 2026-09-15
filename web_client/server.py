@@ -13198,6 +13198,66 @@ def _run_smart_preview(task_id: str, preview_id: str, payload: SmartCutPayload) 
         emit_log("error", f"AI选片预览失败：{exc}", scope)
 
 
+_PREVIEW_PLAN_AUDIT_KEYS = (
+    "m1_story_brief",
+    "m1_story_library",
+    "director_strategy_library",
+    "director_strategy_contract",
+    "m1_result",
+    "m2_plan",
+    "m2_story_consumption_audit",
+    "selection_contract",
+    "opening_hook_recall",
+    "two_pass_director_responses",
+)
+
+
+def _write_preview_plan_audit(
+    *,
+    task_id: str,
+    preview_id: str,
+    case: Mapping[str, Any],
+    target_duration: float,
+    experiment_dir: Any,
+) -> None:
+    """落盘本次预览的候选方案快照，供事后审计。
+
+    正常预览链路从不落盘候选方案，所以“某个方案时长严重超目标”这类回归
+    事后无法定位。这里把与方案/时长相关的字段快照写到实验目录的 plan_audit/。
+    任何失败都必须被吞掉，绝不能影响预览本身。
+    """
+    try:
+        folder = Path(experiment_dir) / "plan_audit"
+        folder.mkdir(parents=True, exist_ok=True)
+        source = dict(case or {}) if isinstance(case, Mapping) else {"_unparsed_case": str(case)[:20000]}
+        written: list[str] = []
+        for key in _PREVIEW_PLAN_AUDIT_KEYS:
+            if key not in source:
+                continue
+            try:
+                payload = json.dumps(source[key], ensure_ascii=False, indent=1)
+            except (TypeError, ValueError):
+                payload = json.dumps(str(source[key]), ensure_ascii=False)
+            if len(payload) > 4 * 1024 * 1024:
+                payload = payload[: 4 * 1024 * 1024] + "\n/* TRUNCATED */"
+            (folder / f"{key}.json").write_text(payload, encoding="utf-8")
+            written.append(key)
+        (folder / "summary.json").write_text(
+            json.dumps({
+                "schema": "preview_plan_audit_v1",
+                "task_id": str(task_id),
+                "preview_id": str(preview_id),
+                "written_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "target_duration": float(target_duration),
+                "case_keys": sorted(str(item) for item in source),
+                "written": written,
+            }, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+    except Exception:
+        _LOG.warning("preview plan audit write failed", exc_info=True)
+
+
 def _write_commerce_director_preview_artifacts(
     output_dir: Path,
     *,
@@ -13983,6 +14043,13 @@ def _run_commerce_director_preview(
         if selected_story_id:
             case = dict(case)
             case["selected_from_m1_story_library"] = selected_story_id
+        _write_preview_plan_audit(
+            task_id=task_id,
+            preview_id=preview_id,
+            case=case,
+            target_duration=float(payload.target_duration),
+            experiment_dir=experiment_dir,
+        )
         cost_report, _ = generate_ai_cost_reports(
             output_dir=experiment_dir,
             task_id=f"commerce_preview:{task_id}",
@@ -15566,6 +15633,11 @@ def _run_commerce_director_preview_auto_batch(
             # compatibility switch.  Semantic ownership is now two stages.
             "single_ai_director_packet": True,
             "two_pass_director_packet": True,
+            # P0-a：独立全文 Hook 召回 + 开篇独立前置 + 章内顺序/去冗余/时长预算。
+            # 各自可单独置 False 回退旧行为。
+            "opening_hook_recall": True,
+            "opening_unit_split": True,
+            "duration_budget_trim": True,
             "sentence_preview_without_m3": True,
             "semantic_call_count": 2,
             "max_semantic_call_count": 2,

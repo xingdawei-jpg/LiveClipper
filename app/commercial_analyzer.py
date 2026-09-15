@@ -3311,6 +3311,62 @@ def _audit_second_pass_duration_for_strategies(
     return payload, controls, primary_strategy_id or "S1"
 
 
+def _opening_hook_pool_prompt(
+    opening_hook_pool: Sequence[Mapping[str, Any]] | None,
+    *,
+    limit: int = 12,
+) -> str:
+    """Render the independent Hook pool section for the story call.
+
+    ``None`` means the independent recall was not run, so the prompt stays
+    byte-identical to the historical behaviour.  An empty sequence means the
+    recall ran and found nothing usable, which the director must declare
+    instead of promoting a body sentence to a full-strength hook.
+    """
+    if opening_hook_pool is None:
+        return ""
+    rows = [
+        dict(item) for item in opening_hook_pool if isinstance(item, Mapping)
+    ][:max(1, int(limit))]
+    if not rows:
+        return "\n".join((
+            "【独立开场候选池：本次已单独全文扫描，结果为空】",
+            "本次没有找到通过硬校验（干净、可独立成立、2-8秒、词级可回放、与主商品相关）的独立开场句。",
+            "此时必须把 opening_promise 明确写成受限（例如：受限-素材无合格独立开场），"
+            "并可改按主商品最强结果或机制安排开场；不得用正文演示句、半句承接或泛情绪句冒充满分 Hook。",
+            "C1 的 evidence_locations 仍必须来自真实安全字幕，并在紧接的真实口播中兑现。",
+        ))
+    return "\n".join((
+        "【独立开场候选池（已单独全文扫描，不属于正文池）】",
+        "下面每一句都通过程序硬校验：干净、可独立成立、2-8秒、词级可回放、与已核实主商品相关。",
+        "这些候选是等价的，强度仅供参考，**不要把强度当成选择的唯一依据**。",
+        "选择规则：从池中挑出**与本案后续章节关联最紧**的一条。判断标准不是它多强，"
+        "而是：它提出的承诺/问题，能不能被紧随其后的真实章节内容最直接地兑现、解释或推进。"
+        "开场与后续章节是一体的：先让观众停下，再立刻用后面的原话给出答案。",
+        "请在 opening_promise 里显式写出这个关联：这条开场承诺了什么，由后面哪一章（哪个证据 ID）兑现。"
+        "若本案的章节方向不同，就应选另一条与之匹配的开场，而不是固定取最强的那条。",
+        "只允许使用池内给出的 subtitle_ids；不得改写、拼接或另取正文句充当开场。",
+        "若池内确实没任何候选能与本案后续章节形成兑现关系，才把 opening_promise 写成受限。",
+        "候选（hook_id / subtitle_ids / 起止秒 / 文本 / 类型 / 停人理由 / 强度参考）：",
+        json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
+    ))
+
+
+def _opening_promise_hint(
+    director_focus: Mapping[str, Any] | None,
+    director_controls: Mapping[str, Any] | None,
+) -> str:
+    """Pick the best available opening promise to freeze for the Hook recall."""
+    for source in (director_focus, director_controls):
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("opening_promise", "central_promise", "core_desire", "director_title"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def build_two_pass_story_prompt(
     *,
     product: str,
@@ -3324,6 +3380,7 @@ def build_two_pass_story_prompt(
     output_speed_factor: float = 1.0,
     source_context_subtitles: Sequence[Mapping[str, Any]] | None = None,
     director_plan_count: int = 1,
+    opening_hook_pool: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """Build the story-only call over the complete executable transcript."""
     rows = _director_casting_rows(subtitles, executable_subtitle_ids)
@@ -3413,6 +3470,7 @@ def build_two_pass_story_prompt(
                 "chapter_packets": [],
             })
     schema = {"strategies": strategy_schemas}
+    _hook_pool_section = _opening_hook_pool_prompt(opening_hook_pool)
     # One chronological transcript distinguishes playable evidence from
     # context. Removing excluded rows would also erase product switches and
     # corrections, letting an adjacent safe pronoun inherit the wrong item.
@@ -3422,6 +3480,7 @@ def build_two_pass_story_prompt(
         "",
         subject_line,
         _story_content_boundary_prompt(content_contract),
+        *([_hook_pool_section] if _hook_pool_section else []),
         _director_controls_prompt(director_controls, stage="story"),
         focus_line,
         (
@@ -5232,6 +5291,7 @@ def analyze_commercial_story(
     source_context_subtitles: Sequence[Mapping[str, Any]] | None = None,
     director_plan_count: int = 1,
     enable_duration_calibration: bool = False,
+    opening_hook_recall: bool = False,
 ) -> StrategyDiscoveryResult:
     """Discover and cast one to three commercial stories in two semantic calls."""
     def log(message: str) -> None:
@@ -5239,6 +5299,7 @@ def analyze_commercial_story(
             log_fn(message)
 
     director_model = resolve_commercial_director_model(base_url, model)
+    opening_hook_payload: dict[str, Any] | None = None
     if two_pass_director:
         # Production supplies controls (even in auto mode). Legacy offline
         # readers without them retain their old response contract.
@@ -5297,6 +5358,52 @@ def analyze_commercial_story(
                         "story_candidate_content_policy",
                         json.dumps(story_candidate_policy_audit, ensure_ascii=False, indent=2),
                     )
+        # P0-a：独立全文 Hook 召回（opt-in）。必须在 story contract 之前跑，
+        # 导演手里才是真有一个“开场候选池”，而不是从正文池里顺出第一句当开头。
+        opening_hook_prompt_rows: list[dict[str, Any]] | None = None
+        if opening_hook_recall:
+            try:
+                from opening_hook_recall_adapter import (
+                    hook_pool_prompt_rows,
+                    recall_opening_hooks,
+                )
+                opening_hook_payload = recall_opening_hooks(
+                    subtitles=subtitles,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=director_model,
+                    opening_promise=_opening_promise_hint(director_focus, director_controls),
+                    allowed_opening_answer_roles=DIRECTOR_ANSWER_ROLES,
+                    executable_subtitle_ids=story_executable_ids,
+                    log_fn=log,
+                )
+                opening_hook_prompt_rows = hook_pool_prompt_rows(opening_hook_payload)
+            except Exception as hook_exc:  # noqa: BLE001 - 召回失败不得阻断导演
+                opening_hook_payload = {
+                    "status": "hook_recall_failed",
+                    "error": f"{type(hook_exc).__name__}: {hook_exc}"[:300],
+                    "hook_candidates": [],
+                }
+                opening_hook_prompt_rows = []
+                log(f"独立 Hook 召回异常（已降级）：{opening_hook_payload['error']}")
+            # 召回失败 ≠ 素材没有合格开场。只有“成功但 0 候选”才允许提示受限；
+            # 真正的失败一律不注入开场池，行为静默回退到改动前，避免主动放弃开场。
+            _hook_status = str((opening_hook_payload or {}).get("status") or "")
+            if _hook_status not in ("hook_recall_completed", "hook_material_limited"):
+                opening_hook_prompt_rows = None
+                log(
+                    f"独立 Hook 召回未成功（status={_hook_status}）：本次不注入开场池，"
+                    "回退旧行为；不使用“声明受限”。"
+                )
+            if stage_response_hook:
+                stage_response_hook(
+                    "opening_hook_recall",
+                    json.dumps(opening_hook_payload, ensure_ascii=False, indent=2),
+                )
+            log(
+                "独立 Hook 召回：" + str(opening_hook_payload.get("status"))
+                + f"，候选 {len(opening_hook_prompt_rows or [])} 条"
+            )
         story_prompt = build_two_pass_story_prompt(
             product=product,
             subtitles=subtitles,
@@ -5768,6 +5875,11 @@ def analyze_commercial_story(
         )
         if raw_response_hook:
             raw_response_hook(raw)
+    if opening_hook_payload is not None:
+        try:
+            result.opening_hook_recall = opening_hook_payload
+        except Exception:
+            log("opening_hook_recall 无法挂到结果对象（只读）")
     result = parse_strategy_result(
         raw,
         product=product,
