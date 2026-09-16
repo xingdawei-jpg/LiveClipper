@@ -569,8 +569,8 @@ def build_single_pass_director_plan(
             # 成片 = 原声 / speed_factor，所以裁剪预算要用“原声口径”的 source_target，
             # 下限用 source_min —— 这样最终成片才会贴近用户设定值（而不是贴 target 数值）。
             _dr = director_delivery_duration_range(float(target_duration), None, 1.15)
-            _budget_seconds = float(_dr.get(source_target) or float(target_duration) * 1.15)
-            _floor_seconds = float(_dr.get(source_min) or float(target_duration) * 0.958)
+            _budget_seconds = float(_dr.get("source_target") or float(target_duration) * 1.15)
+            _floor_seconds = float(_dr.get("source_min") or float(target_duration) * 0.958)
         except (TypeError, ValueError):
             _budget_seconds = None
             _floor_seconds = None
