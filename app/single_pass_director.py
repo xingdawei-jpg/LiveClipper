@@ -226,6 +226,7 @@ def _polish_chapter_beats(
     candidates_by_id: Mapping[int, Any],
     *,
     budget_seconds: float | None = None,
+    floor_seconds: float | None = None,
     dedupe_threshold: float = 0.6,
 ) -> tuple[list[Any], list[tuple[Any, str]], list[str]]:
     """B/C/A 三道本地整改（全程留痕，不自作主张）。
@@ -302,6 +303,10 @@ def _polish_chapter_beats(
                 victim = beat
                 break
             if victim is None:
+                break
+            # 下限保护：按整拍裁时，若去掉这一拍会掉到 floor（source_min）以下，
+            # 宁可不裁，也别让成片低于验收下限（尤其 30s 这类小目标）。
+            if floor_seconds is not None and total - _beat_seconds(victim, candidates_by_id) < float(floor_seconds):
                 break
             beats = [beat for beat in beats if beat is not victim]
             removals.append((victim, "duration_budget_exceeded"))
@@ -556,14 +561,17 @@ def build_single_pass_director_plan(
     if director.get("duration_budget_trim") and beats:
         _candidates_by_id = {candidate.candidate_id: candidate for candidate in selected}
         _budget_seconds: float | None = None
+        _floor_seconds: float | None = None
         try:
             # 预算严格对齐目标时长。原代码引用了不存在的 requested_seconds/speed_factor，
             # NameError 被静默吞掉 → budget 恒为 None → 裁剪从不执行，超时成片一直漏裁。
             _budget_seconds = float(target_duration)
+            _floor_seconds = float(target_duration) * 0.95
         except (TypeError, ValueError):
             _budget_seconds = None
+            _floor_seconds = None
         beats, _removals, _polish_warnings = _polish_chapter_beats(
-            beats, _candidates_by_id, budget_seconds=_budget_seconds,
+            beats, _candidates_by_id, budget_seconds=_budget_seconds, floor_seconds=_floor_seconds,
         )
         for _beat, _reason in _removals:
             quality_warnings.append(

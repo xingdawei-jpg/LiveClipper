@@ -1745,7 +1745,7 @@ def _post_two_pass_director_request_with_retry(*, max_tokens: int, **kwargs: Any
     return _post_two_pass_director_request(max_tokens=retry_tokens, **kwargs)
 
 
-def director_casting_output_max_tokens(director_plan_count: int | None) -> int:
+def director_casting_output_max_tokens(director_plan_count: int | None, target_duration: float | None = None) -> int:
     """Reserve enough room for one compact, executable Casting receipt.
 
     A single 60-second story can still require many one-to-five-second spoken
@@ -1759,7 +1759,14 @@ def director_casting_output_max_tokens(director_plan_count: int | None) -> int:
         plan_count = max(1, min(3, int(director_plan_count or 1)))
     except (TypeError, ValueError):
         plan_count = 1
-    return max(7000, 5500 * plan_count)
+    base = max(7000, 5500 * plan_count)
+    # The output cap must scale with the requested duration: a 90/120s story needs
+    # far more one-to-five-second Beats than a 60s one.  Still a ceiling, not prepaid.
+    try:
+        scale = max(0.6, min(4.0, float(target_duration or 60.0) / 60.0))
+    except (TypeError, ValueError):
+        scale = 1.0
+    return int(base * scale)
 
 
 def director_casting_request_timeout(model: str, requested_timeout: int | float | None) -> int:
@@ -5590,7 +5597,7 @@ def analyze_commercial_story(
             # The compact response omits non-executed alternatives.  A single
             # complete 60-second selection still needs a small JSON-completion
             # margin; this is a ceiling, not a prepaid token allocation.
-            max_tokens=director_casting_output_max_tokens(director_plan_count),
+            max_tokens=director_casting_output_max_tokens(director_plan_count, target_duration),
             timeout=director_casting_request_timeout(director_model, timeout),
             response_hook=(
                 lambda value: stage_response_hook("beat_casting", value)
@@ -5605,7 +5612,7 @@ def analyze_commercial_story(
             model=director_model,
             stage="Director_beat_casting",
             system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT,
-            max_tokens=director_casting_output_max_tokens(director_plan_count),
+            max_tokens=director_casting_output_max_tokens(director_plan_count, target_duration),
             timeout=director_casting_request_timeout(director_model, timeout),
             log_fn=log,
             stage_response_hook=stage_response_hook,
@@ -5739,7 +5746,7 @@ def analyze_commercial_story(
                     api_key=api_key, base_url=base_url, model=director_model,
                     system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT, user_prompt=correction_prompt,
                     stage="Director_duration_calibration",
-                    max_tokens=director_casting_output_max_tokens(director_plan_count),
+                    max_tokens=director_casting_output_max_tokens(director_plan_count, target_duration),
                     timeout=director_casting_request_timeout(director_model, timeout),
                     response_hook=(
                         lambda value: stage_response_hook("duration_calibration", value)
