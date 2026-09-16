@@ -19,6 +19,7 @@ from commercial_analyzer import (
     DIRECTOR_PURCHASE_QUESTIONS,
     DirectorBeat,
     Strategy,
+    director_delivery_duration_range,
     director_target_duration_range,
     final_utterance_surface_issue,
 )
@@ -565,8 +566,11 @@ def build_single_pass_director_plan(
         try:
             # 预算严格对齐目标时长。原代码引用了不存在的 requested_seconds/speed_factor，
             # NameError 被静默吞掉 → budget 恒为 None → 裁剪从不执行，超时成片一直漏裁。
-            _budget_seconds = float(target_duration)
-            _floor_seconds = float(target_duration) * 0.95
+            # 成片 = 原声 / speed_factor，所以裁剪预算要用“原声口径”的 source_target，
+            # 下限用 source_min —— 这样最终成片才会贴近用户设定值（而不是贴 target 数值）。
+            _dr = director_delivery_duration_range(float(target_duration), None, 1.15)
+            _budget_seconds = float(_dr.get(source_target) or float(target_duration) * 1.15)
+            _floor_seconds = float(_dr.get(source_min) or float(target_duration) * 0.958)
         except (TypeError, ValueError):
             _budget_seconds = None
             _floor_seconds = None
