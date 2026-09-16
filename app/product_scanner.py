@@ -4,6 +4,7 @@
 不依赖 cutter_logic.py / gui.py 的主流程
 """
 
+import copy
 import logging
 _LOG = logging.getLogger("liveclipper.product_scanner")
 

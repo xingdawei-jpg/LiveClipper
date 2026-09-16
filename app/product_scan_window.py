@@ -196,7 +196,8 @@ class ProductScanWindow:
                 self.win.after(0, lambda: self._on_scan_done(products))
             except Exception as e:
                 self._scanning = False
-                self.win.after(0, lambda: self._on_scan_error(str(e)))
+                _err_text = str(e)
+                self.win.after(0, lambda _m=_err_text: self._on_scan_error(_m))
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
@@ -281,7 +282,8 @@ class ProductScanWindow:
                 results = self._scanner.extract_all(video_path, products_to_cut, output_dir)
                 self.win.after(0, lambda: self._on_extract_done(results))
             except Exception as e:
-                self.win.after(0, lambda: self._on_extract_error(str(e)))
+                _err_text = str(e)
+                self.win.after(0, lambda _m=_err_text: self._on_extract_error(_m))
 
         threading.Thread(target=_do_extract, daemon=True).start()
 
