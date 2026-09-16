@@ -13767,3 +13767,8 @@ html, body { max-width: 100%; overflow-x: hidden; }
 .preview-workbench-unified .preview-selected-main > span,
 .preview-workbench-unified .preview-current-text { overflow-wrap: anywhere; word-break: break-word; }
 .commerce-director-recommendation, .commerce-director-top-variants, .commerce-director-recommendation-path { max-width: 100%; min-width: 0; }
+
+/* 已选片段撤销条（2026-09-16） */
+.preview-selection-undo-bar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 2px 6px 4px; }
+.preview-selection-undo-bar .button { min-width: 84px; }
+.preview-selection-undo-bar .button:disabled { opacity: .45; cursor: default; }
