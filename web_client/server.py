@@ -3789,12 +3789,17 @@ def _preflight_pip(data: dict[str, Any], warnings: list[str], errors: list[str])
         warnings.append("画中画已启用但未选择素材，将使用自身缩略图。")
 
 
-def _preflight_ai_settings(feature: str, warnings: list[str]) -> None:
+def _preflight_ai_settings(feature: str, errors: list[str], warnings: list[str]) -> None:
     if feature not in {"smart-cut", "smart-preview", "smart-from-preview", "mix", "mix-preview", "mix-from-preview", "ai-scan", "ai-scan-export", "ai-scan-export-merge"}:
         return
     settings = _load_settings()
     if not (settings.get("api_key") or "").strip():
-        warnings.append("AI API Key 未填写，AI 选片或字幕修复可能不可用。")
+        # 空 Key 直接发请求会被平台回 401，用户无法区分“没填/填错/被拦截”。
+        # 这里前置拦断并给出可执行的提示，不再让它变成看不懂的 401。
+        errors.append(
+            "AI API Key 未填写：请在「设置 → AI模型」填入 Key 并保存（保存后可用“测试连接”确认）。"
+        )
+        return
     if settings.get("asr_enabled", False):
         missing = [
             name
@@ -4256,7 +4261,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
         _preflight_single_file(data.get("srt_path"), "字幕文件", errors, required=False)
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature == "smart-from-preview":
         if not str(data.get("preview_id") or "").strip():
             errors.append("请先生成 AI 选片预览。")
@@ -4270,14 +4275,14 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature in {"mix", "mix-preview"}:
         paths = _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
         if len(paths) == 1:
             warnings.append("混剪只添加了 1 个视频，建议添加至少 2 个素材。")
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature == "mix-from-preview":
         if not str(data.get("preview_id") or "").strip():
             errors.append("请先生成混剪 AI 选片预览。")
@@ -4291,7 +4296,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             pass
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature == "mix-batch":
         groups = data.get("groups") if isinstance(data.get("groups"), list) else []
         if not groups:
@@ -4303,11 +4308,11 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
                 warnings.append(f"第 {index} 组只添加了 1 个视频，建议至少 2 个素材。")
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
         _preflight_pip(data, warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature.startswith("ai-scan"):
         _preflight_file_list(data.get("video_paths"), "视频", errors, min_count=1)
         _preflight_output_dir(data.get("output_dir"), warnings, errors)
-        _preflight_ai_settings(feature, warnings)
+        _preflight_ai_settings(feature, errors, warnings)
     elif feature in {"product-scan-read", "product-scan"}:
         _preflight_single_file(data.get("excel_path"), "Excel 时间表", errors, required=True)
         _preflight_file_list(data.get("video_paths"), "直播视频", errors, min_count=1)

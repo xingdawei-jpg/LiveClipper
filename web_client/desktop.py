@@ -58,8 +58,10 @@ def _repair_tool_stdio() -> None:
         try:
             stream = os.fdopen(os.dup(fd), mode, encoding="utf-8", errors="replace", buffering=1)
         except Exception:
-            fallback = "r" if mode == "r" else "w"
-            stream = open(os.devnull, fallback, encoding="utf-8", errors="replace")
+            if mode == "r":
+                stream = io.StringIO("")   # Windows 下 nul 不可读，读回退用空流
+            else:
+                stream = open(os.devnull, "w", encoding="utf-8", errors="replace")
         setattr(sys, name, stream)
 
 

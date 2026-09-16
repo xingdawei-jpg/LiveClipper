@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import importlib
 import importlib.util
+import io
 import os
 import runpy
 import subprocess
@@ -236,7 +237,10 @@ def _repair_stdio() -> None:
         try:
             stream = os.fdopen(os.dup(fd), mode, encoding="utf-8", errors="replace", buffering=1)
         except Exception:
-            stream = open(os.devnull, mode, encoding="utf-8", errors="replace")
+            stream = (
+                io.StringIO("") if mode == "r"   # Windows 下 nul 不可读，读回退用空流
+                else open(os.devnull, "w", encoding="utf-8", errors="replace")
+            )
         setattr(sys, name, stream)
 
 
