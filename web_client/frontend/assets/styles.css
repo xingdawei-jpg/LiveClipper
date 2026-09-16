@@ -13772,3 +13772,6 @@ html, body { max-width: 100%; overflow-x: hidden; }
 .preview-selection-undo-bar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 2px 6px 4px; }
 .preview-selection-undo-bar .button { min-width: 84px; }
 .preview-selection-undo-bar .button:disabled { opacity: .45; cursor: default; }
+
+/* 整体预览按钮进行态（2026-09-16） */
+.preview-video-actions .button.is-active { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent-text); font-weight: 650; }
