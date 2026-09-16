@@ -1720,6 +1720,31 @@ DIRECTOR_PREFERRED_BEAT_MAX_SECONDS = 5.0
 DIRECTOR_LONG_COMPLETE_BEAT_MAX_SECONDS = 8.0
 
 
+def _post_two_pass_director_request_with_retry(*, max_tokens: int, **kwargs: Any) -> str:
+    """One bounded retry for transient Director failures.
+
+    ``output_truncated`` (the response hit the ceiling) and timeouts are the
+    two dominant preview failures. Both are retried exactly once with the
+    ceiling doubled; the provider only charges what it actually returns, so a
+    higher ceiling is not a prepaid cost. Other errors propagate unchanged.
+    """
+
+    try:
+        return _post_two_pass_director_request(max_tokens=max_tokens, **kwargs)
+    except AnalyzerError as exc:
+        text = str(exc)
+        if "output_truncated" not in text and "token 上限" not in text:
+            raise
+    except (TimeoutError, OSError):
+        text = "timeout"
+    retry_tokens = max(int(max_tokens) * 2, int(max_tokens) + 2000)
+    try:
+        log(f"Director {kwargs.get('stage')} 首次返回失败（{text}），抬高上限 {int(max_tokens)}→{retry_tokens} 重试一次。")
+    except Exception:
+        pass
+    return _post_two_pass_director_request(max_tokens=retry_tokens, **kwargs)
+
+
 def director_casting_output_max_tokens(director_plan_count: int | None) -> int:
     """Reserve enough room for one compact, executable Casting receipt.
 
@@ -1734,7 +1759,7 @@ def director_casting_output_max_tokens(director_plan_count: int | None) -> int:
         plan_count = max(1, min(3, int(director_plan_count or 1)))
     except (TypeError, ValueError):
         plan_count = 1
-    return max(5200, 4000 * plan_count)
+    return max(7000, 5500 * plan_count)
 
 
 def director_casting_request_timeout(model: str, requested_timeout: int | float | None) -> int:
@@ -3810,6 +3835,7 @@ def build_two_pass_cast_prompt(
         "若 story_check.overloaded_chapter_requirements 非空，第一遍把多个独立购买判断塞进了同一章。你必须在本次回复用 chapter_revision 把该章收窄为一个可由最短完整原话兑现的判断，或与相邻重复章合并/删除；不得为了逐项打回执而堆叠同义口播。",
         "budget 是本章原声目标，budget_ceiling 是本章超长预警；budget_end 是到本章结束的累计目标。budget_floor 和 budget_end_floor 仅表示整片规划深度，不构成每章最低时长命令。逐章完成取舍，避免前几章耗尽全片预算；无需换算播放速度。",
         "时长门槛：若 duration.safe_pool_can_reach_source_min=true，source_min 是本次交付下限。先剔除残句、重复和无关内容；其后必须继续寻找服务当前故事的新机制、证明、体验、场景或顾虑解除，直到实测累计达到 source_min。不能因为首轮章节讲得简短、预计句数是参考或想保持精炼就提前交卷。只有逐章说明缺失的具体购买判断、且确实没有可选原话可补时，才允许 source_material_limited/natural_complete_below_target。",
+        "本轮即最终选片：这一轮就要按 source_target/source_min 排出完整片单；预计句数、首轮章节估算或想保持精炼都不是提前收尾的理由。",
         "执行顺序：先从安全池识别完整语义单元；再联合选择Hook、紧接兑现与正文，按播放顺序连读、去重；最后归章计时。章节职责服务已经连顺的口播，不能为了填章抽取半句；不能靠不同 role 标签把同义句分装进两章。整片最多保留一个以操作步骤为主的证明块，第一种/第二种/第三种穿法只作证据，不各自凑章。",
         "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。",
         "",
@@ -5422,7 +5448,7 @@ def analyze_commercial_story(
         )
         if stage_progress_hook:
             stage_progress_hook("story_contract_started")
-        story_raw = _post_two_pass_director_request(
+        story_raw = _post_two_pass_director_request_with_retry(
             api_key=api_key,
             base_url=base_url,
             model=director_model,
@@ -5432,7 +5458,7 @@ def analyze_commercial_story(
             # Story contracts contain no source text or chosen IDs.  A 3k
             # single-plan cap comfortably fits the observed compact contract
             # while keeping the commercial peak-time budget predictable.
-            max_tokens=3000 * max(1, min(3, int(director_plan_count or 1))),
+            max_tokens=4500 * max(1, min(3, int(director_plan_count or 1))),
             timeout=max(180, int(timeout)),
             response_hook=(
                 lambda value: stage_response_hook("story_contract", value)
@@ -5447,7 +5473,7 @@ def analyze_commercial_story(
             model=director_model,
             stage="Director_story_contract",
             system_prompt=TWO_PASS_STORY_SYSTEM_PROMPT,
-            max_tokens=3000 * max(1, min(3, int(director_plan_count or 1))),
+            max_tokens=4500 * max(1, min(3, int(director_plan_count or 1))),
             timeout=max(180, int(timeout)),
             log_fn=log,
             stage_response_hook=stage_response_hook,
@@ -5554,7 +5580,7 @@ def analyze_commercial_story(
             ])
         if stage_progress_hook:
             stage_progress_hook("beat_casting_started")
-        cast_raw = _post_two_pass_director_request(
+        cast_raw = _post_two_pass_director_request_with_retry(
             api_key=api_key,
             base_url=base_url,
             model=director_model,
@@ -5709,7 +5735,7 @@ def analyze_commercial_story(
                 correction_prompt += "\n商品归属核对（优先修复，不为时长保留错误商品）：" + json.dumps(_compact_product_calibration_feedback(product_audit), ensure_ascii=False, separators=(",", ":"))
                 correction_prompt += "\n由你从同一完整池重新选符合主商品的原话；程序不删不换句。若开场本身属于错误商品，本次允许由你重选开场。其他正确故事职责和顺序保持。所有已选句必须有真实商品指代依据。"
             try:
-                revised_raw = _post_two_pass_director_request(
+                revised_raw = _post_two_pass_director_request_with_retry(
                     api_key=api_key, base_url=base_url, model=director_model,
                     system_prompt=TWO_PASS_CAST_SYSTEM_PROMPT, user_prompt=correction_prompt,
                     stage="Director_duration_calibration",

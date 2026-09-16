@@ -13725,3 +13725,21 @@ button.commerce-director-sidebar-alt-card:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+/* sidebar license jump (授权管理 -> 设置/系统) */
+.sidebar-license-jump{display:flex;align-items:center;gap:8px;width:calc(100% - 16px);margin:6px 8px;padding:7px 10px;background:transparent;border:1px solid rgba(127,127,127,.22);border-radius:8px;color:inherit;cursor:pointer;font-size:12px}
+.sidebar-license-jump:hover{background:rgba(127,127,127,.10)}
+.sidebar-license-jump-dot{width:7px;height:7px;border-radius:50%;background:#9aa0a6;flex:none}
+.sidebar-license-jump-dot.is-active{background:#22c55e}
+.sidebar-license-jump-dot.is-inactive{background:#ef4444}
+.sidebar-license-jump-label{flex:none}
+.sidebar-license-jump-status{margin-left:auto;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:96px}
+.sidebar-license-jump-arrow{opacity:.5;flex:none}
+
+/* director AI call switches */
+.director-switch{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin:6px 0;cursor:pointer}
+.director-switch:hover{background:rgba(127,127,127,.06)}
+.director-switch input{margin-top:3px;flex:none}
+.director-switch span{display:flex;flex-direction:column;gap:2px}
+.director-switch strong{font-size:13.5px}
+.director-switch small{color:#8b8f94;font-size:12px}

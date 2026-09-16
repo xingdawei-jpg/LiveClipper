@@ -15614,6 +15614,27 @@ def _commerce_director_batch_entries_from_discovery(
     return entries, story_library, strategy_library
 
 
+def _director_switches_from_payload(payload: Any) -> dict[str, bool]:
+    """Read the four director AI-call switches from the request payload.
+
+    Missing/unknown values default to True (quality-first), so old clients keep
+    the current behaviour. Turning a switch off skips its AI call / stage.
+    """
+
+    controls = dict(getattr(payload, "ai_controls", None) or {})
+    raw = controls.get("director_switches")
+    names = ("opening_hook_recall", "opening_unit_split", "duration_budget_trim", "duration_calibration")
+    out: dict[str, bool] = {}
+    if isinstance(raw, dict):
+        for name in names:
+            value = raw.get(name, True)
+            out[name] = bool(value) if isinstance(value, (bool, int)) else True
+    else:
+        for name in names:
+            out[name] = True
+    return out
+
+
 def _run_commerce_director_preview_auto_batch(
     task_id: str,
     preview_id: str,
@@ -15624,6 +15645,7 @@ def _run_commerce_director_preview_auto_batch(
 ) -> None:
     """Default flow: Director draft, measured final revision, then exact M3."""
     requested_plan_count = max(1, min(3, int(payload.versions or 1)))
+    _director_switches = _director_switches_from_payload(payload)
     _run_commerce_director_preview(
         task_id,
         preview_id,
@@ -15635,9 +15657,10 @@ def _run_commerce_director_preview_auto_batch(
             "two_pass_director_packet": True,
             # P0-a：独立全文 Hook 召回 + 开篇独立前置 + 章内顺序/去冗余/时长预算。
             # 各自可单独置 False 回退旧行为。
-            "opening_hook_recall": True,
-            "opening_unit_split": True,
-            "duration_budget_trim": True,
+            "opening_hook_recall": _director_switches["opening_hook_recall"],
+            "opening_unit_split": _director_switches["opening_unit_split"],
+            "duration_budget_trim": _director_switches["duration_budget_trim"],
+            "duration_calibration": _director_switches["duration_calibration"],
             "sentence_preview_without_m3": True,
             "semantic_call_count": 2,
             "max_semantic_call_count": 2,

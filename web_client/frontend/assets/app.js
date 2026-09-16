@@ -2101,6 +2101,7 @@ function bindActions() {
       if (action === "toggle-secret") toggleSecret(target);
       if (action === "activate-license") await activateLicense();
       if (action === "unbind-device") await unbindDevice();
+      if (action === "open-license") { openLicensePanel(); return; }
       if (action === "check-update") await checkUpdate();
       if (action === "apply-update") await applyUpdate();
       if (action === "toggle-update-card") toggleUpdateCard();
@@ -4809,6 +4810,23 @@ function collectAiRules() {
   };
 }
 
+function openLicensePanel() {
+  switchPage("settings");
+  state.settingsTab = "system";
+  document.querySelectorAll(".settings-tab").forEach((item) => {
+    item.classList.toggle("is-active", item.dataset.settingsTab === "system");
+  });
+  document.querySelectorAll(".settings-page").forEach((page) => {
+    page.classList.toggle("is-active", page.id === "settings-system");
+  });
+  const details = document.querySelector("#settings-system .system-license-details");
+  if (details) details.open = true;
+  window.setTimeout(() => {
+    const el = document.querySelector("#settings-system .system-license-details") || document.getElementById("system-license-status");
+    if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, 80);
+}
+
 async function loadLicense() {
   try {
     const data = await api("/api/license");
@@ -4821,6 +4839,13 @@ async function loadLicense() {
       status.classList.toggle("is-active", Boolean(data.activated));
       status.classList.toggle("is-inactive", !data.activated);
       status.lastChild.textContent = data.activated ? "已激活" : "未激活";
+    }
+    const sideStatus = $("sidebar-license-status");
+    if (sideStatus) sideStatus.textContent = data.activated ? `${data.days_left ?? 0} 天` : "未激活";
+    const sideDot = $("sidebar-license-dot");
+    if (sideDot) {
+      sideDot.classList.toggle("is-active", Boolean(data.activated));
+      sideDot.classList.toggle("is-inactive", !data.activated);
     }
   } catch (error) {
     $("license-days-left").value = "读取失败";
@@ -6168,6 +6193,13 @@ function collectAiControls(prefix) {
     // for future runs, but a preview must never silently use stale settings.
     content_policy: directorContentPolicy(collectContentPolicy(), choices),
     content_review_mode: $("s-content-review-mode")?.value || "off",
+    // 四次 AI 调用的独立开关（默认全开）：直接透传给导演合同，关掉即省对应调用。
+    director_switches: {
+      opening_hook_recall: $(`${prefix}-dir-hook-recall`)?.checked !== false,
+      duration_calibration: $(`${prefix}-dir-calibration`)?.checked !== false,
+      opening_unit_split: $(`${prefix}-dir-opening-split`)?.checked !== false,
+      duration_budget_trim: $(`${prefix}-dir-duration-trim`)?.checked !== false,
+    },
   };
 }
 
@@ -13916,6 +13948,26 @@ async function switchPreviewDirectorVariant(previewId, scope = "smart") {
   if (!preview?.ok) throw new Error(preview?.message || "导演方案尚未准备完成");
   if (scope === "mix") state.mixPreview = preview;
   else state.smartPreview = preview;
+  // 切换方案重置：显式把新方案的选择设为本方案自己的片段，其余候选置未选；
+  // 否则第一帧会沿用上一个方案的选中标记 → 时长叠加（需再点一次才校正）。
+  try {
+    const _storyClips = Array.isArray(preview.director_story_clips) ? preview.director_story_clips : preview.clips;
+    hydratePreviewCandidatePool(preview);
+    const _storyKeys = new Set((_storyClips || []).map((clip) => previewCandidateKey(clip)).filter(Boolean));
+    (preview.clips || []).forEach((clip) => {
+      const _on = _storyKeys.has(previewCandidateKey(clip));
+      clip.selected = _on;
+      (Array.isArray(clip.segments) ? clip.segments : []).forEach((segment) => {
+        if (segment.selection_locked === true) { segment.selected = false; return; }
+        segment.selected = _on;
+        segment.wordSelectionExplicit = false;
+      });
+    });
+    const _draftKey = previewDraftKey(scope, preview.id);
+    if (state.previewDrafts) delete state.previewDrafts[_draftKey];
+    if (state.previewAssemblyOrders) delete state.previewAssemblyOrders[_draftKey];
+    preview.selection_draft = null;
+  } catch (error) { /* 重置失败不影响切换本身 */ }
   if (!state.previewDirectorChapterFocus) state.previewDirectorChapterFocus = { smart: "", mix: "" };
   if (!state.previewDirectorCandidateViews) state.previewDirectorCandidateViews = { smart: "recommended", mix: "recommended" };
   state.previewDirectorChapterFocus[scope] = "";
