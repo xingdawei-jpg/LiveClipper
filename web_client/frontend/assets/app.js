@@ -2022,9 +2022,6 @@ function bindActions() {
         Boolean(target.checked),
       );
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
-  if (action === "preview-selection-undo") undoPreviewSelectionChange(target.dataset.previewScope || "smart");
-  if (action === "preview-play-all") startPreviewPlayAll(target.dataset.previewScope || "smart");
-  if (action === "preview-play-all-stop") stopPreviewPlayAll(target.dataset.previewScope || "smart");
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-commerce-director-preview") await startCommerceDirectorPreview();
       if (action === "select-commerce-director-story") await selectCommerceDirectorStory(target.dataset.storyId || "");
@@ -7720,7 +7717,6 @@ function reorderPreviewClip(scope, fromIndex, toIndex, placeAfter = false) {
   const from = order.indexOf(Number(fromIndex));
   const target = Number(toIndex);
   if (from < 0 || !order.includes(target) || Number(fromIndex) === target) return;
-  pushPreviewSelectionUndo(scope, "调整已选顺序");
   const [clip] = order.splice(from, 1);
   const to = order.indexOf(target);
   order.splice(placeAfter ? to + 1 : to, 0, clip);
@@ -9015,12 +9011,7 @@ function previewWorkbenchRoleRank(clip) {
 }
 
 function isPreviewWorkbenchSelected(clip) {
-  // 只有显式 selected === true 才算“已选”。
-  // 候选行默认没有 selected 字段；若把 undefined 当成已选（曾为修“切方案累加”而改），
-  // 候选行会被渲染成“已”（拖拽手柄被替换），导致右侧拖拽落位失效。
-  // 切方案场景由 switchPreviewDirectorVariant 显式写死 selected，无需在这里兜底。
-  if (clip?.selected !== true) return false;
-  return !previewSegments(clip).length || selectedPreviewSegments(clip).length > 0;
+  return clip?.selected !== false && (!previewSegments(clip).length || selectedPreviewSegments(clip).length > 0);
 }
 
 function previewWorkbenchCandidateDuration(clip) {
@@ -9230,96 +9221,6 @@ function undoPreviewTriageAction(scope = "smart") {
   renderPreviewState(scope);
 }
 
-/* ---- 已选片段改动的撤销栈（删除 / 加入 / 调序 / 自动排序） ---- */
-function previewSelectionUndoStack(scope = "smart") {
-  if (!state.previewSelectionUndo) state.previewSelectionUndo = { smart: [], mix: [] };
-  if (!Array.isArray(state.previewSelectionUndo[scope])) state.previewSelectionUndo[scope] = [];
-  return state.previewSelectionUndo[scope];
-}
-
-function capturePreviewSelectionSnapshot(scope = "smart", label = "") {
-  const preview = getPreviewState(scope);
-  if (!preview?.clips) return null;
-  return {
-    label: String(label || ""),
-    order: [...previewAssemblyOrder(scope, preview)],
-    detail: state.previewDetailSelection?.[scope] ?? null,
-    candidate: state.previewCandidateSelections?.[scope] ?? null,
-    clips: preview.clips.map((clip) => ({
-      index: Number(clip.index),
-      selected: clip.selected,
-      segments: previewSegments(clip).map((segment) => ({
-        index: Number(segment.index),
-        selected: segment.selected,
-        explicit: segment.wordSelectionExplicit,
-        words: previewSegmentWords(segment).map((word) => ({ index: Number(word.index), selected: word.selected })),
-      })),
-    })),
-  };
-}
-
-function pushPreviewSelectionUndo(scope = "smart", label = "") {
-  // 快照只是“后悔药”，绝不能因为它失败而影响主流程（删除/加入/调序）。
-  try {
-    const snapshot = capturePreviewSelectionSnapshot(scope, label);
-    if (!snapshot) return;
-    const stack = previewSelectionUndoStack(scope);
-    const last = stack[stack.length - 1];
-    if (last && last.label === snapshot.label && JSON.stringify(last.order) === JSON.stringify(snapshot.order)) return;
-    stack.push(snapshot);
-    while (stack.length > 30) stack.shift();
-  } catch (error) {
-    console.warn("preview undo snapshot failed", error);
-  }
-}
-
-function previewSelectionUndoButton(scope = "smart") {
-  let count = 0;
-  try { count = previewSelectionUndoStack(scope).length; } catch (error) { console.warn("undo button failed", error); return ""; }
-  return '<div class="preview-selection-undo-bar">'
-    + '<button type="button" class="button button-secondary button-small" data-action="preview-selection-undo" data-preview-scope="' + scope + '"'
-    + (count ? '' : ' disabled')
-    + ' title="撤销上一次已选改动（删除 / 加入 / 调序）">撤销' + (count ? ' (' + count + ')' : '') + '</button>'
-    + '</div>';
-}
-
-function applyPreviewSelectionSnapshot(scope = "smart", snapshot) {
-  const preview = getPreviewState(scope);
-  if (!preview?.clips || !snapshot) return false;
-  const byIndex = new Map(preview.clips.map((clip) => [Number(clip.index), clip]));
-  snapshot.clips.forEach((entry) => {
-    const clip = byIndex.get(Number(entry.index));
-    if (!clip) return;
-    clip.selected = entry.selected;
-    const segments = previewSegments(clip);
-    entry.segments.forEach((saved) => {
-      const segment = segments.find((item) => Number(item.index) === Number(saved.index));
-      if (!segment) return;
-      segment.selected = saved.selected;
-      segment.wordSelectionExplicit = saved.explicit;
-      previewSegmentWords(segment).forEach((word) => {
-        const savedWord = saved.words.find((item) => Number(item.index) === Number(word.index));
-        if (savedWord) word.selected = savedWord.selected;
-      });
-    });
-  });
-  state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = [...snapshot.order];
-  state.previewDetailSelection[scope] = snapshot.detail;
-  state.previewCandidateSelections[scope] = snapshot.candidate;
-  commitPreviewDraft(scope);
-  renderPreviewStateKeepStoryScroll(scope);
-  return true;
-}
-
-function undoPreviewSelectionChange(scope = "smart") {
-  const stack = previewSelectionUndoStack(scope);
-  if (!stack.length) { toast("没有可撤销的已选改动", "info"); return false; }
-  const snapshot = stack.pop();
-  const ok = applyPreviewSelectionSnapshot(scope, snapshot);
-  if (ok) toast("已撤销：" + (snapshot.label || "已选改动"), "success");
-  return ok;
-}
-
 function inspectPreviewWorkbenchClip(index, scope = "smart") {
   state.previewDetailSelection[scope] = Number(index);
   if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
@@ -9339,7 +9240,6 @@ function removePreviewAssemblyCandidate(scope = "smart", index) {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
-  pushPreviewSelectionUndo(scope, "删除已选片段");
   const order = previewAssemblyOrder(scope, preview);
   const position = order.indexOf(Number(index));
   const neighborIndex = position >= 0 ? (order[position + 1] ?? order[position - 1] ?? null) : null;
@@ -9357,7 +9257,6 @@ function removePreviewAssemblyCandidate(scope = "smart", index) {
 function autoArrangePreviewAssembly(scope = "smart") {
   const preview = getPreviewState(scope);
   const order = previewAssemblyOrder(scope, preview);
-  pushPreviewSelectionUndo(scope, "自动排序");
   const positions = new Map(order.map((index, position) => [index, position]));
   const byIndex = new Map((preview?.clips || []).map((clip) => [Number(clip.index), clip]));
   order.sort((left, right) => {
@@ -9622,14 +9521,6 @@ function bindPreviewWorkbenchKeyboard(box, scope = "smart") {
   const workbench = box?.querySelector(`[data-preview-workbench-focus="${scope}"]`);
   if (!workbench) return;
   workbench.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && String(event.key || "").toLocaleLowerCase() === "z") {
-      if (event.target?.closest?.("input, textarea, select, [contenteditable=\"true\"]")) return;
-      if (state.previewWorkbenchStages[scope] === "triage") return; // 交给下方 triage 撤销
-      event.preventDefault();
-      if (previewWordEditHistory(scope).length) undoPreviewWordEdit(scope);
-      else undoPreviewSelectionChange(scope);
-      return;
-    }
     if (state.previewWorkbenchStages[scope] !== "triage") return;
     if (event.target?.closest?.("input, textarea, select, video, [contenteditable=\"true\"]")) return;
     const key = String(event.key || "").toLocaleLowerCase();
@@ -10062,7 +9953,6 @@ function renderSmartPreview(preview) {
   updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
   bindPreviewCandidateDrag(box, "smart");
-  bindPreviewPlayAll(box, "smart");
   bindPreviewWorkbenchKeyboard(box, "smart");
   if (state.previewWorkbenchStages.smart === "assembly") ensureInlinePreviewVideo("smart", state.previewDetailSelection.smart);
 }
@@ -10100,7 +9990,6 @@ function renderMixPreview(preview) {
   updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
   bindPreviewCandidateDrag(box, "mix");
-  bindPreviewPlayAll(box, "mix");
   bindPreviewWorkbenchKeyboard(box, "mix");
   if (state.previewWorkbenchStages.mix === "assembly") ensureInlinePreviewVideo("mix", state.previewDetailSelection.mix);
 }
@@ -12605,12 +12494,10 @@ function selectPreviewWorkbenchCandidate(index, scope = "smart") {
 }
 
 function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = null, placeAfter = false) {
-  try {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
   if (isPreviewWorkbenchSelected(clip)) return setPreviewDetailSelection(scope, Number(index));
-  pushPreviewSelectionUndo(scope, "加入已选片段");
   syncPreviewClipSelections(scope);
   const clipIndex = Number(index);
   const order = previewAssemblyOrder(scope, preview).filter((item) => Number(item) !== clipIndex);
@@ -12628,12 +12515,6 @@ function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = n
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
   ensureInlinePreviewVideo(scope, clipIndex);
-  return true;
-  } catch (error) {
-    console.error("insert candidate failed", error);
-    toast("加入片段失败：" + (error && error.message ? error.message : String(error)), "error");
-    return false;
-  }
 }
 
 function addPreviewWorkbenchCandidate(index, scope = "smart") {
@@ -12716,81 +12597,6 @@ function renderPreviewSelectedRows(scope, selected) {
 }
 
 // [AI_WORKBENCH_LIBRARY_END]
-/* ---- 整体预览（按已选顺序连播，前端实现，复用片段小视频）---- */
-function previewPlayAllRun(scope = "smart") {
-  const run = state.previewPlayAll;
-  return run && run.scope === scope && run.active ? run : null;
-}
-
-function previewPlayAllButton(scope = "smart") {
-  let run = null;
-  try { run = previewPlayAllRun(scope); } catch (error) { console.warn("play-all button failed", error); return ""; }
-  if (run) {
-    const at = Math.min(run.position + 1, run.indices.length);
-    return '<button type="button" class="button button-secondary button-small is-active" data-action="preview-play-all-stop" data-preview-scope="' + scope + '" title="停止整体预览">停止（' + at + '/' + run.indices.length + '）</button>';
-  }
-  const count = previewWorkbenchSelectedClips(scope, getPreviewState(scope)).length;
-  return '<button type="button" class="button button-secondary button-small" data-action="preview-play-all" data-preview-scope="' + scope + '"'
-    + (count ? '' : ' disabled')
-    + ' title="按已选顺序连播整条成片预览（硬切、开声）">整体预览' + (count ? '（' + count + '）' : '') + '</button>';
-}
-
-function bindPreviewPlayAll(box, scope = "smart") {
-  if (!box || box.dataset.previewPlayAllBound === "1") return;
-  box.dataset.previewPlayAllBound = "1";
-  // ended 不冒泡，用捕获阶段接；重渲染换元素也不会丢监听。
-  box.addEventListener("ended", (event) => {
-    try {
-    const video = event.target;
-    if (!video?.matches?.("[data-preview-inline-player]")) return;
-    const run = previewPlayAllRun(scope);
-    if (!run) return;
-    const index = Number(video.closest?.("[data-preview-inline-video]")?.dataset?.previewIndex);
-    if (Number(run.indices[run.position]) !== index) return;
-    run.position += 1;
-    advancePreviewPlayAll(scope);
-    } catch (error) { console.warn("play-all advance failed", error); }
-  }, true);
-  // 整体预览期间强制开声（“预览当前句”的静音偏好不影响它）。
-  box.addEventListener("playing", (event) => {
-    const video = event.target;
-    if (!video?.matches?.("[data-preview-inline-player]")) return;
-    if (!previewPlayAllRun(scope)) return;
-    try { video.muted = false; if (!video.volume) video.volume = 1; } catch (_error) { /* ignore */ }
-  }, true);
-}
-
-async function advancePreviewPlayAll(scope = "smart") {
-  const run = previewPlayAllRun(scope);
-  if (!run) return;
-  if (run.position >= run.indices.length) { stopPreviewPlayAll(scope, { completed: true }); return; }
-  const index = Number(run.indices[run.position]);
-  state.previewDetailSelection[scope] = index;
-  if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
-  renderPreviewStateKeepStoryScroll(scope);
-  await ensureInlinePreviewVideo(scope, index);
-}
-
-async function startPreviewPlayAll(scope = "smart") {
-  const preview = getPreviewState(scope);
-  const order = previewAssemblyOrder(scope, preview).map((item) => Number(item)).filter((item) => Number.isInteger(item));
-  if (!order.length) { toast("还没有可预览的已选片段", "info"); return; }
-  state.previewPlayAll = { scope, indices: order, position: 0, active: true };
-  if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
-  state.previewDetailSelection[scope] = Number(order[0]);
-  renderPreviewStateKeepStoryScroll(scope);
-  await ensureInlinePreviewVideo(scope, Number(order[0]));
-}
-
-function stopPreviewPlayAll(scope = "smart", { completed = false } = {}) {
-  state.previewPlayAll = null;
-  previewBox(scope)?.querySelectorAll("[data-preview-inline-player]").forEach((video) => {
-    try { video.pause(); } catch (_error) { /* ignore */ }
-  });
-  renderPreviewStateKeepStoryScroll(scope);
-  toast(completed ? "整体预览播放完毕" : "已停止整体预览", "info");
-}
-
 function renderPreviewWorkbenchVideoStage(scope, preview, current) {
   const clip = current?.clip;
   if (!clip) {
@@ -12798,7 +12604,7 @@ function renderPreviewWorkbenchVideoStage(scope, preview, current) {
   }
   const selected = isPreviewWorkbenchSelected(clip);
   const addButton = selected ? '' : '<button class="button button-secondary button-small" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165\u5df2\u9009</button>';
-  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + previewPlayAllButton(scope) + '</div></div>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
+  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
 }
 
 function renderPreviewEditorSentence(scope, clip, segment, position) {
@@ -14397,7 +14203,7 @@ function renderPreviewWorkbench(scope, preview, targetId) {
   const overview = isDirectorPreview
     ? renderCommerceDirectorRecommendationCard(preview, duration, scope)
     : renderPreviewFilmOverview(scope, preview, targetId, selected, duration);
-  return overview + '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + previewSelectionUndoButton(scope) + '<div class="preview-selected-list" data-preview-candidate-drop-zone data-preview-scope="' + scope + '">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
+  return overview + '<div class="preview-selection-workbench preview-workbench-unified" data-preview-workbench="' + scope + '" data-preview-workbench-focus="' + scope + '" tabindex="0"><aside class="preview-candidate-sidebar">' + candidateHead + renderPreviewCandidateFilterBar(scope, preview) + '<div class="preview-candidate-list">' + renderPreviewCandidateGroups(scope, preview) + '</div></aside><main class="preview-workbench-main">' + renderPreviewWorkbenchVideoStage(scope, preview, current) + renderPreviewSentenceEditor(scope, current) + '</main><aside class="preview-selected-sidebar">' + selectedHead + '<div class="preview-selected-list" data-preview-candidate-drop-zone data-preview-scope="' + scope + '">' + renderPreviewSelectedRows(scope, selected) + '</div></aside></div>';
 }
 
 function toast(message, type = "success") {
