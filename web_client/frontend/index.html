@@ -951,6 +951,20 @@
                 </div>
               </details>
 
+              <details class="director-section director-switch-section">
+                <summary>
+                  <span class="director-section-number">4</span>
+                  <strong>AI 调用开关</strong>
+                  <small>关掉可省一次 AI 调用；关掉后对应能力不再保证</small>
+                </summary>
+                <div class="director-section-body">
+                  <label class="director-switch"><input type="checkbox" id="mix-dir-hook-recall" checked><span><strong>独立 Hook 召回</strong><small>全文独立扫描开场候选（4 次里最贵，约占 1/3 成本）</small></span></label>
+                  <label class="director-switch"><input type="checkbox" id="mix-dir-calibration" checked><span><strong>时长校准</strong><small>实测不足时再跑一次，把时长补向目标（按需触发）</small></span></label>
+                  <label class="director-switch"><input type="checkbox" id="mix-dir-opening-split" checked><span><strong>开篇独立前置</strong><small>把独立选出的开场单独前置到片头</small></span></label>
+                  <label class="director-switch"><input type="checkbox" id="mix-dir-duration-trim" checked><span><strong>时长预算裁剪</strong><small>超预算时按章节裁剪，避免超时</small></span></label>
+                  <p class="panel-note">默认全开（质量优先）；成本敏感可关闭「独立 Hook 召回 / 时长校准」。</p>
+                </div>
+              </details>
               <div class="director-extra-section">
                 <div class="director-field">
                   <label for="mix-extra-instruction">补充要求 <span>可选，最多 300 字</span></label>

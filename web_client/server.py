@@ -15689,6 +15689,7 @@ def _run_commerce_director_mix_preview(
     """Run the same two-call Director over all mix sources as one story space."""
     scope = "mix"
     requested_plan_count = max(1, min(3, int(payload.versions or 1)))
+    _director_switches = _director_switches_from_payload(payload)
     try:
         _ensure_feature_access("混剪成片")
         paths = _existing_paths(payload.video_paths, "视频")
@@ -15759,6 +15760,10 @@ def _run_commerce_director_mix_preview(
             director_strategy_contract={
                 "single_ai_director_packet": True,
                 "two_pass_director_packet": True,
+                "opening_hook_recall": _director_switches["opening_hook_recall"],
+                "opening_unit_split": _director_switches["opening_unit_split"],
+                "duration_budget_trim": _director_switches["duration_budget_trim"],
+                "duration_calibration": _director_switches["duration_calibration"],
                 "sentence_preview_without_m3": True,
                 "semantic_call_count": 2,
                 "max_semantic_call_count": 2,
