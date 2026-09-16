@@ -9011,7 +9011,12 @@ function previewWorkbenchRoleRank(clip) {
 }
 
 function isPreviewWorkbenchSelected(clip) {
-  return clip?.selected !== false && (!previewSegments(clip).length || selectedPreviewSegments(clip).length > 0);
+  // 只有显式 selected === true 才算“已选”。
+  // 候选行默认没有 selected 字段；若把 undefined 当成已选（曾为修“切方案累加”而改），
+  // 候选行会被渲染成“已”（拖拽手柄被替换），导致右侧拖拽落位失效。
+  // 切方案场景由 switchPreviewDirectorVariant 显式写死 selected，无需在这里兜底。
+  if (clip?.selected !== true) return false;
+  return !previewSegments(clip).length || selectedPreviewSegments(clip).length > 0;
 }
 
 function previewWorkbenchCandidateDuration(clip) {

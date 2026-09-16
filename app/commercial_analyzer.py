@@ -2444,6 +2444,7 @@ def _expand_cast_sentence_groups(payload: dict[str, Any], subtitles: Sequence[Ma
     rows = {int(row["id"]): row for row in subtitles}
     allowed = set(rows) if executable_ids is None else set(executable_ids) & set(rows)
     expanded = 0
+    dropped: list[dict[str, Any]] = []
     for strategy in _strategy_refs(payload):
         for chapter in _chapter_refs(strategy):
             beats = chapter.get("beats") or []
@@ -2464,8 +2465,20 @@ def _expand_cast_sentence_groups(payload: dict[str, Any], subtitles: Sequence[Ma
                         raise AnalyzerError("Director 选句格式无效：字幕 ID 必须是整数。")
                     value = int(value)
                     if value not in allowed:
-                        raise AnalyzerError(f"Director 选句不可执行：字幕 ID {value} 不在安全可选素材中。")
+                        # 越界 ID：模型引用了“仅作上下文展示、不在可执行池里”的行。
+                        # 丢弃这一句，而不是让整次预览失败（校验在付费调用之后，代价高）。
+                        dropped.append({
+                            "subtitle_id": value,
+                            "strategy_id": str(strategy.get("strategy_id") or ""),
+                            "chapter_id": str(chapter.get("chapter_id") or ""),
+                            "beat_id": str(beat.get("beat_id") or ""),
+                            "reason": "not_in_executable_pool",
+                        })
+                        continue
                     values.append(value)
+                if not values:
+                    # 整条 beat 没有任何可执行句：丢弃该 beat，不报错。
+                    continue
                 if len(values) == 1:
                     result.append(dict(beat, subtitle_ids=values))
                     continue
@@ -2481,7 +2494,7 @@ def _expand_cast_sentence_groups(payload: dict[str, Any], subtitles: Sequence[Ma
                         item["beat_id"] = f"{item['beat_id']}_line{index + 1}"
                     result.append(item)
             chapter["beats"] = result
-    return {"expanded_groups": expanded}
+    return {"expanded_groups": expanded, "dropped_ids": dropped}
 
 
 def _cast_beat_cardinality_issues(casting_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -3840,6 +3853,7 @@ def build_two_pass_cast_prompt(
         "budget 是本章原声目标，budget_ceiling 是本章超长预警；budget_end 是到本章结束的累计目标。budget_floor 和 budget_end_floor 仅表示整片规划深度，不构成每章最低时长命令。逐章完成取舍，避免前几章耗尽全片预算；无需换算播放速度。",
         "时长门槛：若 duration.safe_pool_can_reach_source_min=true，source_min 是本次交付下限。先剔除残句、重复和无关内容；其后必须继续寻找服务当前故事的新机制、证明、体验、场景或顾虑解除，直到实测累计达到 source_min。不能因为首轮章节讲得简短、预计句数是参考或想保持精炼就提前交卷。只有逐章说明缺失的具体购买判断、且确实没有可选原话可补时，才允许 source_material_limited/natural_complete_below_target。",
         "本轮即最终选片：这一轮就要按 source_target/source_min 排出完整片单；预计句数、首轮章节估算或想保持精炼都不是提前收尾的理由。",
+        "ID 纪律（硬约束）：每个 subtitle_ids / product_evidence_ids / completion_receipts 只能填上面“安全候选字幕片段”里出现过的数字 ID；[context ID] 段里的数字一律禁止引用，任何越界 ID 都会被丢弃。",
         "执行顺序：先从安全池识别完整语义单元；再联合选择Hook、紧接兑现与正文，按播放顺序连读、去重；最后归章计时。章节职责服务已经连顺的口播，不能为了填章抽取半句；不能靠不同 role 标签把同义句分装进两章。整片最多保留一个以操作步骤为主的证明块，第一种/第二种/第三种穿法只作证据，不各自凑章。",
         "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。",
         "",
@@ -5627,6 +5641,12 @@ def analyze_commercial_story(
         format_receipt = _expand_cast_sentence_groups(cast_payload, subtitles, format_executable_ids)
         if format_receipt["expanded_groups"]:
             log(f"已按 AI 原顺序展开 {format_receipt['expanded_groups']} 个多句组；未增删原话或调整章节。")
+        if format_receipt.get("dropped_ids"):
+            _dropped_preview = ", ".join(str(item.get("subtitle_id")) for item in format_receipt["dropped_ids"][:12])
+            log(
+                f"已丢弃 {len(format_receipt['dropped_ids'])} 个不在可执行池的选句"
+                f"（模型引用了仅作上下文展示的行）：{_dropped_preview}"
+            )
         if stage_response_hook and format_receipt["expanded_groups"]:
             stage_response_hook("casting_format_normalization", json.dumps(format_receipt, ensure_ascii=False))
         if identity_errors and isinstance(cast_payload.get("corrected_story"), Mapping):
