@@ -9259,17 +9259,23 @@ function capturePreviewSelectionSnapshot(scope = "smart", label = "") {
 }
 
 function pushPreviewSelectionUndo(scope = "smart", label = "") {
-  const snapshot = capturePreviewSelectionSnapshot(scope, label);
-  if (!snapshot) return;
-  const stack = previewSelectionUndoStack(scope);
-  const last = stack[stack.length - 1];
-  if (last && last.label === snapshot.label && JSON.stringify(last.order) === JSON.stringify(snapshot.order)) return;
-  stack.push(snapshot);
-  while (stack.length > 30) stack.shift();
+  // 快照只是“后悔药”，绝不能因为它失败而影响主流程（删除/加入/调序）。
+  try {
+    const snapshot = capturePreviewSelectionSnapshot(scope, label);
+    if (!snapshot) return;
+    const stack = previewSelectionUndoStack(scope);
+    const last = stack[stack.length - 1];
+    if (last && last.label === snapshot.label && JSON.stringify(last.order) === JSON.stringify(snapshot.order)) return;
+    stack.push(snapshot);
+    while (stack.length > 30) stack.shift();
+  } catch (error) {
+    console.warn("preview undo snapshot failed", error);
+  }
 }
 
 function previewSelectionUndoButton(scope = "smart") {
-  const count = previewSelectionUndoStack(scope).length;
+  let count = 0;
+  try { count = previewSelectionUndoStack(scope).length; } catch (error) { console.warn("undo button failed", error); return ""; }
   return '<div class="preview-selection-undo-bar">'
     + '<button type="button" class="button button-secondary button-small" data-action="preview-selection-undo" data-preview-scope="' + scope + '"'
     + (count ? '' : ' disabled')
@@ -12599,6 +12605,7 @@ function selectPreviewWorkbenchCandidate(index, scope = "smart") {
 }
 
 function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = null, placeAfter = false) {
+  try {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
@@ -12621,6 +12628,12 @@ function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = n
   commitPreviewDraft(scope);
   renderPreviewStateKeepStoryScroll(scope);
   ensureInlinePreviewVideo(scope, clipIndex);
+  return true;
+  } catch (error) {
+    console.error("insert candidate failed", error);
+    toast("加入片段失败：" + (error && error.message ? error.message : String(error)), "error");
+    return false;
+  }
 }
 
 function addPreviewWorkbenchCandidate(index, scope = "smart") {
@@ -12710,7 +12723,8 @@ function previewPlayAllRun(scope = "smart") {
 }
 
 function previewPlayAllButton(scope = "smart") {
-  const run = previewPlayAllRun(scope);
+  let run = null;
+  try { run = previewPlayAllRun(scope); } catch (error) { console.warn("play-all button failed", error); return ""; }
   if (run) {
     const at = Math.min(run.position + 1, run.indices.length);
     return '<button type="button" class="button button-secondary button-small is-active" data-action="preview-play-all-stop" data-preview-scope="' + scope + '" title="停止整体预览">停止（' + at + '/' + run.indices.length + '）</button>';
@@ -12726,6 +12740,7 @@ function bindPreviewPlayAll(box, scope = "smart") {
   box.dataset.previewPlayAllBound = "1";
   // ended 不冒泡，用捕获阶段接；重渲染换元素也不会丢监听。
   box.addEventListener("ended", (event) => {
+    try {
     const video = event.target;
     if (!video?.matches?.("[data-preview-inline-player]")) return;
     const run = previewPlayAllRun(scope);
@@ -12734,6 +12749,7 @@ function bindPreviewPlayAll(box, scope = "smart") {
     if (Number(run.indices[run.position]) !== index) return;
     run.position += 1;
     advancePreviewPlayAll(scope);
+    } catch (error) { console.warn("play-all advance failed", error); }
   }, true);
   // 整体预览期间强制开声（“预览当前句”的静音偏好不影响它）。
   box.addEventListener("playing", (event) => {

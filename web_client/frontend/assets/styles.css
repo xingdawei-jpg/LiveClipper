@@ -13744,30 +13744,6 @@ button.commerce-director-sidebar-alt-card:focus-visible {
 .director-switch strong{font-size:13.5px}
 .director-switch small{color:#8b8f94;font-size:12px}
 
-/* 2026-09-16 布局溢出兜底：修“点击章节后内容撑破、左栏被遮”。
-   背景：.app-shell 用 100vw（含滚动条宽度）+ 工作台三列硬下限（250/420/360px），
-   窄窗口或点章节渲染更宽内容时会横向溢出，把页面顶破。这里统一兜住。 */
-html, body { max-width: 100%; overflow-x: hidden; }
-.app-shell { width: 100%; max-width: 100vw; overflow-x: hidden; }
-.app-shell > .workspace, .workspace { min-width: 0; max-width: 100%; overflow-x: hidden; }
-.preview-selection-workbench.preview-workbench-unified {
-  grid-template-columns: minmax(0, 0.84fr) minmax(0, 1.28fr) minmax(0, 1.08fr);
-  max-width: 100%;
-}
-@media (max-width: 1040px) {
-  .preview-selection-workbench.preview-workbench-unified {
-    grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
-  }
-}
-.preview-workbench-unified .preview-candidate-sidebar,
-.preview-workbench-unified .preview-selected-sidebar,
-.preview-workbench-unified .preview-workbench-main { min-width: 0; max-width: 100%; overflow-x: hidden; }
-.preview-workbench-unified .preview-candidate-main > strong,
-.preview-workbench-unified .preview-candidate-main span,
-.preview-workbench-unified .preview-selected-main > span,
-.preview-workbench-unified .preview-current-text { overflow-wrap: anywhere; word-break: break-word; }
-.commerce-director-recommendation, .commerce-director-top-variants, .commerce-director-recommendation-path { max-width: 100%; min-width: 0; }
-
 /* 已选片段撤销条（2026-09-16） */
 .preview-selection-undo-bar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 2px 6px 4px; }
 .preview-selection-undo-bar .button { min-width: 84px; }
