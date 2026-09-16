@@ -11332,6 +11332,8 @@ def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveR
     segments = _fallback_live_product_segments(duration, settings)
     _apply_live_product_segment_names(segments, payload, output.stem)
     created_at = datetime.now().isoformat(timespec="seconds")
+    # “按录制时长兜底”的路径没有 remux 摘要；原来这里引用了未定义的 summary -> NameError。
+    summary: dict[str, Any] = {}
     queue = {
         "version": 1,
         "created_at": created_at,

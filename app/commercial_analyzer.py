@@ -1738,10 +1738,7 @@ def _post_two_pass_director_request_with_retry(*, max_tokens: int, **kwargs: Any
     except (TimeoutError, OSError):
         text = "timeout"
     retry_tokens = max(int(max_tokens) * 2, int(max_tokens) + 2000)
-    try:
-        log(f"Director {kwargs.get('stage')} 首次返回失败（{text}），抬高上限 {int(max_tokens)}→{retry_tokens} 重试一次。")
-    except Exception:
-        pass
+    # 只做一次有界重试；这里不打日志（该函数在模块级，取不到调用方的局部 logger）。
     return _post_two_pass_director_request(max_tokens=retry_tokens, **kwargs)
 
 
@@ -5911,11 +5908,6 @@ def analyze_commercial_story(
         )
         if raw_response_hook:
             raw_response_hook(raw)
-    if opening_hook_payload is not None:
-        try:
-            result.opening_hook_recall = opening_hook_payload
-        except Exception:
-            log("opening_hook_recall 无法挂到结果对象（只读）")
     result = parse_strategy_result(
         raw,
         product=product,
@@ -5924,6 +5916,13 @@ def analyze_commercial_story(
         content_contract=content_contract,
         commercial_assets=commercial_assets,
     )
+    # 挂载独立 Hook 召回结果（必须在 result 生成之后；此前放在 parse 之前，
+    # 一直被 except 静默吞掉，导致 P0-a 召回结果其实没挂上）。
+    if opening_hook_payload is not None:
+        try:
+            result.opening_hook_recall = opening_hook_payload
+        except Exception:
+            log("opening_hook_recall 无法挂到结果对象（只读）")
     log(
         f"Commercial Story Analyzer: product={result.product or '-'} "
         f"strategies={len(result.strategies)}"
