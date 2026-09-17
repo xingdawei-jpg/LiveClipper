@@ -2580,6 +2580,84 @@ def _continuation_completion_pass(
             chapter["beats"] = result
     return {"inserted": inserted, "skipped": skipped}
 
+def _opening_receipt_selection(receipt: Any) -> tuple[list[int], str]:
+    """从开场回执里取出 (selected_subtitle_ids, quality)。找不到就返回 ([], "")。"""
+    if not isinstance(receipt, Mapping):
+        return [], ""
+    for candidate in (
+        receipt,
+        receipt.get("receipt") if isinstance(receipt.get("receipt"), Mapping) else {},
+        receipt.get("selection") if isinstance(receipt.get("selection"), Mapping) else {},
+    ):
+        raw = (candidate or {}).get("selected_subtitle_ids") or []
+        if not raw:
+            continue
+        ids: list[int] = []
+        for value in raw:
+            try:
+                ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if ids:
+            return ids, str((candidate or {}).get("quality") or "")
+    return [], ""
+
+def _enforce_opening_first(payload: Mapping[str, Any], opening_ids: Sequence[int]) -> dict[str, Any]:
+    """strong 开场回执的顺序若没落在第一章最前面，就在第一章内部把它前移。
+    只调整顺序，不改写原话；不跨章搬运。"""
+    want = [int(v) for v in (opening_ids or [])]
+    moved: list[int] = []
+    if not want:
+        return {"moved": moved}
+    strategies = payload.get("strategies") or ()
+    if isinstance(strategies, Mapping):
+        strategies = (strategies,)
+    for strategy in strategies:
+        if not isinstance(strategy, Mapping):
+            continue
+        chapters = strategy.get("chapter_packets") or ()
+        if isinstance(chapters, Mapping):
+            chapters = (chapters,)
+        if not chapters:
+            continue
+        first = chapters[0]
+        if not isinstance(first, dict):
+            continue
+        beats = first.get("beats") or []
+        if isinstance(beats, Mapping):
+            beats = [beats]
+        if not isinstance(beats, list) or not beats:
+            continue
+
+        def beat_ids(beat: Any) -> list[int]:
+            if not isinstance(beat, Mapping):
+                return []
+            raw = beat.get("subtitle_ids") or beat.get("ids") or []
+            out: list[int] = []
+            for value in raw:
+                try:
+                    out.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        head: list[Any] = []
+        remaining = list(beats)
+        for sid in want:
+            hit = next((b for b in remaining if sid in beat_ids(b)), None)
+            if hit is None:
+                continue
+            head.append(hit)
+            remaining.remove(hit)
+        if not head:
+            continue
+        current_prefix = [i for beat in beats[:len(head)] for i in beat_ids(beat)]
+        if current_prefix == want[:len(head)]:
+            continue
+        first["beats"] = head + remaining
+        moved = want[:len(head)]
+    return {"moved": moved}
+
 def _script_continuity_prompt(script_lines: Sequence[str], pool_lines: Sequence[str]) -> str:
     """把整篇选片文案当一篇文章来读：找不通顺/截断处（优先每章最后一句），
     再从整池里挑一条承接更好的句子补进去（不限于原始相邻行）。"""
@@ -4092,7 +4170,7 @@ def build_two_pass_cast_prompt(
         "按原字幕前后核对口语依赖：‘没有这个点’必须保留所指结论，‘因为/所以/它/那种’必须有明确对象和完整谓语。先保留必要的前后短句再检查预算；不能为限制句数跳过结论或截掉句尾。开场不得保留‘又没什么特点’、‘刚刚讲过了’、‘放在这里就’、‘捏着这一根’等依赖直播现场或画面才能成立的铺垫/指令；正文也不能用它们替代一个完整购买判断。",
         "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序逐对连读，并为每次衔接在内部确认一种真实关系：前句提出顾虑/结论而后句回答或证明；前句给机制而后句给结果；前句给结果而后句解释原因；前句结束一个完整判断而后句自然引入不同但相关的新购买价值。若两句只能靠章节标题、画面、被跳过的直播上下文或模型改写才能连上，必须删掉其中一句、补一条真正的连接句，或合并/取消章节。不能把“有三种穿法”接到“又没什么特点”这类无承接残句，也不能用连续操作指令代替购买判断。保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
         "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。选定前先做纯文本盲读：隐藏章节标题和画面，只听前 6-10 秒仍须知道在讲什么商品、它带来什么具体好处、下一句新增了什么；任一答案缺失就换候选或 quality=limited。没有足够候选就如实少报。",
-        "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，不是最终片单、不是必须使用的开头。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
+        "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，**并且当开场回执 quality=strong 时必须落地**：最终片单的第一句必须是它的 Hook，第二句起就要开始兑现 payoff，不得在前面插入铺垫；确实要改选，必须在 chapter_goal 里写明替代理由，否则视为不合规。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
         "开场联合选择Hook与紧接兑现。痛点型Hook之后，payoff必须开始回答本款怎样解决该顾虑，给出具体效果、机制或证明；继续吐槽普通款、把痛点讲得更具体、或宣称不用再买，都不算本款兑现。结果型Hook之后须增加解释或证据；可拆→还能拆这类同义重复不能算兑现。不能仅因两句内容不同就判定兑现；找不到完整组合时quality=limited。",
         "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
         "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向原片的实际指代依据（可引用 context ID，但绝不能将 context ID 剪进 Hook 或 payoff），并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
@@ -5884,6 +5962,17 @@ def analyze_commercial_story(
             log(f"已补入 {len(continuation_receipt['inserted'])} 条承接句（原句没说完，按原顺序补下一行；未改写原话）。")
         if continuation_receipt["skipped"]:
             log(f"有 {len(continuation_receipt['skipped'])} 处承接句无法补入（不在可执行池或已被使用），已记录审计。")
+        # ② 开场落地：strong 回执的顺序必须落在第一章最前面（只调序，不改写）。
+        try:
+            _opening_ids, _opening_quality = _opening_receipt_selection(opening_hook_payload)
+            if _opening_ids and _opening_quality == "strong":
+                _landing = _enforce_opening_first(cast_payload, _opening_ids)
+                if _landing.get("moved"):
+                    log("开场已按回执前移（strong）：" + str(_landing["moved"]))
+                    if stage_response_hook:
+                        stage_response_hook("opening_landing", json.dumps(_landing, ensure_ascii=False))
+        except Exception as _opening_exc:  # noqa: BLE001 - 落地失败不影响主流程
+            log(f"开场落地检查异常（已跳过）：{type(_opening_exc).__name__}: {_opening_exc}")
         if format_receipt["expanded_groups"]:
             log(f"已按 AI 原顺序展开 {format_receipt['expanded_groups']} 个多句组；未增删原话或调整章节。")
         if format_receipt.get("dropped_ids"):
