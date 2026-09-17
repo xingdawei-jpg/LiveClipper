@@ -3666,7 +3666,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                 encoding="utf-8",
                 errors="replace",
                 creationflags=_NO_WINDOW,
-                timeout=15,
+                timeout=60,
             )
             clip_has_audio.append("Audio:" in (probe.stderr or ""))
         except Exception as probe_error:
@@ -7097,12 +7097,22 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     clip_probe_summaries = []
     for tf in temp_files:
         clip_durations.append(_probe_media_duration(tf))
-        p = subprocess.run([ffmpeg, "-i", tf], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, encoding="utf-8", errors="replace",
-                          creationflags=_NO_WINDOW, timeout=15)
-        stderr = p.stderr or ""
-        clip_has_video.append("Video:" in stderr)
-        clip_has_audio.append("Audio:" in stderr)
+        # 预检只是“看一眼流信息”，绝不能因为它超时就让整次混剪失败：
+        # 磁盘慢 / 文件被占用时 ffmpeg -i 可能很久不返回，这里放宽超时并容错。
+        try:
+            p = subprocess.run([ffmpeg, "-i", tf], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, encoding="utf-8", errors="replace",
+                              creationflags=_NO_WINDOW, timeout=60)
+            stderr = p.stderr or ""
+            has_video = "Video:" in stderr
+            has_audio = "Audio:" in stderr
+        except Exception as probe_error:
+            _log(f"  Warning: 预检超时/失败，按“有流”继续: {os.path.basename(tf)} ({probe_error})")
+            stderr = ""
+            has_video = True
+            has_audio = True
+        clip_has_video.append(has_video)
+        clip_has_audio.append(has_audio)
         summary_lines = []
         for line in stderr.splitlines():
             stripped = line.strip()
