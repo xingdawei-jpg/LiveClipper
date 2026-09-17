@@ -1548,6 +1548,14 @@ def _director_controls_prompt(
         "preference_weights 是长期软偏好：0=尽量少讲、1=标准、3=强优先；不是分数排序或必选配额，只参考与当前品类和故事相关的倾向。",
         "优先讲/重点词不是必须覆盖清单；素材证据弱时应舍弃。避选项不得进入主动选句。",
         "开头与收尾偏好只有在存在干净、完整、符合主故事的原话时才使用，不得制造伪 Hook 或硬凑结尾。",
+        (
+            "结尾专项：最后一章必须是收尾章（chapter_kind 取 close 语义），并且同时满足三点："
+            "① 收住全片，让观众明确知道‘讲完了’；② 回到本片的主购买理由，不得引入新卖点或新商品；"
+            "③ 不能停在半句——结尾章的最后一句必须是一句能独立收住的完整原话。"
+            "若导演参数给了 ending_style（自然收尾/强调价值/制造紧迫），按该风格设计结尾；未给则自然收尾。"
+            "若安全池里找不到能让结尾章完整收住的真实原话，就把该章收窄到一句能收住的完整原话；"
+            "不许硬凑、不许截半句，也不许把结尾章退化成一句与全片无关的客套话。"
+        ) if stage == "story" else "",
     ])
 
 
@@ -2496,6 +2504,217 @@ def _expand_cast_sentence_groups(payload: dict[str, Any], subtitles: Sequence[Ma
             chapter["beats"] = result
     return {"expanded_groups": expanded, "dropped_ids": dropped}
 
+
+
+def _continuation_completion_pass(
+    payload: dict[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """按内容（不看标点）补全“没说完”的 beat 的承接句。
+
+    规则：模型对每个 beat 自判 utterance_complete；若为 false 而紧邻下一个 beat 不是
+    原字幕的下一行（承接句），且该承接句在可执行池内且本方案未用过，则把它补在中间。
+    这是确定性补全：不改写任何原话，只按原顺序插入缺失的承接句。
+    """
+    rows = {int(row["id"]): row for row in subtitles}
+    allowed = set(rows) if executable_ids is None else (set(executable_ids) & set(rows))
+    ordered_ids = [int(item) for item in rows]
+    next_source_id: dict[int, int] = {}
+    for position, sid in enumerate(ordered_ids):
+        if position + 1 < len(ordered_ids):
+            next_source_id[sid] = ordered_ids[position + 1]
+    inserted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for strategy in _strategy_refs(payload):
+        for chapter in _chapter_refs(strategy):
+            beats = chapter.get("beats") or []
+            if isinstance(beats, Mapping):
+                beats = [beats]
+            if not isinstance(beats, list):
+                continue
+            used = {
+                int(value)
+                for beat in beats if isinstance(beat, Mapping)
+                for value in (beat.get("subtitle_ids") or beat.get("ids") or [])
+            }
+            result: list[Any] = []
+            for position, beat in enumerate(beats):
+                if not isinstance(beat, Mapping):
+                    result.append(beat); continue
+                result.append(beat)
+                if beat.get("utterance_complete") is not False:
+                    continue
+                ids = beat.get("subtitle_ids") or beat.get("ids") or []
+                try:
+                    last_id = int(ids[-1]) if ids else None
+                except (TypeError, ValueError):
+                    last_id = None
+                if last_id is None or last_id not in next_source_id:
+                    continue
+                want = next_source_id[last_id]
+                nxt = beats[position + 1] if position + 1 < len(beats) else None
+                nxt_ids = (nxt.get("subtitle_ids") or nxt.get("ids") or []) if isinstance(nxt, Mapping) else []
+                try:
+                    nxt_first = int(nxt_ids[0]) if nxt_ids else None
+                except (TypeError, ValueError):
+                    nxt_first = None
+                if nxt_first == want:
+                    continue  # 已经接上了
+                if want in used:
+                    skipped.append({"reason": "continuation_already_used", "subtitle_id": want})
+                    continue
+                if want not in allowed:
+                    skipped.append({"reason": "continuation_not_selectable", "subtitle_id": want})
+                    continue
+                filler = {
+                    "beat_function": str(beat.get("beat_function") or "continuation"),
+                    "subtitle_ids": [want],
+                    "utterance_complete": True,
+                    "continuation_of": last_id,
+                    "product_relation": beat.get("product_relation"),
+                }
+                result.append(filler)
+                used.add(want)
+                inserted.append({"subtitle_id": want, "continuation_of": last_id})
+            chapter["beats"] = result
+    return {"inserted": inserted, "skipped": skipped}
+
+def _script_continuity_prompt(script_lines: Sequence[str], pool_lines: Sequence[str]) -> str:
+    """把整篇选片文案当一篇文章来读：找不通顺/截断处（优先每章最后一句），
+    再从整池里挑一条承接更好的句子补进去（不限于原始相邻行）。"""
+    return (
+        "下面是本次成片的完整口播稿，按章节顺序排好（`|章末|` 标出每章最后一句）。请把它当成一篇文章通读。\n\n"
+        "任务：找出**读起来不通顺、话没说完/半截**的地方——**优先检查每一章的章末**（章末截断最刺耳）。"
+        "只看内容，不要依赖标点（标点是本地语音识别给的，不准）。\n\n"
+        "对每一处问题，从后面给出的【可选句池】里挑**一条**承接最好、语义能补全的句子（**不限于原文的下一句**，可以是池里任何位置）。"
+        "要求：补进去之后，前后连读自然、意思完整；不要重复已在稿里的句子；不要改写任何原句。\n\n"
+        "只输出 JSON，不要解释：{\"fixes\": [{\"after_id\": 在它后面补的句子ID, \"add_id\": 要补的句子ID, \"reason\": \"一句话说明\"}]}；没有问题就输出 {\"fixes\": []}。\n\n"
+        "【本次口播稿】\n" + "\n".join(script_lines)
+        + "\n\n【可选句池】\n" + "\n".join(pool_lines)
+    )
+
+def review_continuations(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    *, api_key: str, base_url: str, model: str, timeout: float, log_fn: Any = None,
+    executable_ids: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """整篇通读 + 从整池挑承接句（一次调用）。失败返回空结果，绝不影响主流程。"""
+    rows = {int(row["id"]): row for row in subtitles}
+    allowed = set(rows) if executable_ids is None else (set(executable_ids) & set(rows))
+    script_lines: list[str] = []
+    chapters: list[list[int]] = []
+    for strategy in _strategy_refs(payload):
+        for chapter in _chapter_refs(strategy):
+            beats = chapter.get("beats") or []
+            if isinstance(beats, Mapping):
+                beats = [beats]
+            ids: list[int] = []
+            for beat in beats:
+                if not isinstance(beat, Mapping):
+                    continue
+                raw = beat.get("subtitle_ids") or beat.get("ids") or []
+                for value in raw:
+                    try:
+                        sid = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if sid in rows:
+                        ids.append(sid)
+            if ids:
+                chapters.append(ids)
+    flat = [sid for ids in chapters for sid in ids]
+    if not flat:
+        return {"fixes": [], "checked": 0}
+    # 稿子：标出每章最后一句
+    for ids in chapters:
+        for position, sid in enumerate(ids):
+            mark = "|章末|" if position == len(ids) - 1 else ""
+            script_lines.append(f'{mark}#{sid}|{str(rows[sid].get("text") or "").strip()}')
+        script_lines.append("----")
+    pool_lines = [f'#{sid}|{str(rows[sid].get("text") or "").strip()}' for sid in rows if sid in allowed]
+    prompt = _script_continuity_prompt(script_lines, pool_lines)
+    try:
+        raw = _post_analyzer_request(
+            api_key=api_key, base_url=base_url, model=model,
+            user_prompt=prompt, temperature=0.0, top_p=1.0,
+            max_tokens=2000, timeout=timeout,
+        )
+        data = _extract_json(raw)
+    except Exception as exc:  # noqa: BLE001 - 审查失败不得阻断导演
+        if log_fn:
+            log_fn(f"整篇承接审查失败（已跳过）：{type(exc).__name__}: {exc}")
+        return {"fixes": [], "checked": len(flat), "error": f"{type(exc).__name__}"}
+    used = set(flat)
+    fixes: list[dict[str, Any]] = []
+    for item in (data.get("fixes") or []):
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            after = int(item.get("after_id"))
+            add = int(item.get("add_id"))
+        except (TypeError, ValueError):
+            continue
+        if after in used and add in allowed and add not in used:
+            fixes.append({"after_id": after, "add_id": add, "reason": str(item.get("reason") or "")[:80]})
+            used.add(add)
+    return {"fixes": fixes, "checked": len(flat)}
+
+def apply_continuation_fill(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    fixes: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """按审查结果，把补全句插到指定句之后；不改写任何原话。"""
+    rows = {int(row["id"]): row for row in subtitles}
+    allowed = set(rows) if executable_ids is None else (set(executable_ids) & set(rows))
+    want: dict[int, list[int]] = {}
+    for item in fixes or ():
+        try:
+            want.setdefault(int(item.get("after_id")), []).append(int(item.get("add_id")))
+        except (TypeError, ValueError):
+            continue
+    inserted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    if not want:
+        return {"inserted": inserted, "skipped": skipped}
+    for strategy in _strategy_refs(payload):
+        for chapter in _chapter_refs(strategy):
+            beats = chapter.get("beats") or []
+            if isinstance(beats, Mapping):
+                beats = [beats]
+            if not isinstance(beats, list):
+                continue
+            used = {int(v) for beat in beats if isinstance(beat, Mapping)
+                    for v in (beat.get("subtitle_ids") or beat.get("ids") or [])}
+            out: list[Any] = []
+            for beat in beats:
+                out.append(beat)
+                if not isinstance(beat, Mapping):
+                    continue
+                ids = beat.get("subtitle_ids") or beat.get("ids") or []
+                try:
+                    last = int(ids[-1]) if ids else None
+                except (TypeError, ValueError):
+                    last = None
+                for add in want.get(last, []) if last is not None else []:
+                    if add in used:
+                        skipped.append({"subtitle_id": add, "reason": "already_used"}); continue
+                    if add not in allowed:
+                        skipped.append({"subtitle_id": add, "reason": "not_selectable"}); continue
+                    out.append({
+                        "beat_function": str(beat.get("beat_function") or "continuation"),
+                        "subtitle_ids": [add],
+                        "utterance_complete": True,
+                        "continuation_of": last,
+                        "product_relation": beat.get("product_relation"),
+                    })
+                    used.add(add)
+                    inserted.append({"subtitle_id": add, "continuation_of": last})
+            chapter["beats"] = out
+    return {"inserted": inserted, "skipped": skipped}
 
 def _cast_beat_cardinality_issues(casting_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return non-one-ID final Beats without changing the AI sequence."""
@@ -3802,6 +4021,7 @@ def build_two_pass_cast_prompt(
                 "beats": [{
                     "beat_function": "result/mechanism/proof/experience/risk_remove/styling/scene/trust",
                     "subtitle_ids": [101],
+                    "utterance_complete": True,
                     "product_relation": "main_product/styling_support",
                     "subject_product": "这条原话实际讲述的商品，不是照抄目标名",
                     "subject_product_type": "/".join(PRODUCT_TYPES),
@@ -3867,7 +4087,7 @@ def build_two_pass_cast_prompt(
         ),
         "取舍优先级：商品与事实准确、语义完整、前后顺畅和不重复是不可突破的前提；在此前提满足后，source_min/source_target 是交付要求，不是可忽略的参考。不得为达到下限保留残句、重复或无关内容，也不得在安全池容量足够时仅因想精炼而提前结束。超过source_max先删除非必要完整单元，不截半句；无法兼顾时必须报告具体缺口，不能冒报pass。",
         "真实句长参考：" + json.dumps(pacing_reference, ensure_ascii=False, separators=(",", ":")),
-        "approximate_beats 仅为预算规模参考，没有固定句数上下限。每个最终 beat 的 ids 必须恰好写一个 ID；不得把多条字幕塞进一个 ids 数组来隐藏连续长口播。字幕行不等于一句话：必要相邻句必须分别写成连续 beats，并在 semantic_units 中列成一个完整语义单元。单句或完整语义单元通常 2-5 秒；只有必要上下句才能闭合意思时才可延至 5-8 秒。完整表达若超过8秒，另选更短完整表达，或放弃该卖点并收窄章节承诺；不能抽出含卖点的半句，不能用拆分semantic_units规避限制。",
+        "approximate_beats 仅为预算规模参考，没有固定句数上下限。每个最终 beat 的 ids 必须恰好写一个 ID；不得把多条字幕塞进一个 ids 数组来隐藏连续长口播。字幕行不等于一句话：必要相邻句必须分别写成连续 beats，并在 semantic_units 中列成一个完整语义单元。**内容完整优先于时长**：不要为了压到某个秒数而抽走半句；一句说不完就接着选它的下一句，哪怕因此到 6-8 秒。**每个 beat 必须自判 utterance_complete**（true/false，**只按内容判断，不看标点**——本地 ASR 的标点不可信）：只要这句单独连读讲不通、必须靠下一句才讲完（例如停在‘它/这个/因为/就是/那么’这类承接处），就必须填 false，并且**紧邻的下一个 beat 必须是它的承接句**——即原字幕的下一行原话，不得改写、不得插进别的句子。两者在 semantic_units 中列成同一组。**不得以没说完的话收尾**；也不得把承接句挪到很久之后再讲。完整表达若确实超过 8 秒，另选更短的完整表达，或放弃该卖点并收窄章节承诺；不能抽出含卖点的半句，不能用拆分 semantic_units 规避限制。",
         "章节兑现只看最终口播：标题和 role 标签不算证据；介绍材质不等于说明不扎，鼓励尝试不等于教会搭配，说到网眼洞口不等于已经讲出做工结论，说到某一版不等于完成版本对比。每项 needs 用最短的一个完整语义单元直接说出问题、解释或证据和结论；只有补句不可或缺时才增加相邻句。alternative_beats 不参与兑现。不要把尚未选入的关键句只放在备选里。",
         "按原字幕前后核对口语依赖：‘没有这个点’必须保留所指结论，‘因为/所以/它/那种’必须有明确对象和完整谓语。先保留必要的前后短句再检查预算；不能为限制句数跳过结论或截掉句尾。开场不得保留‘又没什么特点’、‘刚刚讲过了’、‘放在这里就’、‘捏着这一根’等依赖直播现场或画面才能成立的铺垫/指令；正文也不能用它们替代一个完整购买判断。",
         "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序逐对连读，并为每次衔接在内部确认一种真实关系：前句提出顾虑/结论而后句回答或证明；前句给机制而后句给结果；前句给结果而后句解释原因；前句结束一个完整判断而后句自然引入不同但相关的新购买价值。若两句只能靠章节标题、画面、被跳过的直播上下文或模型改写才能连上，必须删掉其中一句、补一条真正的连接句，或合并/取消章节。不能把“有三种穿法”接到“又没什么特点”这类无承接残句，也不能用连续操作指令代替购买判断。保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
@@ -5639,6 +5859,30 @@ def analyze_commercial_story(
         for issue in grouped_beat_issues:
             grouped_beat_issues_by_strategy.setdefault(str(issue.get("strategy_id") or "S1"), []).append(issue)
         format_receipt = _expand_cast_sentence_groups(cast_payload, subtitles, format_executable_ids)
+        # 承接审查（按内容，一次极小调用）+ 确定性补入缺失的承接句。
+        try:
+            continuation_review = review_continuations(
+                cast_payload, subtitles, api_key=api_key, base_url=base_url,
+                model=director_model, timeout=director_casting_request_timeout(director_model, timeout), log_fn=log,
+                executable_ids=format_executable_ids,
+            )
+        except Exception as continuation_exc:  # noqa: BLE001 - 绝不阻断导演
+            continuation_review = {"dangling": [], "checked": 0}
+            log(f"承接审查异常（已跳过）：{type(continuation_exc).__name__}: {continuation_exc}")
+        continuation_receipt = apply_continuation_fill(
+            cast_payload, subtitles, continuation_review.get("fixes") or [], format_executable_ids,
+        )
+        if stage_response_hook:
+            stage_response_hook("continuation_review", json.dumps({
+                "checked": continuation_review.get("checked", 0),
+                "fixes": continuation_review.get("fixes") or [],
+                "inserted": continuation_receipt["inserted"],
+                "skipped": continuation_receipt["skipped"],
+            }, ensure_ascii=False, indent=2))
+        if continuation_receipt["inserted"]:
+            log(f"已补入 {len(continuation_receipt['inserted'])} 条承接句（原句没说完，按原顺序补下一行；未改写原话）。")
+        if continuation_receipt["skipped"]:
+            log(f"有 {len(continuation_receipt['skipped'])} 处承接句无法补入（不在可执行池或已被使用），已记录审计。")
         if format_receipt["expanded_groups"]:
             log(f"已按 AI 原顺序展开 {format_receipt['expanded_groups']} 个多句组；未增删原话或调整章节。")
         if format_receipt.get("dropped_ids"):

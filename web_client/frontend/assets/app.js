@@ -3715,6 +3715,8 @@ function collectAiSelectionSettings() {
     preference_weights: collectPreferenceWeights(),
     style_profile_strength: normalizeStyleProfileStrength($("s-style-profile-strength")?.value),
     content_review_mode: $("s-content-review-mode")?.value || "off",
+    // 结尾风格（可选）：交给 M1 设计收尾章；空值=自然收尾
+    ending_style: $(`${prefix}-dir-ending`)?.value || "",
     m2_planner_mode: $("s-m2-planner-mode")?.value || "legacy",
     ai_rules: collectAiRules(),
   };
@@ -6196,6 +6198,8 @@ function collectAiControls(prefix) {
     // for future runs, but a preview must never silently use stale settings.
     content_policy: directorContentPolicy(collectContentPolicy(), choices),
     content_review_mode: $("s-content-review-mode")?.value || "off",
+    // 结尾风格（可选）：交给 M1 设计收尾章；空值=自然收尾
+    ending_style: $(`${prefix}-dir-ending`)?.value || "",
     // 四次 AI 调用的独立开关（默认全开）：直接透传给导演合同，关掉即省对应调用。
     director_switches: {
       opening_hook_recall: $(`${prefix}-dir-hook-recall`)?.checked !== false,
