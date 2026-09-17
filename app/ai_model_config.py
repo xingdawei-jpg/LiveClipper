@@ -33,13 +33,16 @@ def normalize_ai_base_url(base_url: str | None, default: str = DEEPSEEK_DEFAULT_
 
 def normalize_ai_model_defaults(settings: dict | None) -> dict:
     data = dict(settings or {})
-    api_key = str(data.get("api_key") or "").strip()
+    api_key = str(data.get("api_key") or "").strip().strip('"').strip("'").strip()
     base_url = normalize_ai_base_url(data.get("base_url"))
-    model = str(data.get("model") or "").strip()
+    model = str(data.get("model") or "").strip().strip('"').strip("'").strip()
 
     data["base_url"] = base_url
-    if not model:
-        data["model"] = DEEPSEEK_DEFAULT_MODEL
+    # 清洗后的 key / model 必须写回：用户从控制台复制 key 时常带上尾部换行或
+    # 空格，之前只清洗了 base_url，导致 Authorization 头带着 \n 发出去 → 平台
+    # 返回 HTTP 401（用户以为“key 是对的却总是失败”）。model 同理（带空格会 400）。
+    data["api_key"] = api_key
+    data["model"] = model or DEEPSEEK_DEFAULT_MODEL
     data["enabled"] = bool(api_key)
 
     if (

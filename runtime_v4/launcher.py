@@ -17,6 +17,7 @@ from typing import Any
 
 from runtime_v4.business_bundle import VerifiedBusinessBundle, verify_business_directory
 from runtime_v4.core_manifest import VerifiedCore, verify_core_directory
+from runtime_v4.process_io import ensure_subprocess_devnull
 
 
 RUNTIME_LAYOUT_VERSION = 4
@@ -248,6 +249,11 @@ def _launch(
     health_token: str = "",
     rollback_reason: str = "",
 ) -> subprocess.Popen:
+    devnull = ensure_subprocess_devnull()
+    if devnull.used_fallback:
+        _write_log(
+            "Windows NUL device was unavailable; using the private process-output sink"
+        )
     env = os.environ.copy()
     for name in RUNTIME_OWNED_ENV:
         env.pop(name, None)

@@ -1,0 +1,1585 @@
+
+# ===== _call_director_trim_selection =====
+def _call_director_trim_selection(api_key, base_url, model, clips, target_duration, log_fn=None, preferred_focus="", duration_contract=None, required_sources=None):
+    """Ask AI to rank removable clips, then apply that ranking with exact arithmetic."""
+    def _log(message):
+        if log_fn:
+            log_fn(message)
+
+    low, high = _duration_source_bounds(target_duration, duration_contract)
+    items = []
+    for order, clip in enumerate(clips or [], 1):
+        try:
+            duration = max(0.0, float(clip[3]) - float(clip[2]))
+        except Exception:
+            duration = _clip_duration_value(clip)
+        items.append({
+            "order": order,
+            "clip_type": str(clip[0] if len(clip) > 0 else "product"),
+            "duration_sec": round(duration, 1),
+            "focus": str(clip[6] if len(clip) > 6 else "")[:40],
+            "text": re.sub(r"\s+", " ", str(clip[1] if len(clip) > 1 else "")).strip()[:180],
+        })
+    current_total = sum(float(item["duration_sec"]) for item in items)
+    if not items:
+        return []
+
+    system_prompt = (
+        "你是短视频最终删片导演。输入片单的片段内容、边界和顺序已经固定。"
+        "你只负责给所有可删除Product排出完整的删除优先顺序，不需要计算最终时长。"
+        "不能新增、改写、拆分或重排片段。首段Hook、紧随Hook的第二段、末段Close禁止列入删除顺序。"
+        "先删重复、低信息量、偏离指定偏好的Product，后删核心效果和证据。"
+        "只输出JSON对象，不要解释。"
+    )
+    focus_rule = f"本轮指定偏好是“{preferred_focus}”，优先保留真正命中该偏好的核心证据。" if preferred_focus else ""
+    user_prompt = (
+        f"当前片单合计{current_total:.1f}秒，目标约{float(target_duration):.0f}秒，"
+        f"程序会严格把结果控制在{low:.0f}-{high:.0f}秒。{focus_rule}"
+        "返回remove_priority，按最先删除到最后删除排列，并列出除受保护片段外的所有Product编号。"
+        "返回格式只能是：{\"remove_priority\":[5,3,7,4]}。\n"
+        "固定片单：\n"
+        + json.dumps(items, ensure_ascii=False)
+    )
+    body_dict = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+        "top_p": 0.8,
+        "max_tokens": 1024,
+    }
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        body_dict["thinking"] = {"type": "disabled"}
+    if "seed" in model.lower():
+        body_dict["reasoning_effort"] = "low"
+
+    request = urllib.request.Request(
+        ai_chat_completions_url(base_url),
+        data=json.dumps(body_dict, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = create_ssl_context()
+        with urllib.request.urlopen(request, timeout=180, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        content = str(result.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", content)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        match = re.search(r"\{[\s\S]*\}", cleaned)
+        data = json.loads(match.group(0) if match else cleaned)
+        raw_remove_orders = data.get("remove_priority") if isinstance(data, dict) else None
+        if isinstance(raw_remove_orders, list):
+            trimmed = _apply_ai_removal_priority(
+                clips,
+                raw_remove_orders,
+                target_duration,
+                log_fn,
+                label="AI超长精简",
+                duration_contract=duration_contract,
+                required_sources=required_sources,
+            )
+            if trimmed:
+                return trimmed
+            _log("AI超长精简: 删除优先级未能收口到目标时长")
+            return []
+
+        # Compatibility with responses generated from an older cached prompt.
+        raw_orders = data.get("keep_orders") if isinstance(data, dict) else None
+        if not isinstance(raw_orders, list):
+            _log("AI超长精简: 响应缺少remove_priority，拒绝执行")
+            return []
+        keep_orders = []
+        for value in raw_orders:
+            if isinstance(value, bool):
+                return []
+            order = int(value)
+            if order < 1 or order > len(clips) or order in keep_orders:
+                _log("AI超长精简: keep_orders含无效或重复编号，拒绝执行")
+                return []
+            keep_orders.append(order)
+        if keep_orders != sorted(keep_orders):
+            _log("AI超长精简: keep_orders改变原叙事顺序，拒绝执行")
+            return []
+        if not {1, 2}.issubset(set(keep_orders)):
+            _log("AI超长精简: keep_orders未保留Hook与承接句，拒绝执行")
+            return []
+        trimmed = [clips[order - 1] for order in keep_orders]
+        trimmed_total = sum(_clip_duration_value(clip) for clip in trimmed)
+        if trimmed_total < low - 0.05 or trimmed_total > high + 0.05:
+            _log(f"AI超长精简: 旧格式结果{trimmed_total:.1f}s仍不在{low:.0f}-{high:.0f}s")
+            return []
+        _log(
+            f"AI超长精简: AI决定保留 {len(trimmed)}/{len(clips)} 段，"
+            f"{current_total:.1f}s -> {trimmed_total:.1f}s"
+        )
+        return trimmed
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        message = f"AI 接口调用失败 (HTTP {error.code})：{_friendly_http(error.code, detail)}"
+        _log(f"⚠️ {message}")
+        if _is_non_retryable_http(error.code):
+            raise NonRetryableAIError(message) from error
+        return []
+    except Exception as error:
+        _log(f"AI超长精简失败: {_friendly_msg(str(error))}")
+        return []
+
+# ===== _layered_selection_prompt_contract =====
+def _layered_selection_prompt_contract(
+    *,
+    selection_context,
+    ai_controls=None,
+    rules=None,
+    main_category=None,
+    duration_contract=None,
+    merge_mode=False,
+    required_sources=None,
+    multi_version=False,
+):
+    controls = _normalize_ai_controls(ai_controls)
+    merged_rules = dict(rules or _merge_ai_rules(ai_controls))
+    contract = DurationContract.coerce(duration_contract)
+    main_product = str(controls.get("main_product") or "").strip()
+    all_blocks = list(selection_context.story_blocks)
+    block_limit = 120
+    if len(all_blocks) > block_limit:
+        block_positions = {
+            round(index * (len(all_blocks) - 1) / (block_limit - 1))
+            for index in range(block_limit)
+        }
+        prompt_blocks = [
+            block for index, block in enumerate(all_blocks)
+            if index in block_positions
+        ][:block_limit]
+    else:
+        prompt_blocks = all_blocks
+    blocks = []
+    for block in prompt_blocks:
+        candidate_ids = list(block.candidate_ids)
+        blocks.append([
+            block.story_block_id,
+            block.source_id,
+            candidate_ids[0] if candidate_ids else 0,
+            candidate_ids[-1] if candidate_ids else 0,
+            len(candidate_ids),
+            round(block.duration, 1),
+            len(block.continuity_group_ids),
+        ])
+
+    hard_constraints = {
+        "candidate_ids": "只能选择候选表中真实存在且未标记不可选的ID",
+        "source_binding": "不得修改候选文本、时间或素材来源",
+        "safety": "违禁词、价格、CTA、直播操作和内容安全规则不可被任何偏好覆盖",
+        "sentence_integrity": "每段必须是完整语义；只能合并连续ID",
+        "product_lock": (
+            f"只围绕用户锁定商品“{main_product}”"
+            if main_product else (
+                "先按商品名称、别名、近似说法和连续讲解区间识别精确单品；默认只选一个主商品"
+                if bool(merged_rules.get("category_filter", True)) else
+                "用户关闭了品类过滤；允许跨商品，但每次切换必须位于完整故事区间边界并在warnings说明"
+            )
+        ),
+        "duration": {
+            "source_target": round(contract.source_target, 1),
+            "source_min": round(contract.source_min, 1),
+            "source_max": round(contract.source_max, 1),
+        },
+        "required_sources": dict(required_sources or {}),
+    }
+    soft_preferences = {
+        "category": str(main_category or ""),
+        "goal": controls.get("goal") or "",
+        "selling_points": list(controls.get("selling_points") or []),
+        "avoid": list(controls.get("avoid") or []),
+        "hook_style": controls.get("hook_style") or "",
+        "ending_style": controls.get("ending_style") or "",
+        "strictness": controls.get("strictness") or "",
+        "narrative": str(merged_rules.get("narrative") or ""),
+        "category_filter": bool(merged_rules.get("category_filter", True)),
+        "time_coherence": bool(merged_rules.get("time_coherence", True)),
+        "custom_text": str(merged_rules.get("custom_text") or ""),
+    }
+    output_schema = (
+        {
+            "clips": "现有多版本素材池格式保持不变",
+        }
+        if multi_version else
+        {
+            "clips": "有序片段数组",
+            "expansion_plan": "未使用的安全备用片段数组",
+            "plan_report": {
+                "selected_product": "本片单锁定的具体商品；不确定时如实写未知",
+                "selected_story_block_ids": ["SB-..."],
+                "selected_narrative_id": "实际使用的ARC-01；未使用Hook则为空字符串",
+                "chapter_topics": ["开场主题", "下一段完整卖点主题"],
+                "missing_roles": ["effect|evidence|scene|objection|natural_close"],
+                "warnings": ["无法满足的要求或潜在连续性问题"],
+            },
+        }
+    )
+    payload = {
+        "contract_version": "layered-selection-v1",
+        "task": {
+            "mode": "mix" if merge_mode else "smart",
+            "operation": "candidate_pool" if multi_version else "final_sequence",
+            "main_product": main_product or "auto_detect_exact_product",
+        },
+        "task_priority": [
+            "hard_constraints",
+            "exact_product_and_source_consistency",
+            "sentence_integrity",
+            "explicit_user_preferences",
+            "story_and_continuity",
+            "duration",
+            "style_profile_and_defaults",
+        ],
+        "hard_constraints": hard_constraints,
+        "soft_preferences": soft_preferences,
+        "story_blocks_format": [
+            "story_block_id", "source_id", "first_candidate_id",
+            "last_candidate_id", "candidate_count", "duration",
+            "continuity_group_count",
+        ],
+        "story_blocks": blocks,
+        "story_block_summary": {
+            "total": len(all_blocks),
+            "shown": len(blocks),
+            "strategy": "time_stratified" if len(all_blocks) > len(blocks) else "all",
+            "candidate_rows_retain_all_story_block_ids": True,
+        },
+        "output_schema": output_schema,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+# ===== _call_ai =====
+def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_entries=None, hook_candidates_hint=None, multi_version=False, return_raw=False, num_versions=3, ai_controls=None, recent_history_hint=None, extra_instruction=None, main_category=None, duration_contract=None, merge_mode=False, required_sources=None, allowed_candidate_ids=None, reserve_only_candidate_ids=None, content_review_hint=None, review_hook_pairs=None, review_hook_contract_kind="none", review_hook_pairs_checked=False, review_topic_support=None, review_hook_threads=None, review_narrative_opportunities=None, review_lexical_hook_candidates=None, review_natural_opening_ids=None, manual_focus_contract=None):
+    def _log(msg):
+        if log_fn: log_fn(msg)
+    # A parse rejection belongs to this one model response only. Clearing it
+    # here prevents a previous failed attempt from contaminating a later one.
+    _analysis_metadata_context().pop("director_parse_rejection", None)
+    main_category = _normalize_forced_category(main_category) or main_category
+    _review_allowed_candidate_ids = (
+        {int(index) for index in allowed_candidate_ids}
+        if allowed_candidate_ids is not None else None
+    )
+    _normalized_controls = _normalize_ai_controls(ai_controls)
+    _content_policy = _merge_ai_rules(ai_controls).get("content_policy")
+    _control_main_product = str(_normalized_controls.get("main_product") or "").strip()
+
+    def _resolve_focus_used_label(label="", detail=""):
+        text = str(label or "").strip()
+        if text:
+            normalized = _normalize_focus_label(text)
+            if normalized in _DEFAULT_PREFERENCE_KEYWORDS:
+                return normalized
+        haystack = f"{label or ''} {detail or ''}"
+        best_label = ""
+        best_score = 0
+        for pref_label, words in _DEFAULT_PREFERENCE_KEYWORDS.items():
+            score = 0
+            if pref_label in haystack:
+                score += 5
+            for word in words:
+                if word and word in haystack:
+                    score += 1
+            if score > best_score:
+                best_label = pref_label
+                best_score = score
+        return best_label or text
+
+    def _remember_focus_summary(mode, label, detail="", requested=None, score=None, matched_label=None, switched_from=None, error=None):
+        used_label = _resolve_focus_used_label(label, detail)
+        summary = {
+            "mode": str(mode or "").strip(),
+            "label": used_label,
+            "used_label": used_label,
+            "detail": str(detail or "").strip(),
+            "requested": str(requested or "自动").strip(),
+        }
+        if score is not None:
+            summary["score"] = score
+        if matched_label:
+            summary["matched_label"] = str(matched_label).strip()
+        if switched_from:
+            summary["switched_from"] = str(switched_from).strip()
+        if error:
+            summary["error"] = str(error).strip()
+        _set_last_focus_summary(summary)
+
+    focus_hint = _normalize_focus_label(focus_hint)
+    _remember_focus_summary("待定", focus_hint or "自动", requested=focus_hint or "自动")
+
+    # 多版本模式：设置全局标志，让Prompt构建走多版本路径
+    global _skip_focus, _AI_CLIP_COUNT, _detail_kw_prompt
+    _orig_skip = _skip_focus
+    if multi_version:
+        _skip_focus = True
+
+    transcript = srt_text.strip()
+    if len(transcript) > 30000:
+        transcript = transcript[-30000:]
+    
+    # ★生成编号SRT条目（供AI按索引选片）★
+    indexed_transcript = transcript  # fallback: 原始格式
+    _srt_entry_map = {}  # {1: (start, end, text), 2: ...}
+    _forbidden_indices = set()  # 含违禁词的条目索引，AI选片时跳过
+    _focus_score_entry_texts = []  # 只用安全、可入片条目计算自动偏好，避免偏好被价格/CTA脏命中带偏
+    _prompt_selection_context = _selection_context_from_srt_entries(srt_entries)
+    _prompt_candidate_context = _prompt_selection_context.candidate_map()
+    _subject_candidate_policy = _subject_policy_for_entries(
+        srt_entries,
+        main_product=_control_main_product,
+    )
+    _review_natural_opening_ids = {
+        int(value) for value in (review_natural_opening_ids or ())
+        if str(value).strip().isdigit()
+    }
+    _review_lexical_hook_candidates = tuple(
+        dict(item) for item in (review_lexical_hook_candidates or ())
+        if isinstance(item, dict)
+    )
+    if srt_entries:
+        _fw_data = load_keywords()
+        _fw_words = _fw_data.get("forbidden_phrases", [])
+        # 价格/CTA正则模式（与_filter_price_and_cta保持一致）
+        _price_patterns = [
+            re.compile(r'\d{2,4}\s*[元块]'),
+            re.compile(r'[到拿]手[价]?\s*\d'),
+            re.compile(r'\d{2,4}\s*[多几]?[块元]'),
+            re.compile(r'(?:只要|才|仅)[一两三四五六七八九十百千万\d]+[块元]'),
+            re.compile(r'原价|秒杀价|福利价|破价|到手价'),
+            re.compile(r'[一两三四五六七八九十百千万\d]+[多来几]?[块元]'),
+            re.compile(r'[一二三四五六七八九十]\s*折'),
+            re.compile(r'半价|对折'),
+            re.compile(r'\d+\s*折'),
+            re.compile(r'[到拿]手价?\s*[一两三四五六七八九十百千万\d]+'),
+            re.compile(r'满减|领券|优惠券|消费券|凑单'),
+            re.compile(r'321|三二一|价格|拍.*链接|链接.*拍|连结|連結|去拍|赶紧拍|刷新拍|往[大小]拍|上链接|上连结|上連結'),
+        ]
+        _focus_score_blocker_patterns = list(_price_patterns) + [
+            re.compile(r'链接|连结|連結|小黄车|购物车|加购|下单|拍下|去拍|早拍|入手|点关注|关注一下|满减|领券|优惠券'),
+        ]
+        _indexed_lines = []
+        _forbidden_count = 0
+        _focus_score_excluded_count = 0
+        for i, (es, ee, et) in enumerate(srt_entries, 1):
+            _srt_entry_map[i] = (es, ee, et)
+            _is_review_allowed = (
+                _review_allowed_candidate_ids is None or i in _review_allowed_candidate_ids
+            )
+            _entry_duration = max(0.0, float(ee) - float(es))
+            # 预扫描只使用和最终安全检查同一套内容政策，避免正文允许、导演却看不到。
+            _et_variants = _safety_text_variants(et)
+            _matched_fw, _matched_policy = _clip_safety_matches(
+                et,
+                _fw_words,
+                _price_patterns,
+                content_policy=_content_policy,
+            )
+            _matched_content = _content_safety_pattern_matches(et, _content_policy)
+            _matched_backstage = _is_backstage_instruction(et)
+            if _matched_fw or _matched_policy or _matched_content or _matched_backstage:
+                _forbidden_indices.add(i)
+                _forbidden_count += 1
+            _blocked_for_focus_score = bool(
+                _matched_fw
+                or _matched_policy
+                or _matched_content
+                or _matched_backstage
+                or _safety_pattern_matches(_focus_score_blocker_patterns, _et_variants)
+            )
+            if _blocked_for_focus_score:
+                _focus_score_excluded_count += 1
+            elif _is_review_allowed:
+                _focus_score_entry_texts.append(et)
+            _candidate_context = _prompt_candidate_context.get(i)
+            _context_tags = ""
+            if _candidate_context is not None:
+                _context_tags = (
+                    f" | story={_candidate_context.story_block_id}"
+                    f" | continuity={_candidate_context.continuity_group_id}"
+                    f" | source={_candidate_context.source_id}"
+                )
+            _subject_info = _subject_candidate_policy.get(i) or {}
+            _subject_relation = str(_subject_info.get("relation") or "unknown")
+            _subject_permissions = tuple(_subject_info.get("permissions") or ())
+            if _subject_relation != "unscoped":
+                _role_text = "/".join(_subject_permissions) or "不可用"
+                _context_tags += (
+                    f" | 主体={_subject_relation_label(_subject_relation)}"
+                    f" | 可作={_role_text}"
+                )
+            if _matched_fw or _matched_policy or _matched_content or _matched_backstage:
+                if _is_review_allowed:
+                    _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s{_context_tags}] [不可选：含固定禁用词、内容政策禁项或直播操作]")
+            elif _is_review_allowed:
+                _indexed_lines.append(f"[#{i:02d} | {_entry_duration:.1f}s{_context_tags}] {et}")
+        if merge_mode:
+            _interleaved_lines = _director_interleave_prompt_lines(
+                _indexed_lines, srt_entries, chunk_size=10
+            )
+            if _interleaved_lines != _indexed_lines:
+                _indexed_lines = _interleaved_lines
+                _log("AI: 混剪候选按来源每10条交错展示，候选编号和时间戳保持不变")
+        indexed_transcript = chr(10).join(_indexed_lines)
+        if any(
+            str(item.get("relation") or "") != "unscoped"
+            for item in _subject_candidate_policy.values()
+        ):
+            indexed_transcript += (
+                "\n★候选主体角色合同★ 主体=主商品可承担Hook/Product/Close；"
+                "主体=搭配证明或主体未知只能在已有主商品卖点之后作Product证据；"
+                "主体=其他商品不可选择。不得用主体未知内容单独开场、收尾或切换商品。★"
+            )
+        # 追加用户自定义细节关键词（注入到AI prompt末尾，高优先级关注）
+        if _detail_kw_prompt:
+            indexed_transcript += "\n" + _detail_kw_prompt
+        _log(f"AI: 编号SRT条目 {len(_srt_entry_map)} 条")
+        if _forbidden_count:
+            _log(f"AI: 预扫描: {len(_srt_entry_map) - _forbidden_count} 条可选, {_forbidden_count} 条因固定禁用词/内容政策已标记")
+        if _focus_score_excluded_count:
+            _log(f"AI: 偏好评分: 已排除 {_focus_score_excluded_count} 条价格/CTA/违禁词条目")
+
+    _review_natural_opening_ids = {
+        candidate_id for candidate_id in _review_natural_opening_ids
+        if candidate_id in _srt_entry_map
+        and (_review_allowed_candidate_ids is None or candidate_id in _review_allowed_candidate_ids)
+        and _subject_allows_role(_subject_candidate_policy, candidate_id, "product")
+    }
+    _review_lexical_hook_candidates = tuple(
+        {
+            "candidate_id": candidate_id,
+            "keywords": [
+                str(word or "").strip()
+                for word in (item.get("keywords") or ())
+                if str(word or "").strip()
+            ][:3],
+        }
+        for item in _review_lexical_hook_candidates
+        for candidate_id in [int(item.get("candidate_id") or 0)]
+        if candidate_id in _srt_entry_map
+        and candidate_id not in _forbidden_indices
+        and (_review_allowed_candidate_ids is None or candidate_id in _review_allowed_candidate_ids)
+        and _subject_allows_role(_subject_candidate_policy, candidate_id, "hook")
+    )
+
+    # ★预扫描Hook候选：短爆词 + 人群痛点 + 效果前置综合打分★
+    _kw_data = load_keywords()
+    _hook_kw = _kw_data["hook_keywords"]
+    _entries_for_hook = [
+        (_idx, es, ee, et)
+        for _idx, (es, ee, et) in sorted(_srt_entry_map.items())
+        if _idx not in _forbidden_indices
+        and (_review_allowed_candidate_ids is None or _idx in _review_allowed_candidate_ids)
+        and _subject_allows_role(_subject_candidate_policy, _idx, "hook")
+    ]
+    _manual_focus_label = _normalize_focus_label(focus_hint)
+    if str(_manual_focus_label or "").strip().lower() in {"", "自动", "auto", "默认", "无"}:
+        _manual_focus_label = ""
+    _automatic_focus_labels = [] if _manual_focus_label else _automatic_focus_allowed_labels(
+        ai_controls,
+        main_category,
+    )
+    if _automatic_focus_labels and not _skip_focus:
+        _log(
+            "AI: 自动主题仅在本次主卖点中选择 → "
+            + "/".join(_automatic_focus_labels)
+        )
+    # Preferences affect ranking after a Hook is already good. They never form
+    # an exclusive opening contract by themselves.
+    _preference_only_hook_contract = False
+    _hook_candidates, _hook_candidate_total = _collect_hook_candidates_from_entries(
+        _entries_for_hook,
+        hook_keywords=_hook_kw,
+        focus_hint=focus_hint,
+        ai_controls=ai_controls,
+        limit=48,
+    )
+    _preference_hook_candidates = [
+        candidate for candidate in _hook_candidates
+        if _manual_focus_label and _hook_matches_preference(candidate[1], _manual_focus_label, None)
+    ]
+    _automatic_selling_hook_candidates = [
+        candidate for candidate in _hook_candidates
+        if _automatic_focus_labels and any(
+            _hook_matches_preference(candidate[1], label, None)
+            for label in _automatic_focus_labels
+        )
+    ]
+    _analysis_metadata_context()["hook_candidate_summary"] = {
+        "requested_focus": _manual_focus_label,
+        "automatic_allowed_focuses": list(_automatic_focus_labels),
+        "candidate_count": int(_hook_candidate_total),
+        "preference_candidate_count": len(_preference_hook_candidates),
+        "automatic_selling_hook_candidate_count": len(_automatic_selling_hook_candidates),
+        # A preference is a tie-breaker between strong openings. It must not
+        # hide a clearly stronger general Hook from the director.
+        "preference_hook_required": False,
+        "allowed_hook_indices": [],
+    }
+    _hook_hint = ""
+    _allowed_hook_indices = set()
+    _hook_followup_threads = _normalize_hook_followup_threads(review_hook_threads)
+    _valid_review_narratives = []
+    _review_hook_contract_kind = (
+        "hook_package" if str(review_hook_contract_kind or "").strip() == "hook_package"
+        else "hook_pair"
+    )
+    _reviewed_no_hook_contract = False
+    _review_lexical_hook_ids = {
+        int(item.get("candidate_id") or 0)
+        for item in _review_lexical_hook_candidates
+    }
+    _review_lexical_hook_text = ", ".join(
+        f"#{int(item.get('candidate_id') or 0):02d}[{'/'.join(item.get('keywords') or ()) or '爆点词'}]"
+        for item in _review_lexical_hook_candidates
+    ) or "无"
+    if review_hook_pairs:
+        _valid_review_pairs = []
+        for _pair in review_hook_pairs:
+            try:
+                _hook_id = int(_pair.get("hook_id") or 0)
+                _followup_id = int(_pair.get("followup_id") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if (
+                _hook_id in _srt_entry_map
+                and _followup_id in _srt_entry_map
+                and _subject_allows_role(_subject_candidate_policy, _hook_id, "hook")
+                and _subject_allows_role(_subject_candidate_policy, _followup_id, "product")
+                and (_review_allowed_candidate_ids is None or (
+                    _hook_id in _review_allowed_candidate_ids
+                    and _followup_id in _review_allowed_candidate_ids
+                ))
+            ):
+                _valid_review_pairs.append((_hook_id, _followup_id, _pair))
+        _preferred_review_pairs = []
+        if _manual_focus_label and not _skip_focus:
+            for _item in _valid_review_pairs:
+                _hook_id, _followup_id, _pair = _item
+                _pair_text = " ".join((
+                    str(_pair.get("topic") or ""),
+                    str(_srt_entry_map[_hook_id][2]),
+                    str(_srt_entry_map[_followup_id][2]),
+                ))
+                if _hook_matches_preference(_pair_text, _manual_focus_label, None):
+                    _preferred_review_pairs.append(_item)
+        if _preferred_review_pairs:
+            _valid_review_pairs = _preferred_review_pairs + [
+                item for item in _valid_review_pairs
+                if item not in _preferred_review_pairs
+            ]
+        if not _hook_followup_threads:
+            _hook_followup_threads = _hook_thread_contract_from_pairs(
+                [item[2] for item in _valid_review_pairs]
+            )
+        _valid_hook_threads = {}
+        for hook_id, thread in _hook_followup_threads.items():
+            if hook_id not in _srt_entry_map or (
+                _review_allowed_candidate_ids is not None
+                and hook_id not in _review_allowed_candidate_ids
+            ) or not _subject_allows_role(_subject_candidate_policy, hook_id, "hook"):
+                continue
+            followup_ids = {
+                int(candidate_id) for candidate_id in thread.get("allowed_followup_ids", set())
+                if int(candidate_id) in _srt_entry_map
+                and _subject_allows_role(_subject_candidate_policy, int(candidate_id), "product")
+                and (
+                    _review_allowed_candidate_ids is None
+                    or int(candidate_id) in _review_allowed_candidate_ids
+                )
+            }
+            if not followup_ids:
+                continue
+            normalized_thread = dict(thread)
+            normalized_thread["allowed_followup_ids"] = followup_ids
+            normalized_thread["seed_followup_ids"] = {
+                int(candidate_id) for candidate_id in thread.get("seed_followup_ids", set())
+                if int(candidate_id) in followup_ids
+            }
+            _valid_hook_threads[hook_id] = normalized_thread
+        _hook_followup_threads = _valid_hook_threads
+        _valid_review_narratives = _normalize_review_narrative_opportunities(
+            review_narrative_opportunities,
+            srt_entry_map=_srt_entry_map,
+            hook_threads=_hook_followup_threads,
+            allowed_candidate_ids=_review_allowed_candidate_ids,
+        )
+        _allowed_hook_indices = set(_hook_followup_threads)
+        if not _hook_followup_threads:
+            _reviewed_no_hook_contract = True
+        _analysis_metadata_context()["hook_candidate_summary"].update({
+            "preference_hook_required": False,
+            "preference_review_pair_count": len(_preferred_review_pairs),
+            "review_hook_contract": _review_hook_contract_kind,
+            "allowed_hook_indices": sorted(_allowed_hook_indices),
+            "ranked_hook_indices": sorted(_allowed_hook_indices),
+            "review_pair_count": len(_valid_review_pairs),
+            "hook_thread_count": len(_hook_followup_threads),
+            "narrative_opportunity_count": len(_valid_review_narratives),
+            "hook_threads": {
+                str(hook_id): {
+                    "topic": str(thread.get("topic") or ""),
+                    "allowed_followup_ids": sorted(thread.get("allowed_followup_ids") or ()),
+                    "seed_followup_ids": sorted(thread.get("seed_followup_ids") or ()),
+                }
+                for hook_id, thread in _hook_followup_threads.items()
+            },
+        })
+        _thread_lines = [
+            f"#{hook_id:02d}[{str(thread.get('topic') or '高质量卖点').strip()}]"
+            f"→#{'/#'.join(str(value) for value in sorted(thread.get('allowed_followup_ids') or ()))}"
+            for hook_id, thread in sorted(_hook_followup_threads.items())
+        ]
+        if _hook_followup_threads:
+            _hook_contract_title = (
+                "已验证A/B HookPackage"
+                if _review_hook_contract_kind == "hook_package"
+                else "内容审稿Hook主题线程"
+            )
+            _hook_contract_rule = (
+                "这些是已验证的Hook承诺与兑现组合，首段只能从以下Hook编号选择；"
+                "不得用普通候选或普通HookPair替换。第二段可从同一Hook主题线程中选择更清楚的解释、"
+                "证明或展开，不要求死接审稿时的示例编号。"
+                if _review_hook_contract_kind == "hook_package"
+                else "Hook必须从以下左侧编号选择；第二段可从同一Hook的主题线程中任选更清楚的解释、"
+                "证明或展开，不要求死接审稿时的示例编号。"
+            )
+            _hook_hint = (
+                f"\n★{_hook_contract_title}★ {_hook_contract_rule}"
+                "允许跨原始时间但不得换商品或换主题；"
+                "关键词分只负责召回，用户偏好不强迫Hook换成较弱句。"
+                f"线程: {', '.join(_thread_lines)}★"
+            )
+            _log(
+                f"AI: {_hook_contract_title}提供 {len(_hook_followup_threads)} 条Hook主题线程"
+            )
+        else:
+            _reviewed_no_hook_contract = True
+            if _review_lexical_hook_ids:
+                _allowed_hook_indices = set(_review_lexical_hook_ids)
+                _hook_hint = (
+                    "\nCONTENT REVIEW DID NOT LEAVE A VERIFIED HOOK TOPIC THREAD. "
+                    "You may use at most one lexical fallback Hook only from these visible user-rule hook words: "
+                    f"({_review_lexical_hook_text}). The second segment must immediately prove or explain its promise. "
+                    "If no immediate proof fits, do not use Hook; start with the strongest complete Product naturally."
+                )
+                _log(
+                    "AI: 审稿未形成Hook主题线程，改用"
+                    f"{len(_review_lexical_hook_ids)}条用户词库爆点作为可兑现降级Hook"
+                )
+            else:
+                _hook_hint = (
+                    "\nCONTENT REVIEW DID NOT LEAVE A SAFE HOOK TOPIC THREAD OR A SAFE LEXICAL FALLBACK. "
+                    "Do not force a Hook. Start with the strongest complete Product naturally; do not use pure material "
+                    "certificates, live chatter, or reserve-only facts as the opening."
+                )
+                _log("AI: 内容审稿未形成Hook主题线程或词库爆点，改用干净Product自然开场")
+    elif content_review_hint and review_hook_pairs_checked:
+        _reviewed_no_hook_contract = True
+        _analysis_metadata_context()["hook_candidate_summary"].update({
+            "preference_hook_required": False,
+            "allowed_hook_indices": [],
+            "ranked_hook_indices": [],
+            "reviewed_pool_unrestricted": False,
+            "reviewed_pair_fallback": False,
+            "reviewed_no_hook_contract": True,
+            "natural_opening_candidate_ids": sorted(_review_natural_opening_ids),
+            "lexical_hook_fallback_ids": sorted(_review_lexical_hook_ids),
+        })
+        if _review_lexical_hook_ids:
+            _allowed_hook_indices = set(_review_lexical_hook_ids)
+            _hook_hint = (
+                "\nCONTENT REVIEW DID NOT VERIFY A HOOK+FOLLOWUP PAIR. "
+                "You may use at most one lexical fallback Hook only from these visible user-rule hook words: "
+                f"({_review_lexical_hook_text}). The next Product must immediately prove or explain the Hook. "
+                "If that proof is unavailable, start with the strongest complete Product naturally."
+            )
+            _log(
+                "AI: content review未验证Hook组合，改用"
+                f"{len(_review_lexical_hook_ids)}条用户词库爆点作为可兑现降级Hook"
+            )
+        else:
+            _hook_hint = (
+                "\nCONTENT REVIEW DID NOT VERIFY A HOOK+FOLLOWUP PAIR OR A SAFE LEXICAL FALLBACK. "
+                "Do not force a Hook. Start with the strongest complete Product naturally; do not invent a Hook from "
+                "generic chat, sizing, personal try-on, or presentation setup."
+            )
+            _log("AI: content review未验证Hook组合且无安全词库爆点，使用自然Product开场")
+    elif content_review_hint:
+        _log("AI: content review did not complete Hook verification; using the original Hook contract")
+    elif hook_candidates_hint:
+        # 多版本模式：使用外部传入的分配候选
+        _hook_hint = hook_candidates_hint
+        _log(f"AI: 使用分配的Hook候选")
+    elif _hook_candidates:
+        _preference_hook_ids = {candidate[0] for candidate in _preference_hook_candidates}
+        _general_hook_candidates = [candidate for candidate in _hook_candidates if candidate[0] not in _preference_hook_ids]
+        if _preference_hook_candidates:
+            _ranked_hook_candidates = (
+                sorted(_preference_hook_candidates, key=lambda c: (-c[3], c[0]))[:8]
+                + sorted(_general_hook_candidates, key=lambda c: (-c[3], c[0]))
+            )
+        elif _automatic_selling_hook_candidates:
+            _automatic_hook_ids = {candidate[0] for candidate in _automatic_selling_hook_candidates}
+            _ranked_hook_candidates = (
+                sorted(_automatic_selling_hook_candidates, key=lambda c: (-c[3], c[0]))[:8]
+                + sorted(
+                    (candidate for candidate in _hook_candidates if candidate[0] not in _automatic_hook_ids),
+                    key=lambda c: (-c[3], c[0]),
+                )
+            )
+        else:
+            _ranked_hook_candidates = sorted(_hook_candidates, key=lambda c: (-c[3], c[0]))
+        _picked_hook_candidates = _ranked_hook_candidates[:12]
+        if not _skip_focus:
+            _allowed_hook_indices = {candidate[0] for candidate in _picked_hook_candidates}
+        _analysis_metadata_context()["hook_candidate_summary"]["allowed_hook_indices"] = sorted(
+            _allowed_hook_indices
+        )
+        _analysis_metadata_context()["hook_candidate_summary"]["ranked_hook_indices"] = [
+            candidate[0]
+            for candidate in _picked_hook_candidates
+            if candidate[0] in _allowed_hook_indices
+        ]
+        _cand_text = [
+            f'#{idx_k:02d}[{"偏好Hook" if idx_k in _preference_hook_ids else ("主卖点Hook" if any(candidate[0] == idx_k for candidate in _automatic_selling_hook_candidates) else "通用Hook")}]'
+            f'"{et[:18]}"({dur:.0f}s/{",".join(reasons[:2])})'
+            for idx_k, et, dur, _score, reasons in _picked_hook_candidates
+        ]
+        if (
+            _preference_hook_candidates
+            and _manual_focus_label
+            and _preference_only_hook_contract
+        ):
+            _hook_hint = (
+                f"\n★用户明确指定“{_manual_focus_label}”。已找到{len(_preference_hook_candidates)}个合格偏好Hook，"
+                "Hook的srt_indices只能填写下列[偏好Hook]中的一个编号，禁止从全文其他编号自行挑Hook。"
+                "第二段必须继续同一主题，直接解释、证明或兑现Hook，不得跳到别的卖点。"
+                f"候选: {', '.join(_cand_text)}★"
+            )
+        else:
+            _hook_hint = f"\n★Hook候选（已按爆点/人群痛点/效果前置综合打分）: {', '.join(_cand_text)}★"
+        _log(
+            f"AI: Hook候选池 {_hook_candidate_total} 个，提供 {len(_picked_hook_candidates)} 个"
+            + (f"（偏好Hook {len(_preference_hook_candidates)} 个）" if _preference_hook_candidates else "")
+        )
+    else:
+        _hook_hint = "\n★未找到短爆点Hook候选，请从SRT中找最有冲击力的短句作为Hook★"
+
+    if _valid_review_narratives:
+        _narrative_hint = _review_narrative_prompt(_valid_review_narratives)
+        _hook_hint += _narrative_hint
+        _analysis_metadata_context()["review_narrative_contract"] = {
+            "opportunities": [dict(record) for record in _valid_review_narratives],
+            "count": len(_valid_review_narratives),
+        }
+        _log(f"AI: 已验证开场小段落 {len(_valid_review_narratives)} 条，先选骨架再编排正文")
+    else:
+        _analysis_metadata_context()["review_narrative_contract"] = {
+            "opportunities": [],
+            "count": 0,
+        }
+
+    if _allowed_hook_indices:
+        _contract_lines = []
+        for _contract_line in indexed_transcript.splitlines():
+            _contract_match = re.match(r"\[#(\d+)\b", _contract_line)
+            if _contract_match and int(_contract_match.group(1)) not in _allowed_hook_indices:
+                _contract_line = _contract_line.replace("] ", "] [不可作Hook] ", 1)
+            _contract_lines.append(_contract_line)
+        indexed_transcript = "\n".join(_contract_lines)
+
+    _director_repair_mode = bool(
+        extra_instruction and "【整体叙事修复】" in str(extra_instruction)
+    )
+    _source_distribution_repair_mode = bool(
+        extra_instruction and "【混剪来源分布修复】" in str(extra_instruction)
+    )
+
+    # 单版本叙事优先稳定；定向修复进一步降温，避免第二次调用改写已合格骨架。
+    import random
+    temperature = 0.1 if (_director_repair_mode or _source_distribution_repair_mode) else (
+        round(random.uniform(0.35, 0.55), 2) if _skip_focus else 0.2
+    )
+    _log(f"AI: temperature={temperature}")
+
+    # 随机偏好提示(每次侧重不同角度，增加差异化)
+    if focus_hint and focus_hint not in ("自动", "auto", ""):
+        focus = focus_hint
+        _remember_focus_summary("指定偏好", focus_hint, focus, requested=focus_hint)
+        _log(f"AI: 指定偏好 → {focus}")
+    elif _skip_focus:
+        # 多版本模式：保留用户偏好，让方案1匹配
+        focus = focus_hint if focus_hint else ""
+        if focus:
+            _remember_focus_summary("多版本偏好", focus, focus, requested=focus_hint or "自动")
+            _log(f"AI: 多版本模式，方案1偏好 → {focus}")
+        else:
+            _remember_focus_summary("多版本全量", "全量选片", "不额外限定偏好", requested="自动")
+            _log("AI: 多版本模式（全量选片）")
+    else:
+        # ★智能偏好选择：分析SRT内容，选最匹配的偏好★
+        try:
+            _kw_data_focus = load_keywords()
+            _focus_scores = {}
+            _focus_support_counts = {}
+            _focus_hints_map = _kw_data_focus.get("preference_keywords", _DEFAULT_PREFERENCE_KEYWORDS)
+            # 统计SRT中每种偏好的关键词命中数
+            _focus_score_texts = _focus_score_entry_texts if srt_entries else [srt_text]
+            # Load preference weights (default 1.0)
+            _weights = {}
+            try:
+                _settings_weights = load_settings().get("preference_weights", {})
+                if isinstance(_settings_weights, dict):
+                    _weights.update(_normalize_preference_weights(_settings_weights))
+            except Exception:
+                pass
+            try:
+                import json as _jw
+                _kw_path_weights = _keyword_file_paths()[1]
+                if os.path.exists(_kw_path_weights):
+                    with open(_kw_path_weights, "r", encoding="utf-8") as _jwf:
+                        _jwdata = _jw.load(_jwf)
+                    _file_weights = _jwdata.get("preference_weights", {})
+                    if isinstance(_file_weights, dict):
+                        _weights.update(_normalize_preference_weights(_file_weights))
+            except Exception:
+                pass
+            _food_focus_labels = {"口感食欲", "新鲜品质", "产地溯源", "规格分量", "发货保鲜", "场景吃法"}
+            _food_mode = _is_food_fresh_category(main_category)
+            _review_focus_scores = {}
+            _review_focus_support_counts = {}
+            for _topic, _support in (review_topic_support or {}).items():
+                _focus_name = _normalize_focus_label(_topic)
+                if _focus_name not in _focus_hints_map:
+                    continue
+                if _automatic_focus_labels and _focus_name not in _automatic_focus_labels:
+                    continue
+                if _food_mode and _focus_name not in _food_focus_labels:
+                    continue
+                if not _food_mode and _focus_name in _food_focus_labels:
+                    continue
+                if not isinstance(_support, dict):
+                    continue
+                _main_support = float(_support.get("main") or 0.0)
+                _reserve_support = float(_support.get("reserve") or 0.0)
+                _evidence_support = float(_support.get("evidence") or 0.0)
+                _support_count = int(_main_support + _reserve_support)
+                if _support_count <= 0:
+                    continue
+                _weight = _weights.get(_focus_name, 1.0)
+                _review_focus_scores[_focus_name] = (
+                    _main_support * 3.0 + _reserve_support + _evidence_support * 0.5
+                ) * _weight
+                _review_focus_support_counts[_focus_name] = _support_count
+            for _fname, _fkws in _focus_hints_map.items():
+                _fname = _normalize_focus_label(_fname)
+                if _automatic_focus_labels and _fname not in _automatic_focus_labels:
+                    continue
+                if _food_mode and _fname not in _food_focus_labels:
+                    continue
+                if not _food_mode and _fname in _food_focus_labels:
+                    continue
+                _hit_keywords = set()
+                _support_count = 0
+                for _entry_text in _focus_score_texts:
+                    _entry_hits = [str(_kw or "").strip() for _kw in _fkws if str(_kw or "").strip() and str(_kw or "").strip() in _entry_text]
+                    if _entry_hits:
+                        _support_count += 1
+                        _hit_keywords.update(_entry_hits)
+                _score = len(_hit_keywords)
+                if _score > 0:
+                    _weight = _weights.get(_fname, 1.0)
+                    _focus_scores[_fname] = _focus_scores.get(_fname, 0) + _score * _weight
+                    _focus_support_counts[_fname] = _focus_support_counts.get(_fname, 0) + _support_count
+            
+            if _review_focus_scores:
+                _focus_scores = _review_focus_scores
+                _focus_support_counts = _review_focus_support_counts
+                _log("AI: 自动偏好改用内容审稿的高质量主题支持量")
+            if _focus_scores:
+                _robust_focus_scores = {
+                    key: value
+                    for key, value in _focus_scores.items()
+                    if _preference_quota_supported(key)
+                    and float(value) >= 3.0
+                    and int(_focus_support_counts.get(key, 0) or 0) >= 3
+                }
+                if _robust_focus_scores:
+                    _removed_weak_focuses = sorted(set(_focus_scores) - set(_robust_focus_scores))
+                    if _removed_weak_focuses:
+                        _log(
+                            "AI: 自动偏好忽略候选不足主题: "
+                            + ",".join(
+                                f"{name}({_focus_support_counts.get(name, 0)}条)"
+                                for name in _removed_weak_focuses
+                            )
+                        )
+                    _focus_scores = _robust_focus_scores
+                else:
+                    _block_support_counts = {}
+                    for _entry_text in _focus_score_texts:
+                        _block = _clip_focus_block(("product", _entry_text, 0, 0, 0, 0, ""))
+                        if _automatic_focus_labels and _block not in _automatic_focus_labels:
+                            continue
+                        if _food_mode and _block not in _food_focus_labels:
+                            continue
+                        if not _food_mode and _block in _food_focus_labels:
+                            continue
+                        if _preference_quota_supported(_block):
+                            _block_support_counts[_block] = _block_support_counts.get(_block, 0) + 1
+                    if _block_support_counts:
+                        _fallback_focus = max(_block_support_counts, key=_block_support_counts.get)
+                        _fallback_support = _block_support_counts[_fallback_focus]
+                        _focus_scores = {_fallback_focus: float(_fallback_support)}
+                        _focus_support_counts[_fallback_focus] = _fallback_support
+                        _log(
+                            f"AI: 自动偏好改用安全字幕主主题 → {_fallback_focus}"
+                            f"({_fallback_support}条)"
+                        )
+                # 自动偏好必须可复现：按得分、有效条目数、名称稳定排序。
+                _best_focus = sorted(
+                    _focus_scores,
+                    key=lambda key: (
+                        -float(_focus_scores.get(key, 0)),
+                        -int(_focus_support_counts.get(key, 0) or 0),
+                        str(key),
+                    ),
+                )[0]
+                _best_score = _focus_scores[_best_focus]
+                # 从all_angle_hints找对应的完整提示
+                _focus_hint_map_full = {
+                    "版型显瘦": "侧重身材痛点，优先选显瘦,遮肉,修饰身材,收腰的片段",
+                    "上身效果": "侧重上身视觉变化，优先选挂着与穿上反差、试穿效果、整体上身效果的片段，不把舒适度当成上身效果",
+                    "颜色氛围": "侧重颜色氛围，优先选显白,抬亮肤色,色彩氛围相关的片段",
+                    "风格定位": "侧重款式风格与气质，优先选学院、美式、俏皮、减龄、优雅等明确风格身份的片段，不把它误当成流行趋势",
+                    "场景搭配": "侧重场景搭配，优先选通勤,约会,出门,搭配等场景化片段",
+                    "性价比": "侧重性价比，优先选品质对比,划算,超值,大牌平替的片段",
+                    "情绪感染": "侧重情绪感染力，优先选主播语气最激动,最真诚,最惊艳的片段",
+                    "流行趋势": "侧重流行趋势，优先选当季流行,设计感,风格标签的片段",
+                    "面料质感": "侧重面料卖点，优先选面料手感,质感,亲肤的片段",
+                    "品质细节": "侧重品质细节，优先选做工,走线,工艺,耐穿和质量证明的片段",
+                    "紧迫稀缺": "侧重紧迫稀缺，优先选限量,断码,手慢无,库存紧张但不含价格的片段",
+                    "尺寸长度": "侧重尺寸比例，优先选裙长,长度,遮小腿,露脚踝等精准描述长度的片段",
+                    "工艺细节": "侧重工艺品质，优先选工艺,成本,做工,定染等体现品质细节的片段",
+                    "穿着体验": "侧重穿着感受，优先选舒适,不勒,自在,活动方便等体验类片段",
+                    "对比优势": "侧重对比独特，优先选同价位买不到,独家,差异化的片段",
+                    "口感食欲": "侧重口感食欲，优先选试吃反应,切开爆汁,香脆软糯,Q弹拉丝等片段",
+                    "新鲜品质": "侧重新鲜品质，优先选现摘现发,鲜活饱满,坏果包赔,品质背书的片段",
+                    "产地溯源": "侧重产地溯源，优先选产地,果园基地,源头直采,当季应季等片段",
+                    "规格分量": "侧重规格分量，优先选净重,斤装,个头,果径,整箱开箱等片段",
+                    "发货保鲜": "侧重发货保鲜，优先选冷链,冰袋,保温箱,锁鲜,售后保障等片段",
+                    "场景吃法": "侧重食用场景，优先选早餐,夜宵,办公室,全家囤货,火锅煲汤等片段",
+                }
+                focus = _focus_hint_map_full.get(_best_focus, list(_focus_hint_map_full.values())[0])
+                _remember_focus_summary(
+                    "智能偏好",
+                    _best_focus,
+                    focus,
+                    requested="自动",
+                    score=_best_score,
+                    matched_label=_best_focus,
+                )
+                if _automatic_focus_labels:
+                    _analysis_metadata_context()["preference_summary"]["allowed_labels"] = list(_automatic_focus_labels)
+                _log(f"AI: 智能偏好 → {_best_focus}(命中{_best_score}次) → {focus}")
+            else:
+                focus = "不额外限定偏好，优先选择主品类内最完整、最具体、最安全的卖点片段"
+                _remember_focus_summary("智能偏好", "全量选片", focus, requested="自动")
+                if _automatic_focus_labels:
+                    _analysis_metadata_context()["preference_summary"]["allowed_labels"] = list(_automatic_focus_labels)
+                    _analysis_metadata_context()["preference_summary"]["fallback_reason"] = "勾选主题缺少足够的干净支持内容"
+                _log(f"AI: 智能偏好 → 无干净偏好命中，改为全量安全卖点")
+        except Exception as _e:
+            # 防护：变量名拼写不一致或其他异常时，不再随机制造偏好标签。
+            focus = "不额外限定偏好，优先选择主品类内最完整、最具体、最安全的卖点片段"
+            _remember_focus_summary("兜底偏好", "全量选片", focus, requested="自动", error=str(_e))
+            _log(f"AI: 智能偏好异常({str(_e)})，降级全量安全卖点 → {focus}")
+
+    # [增强] 计算 SRT 时间范围，告知 AI
+    _srt_times = []
+    for _ln in srt_text.strip().split("\n"):
+        _tm = re.match(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})", _ln.strip())
+        if _tm:
+            _es = int(_tm.group(5))*3600 + int(_tm.group(6))*60 + int(_tm.group(7)) + int(_tm.group(8))/1000.0
+            _srt_times.append(_es)
+    _srt_max = max(_srt_times) if _srt_times else 60
+    _srt_min = min(_srt_times) if _srt_times else 0
+
+    _target_rule = _target_duration_rule_text(_AI_TARGET_DURATION, duration_contract)
+
+    # 多版本模式：选更多片段，允许同卖点不同角度
+    if _skip_focus:
+        _min_pieces = 12
+        _clip_range = "25-35"
+        _dedup_rule = "★同一卖点如果主播用了不同表达方式（如'面料好'和'这个面料摸着特别软'），可以分别选取，因为多版本需要差异化素材★"
+        _total_rule = f"总素材池25-35个，每个版本必须独立满足：{_target_rule}"
+        _hook_rule = "★多版本选片：必须找出3-5个不同类型的Hook候选★ 不要只选1个最强Hook，而是找出圈人群型、极端表态型、痛点型、爆料型、夸奖型各1个（有则选）。不同版本需要不同的Hook开场。"
+        _product_rule = "★多版本选片：选择12-18个Product片段★ 覆盖不同卖点角度（版型/面料/功能/风格/品质/对比/上身效果/搭配建议/场景种草），每个角度至少2个片段，同一角度有不同表达也要选。素材越丰富，3个版本的内容越充实。"
+        _close_rule = "★多版本选片：选择3-5个Close片段★ 用信任强化、自然选择理由或场景收尾形成不同收束，不得使用直播互动、个人报尺码或强CTA。"
+    else:
+        # 使用统一的目标时长 -> 片段数量规则，避免不同入口写死不同档位。
+        _clip_min, _clip_max = _target_clip_count_range(_AI_TARGET_DURATION)
+        _clip_range = f"{_clip_min}-{_clip_max}"
+        _min_pieces = _clip_min
+        _total_rule = f"通常选择{_clip_range}个片段，以叙事完整和不重复为准；{_target_rule}"
+        # ★★★ 关键：同步 _AI_CLIP_COUNT，否则 prompt 替换的永远是默认值 ★★★
+        _AI_CLIP_COUNT = _clip_range
+        _dedup_rule = (
+            '★正文信息增量合同★ 同一个购买理由只能保留信息量最高的一段；'
+            '只有“结论→原因/证据”或“效果→场景结果”构成明确递进时，才允许连续两段。'
+            '例如“短风衣好搭、更多变、干净利落、不笨重”若都在重复同一穿搭价值，只留最具体的一段，'
+            '不得为了时长把同义表达拆成多段。每个Product必须至少新增一个可验证事实、原因、效果、场景或顾虑解除。'
+        )
+        _hook_rule = ""
+        _product_rule = ""
+        _close_rule = ""
+        _hook_rule = ""
+        _product_rule = ""
+        _close_rule = ""
+
+    _category_overrides = _category_prompt_overrides(main_category, multi_version=bool(_skip_focus))
+    if _category_overrides:
+        _dedup_rule = _category_overrides.get("dedup") or _dedup_rule
+        _hook_rule = _category_overrides.get("hook") or _hook_rule
+        _product_rule = _category_overrides.get("product") or _product_rule
+        _close_rule = _category_overrides.get("close") or _close_rule
+
+    # 随机差异化指令（每次运行不同侧重点）
+    if _is_food_fresh_category(main_category):
+        _diff_vibes = [
+            "★本轮选片重点：优先选试吃反应、切开爆汁、拉丝、多汁等强食欲片段★",
+            "★本轮选片重点：优先选现摘现发、产地源头、新鲜品质、坏果包赔等信任片段★",
+            "★本轮选片重点：优先选规格分量、个头净重、开箱展示、家庭囤货理由明确的片段★",
+            "★本轮选片重点：优先选早餐夜宵、办公室、孩子全家、火锅煲汤等可代入食用场景★",
+            "★本轮选片重点：优先选主播真实试吃和复购反馈，避开医疗保健功效表达★",
+        ]
+    else:
+        _diff_vibes = [
+            "★本轮选片重点：优先选主播语气最激动、情绪最饱满的片段，卖点角度越多越好★",
+            "★本轮选片重点：优先选展示上身效果、穿搭场景的片段，少选纯面料描述★",
+            "★本轮选片重点：优先选对比类、痛点解决类的内容，搭配推荐最佳★",
+            "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
+            "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
+        ]
+    if _manual_focus_label and not _skip_focus:
+        _diff_vibe = (
+            f"★本轮差异化由用户指定偏好“{_manual_focus_label}”决定，不再叠加随机选片重点。"
+            "该偏好必须成为Product主线，其他主题只负责补充完整介绍，不得反客为主★"
+        )
+    elif _automatic_focus_labels and not _skip_focus:
+        _diff_vibe = (
+            "★本轮自动主题只能从用户本次勾选的主卖点“"
+            + "、".join(_automatic_focus_labels)
+            + "”中选择；不再叠加随机显瘦/面料等选片重点。其他安全卖点只用于补全故事，不得反客为主★"
+        )
+    else:
+        _diff_vibe = random.choice(_diff_vibes)
+    _ai_rules_prompt = _build_ai_rules_prompt(ai_controls=ai_controls, main_category=main_category)
+    _chapter_progression_rule = (
+        "★正文段落合同★ 正文只允许由2-3个卖点小段落组成。每个小段落连续1-3段："
+        "先给一个具体购买价值，再给直接证据、解释或场景结果，最后必须以完整句收束后才换主题。"
+        "同一素材、同样带有‘好看/显瘦/面料’等泛词，不等于同一故事链，不能据此连续堆叠。"
+        "同一具体卖点最多连续3段；第4段只有在提供新的直接证据时才可保留。"
+        "段落之间允许按语义跨时间安排，但前一段必须独立完整，不能留下半句或展示口令。"
+    )
+
+    # 偏好权重直接进 prompt
+    _pref_weights = {}
+    try:
+        _settings_pref = load_settings().get("preference_weights", {})
+        if isinstance(_settings_pref, dict):
+            _pref_weights.update(_normalize_preference_weights(_settings_pref))
+    except Exception:
+        pass
+    if _automatic_focus_labels:
+        _pref_weights = {
+            key: value
+            for key, value in _pref_weights.items()
+            if key in _automatic_focus_labels
+        }
+    if _pref_weights:
+        _active_weights = {k: v for k, v in sorted(_pref_weights.items(), key=lambda x: -x[1]) if v > 0 and v != 1.0}
+        if _active_weights:
+            _weight_lines = "、".join(f"{k}(权重{v:.1f})" for k, v in _active_weights.items())
+            _ai_rules_prompt += f"\n- 用户卖点权重偏好（数值越高越优先选）：{_weight_lines}\n"
+
+    # 注入用户自定义细节关键词（来自keywords.json的detail_keywords字段）
+    _detail_kw_prompt = ""
+    try:
+        import json as _dkw_json
+        _kw_path_detail = _keyword_file_paths()[1]
+        if os.path.exists(_kw_path_detail):
+            with open(_kw_path_detail, "r", encoding="utf-8") as _dkwf:
+                _dkw_data = _dkw_json.load(_dkwf)
+            _detail_kws = _dkw_data.get("detail_keywords", [])
+            if _detail_kws:
+                _detail_kw_prompt = f"\n★用户特别关注的卖点关键词（优先选含这些词的片段）: {', '.join(_detail_kws[:30])}★\n"
+    except Exception:
+        pass
+    _recent_history_prompt = f"\n{recent_history_hint}\n" if recent_history_hint else ""
+    _extra_instruction_prompt = f"\n{extra_instruction}\n" if extra_instruction else ""
+    _content_review_prompt = f"\n{content_review_hint}\n" if content_review_hint else ""
+    _active_preference = _current_focus_used_label()
+    _manual_focus_contract_prompt = _manual_focus_mainline_prompt(manual_focus_contract)
+    _automatic_focus_constraint_prompt = ""
+    if _automatic_focus_labels and not _skip_focus:
+        _automatic_focus_constraint_prompt = (
+            "\n★自动主题边界★ 本次自动主题只能从“"
+            + "、".join(_automatic_focus_labels)
+            + "”中选择。不要把未勾选主题（例如显瘦）写成Hook或主线；"
+            "只有为承接、证明、时长和完整介绍所必需时，才可作为补充卖点使用。\n"
+        )
+    _preference_quota_prompt = ""
+    if not _skip_focus and _preference_quota_supported(_active_preference):
+        _preference_request = get_last_analysis_metadata()["preference_summary"].get("requested", "自动")
+        _preference_target_duration = (
+            _analysis_metadata_context().get("final_target_duration") or _AI_TARGET_DURATION
+        )
+        _preference_quota, _preference_max = _preference_target_bounds(
+            _preference_target_duration,
+            _preference_request,
+        )
+        _preference_quota_prompt = (
+            f"\n★偏好是主线，不是全片唯一主题★ 本轮偏好是“{_active_preference}”。Product中选择"
+            f"{_preference_quota}-{_preference_max}段真正命中该偏好的完整片段；不得超过{_preference_max}段，"
+            "偏好内容总时长不得超过Product总时长的55%（用户手动指定偏好时可放宽到65%）。"
+            "仅在focus/reason里写偏好名称不算命中，"
+            "片段原字幕必须出现对应场景、效果、材质或卖点证据。若干净候选不足，选尽所有干净候选并用其他卖点补足。"
+            "全片Product至少覆盖3个独立卖点主题；除偏好主题外，其他角度每类1-2段，"
+            "任何单一补充主题的片段数和总时长都不得超过用户指定偏好。"
+            "成交角色不同不代表主题不同，不能把颜色内容分别标成效果/证明/场景来冒充主题覆盖。\n"
+            "★直播口癖降级★ 不选以“来准备好”“就是你们会发现”“如果你想要有一点尝试的心态”开头的铺垫，"
+            "不选以“呀对不对”“是不是这种感觉”收尾的互动句；除非去掉口癖后仍是一句独立且有新增信息的完整卖点。\n"
+        )
+    if review_hook_pairs and _review_hook_contract_kind == "hook_package":
+        _hook_focus_rule = (
+            "★本次存在完整A/B HookPackage：Hook必须从该合同中选择，第二段必须延续同一承诺主题；"
+            "不得用普通HookPair、泛泛介绍或偏好关键词替换已验证开场★"
+        )
+    elif review_hook_pairs:
+        if _manual_focus_label and not _skip_focus:
+            _hook_focus_rule = (
+                f"★Hook必须从内容审稿组合中选择。用户指定偏好“{_manual_focus_label}”时，"
+                "先比较主题相符的审稿组合；只要匹配组合完整、有具体信息且承接成立，就优先使用。"
+                "仅当没有合格匹配组合时才选择最强的其他主题，不得为了偏好使用弱句★"
+            )
+        elif _automatic_focus_labels and not _skip_focus:
+            _hook_focus_rule = (
+                "★Hook优先从内容审稿组合中选择，并优先兑现本次自动主题“"
+                + "、".join(_automatic_focus_labels)
+                + "”；仅当这些主题没有完整且有购买价值的开头时，才可用更强的通用开头。"
+                "不得为了随机差异化把未勾选主题做成主线Hook★"
+            )
+        else:
+            _hook_focus_rule = (
+                "★Hook优先服从内容审稿的强开头与直接承接组合，不得为了差异化选择较弱开头★"
+            )
+    elif (
+        _manual_focus_label
+        and _preference_hook_candidates
+        and not _skip_focus
+        and _preference_only_hook_contract
+    ):
+        _hook_focus_rule = (
+            f"★Hook必须体现用户指定偏好“{_manual_focus_label}”，第二段必须同主题兑现Hook；"
+            "强度相近时选择偏好Hook，不得用其他主题的通用强Hook覆盖用户选择★"
+        )
+    elif _automatic_focus_labels and not _skip_focus:
+        _hook_focus_rule = (
+            "★Hook优先从本次自动主题“"
+            + "、".join(_automatic_focus_labels)
+            + "”的完整候选中选择，并由第二段直接兑现；"
+            "只有这些主题没有独立、有购买价值的开头时，才可选更强的通用Hook。"
+            "不得把未勾选主题作为默认开头★"
+        )
+    else:
+        _hook_focus_rule = (
+            "★Hook先保证人群/痛点/效果足够强，不要为了命中偏好使用平淡开头★ "
+            "第二段必须承接Hook承诺或展示直接效果"
+        )
+    _category_context_prompt = _food_fresh_context_prompt(main_category)
+    _source_labels = sorted({
+        _director_candidate_source(entry_text)
+        for _entry_start, _entry_end, entry_text in (srt_entries or [])
+        if _director_candidate_source(entry_text)
+    })
+    _source_requirements = _director_source_requirements(required_sources)
+    if not _source_requirements:
+        _source_requirements = {source: 1 for source in _source_labels}
+    _merge_source_rule = ""
+    if merge_mode and len(_source_requirements) > 1:
+        _source_count = len(_source_requirements)
+        _source_share_cap = 65 if _source_count == 2 else 55 if _source_count == 3 else 45
+        _source_run_cap = 5 if _source_count == 2 else 4
+        _merge_source_rule = (
+            "\n★混剪来源合同★ 当前合格来源的最低片段配额为："
+            + "、".join(
+                f"{source.strip('[]')}至少{minimum}段"
+                for source, minimum in sorted(_source_requirements.items())
+            )
+            + "。这是来源覆盖底线，不是机械轮播或平均切换；先让不同来源共同承担效果、证据、场景、顾虑解除等叙事职责，再统一编排成一条自然故事。"
+            f"候选充足时，任一来源尽量不超过全片片段数的{_source_share_cap}%；同一来源连续不得超过{_source_run_cap}段，"
+            "只有同一卖点必须由相邻两三句共同说完整时才可连续。每个合格来源应分布在开头、中段、结尾中的至少两个阶段，禁止把某个来源集中堆在一整段或只放到结尾凑数。"
+            "来源切换应放在卖点或叙事阶段的自然边界，不得逐句机械轮换；也不得为凑配额选择残句、跨品类、价格CTA或低质量重复内容。\n"
+        )
+    if _is_food_fresh_category(main_category):
+        _priority_line = "- 优先选受众代入强的卖点(口感食欲>新鲜品质>产地溯源>规格分量>发货保鲜>场景吃法)"
+        _close_priority_line = '- 对于Close片段,优先选"复购背书""发货保鲜""囤货场景"类,避开含价格和保健功效的内容'
+        _coverage_examples = "口感/新鲜/产地/规格/发货/场景"
+        _example_hook_focus = "口感食欲"
+        _example_hook_reason = "试吃反应强"
+        _example_product_focus_1 = "新鲜品质"
+        _example_product_reason_1 = "现摘现发背书"
+        _example_product_focus_2 = "规格分量"
+        _example_product_reason_2 = "规格展示清楚"
+        _example_close_focus = "发货保鲜"
+        _example_close_reason = "售后信任"
+    else:
+        _priority_line = (
+            "- 自动主题优先级只遵从本次勾选的主卖点；其他卖点只用于补全完整介绍"
+            if _automatic_focus_labels and not _skip_focus
+            else "- 优先选受众群体广的卖点(显瘦>面料>颜色>场景)"
+        )
+        _close_priority_line = '- 对于Close片段,优先选自然总结、选择理由或场景收束；禁止尺码拍法、价格、链接、关注和强CTA'
+        _coverage_examples = "版型/面料/显瘦/穿搭/品质/场景"
+        _example_hook_focus = "痛点提问"
+        _example_hook_reason = "开场爆点"
+        _example_product_focus_1 = "版型显瘦"
+        _example_product_reason_1 = "显瘦卖点突出"
+        _example_product_focus_2 = "面料触感"
+        _example_product_reason_2 = "面料描述细腻"
+        _example_close_focus = "信任强化"
+        _example_close_reason = "推荐合辑"
+
+    if _skip_focus:
+        # 多版本模式：AI只做素材选取，不做编排
+        # ★重要：Prompt结构与单版本一致（避免deepseek-v4-flash对不同格式的兼容问题）★
+        user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中精选出{_clip_range}个高质量素材片段.
+
+你的任务是从SRT中选出足够多的高质量片段，后续会由AI二次编排成不同版本.素材越丰富越多元化,最终效果越好.
+
+{_category_context_prompt}
+
+选片规则:
+1. ★同一卖点如果主播用了不同表达方式(如"面料好"和"这个面料摸着特别软"),可以分别选取,因为多版本需要差异化素材★
+2. {_dedup_rule}
+3. 精选{_clip_range}个片段,{_total_rule}
+4. ★绝对不选含价格/折扣的条目★
+5. {_hook_rule}
+6. {_product_rule}
+7. {_close_rule}
+
+{_extra_instruction_prompt}
+★选片优先级★
+- 优先选主播语气最激动、情绪最饱满的片段
+- 优先选内容独立完整、有头有尾的片段
+{_priority_line}
+{_close_priority_line}
+
+{f"★本轮选片侧重: {focus}★" if focus else ""}
+{_ai_rules_prompt}
+{_recent_history_prompt}
+
+★输出格式★: 每个片段用 srt_indices 字段指定选了哪些编号条目(数组),不要填start/end时间戳.★优先选1个完整条目；如果前一句必须靠后一句承接，允许选2个连续条目，确保单片段5-10秒且语义完整★:
+[
+  {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}", "trim_priority": 0}},
+  {{"clip_type": "hook", "srt_indices": [12], "focus": "{_example_product_focus_1}", "reason": "不同钩子类型", "trim_priority": 0}},
+  {{"clip_type": "product", "srt_indices": [18], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}", "trim_priority": 2}},
+  {{"clip_type": "product", "srt_indices": [25], "focus": "{_example_product_focus_2}", "reason": "{_example_product_reason_2}", "trim_priority": 1}},
+  {{"clip_type": "close", "srt_indices": [45], "focus": "{_example_close_focus}", "reason": "{_example_close_reason}", "trim_priority": 0}},
+  ...
+]
+
+★clip_type: hook/product/close 三种类型; focus: 该片段的卖点角度描述; reason: 选片理由(10字内)★
+{_hook_hint}
+
+字幕条目:
+{indexed_transcript}"""
+
+    if _source_distribution_repair_mode:
+        user_msg = f"""这是一次混剪来源分布的完整重编，不是在旧片单两端补素材。你仍是最终叙事负责人，必须从全部候选中重新输出一条自然、完整、可直接成片的故事。
+
+{extra_instruction}
+{_category_context_prompt}
+{_merge_source_rule}
+{_chapter_progression_rule}
+{_content_review_prompt}
+{_automatic_focus_constraint_prompt}
+本轮指定偏好：{_active_preference or focus or '全量选片'}
+{_preference_quota_prompt}
+{_manual_focus_contract_prompt}
+{_hook_focus_rule}
+{_hook_hint}
+
+重编规则：
+1. 最多1个Hook；若使用则位于首段，第2段必须直接兑现。没有真正合格Hook时，用最完整的Product自然开场，不得凑一个弱Hook；最多1个Close且位于末段，Close后不能再有Product。
+2. 来源均衡必须服从自然叙事：在效果、证据、场景、顾虑解除等阶段边界切换来源，不得逐句机械轮播，也不得把某个来源集中成连续长段。
+3. 通常选择{_clip_range}个片段，{_total_rule}；逐项相加候选秒数，落在目标范围内。
+4. 每个片段优先1个编号；只有补齐完整语义时可选2-3个连续编号。不得编造、跳号、重叠，不得选择标为不可选的条目。
+5. {_dedup_rule}
+6. {_hook_rule}
+7. {_product_rule}
+8. {_close_rule}
+{_ai_rules_prompt}
+
+只输出一个JSON对象，不要解释，不要Markdown。clips必须是全新的完整有序片单；expansion_plan提供4-8个未被clips使用的完整Product备用片；plan_report如实说明商品、故事区间、开场小段落、正文主题推进、缺失角色和风险。
+clips每项格式：
+{{"clip_type":"hook|product|close","srt_indices":[1],"focus":"实际卖点主题","reason":"本段叙事作用","trim_priority":0}}
+expansion_plan每项格式：
+{{"priority":1,"after_srt_indices":[1],"after_order":1,"srt_indices":[2],"focus":"备用主题","reason":"补片作用"}}
+Hook、第2段、Close的trim_priority必须为0；其他Product从1开始填写不重复的正整数，数字越小越先删。
+
+全部候选：
+{indexed_transcript}"""
+    elif _director_repair_mode:
+        user_msg = f"""这是一次定向片单修复，不是重新自由策划。必须解决检查项，不能原样返回旧骨架。
+
+{extra_instruction}
+{_content_review_prompt}
+{_automatic_focus_constraint_prompt}
+
+本轮指定偏好：{_active_preference or focus or '全量选片'}
+{_preference_quota_prompt}
+{_manual_focus_contract_prompt}
+{_hook_focus_rule}
+{_hook_hint}
+
+执行顺序：
+1. 先保留骨架中未被点名的问题项及其相对顺序。已有合格Hook时它仍是第1段且第二段直接兑现；没有合格Hook时保留最完整Product自然开场，Close仍是末段。
+2. 再从下方安全候选中补入或替换完整Product，必须真实达到检查项写明的偏好段数和时长区间。
+3. 输出前逐项相加候选标注的秒数；低于下限继续补，高于上限按trim_priority删低价值Product。
+4. 只使用连续srt_indices，不得编造编号、文本或时间，不得选择标为不可选的条目。
+5. 返回修复后的完整有序JSON对象，不要解释，不要Markdown。对象包含clips、expansion_plan和plan_report；clips是修复后的主片单，expansion_plan仍需提供4-8个未使用备用Product。
+
+clips每项格式：
+{{"clip_type":"hook|product|close","srt_indices":[1],"focus":"实际卖点主题","reason":"本段叙事作用","trim_priority":0}}
+expansion_plan每项格式：
+{{"priority":1,"after_srt_indices":[1],"after_order":1,"srt_indices":[2],"focus":"备用主题","reason":"补片作用"}}
+Hook、第二段、Close的trim_priority必须为0；其他Product从1开始填写不重复的正整数，数字越小越先删。
+
+全部候选：
+{indexed_transcript}"""
+    else:
+        user_msg = f"""以下是编号后的直播字幕条目，你需要像专业短视频编导一样，从中精选条目并编排成一个完整的带货短视频脚本.
+
+{_category_context_prompt}
+{_merge_source_rule}
+要求:
+1. {_dedup_rule}
+2. 像讲故事一样编排，每个片段自然衔接下一段，听起来是一段流畅的口播
+   {_chapter_progression_rule}
+3. ★你是最终叙事负责人★ clips数组的顺序就是最终成片顺序，后续程序不会替你重排或替换主题；程序只会在低于时长下限时执行你声明的expansion_plan。Hook最多1个，若使用必须位于首段；没有真正合格Hook时，直接用最完整、最具体的Product自然开场，绝不凑弱Hook。Close最多1个且位于末段；Close之后绝对不能再有Product。先兑现Hook或自然开场的核心价值，再展开效果、证据、场景或顾虑，最后自然收束
+4. 通常选择{_clip_range}个片段，{_total_rule}。数量不是硬指标；若安全且完整的内容不足，宁可略短也不要用重复、残句或无关内容凑数
+5. ★每个片段优先选1个编号条目；如果只选前一句会导致语义不完整，必须连带后一句，允许选2个连续编号条目；只有补齐完整主谓宾时才允许3个连续条目★ 完整句 > 短句；绝对不要在一句话中间截断
+6. ★片段之间禁止条目编号重叠★ 同一条目只能出现在一个片段中
+7. srt_indices必须连续；禁止选择#05和#07却跳过#06。若两条不连续字幕都值得保留，必须分别作为两个片段放到各自合适的叙事位置
+8. [本轮选片偏好]{focus}
+   {_hook_focus_rule}；主卖点偏好优先进入证明细节和顾虑解除段。后续Product必须覆盖其他卖点角度（{_coverage_examples}等），确保单视频介绍完整。偏好角度遵守上述目标区间，其他同一角度最多2段，禁止全片只讲一个维度
+{_preference_quota_prompt}
+{_manual_focus_contract_prompt}
+9. {_diff_vibe}
+10. {_hook_rule}
+11. {_product_rule}
+12. {_close_rule}
+{_ai_rules_prompt}
+{_recent_history_prompt}
+{_extra_instruction_prompt}
+{_content_review_prompt}
+{_automatic_focus_constraint_prompt}
+
+★输出格式★: 只输出一个JSON对象。clips中每个片段用srt_indices指定编号条目，不要填start/end时间戳；每项都填写trim_priority。expansion_plan提供4-8个未被clips使用的完整Product，并用after_srt_indices锚定插入位置。plan_report说明具体商品、使用的故事区间、实际开场小段落、正文主题推进、缺失角色和风险。★优先1个条目；前后句强相关时选2个连续条目，确保单片段3-9秒且语义完整，不要选3个以上★:
+{{
+  "clips": [
+    {{"clip_type": "hook", "srt_indices": [3], "focus": "{_example_hook_focus}", "reason": "{_example_hook_reason}", "trim_priority": 0}},
+    {{"clip_type": "product", "srt_indices": [8], "focus": "{_example_product_focus_1}", "reason": "{_example_product_reason_1}", "trim_priority": 0}}
+  ],
+  "expansion_plan": [
+    {{"priority": 1, "after_srt_indices": [8], "after_order": 2, "srt_indices": [18], "focus": "{_example_product_focus_2}", "reason": "备用不同卖点"}}
+  ],
+  "plan_report": {{
+    "selected_product": "具体商品或未知",
+    "selected_story_block_ids": ["SB-SINGLE-001"],
+    "selected_narrative_id": "ARC-01或空字符串",
+    "chapter_topics": ["开场主题", "下一段完整卖点主题"],
+    "missing_roles": [],
+    "warnings": []
+  }}
+}}
+
+{_hook_hint}
+
+字幕条目:
+{indexed_transcript}"""
+
+    _layered_contract = _layered_selection_prompt_contract(
+        selection_context=_prompt_selection_context,
+        ai_controls=ai_controls,
+        rules=_merge_ai_rules(ai_controls),
+        main_category=main_category,
+        duration_contract=duration_contract,
+        merge_mode=merge_mode,
+        required_sources=_source_requirements,
+        multi_version=_skip_focus,
+    )
+    user_msg += (
+        "\n\n★分层选片合同★\n"
+        "下面JSON只定义任务层级、硬约束、软偏好和故事区间。"
+        "候选表仍是唯一素材事实来源；冲突时严格按task_priority执行。\n"
+        + _layered_contract
+    )
+
+    _system_low, _system_high = _duration_source_bounds(_AI_TARGET_DURATION, duration_contract)
+    if _skip_focus:
+        _system_prompt = SYSTEM_PROMPT.replace("45-65", f"{_system_low:.0f}-{_system_high:.0f}").replace("10-15", _AI_CLIP_COUNT).replace("最低8段", f"最低{_min_pieces}段").replace("6-10", f"{max(5, _min_pieces - 4)}-{_min_pieces}")
+    else:
+        _system_prompt = (
+            DIRECTOR_SYSTEM_PROMPT
+            .replace("__TARGET__", str(int(_AI_TARGET_DURATION or 60)))
+            .replace("__LOW__", f"{_system_low:.0f}")
+            .replace("__HIGH__", f"{_system_high:.0f}")
+        )
+        _system_prompt += (
+            "\n【卖点段落闭环】正文按2-3个卖点小段落推进：切到一个卖点后，先在相邻1-3段内把"
+            "结论、证据或结果讲完整，再切换下一个卖点。已经结束的主题不得在后面孤立返回；"
+            "若确有新的直接证据，必须紧接同主题段落呈现，不能隔着场景、搭配或其他卖点再捡回一句。\n"
+        )
+    _category_overlay = _category_system_overlay(main_category)
+    if _category_overlay:
+        _system_prompt = f"{_system_prompt}\n\n{_category_overlay}"
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _system_prompt},
+            {"role": "user", "content": user_msg}
+        ],
+        "temperature": temperature,
+        "top_p": 0.9,
+        "max_tokens": 8192,
+        # DeepSeek: 关闭思考模式（R1），防止返回 reasoning_content 无 content
+    }, ensure_ascii=False).encode("utf-8")
+    # DeepSeek: 显式关闭思考模式（R1），防止空content
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        try:
+            body_dict = json.loads(body)
+            body_dict["thinking"] = {"type": "disabled"}
+            body = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            pass
+    # 豆包Seed模型：添加reasoning_effort，Seed忽略temperature
+    if "seed" in model.lower():
+        try:
+            body_dict = json.loads(body)
+            body_dict["reasoning_effort"] = "low"
+            # Seed固定temperature=1，但传了也不报错，保留即可
+            body = json.dumps(body_dict, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            pass
+
+    url = ai_chat_completions_url(base_url)
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    def _apply_subject_contract(parsed_clips):
+        if not srt_entries:
+            return parsed_clips
+        safe_clips, subject_audit = _filter_subject_role_clips(
+            parsed_clips,
+            srt_entries,
+            main_product=_control_main_product,
+            log_fn=log_fn,
+        )
+        if subject_audit.get("removed_count"):
+            _analysis_metadata_context()["subject_role_parse_audit"] = subject_audit
+        return safe_clips
+
+    try:
+        ctx = create_ssl_context()
+        with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        msg = result.get("choices", [{}])[0].get("message", {})
+        content = msg.get("content", "")
+        # DeepSeek-R1: reasoning in reasoning_content, final answer in content
+        # If content is empty but reasoning exists, don't waste time extracting
+        # Just log and let the retry loop handle it
+        if not content.strip():
+            reasoning = msg.get("reasoning_content", "")
+            if reasoning.strip():
+                _log(f"AI: R1推理完成但content为空，reasoning长度={len(reasoning)}字，将重试")
+            # No R1 response, just empty content from API error
+            if not reasoning.strip():
+                _log(f"AI: 响应为空")
+        _log(f"AI: 响应成功，内容长度={len(content)}字")
+        _skip_focus = _orig_skip  # 恢复全局状态
+        if return_raw:
+            # return_raw模式（多版本选素材）：直接解析clips数组
+            return _apply_subject_contract(_parse_ai_response(
+                content,
+                log_fn,
+                srt_entries,
+                _forbidden_indices,
+                require_srt_indices=bool(srt_entries) and not _orig_skip,
+                allowed_hook_indices=(
+                    _allowed_hook_indices
+                    if _reviewed_no_hook_contract else (_allowed_hook_indices or None)
+                ),
+                allowed_candidate_indices=_review_allowed_candidate_ids,
+                required_hook_followups=(
+                    {
+                        hook_id: thread.get("allowed_followup_ids") or ()
+                        for hook_id, thread in _hook_followup_threads.items()
+                    }
+                    if _review_hook_contract_kind == "hook_package" else None
+                ),
+                reserve_only_candidate_indices=reserve_only_candidate_ids,
+                hook_followup_threads=_hook_followup_threads or None,
+                content_policy=_normalize_ai_controls(ai_controls).get("content_policy"),
+                required_natural_opening_ids=None,
+            ))
+        return _apply_subject_contract(_parse_ai_response(
+            content,
+            log_fn,
+            srt_entries,
+            _forbidden_indices,
+            require_srt_indices=bool(srt_entries) and not _orig_skip,
+            allowed_hook_indices=(
+                _allowed_hook_indices
+                if _reviewed_no_hook_contract else (_allowed_hook_indices or None)
+            ),
+            allowed_candidate_indices=_review_allowed_candidate_ids,
+            required_hook_followups=(
+                {
+                    hook_id: thread.get("allowed_followup_ids") or ()
+                    for hook_id, thread in _hook_followup_threads.items()
+                }
+                if _review_hook_contract_kind == "hook_package" else None
+            ),
+            reserve_only_candidate_indices=reserve_only_candidate_ids,
+            hook_followup_threads=_hook_followup_threads or None,
+            content_policy=_normalize_ai_controls(ai_controls).get("content_policy"),
+            required_natural_opening_ids=None,
+        ))
+    except urllib.error.HTTPError as e:
+        err = ""
+        try: err = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception: pass
+        friendly = _friendly_http(e.code, err)
+        message = f"AI 接口调用失败 (HTTP {e.code})：{friendly}"
+        _log(f"⚠️ {message}")
+        _skip_focus = _orig_skip  # 恢复全局状态
+        if _is_non_retryable_http(e.code):
+            raise NonRetryableAIError(message) from e
+        return []
+    except Exception as e:
+        _log(f"⚠️ AI 选片失败: {_friendly_msg(str(e))}")
+        _skip_focus = _orig_skip  # 恢复全局状态
+        return []

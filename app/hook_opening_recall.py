@@ -408,15 +408,21 @@ def recall_hooks_from_complete_source(
     *, source_rows: Sequence[Mapping[str, Any]], api_key: str, base_url: str, model: str,
     opening_promise: str, allowed_opening_answer_roles: Sequence[str],
     response_hook: Callable[[str, str], None] | None = None,
+    batch_seconds: float = HOOK_SOURCE_BATCH_SECONDS,
+    max_tokens: int = 8192,
 ) -> dict[str, Any]:
-    batches = build_hook_recall_batches(source_rows)
+    # batch_seconds 决定全文切成几个“来源窗口”。传一个极大值 = 整个 SRT 一次调用
+    # （M1/M2 就是这样一次吞下整片的）；max_tokens 必须与窗口规模匹配，
+    # 否则单次调用会直接被截断。
+    batches = build_hook_recall_batches(source_rows, max_seconds=batch_seconds)
     responses: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     batch_audit: list[dict[str, Any]] = []
+    failed_batches: list[str] = []
     for batch in batches:
         response = _post_lite_request(
             api_key=api_key, base_url=base_url, model=model,
             prompt=build_hook_recall_prompt(batch=batch, total_batch_count=len(batches), opening_promise=opening_promise),
-            stage=P05_HOOK_RECALL_STAGE, max_tokens=5200,
+            stage=P05_HOOK_RECALL_STAGE, max_tokens=int(max_tokens),
         )
         content = _text(response.get("choices", [{}])[0].get("message", {}).get("content"))
         if response_hook and content:
@@ -426,17 +432,33 @@ def recall_hooks_from_complete_source(
         except (RuntimeError, ValueError, TypeError):
             data = None
         if not isinstance(data, Mapping):
-            return {
-                "status": "hook_recall_response_invalid", "errors": [f"hook_recall_response_invalid:{batch.get('batch_id')}"],
-                "hook_recall_batches": batch_audit + [{"batch_id": batch.get("batch_id"), "status": "response_invalid"}],
-            }
+            # 单批解析失败不再作废全部窗口：记录下来继续扫其余窗口，
+            # 只有全部窗口都失败才算真正失败。同时保留原始响应片段，
+            # 便于事后定位解析失败的具体原因。
+            failed_batches.append(_text(batch.get("batch_id")))
+            batch_audit.append({
+                "batch_id": batch.get("batch_id"),
+                "status": "response_invalid",
+                "raw_response_present": bool(content),
+                "raw_response_head": content[:1200],
+            })
+            continue
         responses.append((batch, data))
         batch_audit.append({"batch_id": batch.get("batch_id"), "status": "reviewed", "raw_response_present": bool(content)})
+    if not responses:
+        return {
+            "status": "hook_recall_response_invalid",
+            "errors": [f"hook_recall_response_invalid:{item}" for item in failed_batches],
+            "hook_recall_batches": batch_audit,
+        }
     result = parse_hook_recall(
         responses=responses, source_rows=source_rows,
         allowed_opening_answer_roles=allowed_opening_answer_roles,
     )
     result["hook_recall_batches"] = batch_audit
+    if failed_batches:
+        result["hook_recall_failed_batches"] = failed_batches
+        result["partial_batch_failure"] = True
     # P0.5A.4 already asks the semantic source-recall model to make the
     # publishable/independent/opening decision.  A second all-or-nothing LLM
     # veto proved counterproductive in the live caramel run: it assigned every

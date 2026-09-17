@@ -1,0 +1,18 @@
+{
+  "case_kind": "current_mix_preview",
+  "task_id": "mix-1786875397-7785b1",
+  "preview_id": "4d31c81c53a7407282726215eb056a2d",
+  "source_video": "C:\\工作\\珊姐\\8月14日直播\\纱韵-清秋（2）.mp4",
+  "source_videos": [
+    "C:\\工作\\珊姐\\8月14日直播\\纱韵-清秋（2）.mp4",
+    "C:\\工作\\珊姐\\8月14日直播\\纱韵-清秋（3）.mp4"
+  ],
+  "srt_path": "",
+  "target_duration": 90,
+  "created_at": 1786875397.5692105,
+  "snapshot_limits": [
+    "No original video binary copied.",
+    "No raw network LLM request was historically persisted.",
+    "Per-candidate hard-filter rejection identities are unavailable unless present in the snapshot."
+  ]
+}

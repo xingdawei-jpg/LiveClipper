@@ -1,0 +1,343 @@
+{
+  "时间": "2026-08-15 20:06:15",
+  "视频": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4",
+  "结果": "成功",
+  "耗时": "502.2s",
+  "参数": {
+    "去重": "custom",
+    "字幕叠加": true,
+    "指定SRT": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.srt",
+    "画中画": "无",
+    "主推品类": "自动"
+  },
+  "选片": {
+    "ok": true,
+    "clips_count": 18,
+    "clips_total": 18,
+    "size_mb": 144.5,
+    "duration": 69.8,
+    "has_hook": true,
+    "hook_type": "hook",
+    "category": "product",
+    "score": 84,
+    "warnings": []
+  },
+  "输出": "C:\\工作\\output\\xx\\8.15\\1_20260815_200615.mp4",
+  "错误": null,
+  "选片审计": {
+    "version": "final_selection_audit_v1",
+    "selected_duration": 69.837,
+    "preference_summary": {},
+    "content_review_summary": {},
+    "ai_plan_report": {},
+    "hook_events": [],
+    "final_clips": [
+      {
+        "order": 1,
+        "clip_type": "hook",
+        "start": 364.23,
+        "end": 368.589,
+        "duration": 4.359,
+        "text": "真的很好看，超显瘦，你看这肩膀头子往里挖，很显瘦。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/肩线内收显瘦",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 2,
+        "clip_type": "product",
+        "start": 743.97,
+        "end": 744.769,
+        "duration": 0.799,
+        "text": "显得肩窄。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/肩宽修饰",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 3,
+        "clip_type": "product",
+        "start": 745.45,
+        "end": 749.009,
+        "duration": 3.559,
+        "text": "就算你肩比我宽，穿上你的肩会往里挖，能看出来吗？",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/肩宽修饰",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 4,
+        "clip_type": "product",
+        "start": 754.71,
+        "end": 759.549,
+        "duration": 4.839,
+        "text": "将近3~8厘米，3~8厘米往里挖，所以你的肩一定会很窄。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/肩宽修饰",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 5,
+        "clip_type": "product",
+        "start": 467.61,
+        "end": 469.769,
+        "duration": 2.159,
+        "text": "有没有发现我们都这么拉了，它不透。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "面料质感/高支高密",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 6,
+        "clip_type": "product",
+        "start": 480.439,
+        "end": 484.8,
+        "duration": 4.361,
+        "text": "更柔软。更细，它穿在身上不扎，它很舒服的。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "面料质感/柔软舒适",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 7,
+        "clip_type": "product",
+        "start": 628.87,
+        "end": 631.99,
+        "duration": 3.12,
+        "text": "我这个面料，你要说热，那我觉得没有凉快的料子了。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "面料质感/透气性",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 8,
+        "clip_type": "product",
+        "start": 507.91,
+        "end": 514.87,
+        "duration": 6.96,
+        "text": "它是做了拼接 AB 的。这个 AB 拼色，我说一下我们的色牢度会做加固，就让它不容易掉掉色串色。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "工艺细节/AB拼色色牢度",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 9,
+        "clip_type": "product",
+        "start": 713.12,
+        "end": 715.799,
+        "duration": 2.679,
+        "text": "或者我要收紧一点，把抽绳拉紧，领口会变小。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/领口调节",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 10,
+        "clip_type": "product",
+        "start": 667.59,
+        "end": 670.99,
+        "duration": 3.4,
+        "text": "就你搭的这一身，我感觉我可以轻松去到一些度假城市。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "场景搭配/度假场景",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 11,
+        "clip_type": "product",
+        "start": 1171.269,
+        "end": 1175.95,
+        "duration": 4.681,
+        "text": "它比较有那种度假休闲的感觉。你不光说是去云南吧，你们。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "场景搭配/度假风格",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 12,
+        "clip_type": "product",
+        "start": 1179.23,
+        "end": 1183.589,
+        "duration": 4.359,
+        "text": "就你去泰兰德，还是说去，哪怕你真的只是去三亚，去海岛。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "场景搭配/度假风格",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 13,
+        "clip_type": "product",
+        "start": 1214.75,
+        "end": 1217.95,
+        "duration": 3.2,
+        "text": "夏天穿反正不粘身，出汗也不会贴着你的身体。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "穿着体验/不粘身",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 14,
+        "clip_type": "product",
+        "start": 1036.519,
+        "end": 1037.92,
+        "duration": 1.401,
+        "text": "公司问题。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "工艺细节/网纱保养",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 15,
+        "clip_type": "product",
+        "start": 1039.369,
+        "end": 1048.769,
+        "duration": 9.4,
+        "text": "这个衣服毕竟是这种网纱编织的感觉，你这种网纱，凡是它就是个面料，它是个纱，你不要用尖锐物去勾，你别说这种网纱了，你正常的面料你也不能拿尖锐物去勾。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "工艺细节/网纱保养",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 16,
+        "clip_type": "product",
+        "start": 1049.609,
+        "end": 1052.009,
+        "duration": 2.4,
+        "text": "正常穿是没毛病的，你看像我这样子。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "工艺细节/网纱保养",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 17,
+        "clip_type": "product",
+        "start": 1355.819,
+        "end": 1359.46,
+        "duration": 3.641,
+        "text": "看一下啊，我觉得大家喜欢这个款应该都跟我一样，一个是点，显瘦。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/总结",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 18,
+        "clip_type": "close",
+        "start": 1360.259,
+        "end": 1364.779,
+        "duration": 4.52,
+        "text": "你看它两边的这根肩线是有作用的，它会显得我们的肩膀更窄更瘦。",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\JCCC的穿搭影记(2.25春上新）\\单品素材\\JCCC影子【焦糖朗姆】宽松透气针织罩衫遮肉显瘦出片套装女JE6NZZ11\\1.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "版型显瘦/总结",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      }
+    ]
+  }
+}

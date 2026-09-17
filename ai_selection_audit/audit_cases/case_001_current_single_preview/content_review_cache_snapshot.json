@@ -1,0 +1,623 @@
+{
+  "version": "content-review-v40",
+  "cache_key": "6560faa2b690c6655e544a8142bceb1aa37f78c0f0fbb946dfc96d38df4cfcdd",
+  "candidate_digest": "a4a2dad9972aa9e00ea36f7068916389d1df11c8151bbe09cac654df86ed9afd",
+  "category": "服饰内衣",
+  "model": "deepseek-v4-flash",
+  "retained_duration": 179.744,
+  "cards": [
+    {
+      "candidate_id": 3,
+      "topic": "上身效果",
+      "subtopic": "显背薄效果",
+      "buyer_value": "说清穿上后显精神显背薄的整体效果",
+      "evidence_type": "具体效果",
+      "evidence_quote": "显精神显背薄的一个效果",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 4,
+      "topic": "风格定位",
+      "subtopic": "简约大方",
+      "buyer_value": "说清设计简约大方且上身显精神",
+      "evidence_type": "风格定位",
+      "evidence_quote": "干净简单，简约大方",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "风格定位",
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 6,
+      "topic": "版型显瘦",
+      "subtopic": "后摆遮臀",
+      "buyer_value": "说清前短后长后摆能盖住臀部肉感",
+      "evidence_type": "版型设计",
+      "evidence_quote": "后摆的异常是对屁股大姐们友好",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果",
+        "人群明确"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 7,
+      "topic": "尺寸长度",
+      "subtopic": "衣长开叉设计",
+      "buyer_value": "说清衣长58且有开叉不拖沓",
+      "evidence_type": "尺寸事实",
+      "evidence_quote": "前面是56的58的衣长",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "needs_previous",
+      "quality_tags": [
+        "尺寸事实"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 8,
+      "topic": "版型显瘦",
+      "subtopic": "遮肚空间感",
+      "buyer_value": "说清衣长58有空间感能遮肚子",
+      "evidence_type": "版型设计",
+      "evidence_quote": "58的衣长有个空间感啊，肚子被遮",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 9,
+      "topic": "工艺细节",
+      "subtopic": "捏褶定型",
+      "buyer_value": "说清前后四道捏褶定型及面料成分",
+      "evidence_type": "工艺细节",
+      "evidence_quote": "前后四道捏褶定型的很漂亮",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "工艺细节",
+        "原因解释"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 18,
+      "topic": "上身效果",
+      "subtopic": "造型感显洋气",
+      "buyer_value": "说清单穿就有造型感显洋气",
+      "evidence_type": "风格定位",
+      "evidence_quote": "单穿就好看",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "风格定位",
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "衬衫",
+      "target_relation": "primary",
+      "subject_evidence": "单穿就好看"
+    },
+    {
+      "candidate_id": 19,
+      "topic": "版型显瘦",
+      "subtopic": "显瘦遮肉",
+      "buyer_value": "说清显精神显背薄遮肉显瘦的综合效果",
+      "evidence_type": "具体效果",
+      "evidence_quote": "显精神，显背薄遮肉，显瘦",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 20,
+      "topic": "颜色氛围",
+      "subtopic": "藏青色优雅",
+      "buyer_value": "说清藏青色单穿大气优雅",
+      "evidence_type": "颜色氛围",
+      "evidence_quote": "藏青色单穿就好看，大气优雅",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "颜色氛围",
+        "风格定位"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 21,
+      "topic": "颜色氛围",
+      "subtopic": "定染显白",
+      "buyer_value": "说清定染蓝色自然光下显白",
+      "evidence_type": "颜色氛围",
+      "evidence_quote": "定染的，就是自然光线下啊比这种普通的深蓝色会更显白一点",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果",
+        "原因解释"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 22,
+      "topic": "颜色氛围",
+      "subtopic": "黄黑皮友好",
+      "buyer_value": "说清黄黑皮姐妹也能放心穿",
+      "evidence_type": "颜色氛围",
+      "evidence_quote": "黄黑皮姐妹都可以放心穿的颜色",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "人群明确"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 27,
+      "topic": "面料质感",
+      "subtopic": "抗皱性说明",
+      "buyer_value": "说清面料有一定抗皱性但不能完全抗皱",
+      "evidence_type": "面料质感",
+      "evidence_quote": "它是有一定的抗皱性的，但是它不能完全抗皱",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "原因解释",
+        "实测证据"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 29,
+      "topic": "版型显瘦",
+      "subtopic": "立体裁片显瘦",
+      "buyer_value": "说清多片立体裁片版型上身显瘦",
+      "evidence_type": "版型设计",
+      "evidence_quote": "多片立体裁片这种版型上身想要显胖都难",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果",
+        "原因解释"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 31,
+      "topic": "场景搭配",
+      "subtopic": "早秋衬衫季",
+      "buyer_value": "说清早秋穿衬衫比卫衣更合适",
+      "evidence_type": "场景搭配",
+      "evidence_quote": "更适合早秋穿",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "场景清晰"
+      ],
+      "tier": "main",
+      "primary_subject": "衬衫",
+      "target_relation": "primary",
+      "subject_evidence": "更适合早秋穿"
+    },
+    {
+      "candidate_id": 32,
+      "topic": "对比优势",
+      "subtopic": "版型显瘦对比",
+      "buyer_value": "说清版型面料好且一件显瘦",
+      "evidence_type": "对比优势",
+      "evidence_quote": "主要是它的版型，就一件衣服就能给你穿的很显瘦",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "对比优势",
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 35,
+      "topic": "场景搭配",
+      "subtopic": "多季可穿",
+      "buyer_value": "说清春夏秋三季都可穿",
+      "evidence_type": "场景搭配",
+      "evidence_quote": "春夏秋三个季都可以穿",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "场景清晰"
+      ],
+      "tier": "reserve",
+      "primary_subject": "衬衫",
+      "target_relation": "primary",
+      "subject_evidence": "春夏秋三个季都可以穿"
+    },
+    {
+      "candidate_id": 38,
+      "topic": "尺寸长度",
+      "subtopic": "前短后长设计",
+      "buyer_value": "说清衣长前短后长的设计",
+      "evidence_type": "尺寸事实",
+      "evidence_quote": "衣常是前短后长",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "尺寸事实"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 39,
+      "topic": "尺寸长度",
+      "subtopic": "前后衣长尺寸",
+      "buyer_value": "说清后长65前长58的具体尺寸",
+      "evidence_type": "尺寸事实",
+      "evidence_quote": "后面大概是在65，前面衣长大概是5在58",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "尺寸事实"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 42,
+      "topic": "版型显瘦",
+      "subtopic": "遮肚显背薄",
+      "buyer_value": "说清前片设计藏肚子且视觉显背薄",
+      "evidence_type": "版型设计",
+      "evidence_quote": "能够适合喂包大肚子大姐妹，而且下面放量它是显背薄的",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果",
+        "人群明确"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 44,
+      "topic": "工艺细节",
+      "subtopic": "造型感设计",
+      "buyer_value": "说清衣服有塞进去的造型感",
+      "evidence_type": "工艺细节",
+      "evidence_quote": "它这个造型给到你好像衣服塞进去一点点的造型感",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "工艺细节"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 47,
+      "topic": "场景搭配",
+      "subtopic": "国庆可穿",
+      "buyer_value": "说清十一国庆南方地区还能穿",
+      "evidence_type": "场景搭配",
+      "evidence_quote": "十一国庆的话，你都还可以再穿",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "场景清晰"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 48,
+      "topic": "场景搭配",
+      "subtopic": "叠穿搭配",
+      "buyer_value": "说清天冷可搭马甲且单穿好看",
+      "evidence_type": "场景搭配",
+      "evidence_quote": "外面搭个小马甲就可以",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "场景清晰"
+      ],
+      "tier": "main",
+      "primary_subject": "衬衫",
+      "target_relation": "primary",
+      "subject_evidence": "外面搭个小马甲就可以"
+    },
+    {
+      "candidate_id": 51,
+      "topic": "版型显瘦",
+      "subtopic": "隐藏肉感",
+      "buyer_value": "说清捏褶设计隐藏肚子和胯部肉",
+      "evidence_type": "版型设计",
+      "evidence_quote": "肚子上的肉胯上的肉都能隐藏的严严实实的",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 54,
+      "topic": "版型显瘦",
+      "subtopic": "开叉不压个子",
+      "buyer_value": "说清开叉设计遮肉且不压个子",
+      "evidence_type": "版型设计",
+      "evidence_quote": "能够做到又遮肉的同时然后正面看它不会压个子",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "具体效果"
+      ],
+      "tier": "reserve",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 60,
+      "topic": "风格定位",
+      "subtopic": "清爽减龄",
+      "buyer_value": "说清清爽感让人显年轻",
+      "evidence_type": "风格定位",
+      "evidence_quote": "这种清爽是会真的让你年轻5岁的",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "风格定位",
+        "具体效果"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 67,
+      "topic": "工艺细节",
+      "subtopic": "后背中缝线",
+      "buyer_value": "说清后背中缝线让视觉中心内移",
+      "evidence_type": "工艺细节",
+      "evidence_quote": "后背给大家做一整行的中缝线，它让视觉中心往中间移",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "工艺细节",
+        "原因解释"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 68,
+      "topic": "面料质感",
+      "subtopic": "面料特性",
+      "buyer_value": "说清面料有厚度有筋骨感但不厚重",
+      "evidence_type": "面料质感",
+      "evidence_quote": "面料是做金属棉，有厚度，有筋骨感，但是不厚重",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "面料质感",
+        "原因解释"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    },
+    {
+      "candidate_id": 70,
+      "topic": "穿着体验",
+      "subtopic": "白色不透",
+      "buyer_value": "说清白色不透且可搭配不同内衣",
+      "evidence_type": "穿着体验",
+      "evidence_quote": "白色不透",
+      "roles": [
+        "effect",
+        "evidence"
+      ],
+      "dependency": "independent",
+      "quality_tags": [
+        "实测证据"
+      ],
+      "tier": "main",
+      "primary_subject": "",
+      "target_relation": "unknown",
+      "subject_evidence": ""
+    }
+  ],
+  "hook_pairs": [],
+  "hook_packages": [
+    {
+      "hook_id": 3,
+      "followup_id": 19,
+      "topic": "上身效果",
+      "reason": "下一段进一步强调显背薄遮肉显瘦的综合效果",
+      "hook_promise": "显精神显背薄的一个效果",
+      "proof_relation": "visual_result",
+      "package_complete": true,
+      "semantic_signals": [
+        "concrete_value"
+      ],
+      "delivery_signal": "unknown",
+      "opening_tier": "C"
+    },
+    {
+      "hook_id": 3,
+      "followup_id": 4,
+      "topic": "显精神显背薄",
+      "reason": "承接句具体描述设计简约大方，并再次强调上身显精神，直接兑现Hook中的显精神显背薄效果",
+      "hook_promise": "它能够让你穿出来显精神显背薄的一个效果",
+      "proof_relation": "visual_result",
+      "package_complete": true,
+      "semantic_signals": [
+        "concrete_value"
+      ],
+      "delivery_signal": "unknown",
+      "opening_tier": "C"
+    }
+  ],
+  "hook_pair_reviewed": true,
+  "marketing_intent": {
+    "version": "marketing-intent-v3",
+    "candidate_digest": "a4a2dad9972aa9e00ea36f7068916389d1df11c8151bbe09cac654df86ed9afd",
+    "response_present": false,
+    "intents": [],
+    "arcs": [],
+    "rejections": []
+  }
+}

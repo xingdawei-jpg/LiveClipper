@@ -1,0 +1,9 @@
+{
+  "raw_asr": "not exported; source SRT path recorded only",
+  "semantic_candidates_before_freeze": "not separately persisted",
+  "after_hard_filter": "counts may be in task logs; identities not persisted",
+  "after_review": "available as content review cards",
+  "director_input_request": "not historically persisted; metadata only",
+  "director_output": "available as preview/selection draft fields",
+  "final_playlist": "available as selection manifest/result fields"
+}

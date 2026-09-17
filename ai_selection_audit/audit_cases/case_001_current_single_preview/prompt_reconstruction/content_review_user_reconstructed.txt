@@ -1,0 +1,46 @@
+
+品类:unknown_from_persisted_preview
+主商品:unknown_from_persisted_preview
+用户要求避开:无
+
+内容使用政策:
+价格/报价：不得进入成片。
+促销/行动引导：不得进入成片。
+来源/原厂背书：不得进入成片。
+社会证明：不得进入成片。
+售后承诺：不得进入成片。
+尺码/身高体重互动：不得进入成片。
+直播互动回复：不得进入成片。
+
+要求:
+1. 审阅全部候选，但只输出值得交给导演的卡。cards上限80不是填满目标，通常25-55项；内容充足时main+reserve原片合计尽量达到180秒。质量永远高于时长，宁可少于目标也不得用残句、乱码、闲聊、纯展示铺垫或重复内容凑秒数。
+2. 同一具体子主题只留1个main和1-2个reserve。候选质量用尽就停，不要用重复模板凑数。
+3. topic用稳定卖点类别，subtopic写具体问题；buyer_value只概括该原句对购买决策的价值。
+4. primary_subject是原句实际在讲的商品/对象，不能因为顺带提到而算主体。target_relation只能是primary/supporting/other/unknown：primary=主商品是本段主体，supporting=主要为主商品提供搭配或证明，other=主体已转为另一商品，unknown=原句不足以判断。subject_evidence必须是原句里一段连续的短引，没有证据就返回unknown。
+5. roles只能使用effect,evidence,scene,objection,product。这些只是内容功能，不是成片位置。dependency只能使用independent,needs_previous,needs_next,needs_both。
+6. topic/subtopic/buyer_value必须只依据该编号原字幕，不得把“展示一下”臆测成度假、通勤或其他未说出的场景；不得改写字幕，程序会按编号绑定原文。
+7. quality_tags用简短标签，如具体效果、原因解释、实测证据、人群明确、场景清晰、ASR风险。只有原句确实属于泛泛夸赞、展示铺垫或重复时才如实打标，不得把它们伪装成具体价值。
+8. 明显从半句开始或结尾未完、指代不明、ASR乱码、连续结巴重复、纯互动或纯铺垫的候选不得进入main/reserve。不要把残句仅标记dependency后继续保留。
+9. tier必须真实分层：main只给同类中最完整、最具体、证据最强的表达，其余高质量表达标reserve。标other的当然可作安全reserve，但不得标main或作Hook。内容充足时main约占35%-65%，禁止全部标main；同一大topic最多4张main，混剪时同一来源+同一大topic最多2张main。
+10. topic使用稳定大类：服饰优先用版型显瘦/上身效果/面料质感/颜色氛围/风格定位/场景搭配/工艺细节/尺寸长度/穿着体验/对比优势/流行趋势；食品优先用口感食欲/新鲜品质/产地溯源/规格分量/发货保鲜/场景吃法；新品类用对应稳定大类。分类边界必须严格：上身效果只指挂着、平铺或试穿前后与穿上后的视觉反差、整体效果，不能拿舒服/透气冒充；穿着体验只指触感、温度、束缚和活动感受；风格定位指学院、美式、韩系、俏皮、减龄、优雅、气质等款式身份，不等于流行趋势；流行趋势只在原句明确说当季、今年、流行、趋势、热门或秀场时使用；夏天、早秋、换季等穿着时间和温度归场景搭配；尺寸长度只写真实裙长、衣长、覆盖位置或尺寸事实，单纯“短百褶裙的风格”归风格定位。
+
+10. hook_pairs给出0-8组可选开头组合，只有真的存在强开头时才输出。每项必须是“独立说清具体购买价值”的完整Hook，以及下一段立刻解释、证明或兑现它的完整候选。直播互动、库存问答、个人身高体重尺码、价格/CTA、上新预告、纯展示铺垫、泛泛夸赞、残句都绝不可进入hook_pairs。若没有足够强的组合，返回空数组，不得凑数。
+
+HookPackage rule: output hook_pairs and hook_packages together. A complete A/B HookPackage becomes the live director's only Hook source; hook_pairs are used only when no A/B package survives validation. A package must state Hook promise, proof relation, completion, semantic signals, and A/B/C tier. Never output a package when the second sentence is merely a different good selling point rather than proof of the promise.
+
+Hook thread rule: every hook_pairs item records one verified seed proof, not an exclusive second-subtitle ID. The director may use another reviewed, independent candidate from the same topic thread as the second segment when it explains, proves, or extends the Hook more clearly. Never use this flexibility to change product, topic, or safety policy.
+
+
+
+输出schema（必须用数组短格式）:
+{"cards":[[1,"版型显瘦","肩宽修饰","说清肩线如何向内收","原因解释","肩线会往里收",["effect","evidence"],"independent",["具体效果","原因解释"],"main","这件上衣","primary","肩线会往里收"]],"hook_packages":[{"hook_id":1,"followup_id":2,"topic":"版型显瘦","reason":"下一段解释肩线内收的设计原因","hook_promise":"肩线会往里收","proof_relation":"design_reason","package_complete":true,"semantic_signals":["result"],"opening_tier":"B"}],"hook_pairs":[[1,2,"版型显瘦","下一段解释肩线内收的设计原因"]]}
+cards字段顺序:[候选编号,topic,subtopic,buyer_value,evidence_type,evidence_quote,roles,dependency,quality_tags,tier,primary_subject,target_relation,subject_evidence]
+hook_pairs字段顺序:[Hook候选编号,承接示例编号,主题线程,承接理由]
+
+
+安全候选字段顺序:[编号,来源,时长秒,原字幕]
+[[31,"简致（4）.mp4",9.6,"它又比打底更显精神，然后又比一般的这种什么卫衣啊，这种我觉得更适合早秋穿，一定是秋高气爽的季节，来一件衬衫穿是刚刚好的。"],[18,"简致（4）.mp4",11.2,"它不会像那种特别平平无奇衬衫啊搭这个搭那个好看这个衣服就单穿就好看嗯这种东西好看它就是好看对不好看它就不好看你上身它的造型感给到你它就显洋气"],[48,"简致（4）.mp4",9.7,"你天冷一点，外面搭个小马甲就可以。主要这个衬衫我给大家讲了，它是让你单穿就好看。你不需要考虑搭配都好看的，显瘦的。"],[68,"简致（4）.mp4",8.2,"卡宝王小牌面料是做金属棉，有厚度，有筋骨感，但是不厚重。好不好？偏微微偏薄，早就穿刚刚好。"],[29,"简致（4）.mp4",9.9,"挺括一点然后让它抗皱一点再加上氨纶的这个材质前后的版型做定型的捏褶就是你看它整个的多片立体裁片这种版型上身想要显胖都难"],[42,"简致（4）.mp4",10.8,"它是为了让你肚子有肉的。吧能够藏起来，不贴在面料上不显胖，能够适合喂包大肚子大姐妹，而且下面放量它是显背薄的，就视觉上会比较显背薄。"],[21,"简致（4）.mp4",8.6,"颜色没错，很漂亮。而且这个蓝我们做的是这种定染的，就是自然光线下啊比这种普通的深蓝色会更显白一点。"],[70,"简致（4）.mp4",7.0,"白色不透，因为我今天穿了个荧光白内心，正常你穿个就是肤色呀，黑色黑色内衣都可以，好不好？"],[60,"简致（4）.mp4",2.3,"这种清爽是会真的让你年轻5岁的"],[10,"简致（4）.mp4",3.8,"感觉整个人特别的干净，没错，显得人很利落，很洒脱。"],[11,"简致（4）.mp4",4.6,"这个版会比较特别。基础款大家都知道，但是我的这件衬衫会让。"],[12,"简致（4）.mp4",3.4,"它能够让你穿出来显精神显背薄的一个效果。"],[13,"简致（4）.mp4",7.1,"整个上身没有任何的浮夸的设计，更加的干净简单，简约大方的一件，穿在身上特别显精神。"],[14,"简致（4）.mp4",6.2,"早秋嘛我跟大家讲就是穿衬衫季。吧，很多的衬衫太过于正式，特别是这种什么设计都没有的。"],[15,"简致（4）.mp4",8.5,"这个你看它的版型前短后长后摆的异常是对屁股大姐们友好哎这个衣服他都把屁股肉给你盖住了然后他也不会太单调"],[16,"简致（4）.mp4",4.7,"不会觉得拖沓又做一个小开叉前面是56的58的衣长"],[17,"简致（4）.mp4",2.2,"58的衣长有个空间感啊，肚子被遮。"],[18,"简致（4）.mp4",8.3,"这个地方下面有两显背包前后四道捏褶定型的很漂亮袖子也做捏褶面料是金梳棉加抗皱纤维加氨纶带弹"],[19,"简致（4）.mp4",2.9,"好的好看哈。嗯单穿就漂亮是吧？"],[20,"简致（4）.mp4",4.4,"穿就是你30加40加50加穿都能穿的一件，无力感穿大。"],[21,"简致（4）.mp4",2.6,"叉L穿到160斤衣长。"],[22,"简致（4）.mp4",2.6,"149多片立体裁面出来的效果啊。"],[23,"简致（4）.mp4",4.2,"是显精神，显背薄遮肉，显瘦好不好？"],[24,"简致（4）.mp4",3.6,"白色不透，藏青色单穿就好看，大气优雅的一个。"],[25,"简致（4）.mp4",2.4,"你是黄黑皮姐妹都可以放心穿的颜色"],[26,"简致（4）.mp4",1.1,"显得肤色白白的。"],[27,"简致（4）.mp4",3.6,"心静如水，白色看一下，要看白的姐妹扣个百，我给你试白色。"],[28,"简致（4）.mp4",8.9,"白色我先给你们看一眼这个的面料生活中穿啊，它不它不会说它是有一定的抗皱性的，但是它不能完全抗皱。"],[29,"简致（4）.mp4",3.4,"可以对吧？做个叠姐穿衬衫是志不挑穿搭的一种。"],[30,"简致（4）.mp4",7.9,"可以试一下珊珊下这个我觉得是不输的，就它的版型啊，还有包括它的面料也好，主要是它的版型，就一件衣服就能给你穿的很显瘦。"],[31,"简致（4）.mp4",2.1,"显背薄显精神的效果"],[32,"简致（4）.mp4",5.0,"好吗？给你们站远的看一下，整个上身的那种视觉感觉是非常漂亮。"],[33,"简致（4）.mp4",6.7,"肉姐妹可以去试一下，每个女人都需要一件衬衫，特别是在这种季节，早秋的季节，春夏秋三个季都可以穿。"],[34,"简致（4）.mp4",3.2,"这款上衣给到大家是三个尺码，啊四个尺码。"],[35,"简致（4）.mp4",2.5,"它衣常是前短后长，看到了吗？"],[36,"简致（4）.mp4",3.9,"前短后长，它后面大概是在65，前面衣长大概是5在58"],[37,"简致（4）.mp4",2.3,"15左右的姐妹给你们试了也没有问题。"],[38,"简致（4）.mp4",3.8,"小个子姐妹可以放心好不好可以然后它前面啊它是有个这个"],[39,"简致（4）.mp4",2.8,"这个地方如果这样，它就太平庸了，是不是？"],[40,"简致（4）.mp4",3.3,"它这个造型给到你好像衣服塞进去一点点的造型感。"],[41,"简致（4）.mp4",12.3,"就这种东西就是一上身就非常完美的存在，没很漂亮啊，我给你试一下白色上衣的话，拍下大概7到9左右，早拍早飞，收到手正正好穿，真的正正好穿。"],[42,"简致（4）.mp4",5.0,"你像今年大家都说今年会特别热所以衬衫这种单品穿的时间会太久太久"],[43,"简致（4）.mp4",7.0,"就如果你十一国庆像南方有些地区，对吧？人家说秋老虎是不是是，十一国庆的话，你都还可以再穿。"],[44,"简致（4）.mp4",3.1,"就怕显胖，这个完全不用担心这个问题。"],[45,"简致（4）.mp4",6.4,"自带造型感和捏褶啊，有小都亮的，所以肚子上的肉胯上的肉都能隐藏的严严实实的。"],[46,"简致（4）.mp4",2.7,"卡巴王小对吧？它不是一件平平无奇。"],[47,"简致（4）.mp4",7.7,"稍微太压个子做个小开叉的一个设计能够做到又遮肉的同时然后正面看它不会压个子"],[48,"简致（4）.mp4",2.3,"早秋就是穿衬衫的姐，可以带一件试一试"],[49,"简致（4）.mp4",2.2,"真的什么东西？什么这种衣服叫什么？"],[50,"简致（4）.mp4",2.9,"可以的，就是不是很少见到这么显瘦的白衬衫？"],[51,"简致（4）.mp4",3.7,"吧？白衬衫我觉得真的你偶尔就是你看腻了市面上的那种设计款。"],[52,"简致（4）.mp4",5.0,"偶尔又回顾一下本真，这种特别清爽的状态，你会觉得人都感觉就是"],[53,"简致（4）.mp4",2.2,"它整个版型给大家做就是非常巧妙的"],[54,"简致（4）.mp4",3.8,"后背给大家做一整行的中缝线，它让视觉中心往中间移。"],[55,"简致（4）.mp4",5.0,"上衣的话，我给你试下藏青。可以呀，给你们试下藏型啊，白色喜欢姐妹直接去入就可以了。"],[56,"简致（4）.mp4",3.1,"没问题。嗯，就这种感觉的很好看。"],[57,"简致（4）.mp4",2.8,"很清，是的是的，主意这个下摆不带松紧。"]]
+HookPackage contract: output both hook_pairs and hook_packages. A complete A/B package is the director's preferred Hook contract; ordinary hook_pairs only provide fallback when no A/B package exists. Each package item must be an object with hook_id, followup_id, topic, reason, hook_promise, proof_relation, package_complete, semantic_signals, and opening_tier. hook_promise must be a continuous short quote from the Hook itself, not a rewritten marketing claim. proof_relation must be one of visual_result, design_reason, material_evidence, wearing_experience, scene_projection, identity_projection, social_proof, source_value, price_value, after_sale_confidence, other_grounded. package_complete=true only when the followup directly proves that exact promise. A good Hook plus an unrelated good selling point is not a complete package. semantic_signals may only use emotion, strong_judgment, identity, style_projection, pain_hit, result, contrast, curiosity, scene, social_proof, source, price_value, after_sale, cta. opening_tier is A, B, or C: A is a real attention spike, B is a strong visual or purchase-value opening, C is only a complete natural introduction. A short emotional reaction is allowed when it has a product/style/result anchor and the followup proves it.
+A/B must be evidenced by the spoken Hook itself: strong emotion or judgement, a visible result, a clear pain/persona, contrast, curiosity, identity/style projection, scene, social proof, source, allowed price, after-sale confidence, or allowed CTA. Do not borrow a signal from the topic label. A plain feature list such as a collar that can stand or turn is a body card, not an A/B Hook, unless the original sentence itself also carries one of those attention mechanisms.
+
+Hook policy override: the task content policy is authoritative. Price, CTA, origin/source claims, social proof, and after-sale commitments are only forbidden when the policy says block or body_only. When allowed, they still need a complete, credible Hook plus immediate proof. A short emotional reaction may be a Hook when it has a real product, style, or result anchor and the next card proves it.

@@ -1,0 +1,465 @@
+{
+  "时间": "2026-09-07 10:14:03",
+  "视频": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4",
+  "结果": "成功",
+  "耗时": "514.4s",
+  "参数": {
+    "去重": "custom",
+    "字幕叠加": true,
+    "指定SRT": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.srt",
+    "画中画": "无",
+    "主推品类": "自动"
+  },
+  "选片": {
+    "ok": true,
+    "clips_count": 25,
+    "clips_total": 25,
+    "size_mb": 99.2,
+    "duration": 67.7,
+    "has_hook": false,
+    "hook_type": "",
+    "category": "C1",
+    "score": 61,
+    "warnings": [
+      "缺少Hook开头，建议保留吸引眼球的片段",
+      "缺少自然收尾，建议补充尺码建议、场景总结或信任背书片段，避免价格/链接/强促单内容"
+    ]
+  },
+  "输出": "C:\\工作\\output\\xx\\9.7\\Ayobe小贤202609061221_part_002_20260907_101403.mp4",
+  "错误": null,
+  "选片审计": {
+    "version": "final_selection_audit_v1",
+    "selected_duration": 67.69,
+    "preference_summary": {},
+    "content_review_summary": {},
+    "ai_plan_report": {},
+    "hook_events": [],
+    "final_clips": [
+      {
+        "order": 1,
+        "clip_type": "C1",
+        "start": 1.95,
+        "end": 4.39,
+        "duration": 2.44,
+        "text": "每个人可能有些人可能手残一点对吧",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C1",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 2,
+        "clip_type": "C1",
+        "start": 6.15,
+        "end": 8.53,
+        "duration": 2.38,
+        "text": "那你去围这个围巾那围不好那就很奇怪",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C1",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 3,
+        "clip_type": "C1",
+        "start": 8.67,
+        "end": 12.58,
+        "duration": 3.91,
+        "text": "很糟糕所以这个东西是全部都给你做的非常好的",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C1",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 4,
+        "clip_type": "C2",
+        "start": 188.53,
+        "end": 190.31,
+        "duration": 1.78,
+        "text": "因为它所有的这个上面的丝巾",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C2",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 5,
+        "clip_type": "C2",
+        "start": 192.555,
+        "end": 196.735,
+        "duration": 4.18,
+        "text": "它的这整片和这些挂脖的位置全部都是做死做好的",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C2",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 6,
+        "clip_type": "C2",
+        "start": 197.25,
+        "end": 201.25,
+        "duration": 4.0,
+        "text": "他不需要你去花任何多一点时间精力去调整它",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C2",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 7,
+        "clip_type": "C2",
+        "start": 206.71,
+        "end": 208.73,
+        "duration": 2.02,
+        "text": "就是你上身套头系个扣子",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C2",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 8,
+        "clip_type": "C2",
+        "start": 208.81,
+        "end": 211.07,
+        "duration": 2.26,
+        "text": "直接走人啊直接直接走",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C2",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 9,
+        "clip_type": "C3",
+        "start": 22.33,
+        "end": 26.33,
+        "duration": 4.0,
+        "text": "好精致这件衣服是我觉得背面不梳正面的",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C3",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 10,
+        "clip_type": "C3",
+        "start": 26.35,
+        "end": 28.55,
+        "duration": 2.2,
+        "text": "我觉得背面甚至比正面还好看",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C3",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 11,
+        "clip_type": "C3",
+        "start": 29.15,
+        "end": 31.47,
+        "duration": 2.32,
+        "text": "你看到没就这种背影杀手的感觉",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C3",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 12,
+        "clip_type": "C3",
+        "start": 302.325,
+        "end": 304.765,
+        "duration": 2.44,
+        "text": "宝宝看一下背面就是爱女明星啊",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C3",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 13,
+        "clip_type": "C3",
+        "start": 304.845,
+        "end": 306.685,
+        "duration": 1.84,
+        "text": "这种穿起来就是女明星即视感",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C3",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 14,
+        "clip_type": "C4",
+        "start": 31.67,
+        "end": 34.59,
+        "duration": 2.92,
+        "text": "哇然后裤子你虽然不一定要搭我这个裤子",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C4",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 15,
+        "clip_type": "C4",
+        "start": 38.76,
+        "end": 43.24,
+        "duration": 4.48,
+        "text": "但是不要太抢镜啊宝贝这套衣服穿起来千万别太抢上衣的风头",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C4",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 16,
+        "clip_type": "C4",
+        "start": 43.5,
+        "end": 45.22,
+        "duration": 1.72,
+        "text": "不然不好看它一定要搭极简",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C4",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 17,
+        "clip_type": "C5",
+        "start": 354.025,
+        "end": 355.385,
+        "duration": 1.36,
+        "text": "然后还可以搭风衣",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C5",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 18,
+        "clip_type": "C5",
+        "start": 355.585,
+        "end": 358.205,
+        "duration": 2.62,
+        "text": "我们有那种大的长款的风衣",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C5",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 19,
+        "clip_type": "C5",
+        "start": 365.04,
+        "end": 367.54,
+        "duration": 2.5,
+        "text": "长款的风衣搭起来非常哇塞",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C5",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 20,
+        "clip_type": "C5",
+        "start": 367.92,
+        "end": 370.06,
+        "duration": 2.14,
+        "text": "是很有腔调的这种感觉",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C5",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 21,
+        "clip_type": "C6",
+        "start": 174.41,
+        "end": 178.35,
+        "duration": 3.94,
+        "text": "它不是那种修身款因为这件衣服它是需要塞着穿的",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C6",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 22,
+        "clip_type": "C6",
+        "start": 230.56,
+        "end": 232.52,
+        "duration": 1.96,
+        "text": "你看你塞一边到裤子里",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C6",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 23,
+        "clip_type": "C6",
+        "start": 233.175,
+        "end": 235.675,
+        "duration": 2.5,
+        "text": "它这样子的话它就有层次了看到没",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C6",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 24,
+        "clip_type": "C7",
+        "start": 311.57,
+        "end": 313.83,
+        "duration": 2.26,
+        "text": "这个东西又不会因为你看你你抬手",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C7",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      },
+      {
+        "order": 25,
+        "clip_type": "C7",
+        "start": 314.475,
+        "end": 317.995,
+        "duration": 3.52,
+        "text": "或者你要做大动作它都是不会掉的对对吧",
+        "source": {
+          "marker": "",
+          "path": "C:\\工作\\小贤\\9-6\\split_output\\Ayobe小贤202609061221_part_002.mp4"
+        },
+        "candidate_indices": [],
+        "topic": "C7",
+        "reason": "",
+        "selection_origin": "unknown",
+        "hook_postprocessed": false
+      }
+    ]
+  }
+}

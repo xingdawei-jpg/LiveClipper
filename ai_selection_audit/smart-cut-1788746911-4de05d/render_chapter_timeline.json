@@ -1,0 +1,76 @@
+{
+  "C1": {
+    "source_seconds": 8.73,
+    "nominal_final_start": 0.0,
+    "clips": [
+      1,
+      2,
+      3
+    ],
+    "nominal_final_end": 7.591304347826088
+  },
+  "C2": {
+    "source_seconds": 14.24,
+    "nominal_final_start": 7.591304347826088,
+    "clips": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "nominal_final_end": 19.973913043478262
+  },
+  "C3": {
+    "source_seconds": 12.799999999999999,
+    "nominal_final_start": 19.973913043478262,
+    "clips": [
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "nominal_final_end": 31.10434782608696
+  },
+  "C4": {
+    "source_seconds": 9.120000000000001,
+    "nominal_final_start": 31.10434782608696,
+    "clips": [
+      14,
+      15,
+      16
+    ],
+    "nominal_final_end": 39.03478260869566
+  },
+  "C5": {
+    "source_seconds": 8.620000000000001,
+    "nominal_final_start": 39.03478260869566,
+    "clips": [
+      17,
+      18,
+      19,
+      20
+    ],
+    "nominal_final_end": 46.5304347826087
+  },
+  "C6": {
+    "source_seconds": 8.4,
+    "nominal_final_start": 46.5304347826087,
+    "clips": [
+      21,
+      22,
+      23
+    ],
+    "nominal_final_end": 53.834782608695654
+  },
+  "C7": {
+    "source_seconds": 5.779999999999999,
+    "nominal_final_start": 53.834782608695654,
+    "clips": [
+      24,
+      25
+    ],
+    "nominal_final_end": 58.86086956521739
+  }
+}

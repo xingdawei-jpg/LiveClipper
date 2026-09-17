@@ -28,6 +28,7 @@ from runtime_v4.business_bundle import (
     verify_business_directory,
 )
 from runtime_v4.update_service import RuntimeV4UpdateService, load_update_source_config
+from runtime_v4.process_io import ensure_subprocess_devnull
 
 
 TOOL_RUN_FLAG = "--liveclipper-run-tool"
@@ -147,6 +148,7 @@ def _schedule_launcher_restart(layout: HostLayout, delay: float = 1.2) -> bool:
         | getattr(subprocess, "DETACHED_PROCESS", 0)
     )
     try:
+        ensure_subprocess_devnull()
         subprocess.Popen(
             [
                 "powershell",
@@ -295,6 +297,7 @@ def _write_diagnostic(verified: VerifiedBusinessBundle) -> bool:
 
 
 def main() -> int:
+    ensure_subprocess_devnull()
     validate_launcher_core_identity()
     layout = resolve_host_layout()
     verified = verify_business_directory(

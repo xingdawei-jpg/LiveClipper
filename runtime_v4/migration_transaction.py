@@ -24,6 +24,7 @@ from runtime_v4.business_bundle import (
 from runtime_v4.core_manifest import verify_core_directory
 from runtime_v4.migration import assemble_core_from_v3, inspect_v3_install
 from runtime_v4.migration_package import verify_migration_package
+from runtime_v4.process_io import ensure_subprocess_devnull
 
 
 class MigrationTransactionError(RuntimeError):
@@ -197,6 +198,7 @@ def _assert_install_not_running(install_root: Path) -> None:
 def _run_v4_launcher(install_root: Path, timeout: float) -> bool:
     launcher = install_root / "LiveClipperWeb.exe"
     try:
+        ensure_subprocess_devnull()
         completed = subprocess.run(
             [str(launcher)],
             cwd=str(install_root),

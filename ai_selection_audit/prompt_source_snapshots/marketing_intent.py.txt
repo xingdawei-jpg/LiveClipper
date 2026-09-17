@@ -1,0 +1,12 @@
+
+# ===== marketing_intent_prompt_contract =====
+def marketing_intent_prompt_contract() -> str:
+    """Return the bounded extra schema for the existing content-review call."""
+    return """
+11. 额外做一次营销意图观察，不决定最终片单。只识别原句已经明确说出的内容：product_origin（来源/发现过程）、product_distinction（具体差异）、identity_expression（气质/身份表达）、ownership_scene（拥有后的真实场景）、emotional_turn（有具体理由的情绪转折）、product_proof（产品事实或作用证明）。没有原句证据就不要标注。
+12. narrative_arcs 只是弧草案，不是成片顺序。弧开头只能是 product_origin、product_distinction、identity_expression、ownership_scene 或 emotional_turn；product_proof 只能作为兑现开头主张的证据，绝不能当弧开头。每条草案必须有至少一个紧接着能证明同一主张的具体证据候选。直接证明候选必须同时在 marketing_intents 里单独标为 product_proof；如果证明跨多个连续候选，链上的每个证明候选都必须分别标成 product_proof，否则不要输出这条弧。不能拿另一个场景、情绪或泛泛夸赞充当证明。不得把库存稀缺、价格、CTA、直播互动、个人尺码身高体重或泛泛夸赞写成意图或弧。没有合格草案时返回空数组。
+13. 不得把“高级感、好看、有气质”这种空话单独当作 identity_expression；必须同时有具体表达、穿着效果、设计细节或真实拥有场景作为原句依据。不要从字幕之外推断买手店、限量、明星同款或用户心理。
+
+marketing_intents 字段顺序：[候选编号,intent_type,原句可证明的购买主张,原文短引]
+narrative_arcs 字段顺序：[开头候选编号,直接证明候选编号数组,可选结果候选编号数组,intent_type,这组原句如何兑现主张]
+""".strip()

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -473,6 +474,13 @@ def _run_case(
     product = str(source.get("product") or M3_GOLDEN_PRODUCTS.get(case_id) or label)
     effective_director_controls = normalize_director_controls(director_controls)
     two_pass_director = bool(dict(director_strategy_contract or {}).get("two_pass_director_packet"))
+    # P0-a：独立全文 Hook 召回。由策略合同声明的开关控制；
+    # 环境变量 LIVECLIPPER_OPENING_HOOK_RECALL=0/1 可随时覆盖（无需改代码）。
+    _opening_hook_env = os.environ.get("LIVECLIPPER_OPENING_HOOK_RECALL")
+    if _opening_hook_env is None:
+        opening_hook_recall = bool(dict(director_strategy_contract or {}).get("opening_hook_recall"))
+    else:
+        opening_hook_recall = _opening_hook_env.strip() == "1"
     active_content_policy = normalize_content_policy(
         settings.get("content_policy") if isinstance(settings, Mapping) else default_content_policy()
     )
@@ -635,6 +643,7 @@ def _run_case(
             stage_response_hook=capture_director_stage if two_pass_director else None,
             stage_progress_hook=director_progress_hook if two_pass_director else None,
             two_pass_director=two_pass_director,
+            opening_hook_recall=opening_hook_recall,
             output_speed_factor=float(dict(director_strategy_contract or {}).get("output_speed_factor") or 1.0),
             source_context_subtitles=ledger_context.get("source_context_units") if two_pass_director else None,
             director_plan_count=max(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from runtime_v4 import launcher
+from runtime_v4 import process_io
 from runtime_v4.business_bundle import build_business_archive
 from runtime_v4.core_manifest import build_core_manifest
 
@@ -201,6 +203,17 @@ class RuntimeV4LauncherTests(unittest.TestCase):
         self.assertNotIn("LIVECLIPPER_BUNDLE_DIR", child_env)
         self.assertNotIn("LIVECLIPPER_V4_BUNDLE_VERIFIED", child_env)
 
+    def test_launch_probes_devnull_before_spawning_the_host(self) -> None:
+        validated = launcher._validated_selection(self.install, self.current)
+        resolution = process_io.DevNullResolution("NUL", False)
+        with (
+            patch.object(launcher, "ensure_subprocess_devnull", return_value=resolution) as probe,
+            patch.object(launcher.subprocess, "Popen", return_value=_FakeProcess()) as spawn,
+        ):
+            launcher._launch(self.install, validated)
+        probe.assert_called_once_with()
+        self.assertEqual(spawn.call_args.kwargs["stdin"], launcher.subprocess.DEVNULL)
+
     def test_exact_health_receipt_confirms_pending_selection(self) -> None:
         state_path = self._write_state()
         process = _FakeProcess()
@@ -333,6 +346,41 @@ class RuntimeV4LauncherTests(unittest.TestCase):
         )
         self.assertFalse(healthy)
         self.assertIn("code 7", reason)
+
+
+class RuntimeV4ProcessIoTests(unittest.TestCase):
+    def test_missing_windows_nul_uses_a_private_file_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            appdata = Path(temporary) / "appdata"
+            fallback = appdata / "LiveClipper" / "process_sinks" / process_io.FALLBACK_SINK_NAME
+            real_open = os.open
+            probe_calls: list[str] = []
+
+            def open_with_missing_nul(path: str, flags: int, mode: int = 0o777) -> int:
+                probe_calls.append(str(path))
+                if str(path) == "nul":
+                    raise FileNotFoundError(2, "No such file or directory", "nul")
+                return real_open(path, flags, mode)
+
+            with (
+                patch.object(process_io.os, "devnull", "nul"),
+                patch.dict(os.environ, {"LOCALAPPDATA": str(appdata)}, clear=False),
+                patch.object(process_io.os, "open", side_effect=open_with_missing_nul),
+            ):
+                resolved = process_io.ensure_subprocess_devnull()
+                completed = subprocess.run(
+                    [sys.executable, "-c", "print('discarded output')"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+
+            self.assertTrue(resolved.used_fallback)
+            self.assertEqual(resolved.path, str(fallback))
+            self.assertTrue(fallback.is_file())
+            self.assertEqual(probe_calls[0], "nul")
+            self.assertEqual(completed.returncode, 0)
 
 
 if __name__ == "__main__":

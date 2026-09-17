@@ -1,0 +1,1 @@
+This is a complete, deterministic reconstruction using the persisted preview candidate pool. It is NOT labelled as the historical request: the original hard-safe inventory, task policy, main-product/category variables and raw outbound request were not persisted.

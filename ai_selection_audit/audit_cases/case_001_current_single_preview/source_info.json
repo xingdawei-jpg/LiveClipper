@@ -1,0 +1,15 @@
+{
+  "case_kind": "current_single_preview",
+  "task_id": "smart-cut-1786874941-3bd2ea",
+  "preview_id": "2e930cbadaf04fc2ab0c7bf8af32e9b0",
+  "source_video": "C:\\工作\\珊姐\\8月14日直播\\简致（4）.mp4",
+  "source_videos": [],
+  "srt_path": "C:\\工作\\珊姐\\8月14日直播\\简致（4）.srt",
+  "target_duration": 60,
+  "created_at": 1786874941.0054386,
+  "snapshot_limits": [
+    "No original video binary copied.",
+    "No raw network LLM request was historically persisted.",
+    "Per-candidate hard-filter rejection identities are unavailable unless present in the snapshot."
+  ]
+}
