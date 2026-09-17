@@ -2023,6 +2023,8 @@ function bindActions() {
       );
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
   if (action === "preview-selection-undo") undoPreviewSelectionChange(target.dataset.previewScope || "smart");
+  if (action === "preview-play-all") startPreviewPlayAll(target.dataset.previewScope || "smart");
+  if (action === "preview-play-all-stop") stopPreviewPlayAll(target.dataset.previewScope || "smart");
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-commerce-director-preview") await startCommerceDirectorPreview();
       if (action === "select-commerce-director-story") await selectCommerceDirectorStory(target.dataset.storyId || "");
@@ -10028,6 +10030,7 @@ function renderSmartPreview(preview) {
   updatePreviewStickyOffset("smart");
   bindPreviewRowDrag(box, "smart");
   bindPreviewCandidateDrag(box, "smart");
+  bindPreviewPlayAll(box, "smart");
   bindPreviewWorkbenchKeyboard(box, "smart");
   if (state.previewWorkbenchStages.smart === "assembly") ensureInlinePreviewVideo("smart", state.previewDetailSelection.smart);
 }
@@ -10065,6 +10068,7 @@ function renderMixPreview(preview) {
   updatePreviewStickyOffset("mix");
   bindPreviewRowDrag(box, "mix");
   bindPreviewCandidateDrag(box, "mix");
+  bindPreviewPlayAll(box, "mix");
   bindPreviewWorkbenchKeyboard(box, "mix");
   if (state.previewWorkbenchStages.mix === "assembly") ensureInlinePreviewVideo("mix", state.previewDetailSelection.mix);
 }
@@ -12673,6 +12677,81 @@ function renderPreviewSelectedRows(scope, selected) {
 }
 
 // [AI_WORKBENCH_LIBRARY_END]
+/* ---- 整体预览（按已选顺序连播，前端实现，复用片段小视频）---- */
+function previewPlayAllRun(scope = "smart") {
+  const run = state.previewPlayAll;
+  return run && run.scope === scope && run.active ? run : null;
+}
+
+function previewPlayAllButton(scope = "smart") {
+  let run = null;
+  try { run = previewPlayAllRun(scope); } catch (error) { console.warn("play-all button failed", error); return ""; }
+  if (run) {
+    const at = Math.min(run.position + 1, run.indices.length);
+    return '<button type="button" class="button button-secondary button-small is-active" data-action="preview-play-all-stop" data-preview-scope="' + scope + '" title="停止整体预览">停止（' + at + '/' + run.indices.length + '）</button>';
+  }
+  const count = previewWorkbenchSelectedClips(scope, getPreviewState(scope)).length;
+  return '<button type="button" class="button button-secondary button-small" data-action="preview-play-all" data-preview-scope="' + scope + '"'
+    + (count ? '' : ' disabled')
+    + ' title="按已选顺序连播整条成片预览（硬切、开声）">整体预览' + (count ? '（' + count + '）' : '') + '</button>';
+}
+
+function bindPreviewPlayAll(box, scope = "smart") {
+  if (!box || box.dataset.previewPlayAllBound === "1") return;
+  box.dataset.previewPlayAllBound = "1";
+  // ended 不冒泡，用捕获阶段接；重渲染换元素也不会丢监听。
+  box.addEventListener("ended", (event) => {
+    try {
+    const video = event.target;
+    if (!video?.matches?.("[data-preview-inline-player]")) return;
+    const run = previewPlayAllRun(scope);
+    if (!run) return;
+    const index = Number(video.closest?.("[data-preview-inline-video]")?.dataset?.previewIndex);
+    if (Number(run.indices[run.position]) !== index) return;
+    run.position += 1;
+    advancePreviewPlayAll(scope);
+    } catch (error) { console.warn("play-all advance failed", error); }
+  }, true);
+  // 整体预览期间强制开声（“预览当前句”的静音偏好不影响它）。
+  box.addEventListener("playing", (event) => {
+    const video = event.target;
+    if (!video?.matches?.("[data-preview-inline-player]")) return;
+    if (!previewPlayAllRun(scope)) return;
+    try { video.muted = false; if (!video.volume) video.volume = 1; } catch (_error) { /* ignore */ }
+  }, true);
+}
+
+async function advancePreviewPlayAll(scope = "smart") {
+  const run = previewPlayAllRun(scope);
+  if (!run) return;
+  if (run.position >= run.indices.length) { stopPreviewPlayAll(scope, { completed: true }); return; }
+  const index = Number(run.indices[run.position]);
+  state.previewDetailSelection[scope] = index;
+  if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
+  renderPreviewStateKeepStoryScroll(scope);
+  await ensureInlinePreviewVideo(scope, index);
+}
+
+async function startPreviewPlayAll(scope = "smart") {
+  const preview = getPreviewState(scope);
+  const order = previewAssemblyOrder(scope, preview).map((item) => Number(item)).filter((item) => Number.isInteger(item));
+  if (!order.length) { toast("还没有可预览的已选片段", "info"); return; }
+  state.previewPlayAll = { scope, indices: order, position: 0, active: true };
+  if (state.previewWorkbenchStages[scope] !== "assembly") state.previewWorkbenchStages[scope] = "assembly";
+  state.previewDetailSelection[scope] = Number(order[0]);
+  renderPreviewStateKeepStoryScroll(scope);
+  await ensureInlinePreviewVideo(scope, Number(order[0]));
+}
+
+function stopPreviewPlayAll(scope = "smart", { completed = false } = {}) {
+  state.previewPlayAll = null;
+  previewBox(scope)?.querySelectorAll("[data-preview-inline-player]").forEach((video) => {
+    try { video.pause(); } catch (_error) { /* ignore */ }
+  });
+  renderPreviewStateKeepStoryScroll(scope);
+  toast(completed ? "整体预览播放完毕" : "已停止整体预览", "info");
+}
+
 function renderPreviewWorkbenchVideoStage(scope, preview, current) {
   const clip = current?.clip;
   if (!clip) {
@@ -12680,7 +12759,7 @@ function renderPreviewWorkbenchVideoStage(scope, preview, current) {
   }
   const selected = isPreviewWorkbenchSelected(clip);
   const addButton = selected ? '' : '<button class="button button-secondary button-small" data-action="preview-workbench-add-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">\u52a0\u5165\u5df2\u9009</button>';
-  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + '</div></div>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
+  return '<section class="preview-workbench-video"><div class="preview-workbench-column-head"><div><strong>' + (selected ? '\u5f53\u524d\u5df2\u9009\u7247\u6bb5' : '\u5f53\u524d\u5019\u9009\u7247\u6bb5') + '</strong><span>' + escapeHtml(previewWorkbenchCategoryLabel(clip, scope)) + '</span></div><div class="preview-video-actions"><button class="button button-muted button-small" data-action="preview-workbench-preview-current" data-preview-scope="' + scope + '">\u9884\u89c8\u89c6\u9891</button>' + addButton + previewPlayAllButton(scope) + '</div></div>' + renderPreviewInlineVideo(scope, preview, clip, { inspectOnly: current.inspectOnly, idleText: current.inspectOnly ? '\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u67e5\u770b\u5019\u9009\u753b\u9762\u3002' : '\u4fee\u6539\u540e\u70b9\u51fb\u201c\u9884\u89c8\u89c6\u9891\u201d\u540c\u6b65\u56de\u770b\u3002' }) + '</section>';
 }
 
 function renderPreviewEditorSentence(scope, clip, segment, position) {
