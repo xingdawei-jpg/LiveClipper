@@ -515,7 +515,7 @@ def build_opening_package_prompt(
         "Opening 目标：Hook → 立即证明 → 尽可能第二次推进。Hook承诺不能被同义重复敷衍，Payoff必须是机制、证据、扩大结果、身体适配或具体体验。每个 Hook 选1–2个不同的 payoff Beat；总长优先约3–10秒，绝不超过12秒。",
         "只可使用给定 Hook ID 和 Actor beat_id，不能改写任何文本。visual Actor 可以作画面依赖的 proof，但不能被说成独立音频 Hook。若没有直接真实兑现素材，必须在 opening_rejects 标明 no_immediate_payoff，不能硬拼无关卖点。最多输出5个最有说服力的 package；其余 Hook 写入 opening_rejects。",
         "本焦糖当前 Director Opening Promise：" + _text(opening_promise),
-        "Hook 与 Payoff 都须保持商品焦点；不要把尺码、互动、价格、CTA、泛夸或无关品质话术塞进开场。quality=strong 必须是 Hook+两个不同 Payoff 的3次真实认知推进；只有 Hook+一个 Payoff 时只能标 medium。Hook 与 Payoff 或两条 Payoff 不能只是同义重复。weak 不应作为回归入口。",
+        "**Hook 之间的排序键：首选 hook_stop_power（越大越好）**；停人力相同再比 hook_specificity 与 hook_product_relevance。**明确：「会短/长两公分」「头版短到会露屁股」这类尺寸差异说明属于尺码类，不得作为 Hook**（可作正文或 Payoff），即使它逻辑严密、信息正确、能立刻被兑现——因为它对陌生观众没有停留力。Hook 与 Payoff 都须保持商品焦点；不要把尺码、互动、价格、CTA、泛夸或无关品质话术塞进开场。quality=strong 必须是 Hook+两个不同 Payoff 的3次真实认知推进；只有 Hook+一个 Payoff 时只能标 medium。Hook 与 Payoff 或两条 Payoff 不能只是同义重复。weak 不应作为回归入口。",
         "返回严格 JSON，不要 Markdown。结构：\n" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "专项 Hook（AI 已通过 clean/standalone/2–8秒/词级 lineage）：\n" + json.dumps(hooks, ensure_ascii=False, separators=(",", ":")),
         "冻结 P0.5A.3 Actor Pool（唯一 Payoff 来源）：\n" + json.dumps(actors, ensure_ascii=False, separators=(",", ":")),
