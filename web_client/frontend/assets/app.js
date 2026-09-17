@@ -2022,6 +2022,7 @@ function bindActions() {
         Boolean(target.checked),
       );
       if (action === "preview-assembly-remove") removePreviewAssemblyCandidate(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex));
+  if (action === "preview-selection-undo") undoPreviewSelectionChange(target.dataset.previewScope || "smart");
       if (action === "start-smart-preview") await startSmartPreview();
       if (action === "start-commerce-director-preview") await startCommerceDirectorPreview();
       if (action === "select-commerce-director-story") await selectCommerceDirectorStory(target.dataset.storyId || "");
@@ -7721,6 +7722,7 @@ function reorderPreviewClip(scope, fromIndex, toIndex, placeAfter = false) {
   const from = order.indexOf(Number(fromIndex));
   const target = Number(toIndex);
   if (from < 0 || !order.includes(target) || Number(fromIndex) === target) return;
+  pushPreviewSelectionUndo(scope, "调整已选顺序");
   const [clip] = order.splice(from, 1);
   const to = order.indexOf(target);
   order.splice(placeAfter ? to + 1 : to, 0, clip);
@@ -9240,10 +9242,79 @@ function movePreviewAssemblyClip(scope = "smart", index, direction) {
   reorderPreviewClip(scope, Number(index), order[next]);
 }
 
+/* ---- 已选片段改动的撤回栈（移除 / 加入 / 调序）---- */
+function previewSelectionUndoStack(scope = "smart") {
+  if (!state.previewSelectionUndo) state.previewSelectionUndo = { smart: [], mix: [] };
+  if (!Array.isArray(state.previewSelectionUndo[scope])) state.previewSelectionUndo[scope] = [];
+  return state.previewSelectionUndo[scope];
+}
+
+function pushPreviewSelectionUndo(scope = "smart", label = "") {
+  // 快照只是“后悔药”，绝不能因为它失败而影响主流程（移除/加入/调序）。
+  try {
+    const preview = getPreviewState(scope);
+    if (!preview?.clips?.length) return;
+    const key = previewAssemblyOrderKey(scope, preview);
+    const stack = previewSelectionUndoStack(scope);
+    const snapshot = {
+      label: String(label || ""),
+      draft: JSON.parse(JSON.stringify(buildPreviewDraftFromState(scope))),
+      order: [...(state.previewAssemblyOrders[key] || [])],
+      detail: state.previewDetailSelection?.[scope] ?? null,
+      candidate: state.previewCandidateSelections?.[scope] ?? null,
+      flags: preview.clips.map((clip) => [Number(clip.index), clip.selected]),
+    };
+    const last = stack[stack.length - 1];
+    if (last && last.label === snapshot.label && JSON.stringify(last.order) === JSON.stringify(snapshot.order)) return;
+    stack.push(snapshot);
+    while (stack.length > 30) stack.shift();
+  } catch (error) {
+    console.warn("preview undo snapshot failed", error);
+  }
+}
+
+function previewSelectionUndoButton(scope = "smart") {
+  let count = 0;
+  try { count = previewSelectionUndoStack(scope).length; } catch (error) { console.warn("undo button failed", error); return ""; }
+  return '<button class="button button-muted button-small" data-action="preview-selection-undo" data-preview-scope="' + scope + '"'
+    + (count ? '' : ' disabled')
+    + ' title="撤回上一次已选改动（移除 / 加入 / 调序）">撤回' + (count ? '（' + count + '）' : '') + '</button>';
+}
+
+function undoPreviewSelectionChange(scope = "smart") {
+  try {
+    const stack = previewSelectionUndoStack(scope);
+    if (!stack.length) { toast("没有可撤回的已选改动", "info"); return false; }
+    const snapshot = stack.pop();
+    const preview = getPreviewState(scope);
+    if (!preview?.clips?.length) return false;
+    const byIndex = new Map(preview.clips.map((clip) => [Number(clip.index), clip]));
+    if (Array.isArray(snapshot.flags)) {
+      snapshot.flags.forEach((pair) => {
+        const clip = byIndex.get(Number(pair[0]));
+        if (clip) clip.selected = pair[1];
+      });
+    }
+    applyPreviewDraftToState(scope, snapshot.draft);
+    state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = [...snapshot.order];
+    state.previewDetailSelection[scope] = snapshot.detail;
+    state.previewCandidateSelections[scope] = snapshot.candidate;
+    commitPreviewDraft(scope);
+    renderPreviewStateKeepStoryScroll(scope);
+    toast("已撤回：" + (snapshot.label || "已选改动"), "success");
+    return true;
+  } catch (error) {
+    console.error("preview undo failed", error);
+    toast("撤回失败：" + ((error && error.message) || String(error)), "error");
+    return false;
+  }
+}
+
 function removePreviewAssemblyCandidate(scope = "smart", index) {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
+  pushPreviewSelectionUndo(scope, "移除已选片段");
   const order = previewAssemblyOrder(scope, preview);
   const position = order.indexOf(Number(index));
   const neighborIndex = position >= 0 ? (order[position + 1] ?? order[position - 1] ?? null) : null;
@@ -12502,6 +12573,7 @@ function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = n
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
   if (isPreviewWorkbenchSelected(clip)) return setPreviewDetailSelection(scope, Number(index));
+  pushPreviewSelectionUndo(scope, "加入已选片段");
   syncPreviewClipSelections(scope);
   const clipIndex = Number(index);
   const order = previewAssemblyOrder(scope, preview).filter((item) => Number(item) !== clipIndex);
@@ -14203,7 +14275,7 @@ function renderPreviewWorkbench(scope, preview, targetId) {
   const selectedGuide = isDirectorPreview ? "按导演章节审阅，可拖拽调整顺序" : "\u6309\u6545\u4e8b\u987a\u5e8f\u8fde\u7eed\u9605\u8bfb";
   const candidateHead = '<div class="preview-workbench-column-head"><div><strong>\u5019\u9009\u7247\u6bb5</strong><span>' + candidateGuide + '</span></div><small>' + (isDirectorPreview ? candidateStats.all : candidateStats.filtered + ' / ' + candidateStats.source) + ' \u6bb5</small></div>';
   const durationClass = duration.accepted ? "is-ok" : "is-warn";
-  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>' + (isDirectorPreview ? '已选片段（故事脚本）' : '\u5df2\u9009\u7247\u6bb5') + '</strong><span>' + selectedGuide + '</span></div><div class="preview-duration-control"><small class="' + durationClass + '" title="\u539f\u7247\u5408\u8ba1 ' + duration.rawTotal.toFixed(1) + 's\uff0c\u6309 ' + duration.speed.toFixed(2) + 'x \u9884\u8ba1\u53d8\u901f\u6298\u7b97">' + selected.length + ' \u6bb5 \u00b7 \u9884\u8ba1 ' + duration.projected.toFixed(1) + 's<br>\u5141\u8bb8 ' + duration.low.toFixed(0) + '-' + duration.high.toFixed(0) + 's</small><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="' + scope + '">\u9002\u914d\u65f6\u957f</button></div></div>';
+  const selectedHead = '<div class="preview-workbench-column-head"><div><strong>' + (isDirectorPreview ? '已选片段（故事脚本）' : '\u5df2\u9009\u7247\u6bb5') + '</strong><span>' + selectedGuide + '</span></div><div class="preview-duration-control"><small class="' + durationClass + '" title="\u539f\u7247\u5408\u8ba1 ' + duration.rawTotal.toFixed(1) + 's\uff0c\u6309 ' + duration.speed.toFixed(2) + 'x \u9884\u8ba1\u53d8\u901f\u6298\u7b97">' + selected.length + ' \u6bb5 \u00b7 \u9884\u8ba1 ' + duration.projected.toFixed(1) + 's<br>\u5141\u8bb8 ' + duration.low.toFixed(0) + '-' + duration.high.toFixed(0) + 's</small><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="' + scope + '">\u9002\u914d\u65f6\u957f</button>' + previewSelectionUndoButton(scope) + '</div></div>';
   const overview = isDirectorPreview
     ? renderCommerceDirectorRecommendationCard(preview, duration, scope)
     : renderPreviewFilmOverview(scope, preview, targetId, selected, duration);
