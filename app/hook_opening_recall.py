@@ -164,11 +164,11 @@ def build_hook_recall_prompt(*, batch: Mapping[str, Any], total_batch_count: int
     return "\n\n".join((
         f"你只做 P0.5A.4 Hook 专项召回，当前是完整焦糖 SRT 的来源窗口 {batch.get('batch_id')}/{total_batch_count}。不做普通正文 Beat Inventory、不做 Director Journey、不做候选排序或最终视频。",
         "目标是找可独立作为短视频开场的真实主播原话。Hook 必须干净、独立、具体、商品相关、有明确停留理由，并能被后续真实素材立刻兑现。优先2–5秒，允许2–8秒；不要把两个或三个句子拼成一段长开场。",
-        "当前冻结 Director Opening Promise：" + _text(opening_promise) + "。只有直接服务这个承诺的句子可进入 hook_candidates；舒适、材质、尺码、搭配等即使本身正确但不服务当前开场承诺，也应进 hook_rejects 或留给正文。",
+        "当前冻结 Director Opening Promise：" + _text(opening_promise) + "。**召回阶段从宽**：直接服务该承诺的句子优先；此外，凡能独立成立、能停人的强 Hook（强结果、痛点、结果反差、强体验、具体意外）即使与当前承诺不完全一致，也请一并放进 hook_candidates 并注明它与承诺的关系，由后续 Hook Gate 判定取舍。只有明显平淡、只讲舒适/材质/尺码/搭配且本身不抓人的句子，才进 hook_rejects 或留给正文。",
         "只可选择 hard_safe=true 且 materializable=true 的连续原词范围。每个选择必须覆盖至少一条 is_primary_window=true 字幕；相邻最多两条 context 字幕只用于补齐自然边界。严禁改写、虚构、跳词、合并不连续字幕。final_text 必须逐字等于所选原词，可保留原有标点。",
-        "Hook 不是普通信息正确：它必须让陌生观众愿意继续看。可找强结果、带购买依据的强判断、自然的痛点命中、结果反差、强体验或具体意外点。‘你看/真的/我跟你说’不是机械禁词，若整句独立自然可保留。",
+        "Hook 不是普通信息正确：它必须让陌生观众愿意继续看。可找强结果、带购买依据的强判断、自然的痛点命中、结果反差、强体验或具体意外点。**尽可能覆盖不同 hook_type**：只要素材里存在，请至少各给出一个 strong_result / pain_point / contrast / experience 类型的候选，不要让候选全部落在同一类（例如全是尺码或规格对照）；同一类型最多给 6 个。‘你看/真的/我跟你说’不是机械禁词，若整句独立自然可保留。",
         "严禁选直播互动、姐妹们、用户昵称、个人身高体重或尺码回应、价格、催单、CTA、售后、无商品指向泛夸、真正残句、ASR异常、只靠手势才能理解的句子。visual_dependency 必须为 none；任何 visual-only 句都只能进 reject audit。",
-        "eligible_for_opening=true 只限 publishable_clean、visual_dependency=none、2–8秒、hook_strength至少4、完整独立的句子。若看似有价值但不适合开场，放入 hook_rejects。每窗口输出不超过12个 Hook与6个最有代表性的拒绝例子；不要为了数量硬凑。",
+        "eligible_for_opening=true 只限 publishable_clean、visual_dependency=none、2–8秒、hook_strength至少4、完整独立的句子。若看似有价值但不适合开场，放入 hook_rejects。**每窗口最多输出 20 个 Hook**（比之前放宽，以便后续 gate 有得挑）与 6 个最有代表性的拒绝例子；仍然宁缺毋滥，**不要为了数量硬凑**——但如果一个窗口里确实有 15 个以上合格候选，请全部给出，不要自行压到 3 个。",
         "返回严格 JSON，不要 Markdown。结构：\n" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "完整来源窗口（is_primary_window=false 仅可作±2行边界上下文）：\n" + json.dumps(source_rows, ensure_ascii=False, separators=(",", ":")),
     ))
