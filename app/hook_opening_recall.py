@@ -31,7 +31,8 @@ HOOK_MIN_SECONDS = 2.0
 HOOK_PREFERRED_MAX_SECONDS = 5.0
 HOOK_MAX_SECONDS = 8.0
 HOOK_CONTEXT_NEIGHBOR_SUBTITLES = 2
-HOOK_SOURCE_BATCH_SECONDS = 480.0
+HOOK_SOURCE_BATCH_SECONDS = 480.0
+HOOK_BATCH_DELAY_SECONDS = 1.5   # 批次间隔（规避豆包突发保护）
 HOOK_RECALL_BATCH_LIMIT = 12
 OPENING_PACKAGE_PAYOFF_LIMIT = 2
 OPENING_PACKAGE_MAX_SECONDS = 12.0
@@ -418,7 +419,11 @@ def recall_hooks_from_complete_source(
     responses: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     batch_audit: list[dict[str, Any]] = []
     failed_batches: list[str] = []
-    for batch in batches:
+    for _batch_index, batch in enumerate(batches):
+        if _batch_index:
+            # 火山方舟对突发请求有系统保护：批次之间主动留出间隔。
+            import time as _time
+            _time.sleep(HOOK_BATCH_DELAY_SECONDS)
         response = _post_lite_request(
             api_key=api_key, base_url=base_url, model=model,
             prompt=build_hook_recall_prompt(batch=batch, total_batch_count=len(batches), opening_promise=opening_promise),

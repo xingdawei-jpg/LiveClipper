@@ -4145,10 +4145,11 @@ def _apply_analyzer_model_runtime_options(body: dict[str, Any], model: str) -> N
         # receipt, so use the explicit response cap as its full budget.
         body["thinking"] = {"type": "disabled"}
     elif "seed" in model_name:
-        # M2's quality depends on reasoning through the exact sentence order,
-        # not merely emitting a compact JSON receipt. Streaming keeps the
-        # slow response alive; do not trade that reasoning budget away.
-        body["reasoning_effort"] = "low"
+        # A/B（2026-09-17）：实测 thinking:disabled 对 Seed 生效（推理 token 归零）。
+        # 先按关闭跑，并与“开着”的结果做质量对比后再定去留。
+        # 注意：Ark 不允许 thinking 与 reasoning_effort 同时出现（会 400 InvalidParam）。
+        body["thinking"] = {"type": "disabled"}
+        body.pop("reasoning_effort", None)
     elif "qwen3.8" in model_name:
         # Qwen 3.8 enables xhigh thinking by default. For deterministic JSON
         # selection, that can spend minutes before the response starts.

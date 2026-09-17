@@ -1241,19 +1241,38 @@ def _post_lite_request(
     }
     if "deepseek" in model.lower() and "seed" not in model.lower():
         body["thinking"] = {"type": "disabled"}
+    else:
+        # 豆包/其他：尝试关闭思维链（若供应商忽略也无害；V4 按输出计费，思维链很贵）。
+        body.setdefault("thinking", {"type": "disabled"})
     request = urllib.request.Request(
         ai_chat_completions_url(base_url), data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=180, context=create_ssl_context()) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, success=False, error_type=f"http_{error.code}")
-        raise RuntimeError(f"Commerce Planner Lite HTTP {error.code}") from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, success=False, error_type=type(error).__name__)
-        raise RuntimeError(f"Commerce Planner Lite 网络错误: {error}") from error
+    # 过载保护重试：火山方舟对“请求突发”会返回 429/403（RequestBurstTooFast）。
+    # 退避重试几次远好过让整次预览降级。
+    import time as _time
+    _retry_delays = (1.0, 3.0, 7.0)
+    last_error: Exception | None = None
+    for _attempt in range(len(_retry_delays) + 1):
+        if _attempt:
+            _time.sleep(_retry_delays[_attempt - 1])
+        try:
+            with urllib.request.urlopen(request, timeout=180, context=create_ssl_context()) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, response_payload=result, success=True, retry=_attempt > 0)
+            return result
+        except urllib.error.HTTPError as error:
+            last_error = error
+            _overload = error.code in (429, 403, 408, 500, 502, 503, 504)
+            if not _overload or _attempt >= len(_retry_delays):
+                record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, success=False, error_type=f"http_{error.code}", retry=_attempt > 0)
+                raise RuntimeError(f"Commerce Planner Lite HTTP {error.code}") from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = error
+            if _attempt >= len(_retry_delays):
+                record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, success=False, error_type=type(error).__name__, retry=_attempt > 0)
+                raise RuntimeError(f"Commerce Planner Lite 网络错误: {error}") from error
+    raise RuntimeError(f"Commerce Planner Lite 重试耗尽: {last_error}")
     record_ai_call(module="commerce_planner_lite", stage=stage, model=model, request_payload=body, response_payload=result, success=True)
     return result
 
