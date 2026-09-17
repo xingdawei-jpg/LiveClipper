@@ -1,0 +1,410 @@
+diff --git a/web_client/frontend/assets/app.js b/web_client/frontend/assets/app.js
+index 2a6051d..f82eb64 100644
+--- a/web_client/frontend/assets/app.js
++++ b/web_client/frontend/assets/app.js
+@@ -905,6 +905,36 @@ const settingFields = {
+   m2_planner_mode: "s-m2-planner-mode",
+ };
+ 
++const aiProviderConfigs = {
++  deepseek: {
++    baseUrl: "https://api.deepseek.com",
++    model: "deepseek-v4-flash",
++    apiKeyLabel: "DeepSeek API Key",
++    modelLabel: "模型",
++    modelPlaceholder: "deepseek-v4-flash",
++    hint: "使用 DeepSeek 控制台的 API Key。",
++  },
++  "doubao-ark": {
++    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
++    model: "",
++    apiKeyLabel: "方舟 API Key",
++    modelLabel: "模型或接入点",
++    modelPlaceholder: "doubao-seed-2-1-pro-260628、doubao-seed-2-1-turbo-260628 或 ep-...",
++    hint: "使用火山方舟 API Key；填写已开通的豆包模型 ID，或推理接入点 ID（ep-...）。",
++  },
++  custom: {
++    baseUrl: "",
++    model: "",
++    apiKeyLabel: "API Key",
++    modelLabel: "模型",
++    modelPlaceholder: "服务商模型名",
++    hint: "填写服务商提供的 OpenAI 兼容 Base URL、API Key 和模型名。",
++  },
++};
++
++let aiProviderProfiles = {};
++let activeAiProvider = "deepseek";
++
+ const keywordFields = {
+   clip_keywords: "kw-clip-keywords",
+   forbidden_phrases: "kw-forbidden-phrases",
+@@ -1345,7 +1375,9 @@ document.addEventListener("DOMContentLoaded", () => {
+   startBackgroundRefreshLoops();
+   bindNavigation();
+   bindSettingsTabs();
++  bindAiProviderControls();
+   bindAiSelectionAutoSave();
++  bindSettingsAutoSave();
+   bindLiveRecTabs();
+   bindLiveRoomFilters();
+   bindActions();
+@@ -2069,6 +2101,7 @@ function bindActions() {
+       if (action === "toggle-secret") toggleSecret(target);
+       if (action === "activate-license") await activateLicense();
+       if (action === "unbind-device") await unbindDevice();
++      if (action === "open-license") { openLicensePanel(); return; }
+       if (action === "check-update") await checkUpdate();
+       if (action === "apply-update") await applyUpdate();
+       if (action === "toggle-update-card") toggleUpdateCard();
+@@ -3587,6 +3620,10 @@ async function loadSettings(showToast = false) {
+       element.value = value ?? "";
+     }
+   });
++  aiProviderProfiles = structuredClone(data.ai_provider_profiles || {});
++  activeAiProvider = selectedAiProvider(data.base_url);
++  rememberAiProvider();
++  syncAiProviderUi({ detectFromSettings: true });
+   applyUiFontSize(data.ui_font_size || 14);
+   syncSubtitleFontSize();
+   syncSubtitleStyleValues();
+@@ -3597,8 +3634,53 @@ async function loadSettings(showToast = false) {
+   if (showToast) toast("设置已重新载入", "success");
+ }
+ 
++function selectedAiProvider(baseUrl = $("s-base-url")?.value) {
++  const normalized = String(baseUrl || "").trim().replace(/\/$/, "").toLowerCase();
++  if (normalized === aiProviderConfigs.deepseek.baseUrl) return "deepseek";
++  if (normalized === aiProviderConfigs["doubao-ark"].baseUrl) return "doubao-ark";
++  return "custom";
++}
++
++function syncAiProviderUi({ detectFromSettings = false, applyProviderDefaults = false } = {}) {
++  const select = $("s-ai-provider");
++  const baseUrl = $("s-base-url");
++  const model = $("s-model");
++  if (!select || !baseUrl || !model) return;
++
++  if (detectFromSettings) select.value = selectedAiProvider(baseUrl.value);
++  const provider = aiProviderConfigs[select.value] || aiProviderConfigs.custom;
++  if (applyProviderDefaults) {
++    const saved = aiProviderProfiles[select.value];
++    baseUrl.value = saved?.base_url ?? provider.baseUrl;
++    model.value = saved?.model ?? provider.model;
++    if ($("s-api-key")) $("s-api-key").value = saved?.api_key ?? "";
++  }
++  $("s-api-key-label").textContent = provider.apiKeyLabel;
++  $("s-model-label").textContent = provider.modelLabel;
++  model.placeholder = provider.modelPlaceholder;
++  $("s-ai-provider-hint").textContent = provider.hint;
++}
++
++function bindAiProviderControls() {
++  $("s-ai-provider")?.addEventListener("change", () => {
++    rememberAiProvider();
++    activeAiProvider = $("s-ai-provider").value;
++    syncAiProviderUi({ applyProviderDefaults: true });
++  });
++}
++
++function rememberAiProvider() {
++  aiProviderProfiles[activeAiProvider] = {
++    api_key: $("s-api-key")?.value.trim() || "",
++    base_url: $("s-base-url")?.value.trim() || "",
++    model: $("s-model")?.value.trim() || "",
++  };
++}
++
+ function collectSettings() {
++  rememberAiProvider();
+   const data = {};
++  data.ai_provider_profiles = structuredClone(aiProviderProfiles);
+   Object.entries(settingFields).forEach(([key, id]) => {
+     const element = $(id);
+     if (!element) return;
+@@ -3726,6 +3808,69 @@ function bindAiSelectionAutoSave() {
+   });
+ }
+ 
++// ---- 主设置自动保存：所有设置页的选项/填入项改动即保存，不再依赖“保存设置”按钮 ----
++let settingsAutoSaveTimer = null;
++let settingsAutoSaveInFlight = false;
++let settingsAutoSaveQueued = false;
++let settingsAutoSavedFingerprint = "";
++
++function queueSettingsAutoSave(delay = 0) {
++  if (settingsAutoSaveTimer) window.clearTimeout(settingsAutoSaveTimer);
++  settingsAutoSaveTimer = window.setTimeout(() => {
++    settingsAutoSaveTimer = null;
++    persistSettingsAuto();
++  }, Math.max(0, delay));
++}
++
++async function persistSettingsAuto() {
++  if (settingsAutoSaveInFlight) {
++    settingsAutoSaveQueued = true;
++    return;
++  }
++  const data = collectSettings();
++  const fingerprint = JSON.stringify(data);
++  if (fingerprint === settingsAutoSavedFingerprint) return;
++
++  settingsAutoSaveInFlight = true;
++  try {
++    applyTheme(data.ui_theme || "system");
++    await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
++    settingsAutoSavedFingerprint = fingerprint;
++  } catch (error) {
++    toast("设置未保存，请检查服务后重试", "error");
++  } finally {
++    settingsAutoSaveInFlight = false;
++    if (settingsAutoSaveQueued) {
++      settingsAutoSaveQueued = false;
++      queueSettingsAutoSave(0);
++    }
++  }
++}
++
++function bindSettingsAutoSave() {
++  const root = document.querySelector(".settings-pages");
++  if (!root) return;
++  const inSelection = (el) => el?.closest?.("#settings-selection");
++  const isTextLike = (el) =>
++    el?.matches?.("input[type=text], input[type=number], input[type=password], input[type=range], input:not([type]), textarea");
++
++  root.addEventListener("change", (event) => {
++    const target = event.target;
++    if (!target || inSelection(target)) return;
++    if (target.matches("input, select, textarea")) queueSettingsAutoSave(0);
++  });
++  root.addEventListener("input", (event) => {
++    const target = event.target;
++    if (!target || inSelection(target)) return;
++    if (isTextLike(target)) queueSettingsAutoSave(600);
++  });
++  root.addEventListener("focusout", (event) => {
++    const target = event.target;
++    if (!target || inSelection(target)) return;
++    if (isTextLike(target)) queueSettingsAutoSave(0);
++  });
++}
++
+ async function saveSettings() {
+   const data = collectSettings();
+   applyTheme(data.ui_theme || "system");
+@@ -4665,6 +4810,23 @@ function collectAiRules() {
+   };
+ }
+ 
++function openLicensePanel() {
++  switchPage("settings");
++  state.settingsTab = "system";
++  document.querySelectorAll(".settings-tab").forEach((item) => {
++    item.classList.toggle("is-active", item.dataset.settingsTab === "system");
++  });
++  document.querySelectorAll(".settings-page").forEach((page) => {
++    page.classList.toggle("is-active", page.id === "settings-system");
++  });
++  const details = document.querySelector("#settings-system .system-license-details");
++  if (details) details.open = true;
++  window.setTimeout(() => {
++    const el = document.querySelector("#settings-system .system-license-details") || document.getElementById("system-license-status");
++    if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "center" });
++  }, 80);
++}
++
+ async function loadLicense() {
+   try {
+     const data = await api("/api/license");
+@@ -4678,6 +4840,13 @@ async function loadLicense() {
+       status.classList.toggle("is-inactive", !data.activated);
+       status.lastChild.textContent = data.activated ? "已激活" : "未激活";
+     }
++    const sideStatus = $("sidebar-license-status");
++    if (sideStatus) sideStatus.textContent = data.activated ? `${data.days_left ?? 0} 天` : "未激活";
++    const sideDot = $("sidebar-license-dot");
++    if (sideDot) {
++      sideDot.classList.toggle("is-active", Boolean(data.activated));
++      sideDot.classList.toggle("is-inactive", !data.activated);
++    }
+   } catch (error) {
+     $("license-days-left").value = "读取失败";
+     const status = $("system-license-status");
+@@ -6024,6 +6193,13 @@ function collectAiControls(prefix) {
+     // for future runs, but a preview must never silently use stale settings.
+     content_policy: directorContentPolicy(collectContentPolicy(), choices),
+     content_review_mode: $("s-content-review-mode")?.value || "off",
++    // 四次 AI 调用的独立开关（默认全开）：直接透传给导演合同，关掉即省对应调用。
++    director_switches: {
++      opening_hook_recall: $(`${prefix}-dir-hook-recall`)?.checked !== false,
++      duration_calibration: $(`${prefix}-dir-calibration`)?.checked !== false,
++      opening_unit_split: $(`${prefix}-dir-opening-split`)?.checked !== false,
++      duration_budget_trim: $(`${prefix}-dir-duration-trim`)?.checked !== false,
++    },
+   };
+ }
+ 
+@@ -7089,9 +7265,26 @@ function setPreviewLayoutState(scope = "smart", preview = null) {
+ 
+ function hydratePreviewCandidatePool(preview) {
+   if (!preview || !Array.isArray(preview.candidate_clips) || !preview.candidate_clips.length) return preview;
++  // 整池渲染前，先记住“方案自身片段”（故事脚本），供草稿清洗用。
++  if (!Array.isArray(preview.director_story_clips) && Array.isArray(preview.clips)) {
++    preview.director_story_clips = preview.clips;
++  }
+   if (preview.clips !== preview.candidate_clips) preview.clips = preview.candidate_clips;
+   return preview;
+ }
++function sanitizePreviewDraftToStoryClips(draft, preview) {
++  // 切方案/加载时，草稿不应包含不属于本方案的片段（否则会把别的方案片段算进“已选片段（故事脚本）”）。
++  const story = preview && Array.isArray(preview.director_story_clips) ? preview.director_story_clips : null;
++  if (!draft || !story || !story.length) return draft;
++  const storyKeys = new Set(story.map(function (clip) { return previewCandidateKey(clip); }).filter(Boolean));
++  const storyIdx = new Set(story.map(function (clip) { return Number(clip.index); }).filter(Number.isInteger));
++  const out = Object.assign({}, draft);
++  if (Array.isArray(out.selected_keys)) out.selected_keys = out.selected_keys.filter(function (k) { return storyKeys.has(String(k)); });
++  if (Array.isArray(out.order_keys)) out.order_keys = out.order_keys.filter(function (k) { return storyKeys.has(String(k)); });
++  if (Array.isArray(out.selected_indices)) out.selected_indices = out.selected_indices.filter(function (i) { return storyIdx.has(Number(i)); });
++  if (Array.isArray(out.order)) out.order = out.order.filter(function (i) { return storyIdx.has(Number(i)); });
++  return out;
++}
+ 
+ function getPreviewState(scope = "smart") {
+   const preview = scope === "mix" ? state.mixPreview : state.smartPreview;
+@@ -7320,7 +7513,7 @@ function readStoredPreviewDraft(scope, preview) {
+   const candidates = [local, server]
+     .filter((draft) => draft && draft.preview_id === preview.id)
+     .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0));
+-  return candidates[0] || null;
++  return sanitizePreviewDraftToStoryClips(candidates[0] || null, preview);
+ }
+ 
+ function applyPreviewDraftToState(scope = "smart", draft = null) {
+@@ -7372,7 +7565,7 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
+ 
+ function savePreviewDraft(scope = "smart", draft = null, { remote = true } = {}) {
+   const preview = getPreviewState(scope);
+-  const nextDraft = draft || buildPreviewDraftFromState(scope);
++  const nextDraft = sanitizePreviewDraftToStoryClips(draft || buildPreviewDraftFromState(scope), preview);
+   if (!preview?.id || !nextDraft.preview_id) return nextDraft;
+   const key = previewDraftKey(scope, preview.id);
+   state.previewDrafts[key] = nextDraft;
+@@ -7402,6 +7595,7 @@ function ensurePreviewDraft(scope = "smart") {
+   if (!preview?.id || !preview?.clips?.length) return null;
+   const key = previewDraftKey(scope, preview.id);
+   let draft = state.previewDrafts[key] || readStoredPreviewDraft(scope, preview);
++  draft = sanitizePreviewDraftToStoryClips(draft, preview);
+   if (draft) {
+     applyPreviewDraftToState(scope, draft);
+   }
+@@ -10587,8 +10781,8 @@ function formatSeconds(value) {
+ 
+ const deepSeekPreviewRatesCnyPerMillion = {
+   "deepseek-v4-flash": {
+-    offpeak: { cachedInput: 0.05, input: 1.5, output: 4.5 },
+-    peak: { cachedInput: 0.1, input: 3, output: 9 },
++    offpeak: { cachedInput: 0.02, input: 1, output: 4 },
++    peak: { cachedInput: 0.04, input: 2, output: 8 },
+     label: "DeepSeek V4 Flash",
+   },
+   "deepseek-v4-pro": {
+@@ -10596,6 +10790,18 @@ const deepSeekPreviewRatesCnyPerMillion = {
+     peak: { cachedInput: 0.3, input: 9, output: 27 },
+     label: "DeepSeek V4 Pro",
+   },
++  "qwen3.8-flash": {
++    flat: { cachedInput: 0.1, input: 0.8, output: 2.7 },
++    label: "Qwen 3.8 Flash",
++  },
++  "doubao-seed-2-1-pro-260628": {
++    flat: { cachedInput: 1.2, input: 6, output: 30 },
++    label: "Doubao Seed 2.1 Pro",
++  },
++  "doubao-seed-2-1-turbo-260628": {
++    flat: { cachedInput: 0.6, input: 3, output: 15 },
++    label: "Doubao Seed 2.1 Turbo",
++  },
+ };
+ 
+ function versionCostNoteText(count) {
+@@ -10674,17 +10880,20 @@ function commerceDirectorPreviewCostSummary(preview) {
+   const details = rows.map(row => {
+     const window = beijingPeakWindowFromReport(row);
+     const rate = deepSeekPreviewRatesCnyPerMillion[String(row.model || "").toLowerCase()];
+-    const tier = rate && window.peak !== null ? (window.peak ? rate.peak : rate.offpeak) : null;
++    const flatRate = Boolean(rate?.flat);
++    const tier = rate?.flat || (rate && window.peak !== null ? (window.peak ? rate.peak : rate.offpeak) : null);
+     const input = Number(row.input_tokens), output = Number(row.output_tokens), cached = Number(row.cached_input_tokens);
+     const known = row.cached_input_tokens != null && Number.isFinite(input) && Number.isFinite(output)
+       && input >= cached && cached >= 0 && output >= 0;
+     const amount = tier && known ? ((input - cached) * tier.input + cached * tier.cachedInput + output * tier.output) / 1000000 : null;
+-    return {stage: row.stage, model: row.model, window, tier, input, output, cached, amount,
++    return {stage: row.stage, model: row.model, window, tier, flatRate, input, output, cached, amount,
+       basis: row.request_started_at ? "请求开始时间" : row.timestamp ? "历史回执时间估算" : "历史报告时间估算"};
+   });
+   const cost = details.every(d => d.amount !== null) ? details.reduce((sum, d) => sum + d.amount, 0) : null;
+   const labels = [...new Set(details.map(d => d.window.label))];
+-  const priceWindowLabel = labels.length > 1 ? "跨峰谷" : (labels[0] || "时段未知");
++  const priceWindowLabel = details.length && details.every(d => d.flatRate)
++    ? "标准价"
++    : (labels.length > 1 ? "跨峰谷" : (labels[0] || "时段未知"));
+ 
+   return {
+     totalTokens,
+@@ -13676,7 +13885,9 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
+   const fidelity = review.export_fidelity?.status === "warning"
+     ? review.export_fidelity : (review.preview_fidelity || preview?.dedup_summary?.director_preview_fidelity || {});
+   const boundaryWarning = fidelity.status === "warning";
+-  const currentStatus = overview.status === "block" ? "block" : (boundaryWarning ? "warn" : overview.status);
++  const openingWarning = review.opening_selection?.verification?.status === "warning";
++  const openingLimited = review.opening_selection?.quality === "limited";
++  const currentStatus = overview.status === "block" ? "block" : ((boundaryWarning || openingWarning || openingLimited) ? "warn" : overview.status);
+   const duplicates = overview.issues.filter(function (item) { return item.kind === "duplicate"; }).length;
+   const firstFunction = String(selected[0]?.director_beat_function || selected[0]?.director_chapter_kind || "").toLowerCase();
+   const lastFunction = String(selected[selected.length - 1]?.director_beat_function || selected[selected.length - 1]?.director_chapter_kind || "").toLowerCase();
+@@ -13686,8 +13897,9 @@ function previewDirectorCurrentStatus(scope, preview, targetId, selected, durati
+     ...overview,
+     status: currentStatus,
+     boundaryMessage: boundaryWarning ? String(fidelity.message || "内容边界影响了部分短句，请连读复核") : "",
++    openingMessage: openingLimited ? "AI 未找到足够好的真实开场；请连读候选，必要时补充素材。" : (openingWarning ? "开场比较或原话来源待复核，请核对首句与紧接的兑现句。" : ""),
+     duplicates,
+-    openingLabel: fidelity.opening_affected ? "开场受内容边界影响" : (openingReady ? "开场已设置" : "开场待复核"),
++    openingLabel: openingLimited ? "开场素材不足" : (fidelity.opening_affected ? "开场受内容边界影响" : (openingWarning ? "开场回执待复核" : (openingReady ? "开场已设置" : "开场待复核"))),
+     progressionLabel: duplicates ? `重复提示 ${duplicates}` : "未见完全重复",
+     endingLabel: endingReady ? "结尾可连读" : "结尾待复核",
+     overallLabel: currentStatus === "block" ? "暂不可成片" : (boundaryWarning ? "边界删减待复核" : (currentStatus === "warn" ? "建议调整" : "可继续审核")),
+@@ -13736,6 +13948,26 @@ async function switchPreviewDirectorVariant(previewId, scope = "smart") {
+   if (!preview?.ok) throw new Error(preview?.message || "导演方案尚未准备完成");
+   if (scope === "mix") state.mixPreview = preview;
+   else state.smartPreview = preview;
++  // 切换方案重置：显式把新方案的选择设为本方案自己的片段，其余候选置未选；
++  // 否则第一帧会沿用上一个方案的选中标记 → 时长叠加（需再点一次才校正）。
++  try {
++    const _storyClips = Array.isArray(preview.director_story_clips) ? preview.director_story_clips : preview.clips;
++    hydratePreviewCandidatePool(preview);
++    const _storyKeys = new Set((_storyClips || []).map((clip) => previewCandidateKey(clip)).filter(Boolean));
++    (preview.clips || []).forEach((clip) => {
++      const _on = _storyKeys.has(previewCandidateKey(clip));
++      clip.selected = _on;
++      (Array.isArray(clip.segments) ? clip.segments : []).forEach((segment) => {
++        if (segment.selection_locked === true) { segment.selected = false; return; }
++        segment.selected = _on;
++        segment.wordSelectionExplicit = false;
++      });
++    });
++    const _draftKey = previewDraftKey(scope, preview.id);
++    if (state.previewDrafts) delete state.previewDrafts[_draftKey];
++    if (state.previewAssemblyOrders) delete state.previewAssemblyOrders[_draftKey];
++    preview.selection_draft = null;
++  } catch (error) { /* 重置失败不影响切换本身 */ }
+   if (!state.previewDirectorChapterFocus) state.previewDirectorChapterFocus = { smart: "", mix: "" };
+   if (!state.previewDirectorCandidateViews) state.previewDirectorCandidateViews = { smart: "recommended", mix: "recommended" };
+   state.previewDirectorChapterFocus[scope] = "";
+@@ -13933,6 +14165,7 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope
+     ${chapterRows ? `<nav class="commerce-director-recommendation-path" aria-label="说服路径"><span>说服路径</span><ol>${chapterRows}</ol>${moreChapters}</nav>` : ""}
+     <div class="commerce-director-status-row" role="status"><span class="commerce-director-opening"><b>开场承诺</b>${escapeHtml(openingPromise || "尚未形成明确开场承诺")}</span><div class="commerce-director-status-metrics"><span>可编辑候选约 ${Number(candidateStats.duration || 0).toFixed(1)}s</span><span>已选 ${selected.length} 段</span><span>${escapeHtml(status.progressionLabel)}</span><span>${escapeHtml(status.openingLabel)}</span><span>${escapeHtml(status.endingLabel)}</span></div><span class="commerce-director-status-badge is-${statusTone}"><small>${escapeHtml(statusSource)}</small>${escapeHtml(status.overallLabel)}</span></div>
+     ${status.boundaryMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.boundaryMessage)}</p>` : ""}
++    ${status.openingMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.openingMessage)}</p>` : ""}
+     <span class="visually-hidden" aria-live="polite">当前查看 ${escapeHtml(outline.find(function (item) { return String(item?.chapter_id || "") === activeChapterId; })?.goal || "导演方案")}</span>
+   </section>`;
+ }

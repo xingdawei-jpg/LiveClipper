@@ -7273,11 +7273,14 @@ function hydratePreviewCandidatePool(preview) {
   return preview;
 }
 function sanitizePreviewDraftToStoryClips(draft, preview) {
-  // 切方案/加载时，草稿不应包含不属于本方案的片段（否则会把别的方案片段算进“已选片段（故事脚本）”）。
-  const story = preview && Array.isArray(preview.director_story_clips) ? preview.director_story_clips : null;
-  if (!draft || !story || !story.length) return draft;
-  const storyKeys = new Set(story.map(function (clip) { return previewCandidateKey(clip); }).filter(Boolean));
-  const storyIdx = new Set(story.map(function (clip) { return Number(clip.index); }).filter(Number.isInteger));
+  // 只清理“当前预览里根本不存在的”条目（真正的跨方案垃圾）。
+  // 注意：不能按“本方案故事片段”过滤——用户手动加入的补充句不在故事里，
+  // 那样会把它们删掉（表现为“加入没反应、候选永不显示已选”）。跨方案时长叠加
+  // 已由 switchPreviewDirectorVariant 的显式重置负责。
+  const pool = preview && Array.isArray(preview.clips) ? preview.clips : null;
+  if (!draft || !pool || !pool.length) return draft;
+  const storyKeys = new Set(pool.map(function (clip) { return previewCandidateKey(clip); }).filter(Boolean));
+  const storyIdx = new Set(pool.map(function (clip) { return Number(clip.index); }).filter(Number.isInteger));
   const out = Object.assign({}, draft);
   if (Array.isArray(out.selected_keys)) out.selected_keys = out.selected_keys.filter(function (k) { return storyKeys.has(String(k)); });
   if (Array.isArray(out.order_keys)) out.order_keys = out.order_keys.filter(function (k) { return storyKeys.has(String(k)); });
@@ -7565,7 +7568,9 @@ function applyPreviewDraftToState(scope = "smart", draft = null) {
 
 function savePreviewDraft(scope = "smart", draft = null, { remote = true } = {}) {
   const preview = getPreviewState(scope);
-  const nextDraft = sanitizePreviewDraftToStoryClips(draft || buildPreviewDraftFromState(scope), preview);
+  // 保存必须忠实反映用户当前选择：这里绝不能再按“本方案故事片段”过滤，
+  // 否则用户刚“加入”的补充句会在保存瞬间被删掉（表现为点了没反应、候选永不显示“已”）。
+  const nextDraft = draft || buildPreviewDraftFromState(scope);
   if (!preview?.id || !nextDraft.preview_id) return nextDraft;
   const key = previewDraftKey(scope, preview.id);
   state.previewDrafts[key] = nextDraft;
@@ -7595,7 +7600,6 @@ function ensurePreviewDraft(scope = "smart") {
   if (!preview?.id || !preview?.clips?.length) return null;
   const key = previewDraftKey(scope, preview.id);
   let draft = state.previewDrafts[key] || readStoredPreviewDraft(scope, preview);
-  draft = sanitizePreviewDraftToStoryClips(draft, preview);
   if (draft) {
     applyPreviewDraftToState(scope, draft);
   }

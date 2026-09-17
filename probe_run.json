@@ -1,0 +1,74 @@
+{
+ "preview_id": "0fe041772f354499a269ec025d743e32",
+ "payload": {
+  "video_paths": [
+   "C:\\工作\\小贤\\8-22单品\\【AYOBE】小贤 8月22日1000新品 废土松弛风酷感连帽工装夹克外套\\【AYOBE】小贤 8月22日1000新品 废土松弛风酷感连帽工装夹克外套 8.22.mp4"
+  ],
+  "srt_path": "C:\\工作\\小贤\\8-22单品\\【AYOBE】小贤 8月22日1000新品 废土松弛风酷感连帽工装夹克外套\\【AYOBE】小贤 8月22日1000新品 废土松弛风酷感连帽工装夹克外套 8.22.srt",
+  "output_dir": "",
+  "output_naming_mode": "source_timestamp",
+  "primary_category": "服饰内衣",
+  "category": "自动检测",
+  "focus_hint": "自动",
+  "ai_controls": {
+   "content_policy": {
+    "price": "block",
+    "cta": "block",
+    "inventory_pressure": "block",
+    "source_claim": "block",
+    "social_proof": "body_only",
+    "after_sale": "block",
+    "size_interaction": "body_only",
+    "live_interaction": "block",
+    "custom_rules": []
+   },
+   "avoid": [
+    "无关闲聊",
+    "无效重复"
+   ],
+   "director_controls": {
+    "contract_version": "director-controls-v2",
+    "primary_category": "服饰内衣",
+    "secondary_category": "",
+    "leaf_category": "",
+    "main_product": "",
+    "source_product_hints": [
+     "【AYOBE】小贤 8月22日1000新品 废土松弛风酷感连帽工装夹克外套 8.22"
+    ],
+    "director_direction": "",
+    "extra_instruction": "",
+    "supporting_products": "allow",
+    "priority_theme": "",
+    "preferred_topics": [],
+    "preferred_terms": [],
+    "preference_weights": {},
+    "avoid": [
+     "无关闲聊",
+     "无效重复"
+    ],
+    "opening_style": "",
+    "ending_style": ""
+   }
+  },
+  "target_duration": 90,
+  "duration_tolerance": null,
+  "versions": 1,
+  "dedup_preset": "custom",
+  "video": {
+   "mirror": true,
+   "crop": true,
+   "crop_value": 5,
+   "speed": true,
+   "speed_value": 115,
+   "frame_structure": true,
+   "frame_structure_level": "heavy",
+   "blur": false,
+   "blur_value": 2,
+   "sharpen": false,
+   "sharpen_value": 30,
+   "gamma_shift": true,
+   "corner_mask": true,
+   "bg_fill": false
+  }
+ }
+}
