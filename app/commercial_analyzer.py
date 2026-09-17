@@ -4872,6 +4872,18 @@ def _parse_director_stage_json_with_recovery(
                 f"{stage}_format_diagnostic",
                 json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
             )
+        # 先做免费的本地宽松修复；修得出来就不必再发一次付费的 AI 格式修复。
+        local_recovered = _relaxed_json_repair(raw)
+        if local_recovered is not None:
+            diagnostics["recovery_status"] = "recovered_local"
+            if stage_response_hook:
+                stage_response_hook(
+                    f"{stage}_format_recovered_local",
+                    json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":")),
+                )
+            if log_fn:
+                log_fn(f"AI 导演 {stage} 的 JSON 已由本地宽松修复解析，跳过付费的 AI 格式修复。")
+            return local_recovered
         repair_prompt = "\n\n".join([
             "你的上一条回复未能被严格 JSON 解析。请只做格式修复。",
             "必须只返回一个有效 JSON 对象，不要 Markdown、解释或代码围栏。",
@@ -4916,6 +4928,33 @@ def _parse_director_stage_json_with_recovery(
             log_fn(f"AI 导演 {stage} 的 JSON 格式已自动恢复；继续使用同一阶段结果。")
         return parsed
 
+
+def _relaxed_json_repair(raw: Any) -> Any | None:
+    """本地宽松修复 JSON（免费）：去代码围栏、截取最外层对象、修尾逗号与中文引号。
+
+    返回可解析对象；本地修不出来返回 None（此时才值得再发一次付费的 AI 格式修复）。"""
+    text = str(raw or "")
+    if not text.strip():
+        return None
+    candidates = [text]
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        candidates.append(fenced.group(1))
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start:end + 1])
+    for candidate in candidates:
+        variants = (
+            candidate,
+            re.sub(r",\s*([}\]]) *", r"\1", candidate),
+            candidate.replace("\u201c", '"').replace("\u201d", '"'),
+        )
+        for variant in variants:
+            try:
+                return json.loads(variant, strict=False)
+            except Exception:  # noqa: BLE001 - 逐个变体尝试
+                continue
+    return None
 
 def _subtitle_duration_map(subtitles: Sequence[Mapping[str, Any]]) -> dict[int, float]:
     result: dict[int, float] = {}
@@ -6067,10 +6106,21 @@ def analyze_commercial_story(
         # complete transcript, prior response and audits in a third paid call.
         # The optional third call remains reserved for a real duration or
         # chapter-completion shortfall.
+        if (
+            final_audit["needs_calibration"]
+            and enable_duration_calibration
+            and not _gross_duration_contract_violation(final_audit)
+        ):
+            calibration["skipped_reason"] = "minor_duration_deviation"
+            log("本次时长偏差未达“严重超差”门槛，跳过一次付费校准；保留可编辑方案与实测时长。")
         if final_audit["needs_calibration"] and not enable_duration_calibration:
             calibration["skipped_reason"] = "single_casting_delivery"
             log("本次一次选片未达目标，已保留可编辑方案并显示实测时长；不后补、不追加第三轮AI。")
-        if final_audit["needs_calibration"] and enable_duration_calibration:
+        if (
+            final_audit["needs_calibration"]
+            and enable_duration_calibration
+            and _gross_duration_contract_violation(final_audit)
+        ):
             calibration["attempted"] = True
             if stage_progress_hook:
                 stage_progress_hook("duration_calibration_started")

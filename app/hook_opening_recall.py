@@ -90,6 +90,13 @@ def build_hook_recall_batches(
     a second semantic discovery pass or a hidden Top-K filter.
     """
     ordered = [dict(item) for item in source_rows if isinstance(item, Mapping)]
+    # 时间轴不可用时（例如混剪的虚拟 SRT 全是同一时间），分批器会一次吞掉整份材料，
+    # 单次输入可达 6 万+ token。这里按行序补合成时间，保证仍能切成可控窗口。
+    _starts = [float(item.get("start") or 0.0) for item in ordered]
+    if _starts and (max(_starts) - min(_starts)) < 1.0:
+        for _index, _item in enumerate(ordered):
+            _item["start"] = float(_index) * 3.0
+            _item["end"] = float(_index) * 3.0 + 3.0
     by_id = {int(item["subtitle_id"]): item for item in ordered if _safe_int(item.get("subtitle_id"))}
     ordered_ids = [int(item["subtitle_id"]) for item in ordered if int(item["subtitle_id"]) in by_id]
     positions = {subtitle_id: index for index, subtitle_id in enumerate(ordered_ids)}
