@@ -6384,6 +6384,26 @@ def _preview_public_clips(
     return public_clips
 
 
+def _opening_quality_warning(director_review: Any) -> dict[str, Any]:
+    """开场回执未达 strong 时，生成前端可渲染的告警（走 plan_quality_report 通道）。"""
+    try:
+        review = director_review if isinstance(director_review, Mapping) else {}
+        selection = review.get("opening_selection") if isinstance(review.get("opening_selection"), Mapping) else {}
+        quality = str((selection or {}).get("quality") or "").strip().lower()
+        if not quality or quality == "strong":
+            return {}
+        reason = ""
+        for package in (selection.get("compared_packages") or []):
+            if isinstance(package, Mapping) and str(package.get("decision") or "") == "selected":
+                reason = str(package.get("reason") or "")
+                break
+        text = "本次开场未达强档（quality=" + quality + "）：建议在已选列表里手动替换开场句"
+        if reason:
+            text += "；当时的选取理由：" + reason[:80]
+        return {"status": "warning", "soft_quality_issues": [text], "warnings": [text]}
+    except Exception:  # noqa: BLE001 - 提示失败不影响预览
+        return {}
+
 def _director_preview_fidelity_audit(public_clips: list[dict[str, Any]]) -> dict[str, Any]:
     """Report boundary removals; never choose a replacement or repair a story."""
     changes: list[dict[str, Any]] = []
@@ -14643,6 +14663,8 @@ def _run_commerce_director_preview(
                 candidate_clips=candidate_public_clips,
                 dedup_summary={
                     "narrative_owner": "two_pass_ai_director_m2_sentence_preview",
+                    # 开场未达强档时，把提示送到前端已有的告警通道（plan_quality_report）。
+                    "plan_quality_report": _opening_quality_warning(director_review),
                     "director_preview_fidelity": preview_fidelity,
                     "planner_mode": planner_mode,
                     "planner_version": planner_mode_version(planner_mode),

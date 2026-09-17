@@ -338,7 +338,7 @@ def build_hook_opening_gate_prompt(
         "你是 P0.5A.4 最终 Hook Gate。这里只审已经词级可回放的 Hook 候选，不改写、不裁词、不补句、不选正文，也不输出 Payoff。你只判断它是否真的能在短视频第1句成立。",
         "标准必须同时满足：干净；独立；商品相关且具体；陌生观众有停留理由；直接符合当前 Director Opening Promise；没有 ASR怪词、直播承接、对象不明、用户画像标签、个人尺码/体重回应或必须靠手势理解的问题。信息正确、商业价值高、能用于正文，都不等于可作开场。",
         "不要机械拒绝‘你看/真的/我觉得’；只有整句仍像直播残留或依赖前文才拒绝。特别严查类似‘好的，来…’、‘它其实…’、未明对象的‘然后这个…’、奇怪比喻、ASR词和只重复口号。",
-        "所有评分为1–5。eligible_for_opening=true 仅限 publishable_clean、visual_dependency=none，且六项评分都至少4；否则 false 并填 reject_reason。程序不会把任何 false 候选升格。",
+        "所有评分为1–5。**首要标准是 hook_stop_power（陌生观众 3 秒内会不会停下）：它必须 ≥4。**逻辑严密、商业价值高但**停人力不足**的候选（典型如尺码/规格对照、做工与工艺说明、慢慢铺垫的背景介绍）**一律不得占用开场位**——它们可以进正文，但不做开场。eligible_for_opening=true 仅限 publishable_clean、visual_dependency=none，且六项评分都至少4、hook_stop_power≥4；否则 false 并填 reject_reason。程序不会把任何 false 候选升格。**若所有候选的 hook_stop_power 都 ≤3，不要勉强启用开场**：宁可输出“本次没有强开场”（quality 记为 usable），也不要选一个平淡但不抓人的句子充数。",
         "当前冻结 Director Opening Promise：" + _text(opening_promise) + "；允许的开场证据角色仅为：" + ",".join(_text(item) for item in allowed_opening_answer_roles),
         "返回严格 JSON，不要 Markdown。结构：\n" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "待审真实候选：\n" + json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
