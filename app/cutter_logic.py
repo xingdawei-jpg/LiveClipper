@@ -1779,7 +1779,7 @@ def _probe_media_duration(media_path, ffprobe_cmd=None):
         proc = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", media_path],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=15, creationflags=globals().get("_NO_WINDOW", 0),
+            timeout=60, creationflags=globals().get("_NO_WINDOW", 0),
         )
         return max(0.0, float(str(proc.stdout).strip()))
     except Exception:
