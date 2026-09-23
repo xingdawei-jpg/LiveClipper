@@ -23,6 +23,9 @@ _ENCODE_ALIASES = {
 }
 _DECODE_ALIASES = {value: key for key, value in _ENCODE_ALIASES.items()}
 
+# 「识别到多商品即排除」：商品引用越界的 beat 在解码阶段被剔除，而不是让整次预览失败。
+_EXCLUDED = object()
+
 
 def _is_beat(value: Mapping[str, Any]) -> bool:
     return "beat_function" in value and "subtitle_ids" in value
@@ -76,12 +79,13 @@ def compact_director_wire_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _decode(value: Any, products: list[dict[str, str]]) -> Any:
+def _decode(value: Any, products: list[dict[str, str]], stats: dict[str, Any] | None = None) -> Any:
     if isinstance(value, list):
-        return [_decode(item, products) for item in value]
+        decoded = [_decode(item, products, stats) for item in value]
+        return [item for item in decoded if item is not _EXCLUDED]
     if not isinstance(value, Mapping):
         return copy.deepcopy(value)
-    result = {str(key): _decode(item, products) for key, item in value.items()}
+    result = {str(key): _decode(item, products, stats) for key, item in value.items()}
     is_compact_beat = "role" in result and "ids" in result
     if not is_compact_beat:
         return result
@@ -91,14 +95,17 @@ def _decode(value: Any, products: list[dict[str, str]]) -> Any:
     if "product_ref" in result:
         ref = result.pop("product_ref")
         if not isinstance(ref, int) or isinstance(ref, bool) or not 0 <= ref < len(products):
-            raise ValueError("Director wire product_ref is invalid")
+            # 非主商品/越界编号：剔除该条 beat，不让整次预览失败。
+            if stats is not None:
+                stats["excluded_beats"] = int(stats.get("excluded_beats", 0)) + 1
+            return _EXCLUDED
         product = products[ref]
         result["subject_product"] = product["name"]
         result["subject_product_type"] = product["type"]
     return result
 
 
-def expand_director_wire_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def expand_director_wire_payload(payload: Mapping[str, Any], stats: dict[str, Any] | None = None) -> dict[str, Any]:
     """Strictly validate and expand a Director wire packet to the legacy shape."""
     if str(payload.get("schema_version") or "") != WIRE_VERSION:
         raise ValueError("Unsupported Director wire schema")
@@ -115,4 +122,4 @@ def expand_director_wire_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         if not name or not kind:
             raise ValueError("Director wire product entry is incomplete")
         products.append({"name": name, "type": kind})
-    return _decode(packet, products)
+    return _decode(packet, products, stats)

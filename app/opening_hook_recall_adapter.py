@@ -202,11 +202,21 @@ def recall_opening_hooks(
 def hook_pool_prompt_rows(
     hook_recall: Mapping[str, Any] | None,
     *,
-    limit: int = 12,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """把召回结果压成给 story prompt 用的紧凑清单。"""
+    """把召回结果压成给 story prompt 用的紧凑清单。
+
+    默认不截断（``limit=None``）：召回最多约 20 条，原先只取前 12 条会按 AI
+    返回顺序误砍强候选；这里改为**先按 hook_strength 降序稳定排序**，保证最强的
+    候选一定进入 story prompt。仅当传入正整数 ``limit`` 时才截断。
+    """
     rows: list[dict[str, Any]] = []
-    candidates = list((hook_recall or {}).get("hook_candidates") or ())[:max(1, int(limit))]
+    candidates = list((hook_recall or {}).get("hook_candidates") or ())
+    def _strength_key(item: Any) -> float:
+        return -_number(item.get("hook_strength")) if isinstance(item, Mapping) else 0.0
+    candidates.sort(key=_strength_key)
+    if limit is not None:
+        candidates = candidates[:max(1, int(limit))]
     for candidate in candidates:
         subtitle_ids: list[int] = []
         for value in candidate.get("source_subtitle_ids") or ():

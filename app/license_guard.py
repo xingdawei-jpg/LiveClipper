@@ -4,7 +4,7 @@
 from tkinter import messagebox
 
 
-LOCKED_REASON = "试用次数已用完，请激活后继续使用。"
+LOCKED_REASON = "未激活。加客服微信 LeyiDeco 可领 3 天免费试用码，或在官网购买后自动获取激活码。"
 
 
 def _log(log_fn, message, level="info"):

@@ -229,10 +229,19 @@ def _extract_json(text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start < 0 or end <= start:
-            raise RuntimeError("Commerce Director 返回无法解析为 JSON")
-        parsed = json.loads(cleaned[start:end + 1])
+        # 先取第一个完整闭合的对象（结尾多出杂散括号时 rfind("}") 会切错）
+        start = cleaned.find("{")
+        parsed = None
+        if start >= 0:
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+            except json.JSONDecodeError:
+                parsed = None
+        if parsed is None:
+            end = cleaned.rfind("}")
+            if start < 0 or end <= start:
+                raise RuntimeError("Commerce Director 返回无法解析为 JSON")
+            parsed = json.loads(cleaned[start:end + 1])
     if not isinstance(parsed, dict):
         raise RuntimeError("Commerce Director JSON 根节点必须是对象")
     return parsed

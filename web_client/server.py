@@ -554,7 +554,7 @@ def _progress_message(raw: str, scope: str) -> str | None:
     if "开始录制" in compact:
         return "正在录制直播。"
     if "录制完成" in compact:
-        return "直播录制完成。"
+        return "录屏完成。"
 
     if "诊断" in compact:
         return _clean_low_level_terms(compact)
@@ -1671,11 +1671,25 @@ def _normalize_live_room_cache_item(room: Any) -> dict[str, Any] | None:
         return None
     platform = str(room.get("platform") or "抖音").strip() or "抖音"
     naming = str(room.get("product_naming_mode") or room.get("productNamingMode") or room.get("naming_mode") or "").strip()
+    if naming == "product_name":
+        naming_mode = "product_name"
+    elif naming == "room_timestamp":
+        naming_mode = "room_timestamp"
+    else:
+        naming_mode = "product_id"
+    segment = str(room.get("segment") or "").strip()[:16]
+    product_clip_minutes = str(room.get("product_clip_minutes") or room.get("productClipMinutes") or "").strip()[:8]
+    record_mode = str(room.get("record_mode") or room.get("recordMode") or "").strip().lower()
+    if record_mode not in {"duration", "product"}:
+        record_mode = ""
     return {
         "name": name,
         "url": url,
         "platform": platform,
-        "product_naming_mode": "product_name" if naming == "product_name" else "product_id",
+        "product_naming_mode": naming_mode,
+        "segment": segment,
+        "product_clip_minutes": product_clip_minutes,
+        "record_mode": record_mode,
     }
 
 
@@ -2367,6 +2381,7 @@ class LiveRecPayload(BaseModel):
     room_name: str = ""
     room_url: str = ""
     platform: str = "自定义RTMP"
+    record_mode: str = "product"
     product_split_enabled: bool = False
     product_auto_cut: bool = False
     product_default_minutes: float = Field(default=10.0, ge=1.0, le=60.0)
@@ -3110,7 +3125,17 @@ def _cancel_scope(scope: str) -> int:
     return stopped
 
 
+# 免费开放的功能：不做授权门禁，也不消耗试用次数。
+FREE_FEATURE_NAMES = {"录屏", "直播录制", "单品扫描", "视频分割", "创作辅助"}
+
+
+def _feature_is_free(feature_name: str) -> bool:
+    return str(feature_name or "").strip() in FREE_FEATURE_NAMES
+
+
 def _ensure_feature_access(feature_name: str) -> None:
+    if _feature_is_free(feature_name):
+        return
     try:
         from license_guard import get_feature_access
 
@@ -3123,6 +3148,8 @@ def _ensure_feature_access(feature_name: str) -> None:
 
 
 def _consume_trial(feature_name: str, units: int = 1, scope: str = "system") -> None:
+    if _feature_is_free(feature_name):
+        return
     try:
         from license_guard import consume_trial_after_success
 
@@ -3422,7 +3449,7 @@ def _transcode_live_recording_sync(source: Path, target: Path, scope: str, name:
     ]
     log_path = target.with_suffix(".sync.log")
     try:
-        emit_log("info", f"{name}: 检测到直播录制时间戳偏移（{reason}），正在生成同步安全版 MP4。", scope)
+        emit_log("info", f"{name}: 检测到录屏时间戳偏移（{reason}），正在生成同步安全版 MP4。", scope)
         with log_path.open("wb") as log_handle:
             proc = subprocess.run(
                 cmd,
@@ -4354,7 +4381,7 @@ def _preflight_checks(feature: str, data: dict[str, Any]) -> dict[str, Any]:
             if not str(data.get("room_url") or "").strip():
                 errors.append("请填写直播间地址。")
             _preflight_output_dir(data.get("save_dir"), warnings, errors)
-            if data.get("product_split_enabled"):
+            if data.get("product_split_enabled") and _live_record_mode(data) == "product":
                 try:
                     min_minutes = min(15.0, float(data.get("product_min_minutes") or 3))
                     max_minutes = min(15.0, float(data.get("product_max_minutes") or 15))
@@ -12110,7 +12137,7 @@ def _find_running_live_record_task(room_url: Any) -> dict[str, Any] | None:
     with _TASK_LOCK:
         tasks = list(_TASKS.values())
     for task in reversed(tasks):
-        if task.get("scope") != "live-rec" or task.get("title") != "直播录制":
+        if task.get("scope") != "live-rec" or task.get("title") != "录屏":
             continue
         if task.get("status") not in {"queued", "running"}:
             continue
@@ -12143,7 +12170,28 @@ def _resolve_douyin_short_page_url(url: str, scope: str = "live-rec") -> str:
     return text
 
 
+def _live_record_mode(payload: Any) -> str:
+    """Resolve the live recording mode: product | duration | single.
+
+    - product: Douyin active-product probe + time-based product timeline/split.
+    - duration: record only, split into fixed-length files, no product work.
+    - single: record only, one single file, no product work.
+    """
+    text = ""
+    if isinstance(payload, dict):
+        text = str(payload.get("record_mode") or "").strip().lower()
+    else:
+        text = str(getattr(payload, "record_mode", "") or "").strip().lower()
+    if text == "duration":
+        return "duration"
+    if text == "single":
+        return "single"
+    return "product"
+
+
 def _should_use_douyin_active_probe(payload: LiveRecPayload, url: str) -> bool:
+    if _live_record_mode(payload) != "product":
+        return False
     url = _extract_url_from_text(url)
     lower = str(url or "").lower()
     is_douyin_page = "douyin.com" in lower or "webcast.amemv.com/douyin/webcast/reflow" in lower
@@ -12175,18 +12223,374 @@ def _run_live_detect(task_id: str, payload: LiveRecPayload) -> None:
         emit_log("error", f"直播流检测失败：{exc}", scope)
 
 
+LIVE_STREAM_STALL_SECONDS = 30.0
+LIVE_STREAM_WATCH_INTERVAL = 2.0
+LIVE_STREAM_RETRY_DELAY = 5.0
+LIVE_STREAM_MAX_RESOLVE_FAILURES = 8
+LIVE_STREAM_MAX_RECOVERIES = 200
+
+
+def _path_size(path: Path | None) -> int:
+    try:
+        return path.stat().st_size if path and path.is_file() else 0
+    except Exception:
+        return 0
+
+
+def _prefixed_dir_size(directory: Path, prefix: str) -> int:
+    total = 0
+    try:
+        for item in directory.iterdir():
+            if item.is_file() and item.name.startswith(prefix):
+                total += item.stat().st_size
+    except Exception:
+        pass
+    return total
+
+
+def _supervise_live_ffmpeg(task_id: str, proc: subprocess.Popen[Any], target: Path | None, directory: Path, prefix: str) -> int:
+    """Wait for a live ffmpeg process; kill it when the output stops growing.
+
+    Returns the process exit code, or -1 when it was terminated for stalling.
+    """
+    last_size = -1
+    last_growth = time.time()
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            return rc
+        if _is_task_cancelled(task_id):
+            _terminate_process_tree(proc)
+            return -1
+        size = _path_size(target) if target is not None else _prefixed_dir_size(directory, prefix)
+        now = time.time()
+        if size != last_size:
+            last_size = size
+            last_growth = now
+        elif now - last_growth >= LIVE_STREAM_STALL_SECONDS:
+            _terminate_process_tree(proc)
+            return -1
+        time.sleep(LIVE_STREAM_WATCH_INTERVAL)
+
+
+def _collect_live_segments(room_dir: Path, name: str, stamp: str) -> list[Path]:
+    prefix = f"{name}_{stamp}_"
+    segments: list[Path] = []
+    try:
+        for item in sorted(room_dir.iterdir()):
+            if (
+                item.is_file()
+                and item.name.startswith(prefix)
+                and item.suffix.lower() == ".ts"
+                and item.stat().st_size >= 1000
+            ):
+                segments.append(item)
+    except Exception:
+        pass
+    return segments
+
+
+def _max_live_segment_index(paths: list[Path]) -> int:
+    best = -1
+    for path in paths:
+        match = re.search(r"_(\d+)\.ts$", path.name)
+        if match:
+            best = max(best, int(match.group(1)))
+    return best
+
+
+def _concat_live_parts(parts: list[Path], target: Path, scope: str, name: str) -> bool:
+    list_path = target.with_suffix(".concat.txt")
+    try:
+        list_path.write_text("\n".join(f"file '{part.as_posix()}'" for part in parts), encoding="utf-8")
+        cmd = [
+            _ffmpeg_cmd(),
+            "-hide_banner",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(target),
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1800,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode == 0 and target.exists() and target.stat().st_size >= 1000:
+            for part in parts:
+                try:
+                    part.unlink()
+                except Exception:
+                    pass
+            emit_log("info", f"{name}: 断流片段已合并为单文件：{target.name}", scope)
+            return True
+        emit_log("warning", f"{name}: 合并断流片段未生成有效文件，已保留分段文件。", scope)
+    except Exception as exc:
+        emit_log("warning", f"{name}: 合并断流片段失败，已保留分段文件：{exc}", scope)
+    finally:
+        try:
+            list_path.unlink()
+        except Exception:
+            pass
+    return False
+
+
+def _run_live_record_stream_guard(
+    task_id: str,
+    payload: LiveRecPayload,
+    page_url: str,
+    room_dir: Path,
+    name: str,
+    scope: str,
+    record_mode: str,
+) -> None:
+    """Record a live stream with断流自愈: re-resolve the stream URL and resume on drop."""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    chunk_seconds = _live_segment_seconds(payload.segment)
+    if record_mode == "duration" and chunk_seconds >= _live_segment_seconds("不限"):
+        chunk_seconds = 1800
+    single_seconds = _live_segment_seconds(payload.segment)
+    single_target_duration = single_seconds < _live_segment_seconds("不限")
+
+    attempt = 0
+    resolve_failures = 0
+    recoveries = 0
+    duration_outputs: list[str] = []
+    parts: list[Path] = []
+    started = False
+
+    while not _is_task_cancelled(task_id):
+        attempt += 1
+        if attempt > 1:
+            if started:
+                emit_log("warning", f"{name}: 直播流中断，正在重新解析流地址并续录（第 {attempt} 次）。", scope)
+                _set_task_progress(task_id, 30, f"断流恢复中（第 {attempt} 次）")
+            else:
+                emit_log("warning", f"{name}: 正在重试解析直播流地址（第 {attempt} 次）。", scope)
+                _set_task_progress(task_id, 24, f"重试解析直播流（第 {attempt} 次）")
+            time.sleep(LIVE_STREAM_RETRY_DELAY)
+        else:
+            _set_task_progress(task_id, 24, "解析直播流")
+        try:
+            stream_url = _resolve_live_url(page_url, scope)
+            resolve_failures = 0
+        except Exception as exc:
+            resolve_failures += 1
+            emit_log(
+                "warning",
+                f"{name}: 解析直播流失败（{resolve_failures}/{LIVE_STREAM_MAX_RESOLVE_FAILURES}）：{exc}",
+                scope,
+            )
+            if resolve_failures >= LIVE_STREAM_MAX_RESOLVE_FAILURES:
+                if started:
+                    break
+                raise
+            time.sleep(LIVE_STREAM_RETRY_DELAY)
+            continue
+
+        reconnect_args: list[str] = []
+        if str(stream_url).lower().startswith(("http://", "https://")):
+            reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "30"]
+
+        target: Path | None = None
+        prefix = ""
+        if record_mode == "duration":
+            chunk_stamp = time.strftime("%Y%m%d_%H%M%S")
+            target = room_dir / f"{name}_{chunk_stamp}.ts"
+            stderr_path = target.with_suffix(".ffmpeg.log")
+            cmd = [_ffmpeg_cmd(), "-hide_banner", "-y"]
+            cmd += reconnect_args
+            cmd += [
+                "-i", stream_url,
+                "-map", "0:v:0?", "-map", "0:a:0?",
+                "-c", "copy",
+                "-t", str(chunk_seconds),
+                "-avoid_negative_ts", "make_zero",
+                "-f", "mpegts",
+                str(target),
+            ]
+            proc_target = target
+        else:
+            target = room_dir / f"{name}_{stamp}_{attempt:03d}.ts"
+            stderr_path = target.with_suffix(".ffmpeg.log")
+            cmd = [_ffmpeg_cmd(), "-y"]
+            cmd += reconnect_args
+            cmd += [
+                "-i", stream_url,
+                "-map", "0:v:0?", "-map", "0:a:0?",
+                "-c", "copy",
+                "-t", str(single_seconds),
+                "-avoid_negative_ts", "make_zero",
+                "-f", "mpegts",
+                str(target),
+            ]
+            proc_target = target
+
+        stderr_file = stderr_path.open("ab")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            stderr_file.close()
+            raise
+        with _LIVE_LOCK:
+            _LIVE_PROCS[task_id] = {"process": proc, "output": str(proc_target), "name": name, "stderr": str(stderr_path)}
+        if not started:
+            started = True
+            if record_mode == "duration":
+                chunk_minutes = max(1, chunk_seconds // 60)
+                _set_task_progress(task_id, 35, f"录制中（每 {chunk_minutes} 分钟一段）")
+                emit_log(
+                    "success",
+                    f"{name}: 开始录制（按时长分段，每 {chunk_minutes} 分钟一段，已开启断流自愈）",
+                    scope,
+                )
+            else:
+                _set_task_progress(task_id, 35, "录制中")
+                emit_log("success", f"{name}: 开始录制（已开启断流自愈）", scope)
+
+        rc = _supervise_live_ffmpeg(task_id, proc, target, room_dir, prefix)
+        try:
+            stderr_file.close()
+        except Exception:
+            pass
+
+        if record_mode == "duration":
+            if target is not None and _path_size(target) >= 1000:
+                converted = _remux_live_recording_to_mp4(target, scope, name)
+                finished = converted if converted.exists() and converted.stat().st_size >= 1000 else target
+                duration_outputs.append(str(finished))
+                _set_task(task_id, outputs=list(duration_outputs), result_count=len(duration_outputs))
+                emit_log(
+                    "success",
+                    f"{name}: 已完成一段：{finished.name}（{_path_size(finished) / 1024 / 1024:.1f}MB）",
+                    scope,
+                )
+            elif target is not None and target.exists():
+                try:
+                    target.unlink()
+                except Exception:
+                    pass
+            if _is_task_cancelled(task_id):
+                break
+            if rc == 0:
+                # The chunk reached its target length: keep rolling into the next chunk.
+                resolve_failures = 0
+                continue
+            recoveries += 1
+            if recoveries >= LIVE_STREAM_MAX_RECOVERIES:
+                emit_log("warning", f"{name}: 已连续自愈 {recoveries} 次，停止继续尝试。", scope)
+                break
+            continue
+        if _path_size(target) >= 1000:
+            parts.append(target)  # type: ignore[arg-type]
+        elif target is not None and target.exists():
+            try:
+                target.unlink()
+            except Exception:
+                pass
+        if _is_task_cancelled(task_id):
+            break
+        if rc == 0:
+            # Clean exit: the stream ended on its own (or the target duration was reached).
+            break
+        recoveries += 1
+        if recoveries >= LIVE_STREAM_MAX_RECOVERIES:
+            emit_log("warning", f"{name}: 已连续自愈 {recoveries} 次，停止继续尝试。", scope)
+            break
+
+    cancelled = _is_task_cancelled(task_id)
+
+    if record_mode == "duration":
+        outputs = list(duration_outputs)
+        if cancelled and not outputs:
+            _set_task(task_id, status="cancelled", finished_at=time.time(), message="录制已停止，未生成有效文件。")
+            emit_log("warning", "录制已停止，未生成有效文件。", scope)
+            return
+        if not outputs:
+            raise RuntimeError("录屏未能生成有效片段，请检查直播流地址与网络。")
+        total_size = sum(Path(item).stat().st_size for item in outputs if Path(item).is_file())
+        if not cancelled:
+            _consume_trial("录屏", scope=scope)
+        message = (
+            f"录制已停止，已保留 {len(outputs)} 段录制文件。"
+            if cancelled
+            else f"录制完成：共 {len(outputs)} 段（{total_size / 1024 / 1024:.1f}MB）。"
+        )
+        _set_task(
+            task_id,
+            status="cancelled" if cancelled else "completed",
+            finished_at=time.time(),
+            message=message,
+            output=outputs[-1],
+            outputs=outputs,
+            result_count=len(outputs),
+            recording_outputs=outputs,
+        )
+        emit_log("warning" if cancelled else "success", f"{name}: {message}", scope)
+        return
+
+    # single-file mode: gather TS parts, join into one file, then remux to MP4
+    valid_parts = [path for path in parts if _path_size(path) >= 1000]
+    joined: Path | None = None
+    merged_ts = room_dir / f"{name}_{stamp}.ts"
+    if len(valid_parts) == 1:
+        try:
+            valid_parts[0].replace(merged_ts)
+            joined = merged_ts
+        except Exception:
+            joined = valid_parts[0]
+    elif len(valid_parts) > 1:
+        joined = merged_ts if _concat_live_parts(valid_parts, merged_ts, scope, name) else valid_parts[-1]
+    final_path: Path | None = None
+    if joined is not None and joined.exists() and _path_size(joined) >= 1000:
+        final_path = _remux_live_recording_to_mp4(joined, scope, name)
+    if final_path is None or not final_path.exists():
+        if cancelled:
+            _set_task(task_id, status="cancelled", finished_at=time.time(), message="录制已停止，未生成有效文件。")
+            emit_log("warning", "录制已停止，未生成有效文件。", scope)
+            return
+        raise RuntimeError("录屏未能生成有效文件，请检查直播流地址与网络。")
+    size = _path_size(final_path)
+    if not cancelled:
+        _consume_trial("录屏", scope=scope)
+    message = (
+        f"录制已停止，已保留文件：{final_path.name}（{size / 1024 / 1024:.1f}MB）"
+        if cancelled
+        else f"录制完成：{final_path.name}（{size / 1024 / 1024:.1f}MB）"
+    )
+    _set_task(
+        task_id,
+        status="cancelled" if cancelled else "completed",
+        finished_at=time.time(),
+        message=message,
+        output=str(final_path),
+        outputs=[str(final_path)],
+        result_count=1 if not cancelled else 0,
+    )
+    emit_log("warning" if cancelled else "success", f"{name}: {message}", scope)
+
+
 def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
     scope = "live-rec"
-    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备直播录制")
+    _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备录屏")
     try:
-        _ensure_feature_access("直播录制")
+        _ensure_feature_access("录屏")
         url = (payload.room_url or "").strip()
         if not url:
             raise ValueError("请填写直播间地址。")
         payload.room_url = _resolve_douyin_short_page_url(_extract_url_from_text(url), scope)
         _set_task(task_id, live_room_url=payload.room_url)
         url = payload.room_url
-        save_dir = _clean_path(payload.save_dir) if payload.save_dir.strip() else Path.home() / "Videos" / "直播录制"
+        save_dir = _clean_path(payload.save_dir) if payload.save_dir.strip() else Path.home() / "Videos" / "录屏"
         name = _safe_stem(payload.room_name or "live")
         room_dir = save_dir / name
         room_dir.mkdir(parents=True, exist_ok=True)
@@ -12202,7 +12606,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
             last_queue: dict[str, Any] | None = None
             while not _is_task_cancelled(task_id):
                 cycle_index += 1
-                _set_task(task_id, status="running", progress=18, message=f"准备第 {cycle_index} 段直播录制")
+                _set_task(task_id, status="running", progress=18, message=f"准备第 {cycle_index} 段录屏")
                 emit_log("info", f"{name}: 开始第 {cycle_index} 段录制。", scope)
                 try:
                     output, product_queue, _ = _run_douyin_active_probe_record(task_id, payload, room_dir, name, scope)
@@ -12235,7 +12639,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                     else:
                         emit_log("warning", f"{name}: 第 {cycle_index} 段未导出有效片段，请检查队列时长和源视频。", scope)
                 if not consumed_trial:
-                    _consume_trial("直播录制", scope=scope)
+                    _consume_trial("录屏", scope=scope)
                     consumed_trial = True
                 product_stats = _live_product_queue_stats(product_queue)
                 partial_payload: dict[str, Any] = {
@@ -12285,7 +12689,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                 emit_log("warning", message, scope)
                 return
             if not last_output:
-                raise RuntimeError("直播录制未生成有效文件。")
+                raise RuntimeError("录屏未生成有效文件。")
             final_payload: dict[str, Any] = {
                 "status": "completed",
                 "finished_at": time.time(),
@@ -12314,6 +12718,10 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                 final_payload["result_count"] = len(product_outputs)
             _set_task(task_id, **final_payload)
             emit_log("success", f"{name}: 录制完成：共 {len(recording_outputs)} 段录制文件。", scope)
+            return
+        record_mode = _live_record_mode(payload)
+        if record_mode in ("duration", "single"):
+            _run_live_record_stream_guard(task_id, payload, url, room_dir, name, scope, record_mode)
             return
         stream_url = _resolve_live_url(url, scope)
         _set_task_progress(task_id, 24, "解析直播流")
@@ -12375,7 +12783,7 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                         emit_log("warning", f"{name}: 录后自动分割未导出有效片段，请检查队列时长和源视频。", scope)
             except Exception as split_exc:
                 emit_log("warning", f"{name}: 录制完成，但单品分段队列生成失败：{split_exc}", scope)
-        _consume_trial("直播录制", scope=scope)
+        _consume_trial("录屏", scope=scope)
         result_payload: dict[str, Any] = {"status": "completed", "finished_at": time.time(), "output": str(output)}
         if product_queue:
             result_payload.update(
@@ -12398,11 +12806,11 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
         emit_log("success", f"{name}: 录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
     except Exception as exc:
         if _is_task_cancelled(task_id):
-            _set_task(task_id, status="cancelled", finished_at=time.time(), error="", message="直播录制已停止。")
-            emit_log("warning", "直播录制已停止。", scope)
+            _set_task(task_id, status="cancelled", finished_at=time.time(), error="", message="录屏已停止。")
+            emit_log("warning", "录屏已停止。", scope)
         else:
             _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
-            emit_log("error", f"直播录制失败：{exc}", scope)
+            emit_log("error", f"录屏失败：{exc}", scope)
     finally:
         with _LIVE_LOCK:
             _LIVE_PROCS.pop(task_id, None)
@@ -12422,7 +12830,7 @@ def _stop_live_all() -> int:
         proc = info.get("process")
         if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
             if proc:
-                _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "直播录制"), "live-rec")
+                _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "录屏"), "live-rec")
             graceful_probe_stops += 1
             stopped += 1
             continue
@@ -12445,7 +12853,7 @@ def _stop_live_task_process(task_id: str) -> int:
     proc = info.get("process")
     if info.get("kind") == "active_product_probe" and _request_live_probe_stop(info):
         if proc:
-            _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "直播录制"), "live-rec")
+            _schedule_live_probe_force_stop(task_id, proc, str(info.get("name") or "录屏"), "live-rec")
         return 1
     if proc and proc.poll() is None:
         _terminate_process_tree(proc)
@@ -15032,6 +15440,11 @@ def _commerce_director_candidate_timeline(case: Mapping[str, Any]) -> list[dict[
 
     rows: list[dict[str, Any]] = []
     position = 0
+    # 2026-09-23（David 定调）：重复句必须由程序删除，只保留首次出现。
+    # 同一候选（同一句原话）被 M2 排进两个章节时，后一次直接丢弃，
+    # 不再作为第二个预览片段出现，避免同一句口播重复播放。
+    seen_candidate_ids: set[int] = set()
+    deduped_duplicate_ids: list[int] = []
     for beat in list(plan.get("beats") or []):
         if not isinstance(beat, Mapping):
             continue
@@ -15040,6 +15453,9 @@ def _commerce_director_candidate_timeline(case: Mapping[str, Any]) -> list[dict[
             try:
                 candidate_id = int(raw_id)
             except (TypeError, ValueError):
+                continue
+            if candidate_id in seen_candidate_ids:
+                deduped_duplicate_ids.append(candidate_id)
                 continue
             candidate = candidates.get(candidate_id)
             if candidate is None:
@@ -15080,6 +15496,13 @@ def _commerce_director_candidate_timeline(case: Mapping[str, Any]) -> list[dict[
                     "role_permissions": list(candidate.get("role_permissions") or []),
                 },
             })
+            seen_candidate_ids.add(candidate_id)
+    if deduped_duplicate_ids:
+        _LOG.info(
+            "导演句子交付去重：删除 %d 个重复句（只保留首次出现）ids=%s",
+            len(deduped_duplicate_ids),
+            sorted(set(deduped_duplicate_ids)),
+        )
     return rows
 
 
@@ -18855,7 +19278,7 @@ def start_live_monitor(payload: LiveRecPayload) -> dict[str, Any]:
             "reused": True,
             "message": "这个直播间已经在录制中，已复用现有任务。",
         }
-    task_id = _new_task("live-rec", "直播录制")
+    task_id = _new_task("live-rec", "录屏")
     _set_task(task_id, live_room_name=payload.room_name, live_room_url=resolved_url, live_platform=payload.platform)
     threading.Thread(target=_run_task_worker, args=(task_id, _run_live_record, task_id, payload), daemon=True).start()
     return {
@@ -18863,7 +19286,7 @@ def start_live_monitor(payload: LiveRecPayload) -> dict[str, Any]:
         "task_id": task_id,
         "room_name": payload.room_name,
         "room_url": resolved_url,
-        "message": "直播录制任务已启动。",
+        "message": "录屏任务已启动。",
     }
 
 
@@ -18896,11 +19319,11 @@ def start_placeholder(feature: str, payload: dict[str, Any] | None = None) -> di
         "product-scan": "单品扫描",
         "dedup": "创作辅助",
         "dedup-check": "创作辅助查重",
-        "live-rec-monitor": "直播录制",
-        "live-rec-detect": "直播录制检测流地址",
-        "live-rec-delete-all": "直播录制删除全部",
-        "live-rec-marker": "直播录制换品标记",
-        "live-rec": "直播录制",
+        "live-rec-monitor": "录屏",
+        "live-rec-detect": "录屏检测流地址",
+        "live-rec-delete-all": "录屏删除全部",
+        "live-rec-marker": "录屏换品标记",
+        "live-rec": "录屏",
     }
     label = names.get(feature, feature)
     scope = feature

@@ -50,7 +50,16 @@ _LEGACY_HMAC_KEY_ENV = "LIVECLIPPER_LEGACY_HMAC_KEY"
 
 CACHE_FILE = "license_cache.json"
 LICENSE_FILE = "license.dat"
+
+# 本地免费试用开关（2026-09-18 关闭）
+# False = 未激活用户不再获得任何免费次数，统一走「领取 3 天试用激活码」或官网购买。
+# 原来的 10 次本地试用逻辑没有删除，把这里改回 True 即可恢复。
+TRIAL_ENABLED = False
 TRIAL_USES = 10
+TRIAL_DISABLED_REASON = (
+    "未激活。加客服微信 LeyiDeco 可领 3 天免费试用码，"
+    "或在官网购买后自动获取激活码。"
+)
 _CACHE_LOCK = threading.RLock()
 
 
@@ -812,9 +821,12 @@ def _get_fingerprints():
 # 服务器验证配置
 # ============================================================
 # 阿里云函数计算 API 地址（部署后填入）
-_VERIFY_API_URL = "https://liveclinse-auth-cfofyfzuwg.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
+_VERIFY_API_URL = "https://livecli-unified-xfsribggth.cn-hangzhou.fcapp.run"  #防盗2.0 FC地址
 _VERIFY_REQUEST_TIMEOUT_SECONDS = 20
 _ACTIVATE_REQUEST_TIMEOUT_SECONDS = 35
+# 解绑路径：服务端要串行写几处飞书，冷启动还会叠加初始化时间。
+# 给足余量，避免客户端先超时放弃、而服务端其实已经解绑成功（用户看到「解绑请求未完成」）。
+_UNBIND_REQUEST_TIMEOUT_SECONDS = 35
 _ACTIVATION_RECOVERY_DELAY_SECONDS = 1.0
 
 
@@ -884,6 +896,9 @@ def _check_activation_local_fast():
         trial = check_trial()
         if trial.get("in_trial"):
             return {"trial": True, "uses_left": trial.get("uses_left", 0), "local_only": True}
+
+        if not TRIAL_ENABLED:
+            return {"need_activate": True, "reason": TRIAL_DISABLED_REASON, "local_only": True}
 
         if not _get_trial_info():
             _start_trial()
@@ -1087,7 +1102,7 @@ def _fc_unbind(code, machine_id):
         url = f"{_VERIFY_API_URL}/api/unbind"
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=_UNBIND_REQUEST_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             if isinstance(result, dict):
                 return result
@@ -1190,6 +1205,8 @@ def _get_trial_info():
 
 
 def _start_trial():
+    if not TRIAL_ENABLED:
+        return None
     cache = _load_cache() or {}
     mid = _get_machine_id()
     cache["trial_start"] = int(time.time())
@@ -1201,6 +1218,8 @@ def _start_trial():
 
 
 def consume_trial_use():
+    if not TRIAL_ENABLED:
+        return -1
     trial = _get_trial_info()
     if not trial:
         return -1
@@ -1230,6 +1249,8 @@ def consume_trial_use():
 
 
 def check_trial():
+    if not TRIAL_ENABLED:
+        return {"in_trial": False, "uses_left": 0, "total_uses": 0}
     trial = _get_trial_info()
     if not trial:
         return {"in_trial": False, "uses_left": 0, "total_uses": TRIAL_USES}
@@ -1804,6 +1825,9 @@ def check_activation():
     trial = check_trial()
     if trial["in_trial"]:
         return {"trial": True, "uses_left": trial["uses_left"]}
+
+    if not TRIAL_ENABLED:
+        return {"need_activate": True, "reason": TRIAL_DISABLED_REASON}
 
     # 没有试用记录 → 开始试用
     trial_info = _get_trial_info()

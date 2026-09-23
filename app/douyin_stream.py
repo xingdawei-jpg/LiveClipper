@@ -9,19 +9,83 @@ import os
 import shutil
 import sys
 import urllib.parse
+import urllib.request
 from pathlib import Path
+
+
+# 抖音直播流清晰度命名排序（数字越小越优先）
+_DOUYIN_STREAM_QUALITY_RANK = {
+    "or4": 0, "origin": 0, "source": 0,
+    "uhd": 1, "uhd5": 2,
+    "hd": 3, "hd5": 4,
+    "md": 5, "md5": 6,
+    "sd": 7, "sd5": 8,
+    "ld": 9, "ld5": 10,
+}
+
+
+def _douyin_stream_sort_key(url):
+    """FLV 优先，其次按清晰度 from高到低，再按 URL 长度。"""
+    lower = urllib.parse.unquote(str(url or "")).lower()
+    format_score = 0 if ".flv" in lower else 1
+    match = re.search(r"stream-\d+_([a-z0-9]+)\.(?:flv|m3u8)", lower)
+    quality = _DOUYIN_STREAM_QUALITY_RANK.get(match.group(1), 20) if match else 20
+    return (format_score, quality, len(lower))
+
+
+def _try_direct_page(douyin_url, _log, timeout=12.0):
+    """直接请求直播间页面，从 HTML 里提取直播流地址（最快，无需浏览器）。"""
+    text = str(douyin_url or "").strip()
+    if not text.lower().startswith(("http://", "https://")):
+        return None
+    request = urllib.request.Request(
+        text,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+    )
+    try:
+        _log("正在直接解析直播间页面...")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "ignore")
+    except Exception as exc:
+        _log("页面请求失败: " + str(exc))
+        return None
+    if not body or len(body) < 2000:
+        _log("页面内容过短，可能被拦截")
+        return None
+    normalized = body.replace("\\u0026", "&").replace("\\/", "/")
+    found = set(re.findall(r'https?://[^"\'<>\s]+?\.(?:flv|m3u8)[^"\'<>\s]*', normalized))
+    if not found:
+        if "直播已结束" in body or "直播已经结束" in body or "暂无直播" in body:
+            _log("直播间未开播或已结束")
+        else:
+            _log("页面未包含直播流地址")
+        return None
+    best = sorted(found, key=_douyin_stream_sort_key)[0].rstrip(',;)\\')
+    _log("解析成功 (直播间页面直取)")
+    return best
 
 
 def extract_live_url(douyin_url, log_fn=None):
     """从抖音直播间获取真实推流地址（m3u8/flv）
 
-    优先使用 yt-dlp（无需浏览器），失败则用 Chrome headless 兜底。
+    优先级：直接抓直播间页面 HTML（最快最稳）→ yt-dlp → Chrome headless 兜底。
+    说明：yt-dlp 对 live.douyin.com 直播间地址返回 Unsupported URL，headless
+    常被反爬拦截，因此页面直取放在最前。
     """
     def _log(msg):
         if log_fn:
             log_fn(msg)
 
-    # --- 方案1: yt-dlp（推荐，无需浏览器）---
+    # --- 方案0: 直接抓直播间页面（推荐）---
+    stream_url = _try_direct_page(douyin_url, _log)
+    if stream_url:
+        return stream_url
+
+    # --- 方案1: yt-dlp ---
     stream_url = _try_ytdlp(douyin_url, _log)
     if stream_url:
         return stream_url

@@ -1439,7 +1439,15 @@ def _extract_json(text: str) -> dict[str, Any]:
             return parsed
     except json.JSONDecodeError:
         pass
-    start, end = cleaned.find("{"), cleaned.rfind("}")
+    start = cleaned.find("{")
+    if start >= 0:
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    end = cleaned.rfind("}")
     if start >= 0 and end > start:
         try:
             parsed = json.loads(cleaned[start:end + 1])

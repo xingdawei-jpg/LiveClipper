@@ -802,13 +802,18 @@ def build_single_pass_director_plan(
     preferred_low = float(duration_range.get("preferred_low") or max(30.0, requested_seconds * 0.80))
     preferred_high = float(duration_range.get("preferred_high") or min(120.0, requested_seconds * 1.10))
     speed_factor = float(duration_range.get("speed_factor") or 1.0)
+    duration_control = dict(strategy.whole_video_audit or {}).get("duration_control") or {}
+    final_audit = dict(duration_control.get("final") or {})
+    # Judge delivery on unique source seconds so a repeated playback can never be
+    # reported as delivered length, and report quality warnings separately
+    # instead of silently flipping an in-range delivery into "not met".
+    unique_source_seconds = final_audit.get("unique_source_seconds")
+    if isinstance(unique_source_seconds, (int, float)) and float(unique_source_seconds) > 0:
+        selected_seconds = float(unique_source_seconds)
     projected_seconds = selected_seconds / speed_factor
     margin = float(duration_range.get("acceptance_margin") or 0.0)
     duration_fulfilled = plan_valid and preferred_low - margin <= projected_seconds <= preferred_high + margin
-    duration_control = dict(strategy.whole_video_audit or {}).get("duration_control") or {}
-    duplicate_source_ids = list(dict(duration_control.get("final") or {}).get("duplicate_subtitle_ids") or [])
-    if duplicate_source_ids:
-        duration_fulfilled = False
+    duplicate_source_ids = list(final_audit.get("duplicate_subtitle_ids") or [])
     duration_status = (
         "duplicate_source_needs_review" if duplicate_source_ids else
         "target_range_fulfilled"

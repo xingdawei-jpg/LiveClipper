@@ -30,12 +30,15 @@ class DirectorWireSchemaTests(unittest.TestCase):
         self.assertEqual(encoded["products"], [{"name": "衬衫", "type": "top"}])
         self.assertEqual(expand_director_wire_payload(encoded), payload)
 
-    def test_invalid_product_reference_is_rejected(self) -> None:
+    def test_invalid_product_reference_excludes_the_beat(self) -> None:
+        """商品引用越界时按「多商品排除」剔除该 beat，而不是让整次预览失败。"""
         payload = compact_director_wire_payload({"beats": [{"beat_function": "proof", "subtitle_ids": [1]}]})
         payload = copy.deepcopy(payload)
         payload["packet"]["beats"][0]["product_ref"] = 9
-        with self.assertRaises(ValueError):
-            expand_director_wire_payload(payload)
+        stats: dict = {}
+        expanded = expand_director_wire_payload(payload, stats=stats)
+        self.assertEqual(expanded.get("beats"), [])
+        self.assertEqual(stats.get("excluded_beats"), 1)
 
 
 if __name__ == "__main__":

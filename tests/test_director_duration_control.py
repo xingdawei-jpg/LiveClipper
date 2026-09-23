@@ -584,7 +584,17 @@ class DirectorDurationControlTests(unittest.TestCase):
                 else:
                     chapters[0]["beats"].reverse()
                 primary, _, _ = self.run_ai(self.cast(10), revised)
-                self.assertEqual(len(primary.director_sequence), 10)
+                if fault == "unknown":
+                    # 2026-09-23（David 定调）：只有一个不可用 ID 的修订不再整版作废，
+                    # 程序逐句剔除该 ID 后重新实测，清理版仍是改进就采纳。
+                    control = primary.whole_video_audit["duration_control"]
+                    self.assertEqual(control["calibration"]["sanitized_revision"]["dropped_ids"], [9999])
+                    self.assertTrue(control["calibration"]["accepted_revision"])
+                    self.assertEqual(len(primary.director_sequence), 19)
+                    self.assertNotIn(9999, [beat.subtitle_ids[0] for beat in primary.director_sequence])
+                else:
+                    # 章节顺序/开场被改动仍必须整版拒绝：程序只清句子，不重排内容。
+                    self.assertEqual(len(primary.director_sequence), 10)
 
     def test_duplicates_cannot_inflate_available_seconds(self):
         cast = self.cast(10)
@@ -596,14 +606,22 @@ class DirectorDurationControlTests(unittest.TestCase):
         self.assertTrue(audit["needs_calibration"])
         self.assertEqual(audit["duplicate_subtitle_ids"], [1, 2, 3])
 
-    def test_duplicate_is_a_warning_not_program_semantic_deletion(self):
+    def test_duplicate_beat_is_deleted_by_program_before_delivery(self):
         revised = self.cast(20)
         revised["strategies"][0]["chapter_packets"][-1]["beats"][-1]["subtitle_ids"] = [2]
         primary, _, _ = self.run_ai(self.cast(10), revised)
         self.assertTrue(primary.whole_video_audit["duration_control"]["calibration"]["accepted_revision"])
-        self.assertEqual(primary.director_sequence[-1].subtitle_ids, (2,))
-        self.assertEqual(primary.whole_video_audit["status"], "needs_review")
-        self.assertFalse(primary.whole_video_audit["duration_control"]["final"]["target_range_fulfilled"])
+        # 2026-09-23（David 定调）：重复句必须由程序删除，只保留首次出现。
+        # 重复口播不得进入预览/成片，也不得计入可用时长。
+        delivered = [beat.subtitle_ids[0] for beat in primary.director_sequence]
+        self.assertEqual(len(delivered), len(set(delivered)))
+        control = primary.whole_video_audit["duration_control"]
+        self.assertEqual(control["dedup_removed_ids"], [2])
+        final_audit = control["final"]
+        self.assertEqual(final_audit["duplicate_subtitle_ids"], [])
+        self.assertEqual(final_audit["repeated_source_seconds"], 0.0)
+        self.assertEqual(
+            final_audit["source_seconds"], final_audit["unique_source_seconds"])
 
     def test_repeated_playback_in_range_is_not_duration_success(self):
         cast = self.cast(10)

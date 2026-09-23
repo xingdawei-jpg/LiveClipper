@@ -519,13 +519,20 @@ def _running_task_count(port: int) -> int:
     return len(_running_tasks(port))
 
 
-def _confirm_close_with_running_tasks(window: Any, count: int) -> bool:
-    message = (
-        f"当前还有 {count} 个任务正在运行。\n\n"
-        "选择“是”将停止任务并退出；选择“否”将继续处理。"
-    )
+def _confirm_close(window: Any, running_count: int) -> bool:
+    if running_count > 0:
+        message = (
+            f"当前还有 {running_count} 个任务正在运行。\n\n"
+            "选择“是”将停止任务并退出；选择“否”将继续处理。"
+        )
+    else:
+        message = (
+            "确定要退出吗？\n\n"
+            "退出后当前已选择的素材与未开始的参数需要重新设置，正在运行的任务也会停止。"
+            "\n\n选择“是”退出；选择“否”返回。"
+        )
     try:
-        return bool(window.create_confirmation_dialog("退出 LiveClipper", message))
+        return bool(window.create_confirmation_dialog("退出", message))
     except Exception:
         root = None
         try:
@@ -534,7 +541,7 @@ def _confirm_close_with_running_tasks(window: Any, count: int) -> bool:
 
             root = tk.Tk()
             root.withdraw()
-            return bool(messagebox.askyesno("退出 LiveClipper", message))
+            return bool(messagebox.askyesno("退出", message))
         except Exception:
             return False
         finally:
@@ -617,9 +624,9 @@ def _protect_running_tasks_on_close(window, port: int, emit_log) -> None:
         if exiting:
             return None
         tasks = _running_tasks(port)
-        if tasks and not _confirm_close_with_running_tasks(window, len(tasks)):
+        if not _confirm_close(window, len(tasks)):
             try:
-                emit_log("info", f"检测到 {len(tasks)} 个任务仍在运行，已取消退出。", "system")
+                emit_log("info", "已取消退出。", "system")
             except Exception:
                 pass
             return False

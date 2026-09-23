@@ -25,7 +25,7 @@
         <button class="nav-item" data-page="product-scan"><span>单品扫描</span></button>
         <button class="nav-item" data-page="video-split"><span>视频分割</span></button>
         <button class="nav-item" data-page="dedup"><span>创作辅助</span></button>
-        <button class="nav-item" data-page="live-rec"><span>直播录制</span></button>
+        <button class="nav-item" data-page="live-rec"><span>录屏</span></button>
         <button class="nav-item" data-page="settings"><span>设置</span></button>
       </nav>
 
@@ -1469,13 +1469,18 @@
       <section class="page" id="page-live-rec">
         <header class="page-header">
           <div>
-            <h1>直播录制</h1>
+            <h1>录屏</h1>
             <p class="page-subtitle">录制直播流并管理本地素材。</p>
           </div>
         </header>
 
+        <div class="live-disclaimer" role="note">
+          <strong>免责声明</strong>
+          <span>本功能仅用于录制您拥有版权或已获授权的直播内容。请遵守抖音等平台的服务条款及相关法律法规；录制内容的存储、传播、发布所产生的法律责任由用户自行承担。本功能免费提供，请勿用于任何侵权或违规用途。</span>
+        </div>
+
         <div class="live-rec-workbench">
-          <div class="live-rec-tabs" role="tablist" aria-label="直播录制">
+          <div class="live-rec-tabs" role="tablist" aria-label="录屏">
             <button class="live-rec-tab is-active" type="button" data-live-rec-tab="rooms">主播列表</button>
             <button class="live-rec-tab" type="button" data-live-rec-tab="add">添加直播间</button>
             <button class="live-rec-tab" type="button" data-live-rec-tab="settings">录制设置</button>
@@ -1597,6 +1602,21 @@
             </section>
 
             <section class="panel live-settings-panel">
+              <div class="panel-header">
+                <h2>录制模式</h2>
+              </div>
+              <div class="field-row">
+                <label for="live-record-mode">模式</label>
+                <select id="live-record-mode">
+                  <option value="product" selected>识别单品并切片</option>
+                  <option value="duration">只按时长分段</option>
+                  <option value="single">单文件不分段</option>
+                </select>
+              </div>
+              <p class="page-subtitle">识别单品并切片仅支持抖音直播间，会同时生成商品时间线；只按时长分段与单文件不分段不做商品识别，更稳定。</p>
+            </section>
+
+            <section class="panel live-settings-panel" id="live-product-panel">
               <div class="panel-header">
                 <h2>商品分段</h2>
               </div>

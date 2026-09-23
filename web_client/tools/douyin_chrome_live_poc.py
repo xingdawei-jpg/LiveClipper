@@ -631,18 +631,40 @@ def find_chrome() -> str:
     raise FileNotFoundError("Chrome was not found.")
 
 
-def find_ffmpeg() -> str:
-    root = Path(__file__).resolve().parents[1]
-    candidates = [
-        root / "app" / "ffmpeg" / "ffmpeg.exe",
-        root / "_internal" / "ffmpeg" / "ffmpeg.exe",
-        Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
-    ]
-    found = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+def _ffmpeg_bin_candidates(name: str) -> list[Path]:
+    """Return FFmpeg-family candidate paths for every supported layout.
+
+    The tool scripts ship inside the signed Runtime V4 business bundle
+    (versions/<version>/business/web_client/tools), while the packaged FFmpeg
+    binaries live next to the frozen host executable or under its
+    _internal/ffmpeg directory.  Also cover the source checkout and a plain
+    Windows install, so recording never depends on a system-wide FFmpeg.
+    """
+    exe = f"{name}.exe"
+    candidates: list[Path] = []
+    found = shutil.which(name) or shutil.which(exe)
     if found:
-        candidates.insert(0, Path(found))
-    for candidate in candidates:
-        if candidate and Path(candidate).exists():
+        candidates.append(Path(found))
+    env_dir = os.environ.get("LIVECLIPPER_FFMPEG_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir) / exe)
+    here = Path(__file__).resolve().parent
+    for base in [here, *list(here.parents)[:6]]:
+        candidates.append(base / "_internal" / "ffmpeg" / exe)
+        candidates.append(base / "app" / "ffmpeg" / exe)
+    executable = str(getattr(sys, "executable", "") or "").strip()
+    if executable:
+        exe_dir = Path(executable).resolve().parent
+        for base in [exe_dir, exe_dir.parent]:
+            candidates.append(base / "_internal" / "ffmpeg" / exe)
+            candidates.append(base / "ffmpeg" / exe)
+    candidates.append(Path(f"C:\\ffmpeg\\bin\\{exe}"))
+    return candidates
+
+
+def find_ffmpeg() -> str:
+    for candidate in _ffmpeg_bin_candidates("ffmpeg"):
+        if candidate and candidate.is_file():
             return str(candidate)
     return "ffmpeg"
 
@@ -656,19 +678,16 @@ def find_ffprobe() -> str:
         candidates.append(ffmpeg_path.with_name(f"ffprobe{suffix}"))
     except Exception:
         pass
-    root = Path(__file__).resolve().parents[1]
-    candidates.extend(
-        [
-            root / "app" / "ffmpeg" / "ffprobe.exe",
-            root / "_internal" / "ffmpeg" / "ffprobe.exe",
-            Path(r"C:\ffmpeg\bin\ffprobe.exe"),
-        ]
-    )
-    found = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
-    if found:
-        candidates.insert(0, Path(found))
+    candidates.extend(_ffmpeg_bin_candidates("ffprobe"))
+    seen = set()
     for candidate in candidates:
-        if candidate and Path(candidate).exists():
+        if not candidate:
+            continue
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
             return str(candidate)
     return "ffprobe"
 
@@ -1536,6 +1555,12 @@ def start_ffmpeg(ffmpeg: str, stream_url: str, output: Path, seconds: float, std
         )
         setattr(proc, "_liveclipper_stderr_file", stderr_file)
         return proc
+    except FileNotFoundError as exc:
+        stderr_file.close()
+        raise FileNotFoundError(
+            f"FFmpeg executable was not found: {ffmpeg!r}. "
+            "Expected the bundled copy under _internal/ffmpeg or a system FFmpeg on PATH."
+        ) from exc
     except Exception:
         stderr_file.close()
         raise

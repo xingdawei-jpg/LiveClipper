@@ -1123,6 +1123,7 @@ const featurePreferenceGroups = {
       "live-segment",
       "live-check-interval",
       "live-min-stream-quality",
+      "live-record-mode",
       "live-platform",
       "live-product-split-enabled",
       "live-product-auto-cut",
@@ -1379,6 +1380,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAiSelectionAutoSave();
   bindSettingsAutoSave();
   bindLiveRecTabs();
+  bindExitConfirm();
   bindLiveRoomFilters();
   bindActions();
   bindProductScanFlow();
@@ -1949,10 +1951,44 @@ function setLiveRecTab(tab) {
   });
 }
 
+const MATERIAL_PATH_IDS = ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "vs-video-paths", "dedup-video-paths"];
+
+function hasLoadedMaterial() {
+  if (MATERIAL_PATH_IDS.some((id) => getLines(id).length > 0)) return true;
+  return ["ps-excel-path", "vs-excel-path"].some((id) => String($(id)?.value || "").trim());
+}
+
+// 浏览器/网页壳场景：关闭标签页或窗口前弹一次确认，避免误点导致素材丢失。
+function bindExitConfirm() {
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasLoadedMaterial()) return undefined;
+    event.preventDefault();
+    event.returnValue = "退出后已选择的素材需要重新添加，确定退出吗？";
+    return event.returnValue;
+  });
+}
+
 function bindLiveRecTabs() {
   document.querySelectorAll(".live-rec-tab").forEach((button) => {
     button.addEventListener("click", () => setLiveRecTab(button.dataset.liveRecTab));
   });
+  $("live-record-mode")?.addEventListener("change", () => {
+    syncLiveRecordModeUi();
+    renderLiveRooms();
+  });
+  const grid = document.querySelector("#live-room-grid");
+  grid?.addEventListener("focusout", () => {
+    if (!state.liveRoomsRenderPending) return;
+    state.liveRoomsRenderPending = false;
+    window.setTimeout(() => renderLiveRooms(), 0);
+  });
+  syncLiveRecordModeUi();
+}
+
+function syncLiveRecordModeUi() {
+  const mode = $("live-record-mode")?.value || "product";
+  const panel = $("live-product-panel");
+  if (panel) panel.style.display = mode === "product" ? "" : "none";
 }
 
 function bindLiveRoomFilters() {
@@ -2119,6 +2155,12 @@ function bindActions() {
   document.body.addEventListener("change", (event) => {
     const target = event.target.closest("[data-live-naming-mode]");
     if (target) updateLiveRoomNamingMode(Number(target.dataset.index), target.value);
+    const segTarget = event.target.closest("[data-live-segment]");
+    if (segTarget) updateLiveRoomSegment(Number(segTarget.dataset.index), segTarget.value);
+    const modeTarget = event.target.closest("[data-live-record-mode]");
+    if (modeTarget) updateLiveRoomRecordMode(Number(modeTarget.dataset.index), modeTarget.value);
+    const productSegTarget = event.target.closest("[data-live-product-segment]");
+    if (productSegTarget) updateLiveRoomProductClip(Number(productSegTarget.dataset.index), productSegTarget.value);
     if (event.target.closest("#sc-versions, #mix-versions")) refreshVersionCostNotes();
   });
 
@@ -2495,6 +2537,7 @@ function refreshFeaturePreferenceUi() {
   });
   refreshVersionCostNotes();
   document.querySelectorAll("[data-collapsible-panel]").forEach((panel) => updatePanelSummary(panel));
+  syncLiveRecordModeUi();
 }
 
 async function loadFeaturePreferences() {
@@ -9248,72 +9291,111 @@ function movePreviewAssemblyClip(scope = "smart", index, direction) {
   reorderPreviewClip(scope, Number(index), order[next]);
 }
 
-/* ---- 已选片段改动的撤回栈（移除 / 加入 / 调序）---- */
-function previewSelectionUndoStack(scope = "smart") {
-  if (!state.previewSelectionUndo) state.previewSelectionUndo = { smart: [], mix: [] };
-  if (!Array.isArray(state.previewSelectionUndo[scope])) state.previewSelectionUndo[scope] = [];
-  return state.previewSelectionUndo[scope];
+/* ---- 预览工作台统一撤回栈（移除 / 加入 / 调序 / 删句 / 删词 / 适配时长）----
+   一条时间线：任何会改动成片内容的操作都先压一条快照，撤回永远是"最近一次操作"。
+   快照只存选择状态（片段 / 句子 / 词），不存文案，轻量且精确（词级删减也会被还原）。 */
+function previewUndoStack(scope = "smart") {
+  if (!state.previewUndoStacks) state.previewUndoStacks = { smart: [], mix: [] };
+  if (!Array.isArray(state.previewUndoStacks[scope])) state.previewUndoStacks[scope] = [];
+  return state.previewUndoStacks[scope];
 }
 
-function pushPreviewSelectionUndo(scope = "smart", label = "") {
-  // 快照只是“后悔药”，绝不能因为它失败而影响主流程（移除/加入/调序）。
+function previewUndoSnapshot(scope = "smart", label = "") {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || !Array.isArray(preview.clips)) return null;
+  const key = previewAssemblyOrderKey(scope, preview);
+  return {
+    label: String(label || ""),
+    at: Date.now(),
+    order: [...(state.previewAssemblyOrders[key] || [])],
+    detail: state.previewDetailSelection?.[scope] ?? null,
+    candidate: state.previewCandidateSelections?.[scope] ?? null,
+    clips: preview.clips.map((clip) => [
+      Number(clip.index),
+      clip.selected !== false,
+      previewSegments(clip).map((segment) => [
+        Number(segment.index),
+        segment.selected !== false,
+        segment.wordSelectionExplicit === true,
+        previewSegmentWords(segment).map((word) => [Number(word.index), word.selected !== false]),
+      ]),
+    ]),
+  };
+}
+
+function pushPreviewUndo(scope = "smart", label = "") {
+  // 撤回快照只是"后悔药"，绝不能因为它失败而影响主流程。
   try {
-    const preview = getPreviewState(scope);
-    if (!preview?.clips?.length) return;
-    const key = previewAssemblyOrderKey(scope, preview);
-    const stack = previewSelectionUndoStack(scope);
-    const snapshot = {
-      label: String(label || ""),
-      draft: JSON.parse(JSON.stringify(buildPreviewDraftFromState(scope))),
-      order: [...(state.previewAssemblyOrders[key] || [])],
-      detail: state.previewDetailSelection?.[scope] ?? null,
-      candidate: state.previewCandidateSelections?.[scope] ?? null,
-      flags: preview.clips.map((clip) => [Number(clip.index), clip.selected]),
-    };
-    const last = stack[stack.length - 1];
-    if (last && last.label === snapshot.label && JSON.stringify(last.order) === JSON.stringify(snapshot.order)) return;
+    const snapshot = previewUndoSnapshot(scope, label);
+    if (!snapshot) return;
+    const stack = previewUndoStack(scope);
     stack.push(snapshot);
-    while (stack.length > 30) stack.shift();
+    while (stack.length > 40) stack.shift();
   } catch (error) {
     console.warn("preview undo snapshot failed", error);
   }
 }
 
-function previewSelectionUndoButton(scope = "smart") {
-  let count = 0;
-  try { count = previewSelectionUndoStack(scope).length; } catch (error) { console.warn("undo button failed", error); return ""; }
-  return '<button class="button button-muted button-small" data-action="preview-selection-undo" data-preview-scope="' + scope + '"'
-    + (count ? '' : ' disabled')
-    + ' title="撤回上一次已选改动（移除 / 加入 / 调序）">撤回' + (count ? '（' + count + '）' : '') + '</button>';
+function restorePreviewUndoSnapshot(scope, snapshot) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || !Array.isArray(preview.clips) || !snapshot) return false;
+  const savedClips = new Map((snapshot.clips || []).map((entry) => [Number(entry[0]), entry]));
+  preview.clips.forEach((clip) => {
+    const savedClip = savedClips.get(Number(clip.index));
+    if (!savedClip) return;
+    clip.selected = savedClip[1] !== false;
+    const savedSegments = new Map((savedClip[2] || []).map((item) => [Number(item[0]), item]));
+    previewSegments(clip).forEach((segment) => {
+      const savedSegment = savedSegments.get(Number(segment.index));
+      if (!savedSegment) return;
+      segment.selected = savedSegment[1] !== false;
+      segment.wordSelectionExplicit = savedSegment[2] === true;
+      const savedWords = new Map((savedSegment[3] || []).map((pair) => [Number(pair[0]), pair[1]]));
+      previewSegmentWords(segment).forEach((word) => {
+        const wordIndex = Number(word.index);
+        if (savedWords.has(wordIndex)) word.selected = savedWords.get(wordIndex) !== false;
+      });
+    });
+  });
+  const key = previewAssemblyOrderKey(scope, preview);
+  state.previewAssemblyOrders[key] = [...(snapshot.order || [])];
+  state.previewDetailSelection[scope] = snapshot.detail ?? null;
+  state.previewCandidateSelections[scope] = snapshot.candidate ?? null;
+  return true;
 }
 
-function undoPreviewSelectionChange(scope = "smart") {
+function undoPreviewChange(scope = "smart") {
   try {
-    const stack = previewSelectionUndoStack(scope);
-    if (!stack.length) { toast("没有可撤回的已选改动", "info"); return false; }
+    const stack = previewUndoStack(scope);
+    if (!stack.length) { toast("没有可撤回的改动", "info"); return false; }
     const snapshot = stack.pop();
-    const preview = getPreviewState(scope);
-    if (!preview?.clips?.length) return false;
-    const byIndex = new Map(preview.clips.map((clip) => [Number(clip.index), clip]));
-    if (Array.isArray(snapshot.flags)) {
-      snapshot.flags.forEach((pair) => {
-        const clip = byIndex.get(Number(pair[0]));
-        if (clip) clip.selected = pair[1];
-      });
-    }
-    applyPreviewDraftToState(scope, snapshot.draft);
-    state.previewAssemblyOrders[previewAssemblyOrderKey(scope, preview)] = [...snapshot.order];
-    state.previewDetailSelection[scope] = snapshot.detail;
-    state.previewCandidateSelections[scope] = snapshot.candidate;
+    if (!restorePreviewUndoSnapshot(scope, snapshot)) return false;
     commitPreviewDraft(scope);
     renderPreviewStateKeepStoryScroll(scope);
-    toast("已撤回：" + (snapshot.label || "已选改动"), "success");
+    toast("已撤回：" + (snapshot.label || "上一步改动"), "success");
     return true;
   } catch (error) {
     console.error("preview undo failed", error);
     toast("撤回失败：" + ((error && error.message) || String(error)), "error");
     return false;
   }
+}
+
+/* 旧函数名保留为别名：加入 / 移除 / 调序等历史调用点自动走统一栈。 */
+function pushPreviewSelectionUndo(scope = "smart", label = "") {
+  pushPreviewUndo(scope, label);
+}
+
+function undoPreviewSelectionChange(scope = "smart") {
+  return undoPreviewChange(scope);
+}
+
+function previewSelectionUndoButton(scope = "smart") {
+  let count = 0;
+  try { count = previewUndoStack(scope).length; } catch (error) { console.warn("undo button failed", error); return ""; }
+  return '<button class="button button-muted button-small" data-action="preview-selection-undo" data-preview-scope="' + scope + '"'
+    + (count ? '' : ' disabled')
+    + ' title="撤回上一次改动（移除 / 加入 / 调序 / 删句 / 删词 / 适配时长）">撤回' + (count ? '（' + count + '）' : '') + '</button>';
 }
 
 function removePreviewAssemblyCandidate(scope = "smart", index) {
@@ -9398,6 +9480,7 @@ function autoFitPreviewDuration(scope = "smart") {
   const preview = getPreviewState(scope);
   if (!preview?.clips?.length) return;
   syncPreviewClipSelections(scope);
+  pushPreviewUndo(scope, "适配时长");
   const before = previewDurationFitState(scope, preview);
   const byIndex = new Map(preview.clips.map((clip) => [Number(clip.index), clip]));
   let order = [...previewAssemblyOrder(scope, preview)];
@@ -11110,6 +11193,7 @@ function collectFeaturePayload(feature) {
       segment: $("live-segment").value,
       check_interval: Number($("live-check-interval").value || 30),
       min_stream_quality: $("live-min-stream-quality")?.value || "",
+      record_mode: $("live-record-mode")?.value || "product",
       room_name: $("live-room-name").value.trim(),
       room_url: $("live-room-url").value.trim(),
       platform: $("live-platform").value,
@@ -11163,8 +11247,11 @@ function normalizeLiveRoom(room = {}) {
   const url = String(room.url || "").trim();
   const platform = String(room.platform || "抖音").trim() || "抖音";
   const product_naming_mode = liveNormalizeNamingMode(room.product_naming_mode || room.productNamingMode || room.naming_mode);
+  const segment = liveNormalizeSegment(room.segment);
+  const product_clip_minutes = liveNormalizeProductClip(room.product_clip_minutes || room.productClipMinutes);
+  const record_mode = liveNormalizeRecordMode(room.record_mode || room.recordMode);
   if (!name || !url) return null;
-  return { name, url, platform, product_naming_mode };
+  return { name, url, platform, product_naming_mode, segment, product_clip_minutes, record_mode };
 }
 
 function normalizeLiveRooms(rooms = []) {
@@ -11182,11 +11269,110 @@ function normalizeLiveRooms(rooms = []) {
 }
 
 function liveNormalizeNamingMode(value) {
-  return String(value || "").trim() === "product_name" ? "product_name" : "product_id";
+  const text = String(value || "").trim();
+  if (text === "product_name") return "product_name";
+  if (text === "room_timestamp") return "room_timestamp";
+  return "product_id";
 }
 
 function liveNamingModeLabel(value) {
-  return liveNormalizeNamingMode(value) === "product_name" ? "商品名称命名" : "商品ID命名";
+  const mode = liveNormalizeNamingMode(value);
+  if (mode === "product_name") return "商品名称命名";
+  if (mode === "room_timestamp") return "直播间名+时间戳";
+  return "商品ID命名";
+}
+
+function liveEffectiveNamingMode(roomMode, namingMode) {
+  return liveNormalizeRecordMode(roomMode) === "duration"
+    ? "room_timestamp"
+    : liveNormalizeNamingMode(namingMode);
+}
+
+const LIVE_SEGMENT_OPTIONS = ["10分钟", "15分钟", "30分钟", "60分钟", "120分钟"];
+
+function liveNormalizeSegment(value) {
+  const text = String(value || "").trim();
+  return LIVE_SEGMENT_OPTIONS.includes(text) ? text : "";
+}
+
+function liveSegmentLabel(value) {
+  return liveNormalizeSegment(value) || "跟随全局";
+}
+
+function liveSegmentOptionsHtml(selected) {
+  const current = liveNormalizeSegment(selected);
+  const items = [`<option value="" ${current === "" ? "selected" : ""}>跟随全局</option>`];
+  LIVE_SEGMENT_OPTIONS.forEach((item) => {
+    items.push(`<option value="${item}" ${current === item ? "selected" : ""}>${item}</option>`);
+  });
+  return items.join("");
+}
+
+function updateLiveRoomSegment(index, value) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  state.liveRooms[index] = normalizeLiveRoom({ ...state.liveRooms[index], segment: value }) || state.liveRooms[index];
+  saveLiveRooms();
+  renderLiveRooms();
+}
+
+const LIVE_RECORD_MODE_OPTIONS = [
+  { value: "", label: "跟随全局" },
+  { value: "duration", label: "整场录制" },
+  { value: "product", label: "单品扫描" },
+];
+
+function liveNormalizeRecordMode(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return text === "duration" || text === "product" ? text : "";
+}
+
+function liveRecordModeLabel(value) {
+  const mode = liveNormalizeRecordMode(value);
+  if (mode === "duration") return "整场录制";
+  if (mode === "product") return "单品扫描";
+  return "跟随全局";
+}
+
+function liveRecordModeOptionsHtml(selected) {
+  const current = liveNormalizeRecordMode(selected);
+  return LIVE_RECORD_MODE_OPTIONS
+    .map((item) => `<option value="${item.value}" ${current === item.value ? "selected" : ""}>${item.label}</option>`)
+    .join("");
+}
+
+function updateLiveRoomRecordMode(index, value) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  state.liveRooms[index] = normalizeLiveRoom({ ...state.liveRooms[index], record_mode: liveNormalizeRecordMode(value) }) || state.liveRooms[index];
+  saveLiveRooms();
+  renderLiveRooms();
+}
+
+function updateLiveRoomProductClip(index, value) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  state.liveRooms[index] = normalizeLiveRoom({ ...state.liveRooms[index], product_clip_minutes: value }) || state.liveRooms[index];
+  saveLiveRooms();
+  renderLiveRooms();
+}
+
+const LIVE_PRODUCT_CLIP_OPTIONS = ["3", "5", "10", "15"];
+
+function liveNormalizeProductClip(value) {
+  const text = String(value === 0 ? "0" : value || "").trim();
+  return LIVE_PRODUCT_CLIP_OPTIONS.includes(text) ? text : "";
+}
+
+function liveProductClipLabel(value) {
+  const clip = liveNormalizeProductClip(value);
+  return clip ? `${clip}分钟` : "跟随全局";
+}
+
+function liveProductClipOptionsHtml(selected) {
+  const current = liveNormalizeProductClip(selected);
+  const items = [`<option value="" ${current === "" ? "selected" : ""}>跟随全局</option>`];
+  LIVE_PRODUCT_CLIP_OPTIONS.forEach((item) => {
+    items.push(`<option value="${item}" ${current === item ? "selected" : ""}>${item}分钟</option>`);
+  });
+  return items.join("");
 }
 
 function loadLiveRooms() {
@@ -11253,6 +11439,9 @@ function liveRoomsFromTable() {
       platform: card.dataset.platform || "",
       url: card.dataset.url || "",
       product_naming_mode: card.querySelector("[data-live-naming-mode]")?.value || card.dataset.productNamingMode || "product_id",
+      segment: card.querySelector("[data-live-segment]")?.value || card.dataset.liveSegment || "",
+      product_clip_minutes: card.querySelector("[data-live-product-segment]")?.value || card.dataset.liveProductSegment || "",
+      record_mode: card.querySelector("[data-live-record-mode]")?.value || card.dataset.liveRecordMode || "",
     });
   }).filter(Boolean);
 }
@@ -11265,7 +11454,7 @@ function liveStatusBadge(label, tone = "") {
   return `<span class="live-status ${tone ? `is-${tone}` : ""}">${escapeHtml(label)}</span>`;
 }
 
-function renderLiveProductResult(index, activity = {}) {
+function renderLiveProductResult(index, activity = {}, renderMode = "") {
   const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
   const outputCount = Number(activity.productOutputCount || outputs.length || 0);
   const segmentCount = Number(activity.productSegments || 0);
@@ -11278,7 +11467,10 @@ function renderLiveProductResult(index, activity = {}) {
   const recordingReturncode = activity.recordingReturncode;
   const clipsDir = String(activity.productClipsDir || "").trim();
   if (!outputCount && !segmentCount && !clipsDir && !activity.productSplitQueue && !candidateSignals && !activeCandidateCount) return "";
-  const title = outputCount > 0 ? `已提取 ${outputCount} 个单品` : `已生成 ${segmentCount || pendingCount || 0} 个候选段`;
+  const isWholeMode = liveNormalizeRecordMode(renderMode) === "duration";
+  const title = isWholeMode
+    ? `已录制 ${outputCount || 0} 段`
+    : (outputCount > 0 ? `已提取 ${outputCount} 个单品` : `已生成 ${segmentCount || pendingCount || 0} 个候选段`);
   const fileRows = outputs.slice(0, 3).map((path) => `
     <span class="live-product-file" title="${escapeHtml(path)}">${escapeHtml(livePathName(path))}</span>
   `).join("");
@@ -11396,6 +11588,14 @@ function liveRoomStatusClass(activity) {
 function renderLiveRooms() {
   const grid = document.querySelector("#live-room-grid");
   if (!grid) return;
+  const active = document.activeElement;
+  if (active && grid.contains(active) && (active.tagName === "SELECT" || active.tagName === "INPUT")) {
+    // A card control is focused/open (e.g. an expanded select): defer the re-render
+    // so it is not torn down mid-interaction.
+    state.liveRoomsRenderPending = true;
+    return;
+  }
+  state.liveRoomsRenderPending = false;
   grid.innerHTML = "";
   const rooms = state.liveRooms || [];
   const visibleRooms = rooms
@@ -11409,7 +11609,7 @@ function renderLiveRooms() {
     return;
   }
   visibleRooms.forEach(({ room, index, activity }) => {
-    const productEnabled = $("live-product-split-enabled")?.checked !== false && isDouyinLiveRoom(room);
+    const productEnabled = $("live-product-split-enabled")?.checked !== false && isDouyinLiveRoom(room) && ($("live-record-mode")?.value || "product") === "product";
     const liveStatus = activity.liveStatus || "未检测";
     const recordStatus = activity.recordStatus || "待录制";
     const productStatus = activity.productStatus || (productEnabled ? "待监控" : "未启用");
@@ -11423,7 +11623,15 @@ function renderLiveRooms() {
     card.dataset.platform = room.platform;
     card.dataset.url = room.url;
     card.dataset.productNamingMode = liveNormalizeNamingMode(room.product_naming_mode);
+    card.dataset.liveSegment = liveNormalizeSegment(room.segment);
+    card.dataset.liveProductSegment = liveNormalizeProductClip(room.product_clip_minutes);
+    card.dataset.liveRecordMode = liveNormalizeRecordMode(room.record_mode);
     const namingMode = liveNormalizeNamingMode(room.product_naming_mode);
+    const segmentMode = liveNormalizeSegment(room.segment);
+    const productSegmentMode = liveNormalizeProductClip(room.product_clip_minutes);
+    const recordMode = liveNormalizeRecordMode(room.record_mode);
+    const effectiveNaming = liveEffectiveNamingMode(recordMode, namingMode);
+    const namingLocked = recordMode === "duration";
     card.innerHTML = `
       <div class="live-card-top">
         <div class="live-card-title">
@@ -11451,14 +11659,33 @@ function renderLiveRooms() {
         </div>
       </div>
       <div class="live-card-url" title="${escapeHtml(room.url)}">${escapeHtml(room.url)}</div>
-      ${renderLiveProductResult(index, activity)}
+      ${renderLiveProductResult(index, activity, recordMode)}
       <div class="live-card-control-row">
         <div class="live-card-config">
           <label>
+            <span>录制方式</span>
+            <select data-live-record-mode data-index="${index}">
+              ${liveRecordModeOptionsHtml(recordMode)}
+            </select>
+          </label>
+          <label>
+            <span>整场分段时间</span>
+            <select data-live-segment data-index="${index}">
+              ${liveSegmentOptionsHtml(segmentMode)}
+            </select>
+          </label>
+          <label>
+            <span>单品片段时长</span>
+            <select data-live-product-segment data-index="${index}">
+              ${liveProductClipOptionsHtml(productSegmentMode)}
+            </select>
+          </label>
+          <label>
             <span>命名方式</span>
-            <select data-live-naming-mode data-index="${index}">
-              <option value="product_id" ${namingMode === "product_id" ? "selected" : ""}>商品ID命名</option>
-              <option value="product_name" ${namingMode === "product_name" ? "selected" : ""}>商品名称命名</option>
+            <select data-live-naming-mode data-index="${index}" ${namingLocked ? "disabled" : ""}>
+              <option value="room_timestamp" ${effectiveNaming === "room_timestamp" ? "selected" : ""}>直播间名+时间戳</option>
+              <option value="product_id" ${effectiveNaming === "product_id" ? "selected" : ""}>商品ID命名</option>
+              <option value="product_name" ${effectiveNaming === "product_name" ? "selected" : ""}>商品名称命名</option>
             </select>
           </label>
         </div>
@@ -11615,6 +11842,9 @@ function showLiveRoomDetail(index) {
     ["最低画质要求", escapeHtml(qualityRequirement)],
     ["分段录制", segment === "不限" ? "未开启" : "已开启"],
     ["分段时长", escapeHtml(segment === "不限" ? "不分段" : segment)],
+    ["分段时间（本直播间）", escapeHtml(liveSegmentLabel(room.segment))],
+    ["录制方式（本直播间）", escapeHtml(liveRecordModeLabel(room.record_mode))],
+    ["单品片段时长", escapeHtml(liveProductClipLabel(room.product_clip_minutes))],
     ["商品时间线", productSplitEnabled ? "已开启" : "未开启"],
     ["录后自动切段", productAutoCut ? "已开启" : "未开启"],
     ["命名方式", escapeHtml(namingMode)],
@@ -11688,12 +11918,21 @@ function ensureLiveDetailModal() {
 
 function livePayloadForRoom(room) {
   const basePayload = collectFeaturePayload("live-rec-monitor");
+  const roomMode = liveNormalizeRecordMode(room.record_mode);
+  const effectiveMode = roomMode || String(basePayload.record_mode || "product");
+  const roomSegment = liveNormalizeSegment(room.segment);
+  const roomClip = liveNormalizeProductClip(room.product_clip_minutes);
   return {
     ...basePayload,
     room_name: room.name,
     room_url: room.url,
     platform: room.platform,
-    product_naming_mode: liveNormalizeNamingMode(room.product_naming_mode || basePayload.product_naming_mode),
+    record_mode: roomMode || basePayload.record_mode,
+    segment: roomSegment || basePayload.segment,
+    product_default_minutes: effectiveMode === "product" && roomClip
+      ? Number(roomClip)
+      : basePayload.product_default_minutes,
+    product_naming_mode: liveEffectiveNamingMode(effectiveMode, room.product_naming_mode || basePayload.product_naming_mode),
   };
 }
 
@@ -11740,7 +11979,7 @@ async function startLiveRoom(index) {
       level: result.reused ? "warning" : (result.ok ? "success" : "warning"),
       message: `${room.name}: ${result.message || "任务已提交"}`,
     });
-    toast(result.message || "直播录制任务已启动", result.reused ? "warning" : (result.ok ? "success" : "warning"));
+    toast(result.message || "录屏任务已启动", result.reused ? "warning" : (result.ok ? "success" : "warning"));
   } catch (error) {
     setLiveRoomActivity(room, {
       recordStatus: "启动失败",
@@ -11825,9 +12064,9 @@ async function submitLiveRecord() {
       });
     }
   }
-  if (started) toast(`已启动 ${started} 个直播录制任务`, "success");
+  if (started) toast(`已启动 ${started} 个录屏任务`, "success");
   if (!started && reused) toast("选中的直播间已经在录制中", "warning");
-  if (!started && failed.length) toast("直播录制启动失败，请看运行日志", "error");
+  if (!started && failed.length) toast("录屏启动失败，请看运行日志", "error");
   else if (failed.length) toast(`${failed.length} 个直播间启动失败，请看运行日志`, "warning");
   refreshTasks();
 }
@@ -12307,6 +12546,7 @@ function updatePreviewClipSelection(index, selected, scope = "smart") {
   const preview = getPreviewState(scope);
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   if (!clip) return;
+  pushPreviewUndo(scope, selected ? "恢复片段" : "移除片段");
   clip.selected = selected;
   previewSegments(clip).forEach((segment) => {
     segment.selected = segment.selection_locked === true ? false : selected;
@@ -12322,6 +12562,7 @@ function updatePreviewSegmentSelection(index, segmentIndex, selected, scope = "s
   const clip = preview?.clips?.find((item) => Number(item.index) === Number(index));
   const segment = previewSegments(clip).find((item) => Number(item.index) === Number(segmentIndex));
   if (!clip || !segment || segment.selection_locked === true) return;
+  pushPreviewUndo(scope, selected ? "恢复整句" : "删除整句");
   segment.selected = selected;
   if (selected) resetPreviewSegmentWords(segment);
   else { previewSegmentWords(segment).forEach((word) => { word.selected = false; }); segment.wordSelectionExplicit = false; }
@@ -12337,6 +12578,7 @@ function togglePreviewWordSelection(clipIndex, segmentIndex, wordIndex, scope = 
   const segment = previewSegments(clip).find((item) => Number(item.index) === Number(segmentIndex));
   const word = previewSegmentWords(segment).find((item) => Number(item.index) === Number(wordIndex));
   if (!clip || !segment || !word || isPreviewWordLocked(word) || segment.selection_locked === true) return;
+  pushPreviewUndo(scope, word.selected === false ? "恢复词块" : "删除词块");
   word.selected = word.selected === false;
   const selectable = previewSegmentWords(segment).filter((item) => !isPreviewWordLocked(item));
   segment.wordSelectionExplicit = selectedPreviewWords(segment).length !== selectable.length;
@@ -12857,7 +13099,7 @@ function bindDirectPreviewWorkbenchActions() {
       auditionPreviewWordEdit(scope).catch(function () {});
     } else if (action === 'preview-word-undo') {
       event.preventDefault();
-      undoPreviewWordEdit(scope);
+      undoPreviewChange(scope);
     } else if (action === 'preview-word-toggle') {
       event.preventDefault();
       togglePreviewWordSelection(Number(target.dataset.previewClip), Number(target.dataset.previewSegment), Number(target.dataset.previewWord), scope);
@@ -12901,9 +13143,9 @@ function bindDirectPreviewWorkbenchActions() {
     const isUndo = (event.ctrlKey || event.metaKey) && String(event.key || '').toLowerCase() === 'z';
     if (!insideWorkbench || !isUndo || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
     const scope = insideWorkbench.dataset.previewWorkbench || 'smart';
-    if (!previewWordEditHistory(scope).length) return;
+    if (!previewUndoStack(scope).length) return;
     event.preventDefault();
-    undoPreviewWordEdit(scope);
+    undoPreviewChange(scope);
   });
 }
 
@@ -13621,6 +13863,7 @@ function applyPreviewWordSelection(clipIndex, segmentIndex, indices, selected, s
   if (!clip || !segment || !words.length || segment.selection_locked === true) return false;
   const changed = words.some(function (word) { return (word.selected !== false) !== selected; });
   if (!changed) return false;
+  pushPreviewUndo(scope, selected ? "恢复词块" : "删除词块");
   recordPreviewWordEdit(scope, clip, segment);
   words.forEach(function (word) { word.selected = selected; });
   refreshPreviewWordSelection(clip, segment, scope);
@@ -13777,7 +14020,7 @@ async function auditionPreviewWordEdit(scope = "smart") {
 
 function renderPreviewWordEditToolbar(scope, clip) {
   const stats = previewWordEditStats(scope, clip);
-  const undoEnabled = previewWordEditHistory(scope).length > 0;
+  const undoEnabled = previewUndoStack(scope).length > 0;
   const impact = stats.removed > 0.01
     ? '已裁 ' + stats.removed.toFixed(1) + 's · 当前片段 ' + stats.current.toFixed(1) + 's · 成片预计 ' + stats.total.toFixed(1) + 's'
     : '当前片段 ' + stats.current.toFixed(1) + 's · 成片预计 ' + stats.total.toFixed(1) + 's';
