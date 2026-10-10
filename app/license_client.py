@@ -307,6 +307,37 @@ def _is_retryable_auth_result(result):
     ))
 
 
+# 服务端下发的权威拒绝码 -> 用户能看懂的说法。
+# 服务端（license_server.py）不在本仓库内，拒绝码是运行时下发的，因此这里做映射，
+# 已知码给人话，未知码保留原始码便于排查。之前直接把 invalid_signature 这类内部
+# 代号抛给用户，用户完全不知道发生了什么。
+_REJECTION_TEXT = {
+    "invalid_signature": "授权签名校验未通过，请重新激活，或联网更新授权",
+    "signature_invalid": "授权签名校验未通过，请重新激活，或联网更新授权",
+    "expired": "授权已过期，请续费后继续使用",
+    "license_expired": "授权已过期，请续费后继续使用",
+    "token_expired": "授权已过期，请续费后继续使用",
+    "revoked": "授权已被吊销，请联系客服处理",
+    "license_revoked": "授权已被吊销，请联系客服处理",
+    "machine_mismatch": "当前设备与授权设备不一致，请联网重新激活",
+    "device_mismatch": "当前设备与授权设备不一致，请联网重新激活",
+    "not_found": "激活码不存在，请核对后重新输入",
+    "code_not_found": "激活码不存在，请核对后重新输入",
+    "device_limit": "该激活码绑定的设备数已达上限，请联系客服",
+}
+
+
+def _humanize_rejection(reason):
+    """把服务端的拒绝码转成用户能看懂的一句话。"""
+    raw = str(reason or "").strip()
+    if not raw:
+        return "授权已失效，请重新激活"
+    friendly = _REJECTION_TEXT.get(raw.lower())
+    if friendly:
+        return friendly
+    return f"授权校验未通过（{raw}），请重新激活，或联网更新授权"
+
+
 def _remember_authoritative_rejection(reason):
     cache = _load_cache() or {}
     cache[_AUTH_REJECTION_CACHE_KEY] = str(reason or "授权已失效，请联网验证")
@@ -847,7 +878,7 @@ def _check_activation_local_fast():
         cache = _load_cache() or {}
         rejection_reason = str(cache.get(_AUTH_REJECTION_CACHE_KEY) or "").strip()
         if rejection_reason:
-            return {"need_activate": True, "reason": rejection_reason}
+            return {"need_activate": True, "reason": _humanize_rejection(rejection_reason)}
 
         token_result = _token_activation_result(cache)
         if token_result:

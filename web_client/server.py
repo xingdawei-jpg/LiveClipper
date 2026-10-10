@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import ssl
@@ -27,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -154,7 +156,12 @@ _CLIP_PREVIEW_LOCK = threading.Lock()
 _PREVIEW_SOURCE_ID_CACHE: dict[str, str] = {}
 _MEDIA_PIPELINE_SCOPES = frozenset({"smart-cut", "mix", "mix-batch"})
 _AI_PREVIEW_CACHE_SCHEMA = "layered_selection_v2"
-_PREVIEW_CANDIDATE_POOL_LIMIT = 240
+# 单个预览的候选总数上限（AI 已选 + 备选 + 完整源清单）。
+# 240 在多源混剪上不够用：提示词把商品归属判准之后，主商品内容从 61 行涨到 287 行，
+# 源清单条目超过 240 被截断，"完整句库"再次名不副实（2026-10-08 决策提到 800）。
+# 注意这只影响**预览里最多列出多少候选**，不增加 AI 花费 —— 每次调用的输出量由各自的
+# max_tokens 控制，与此无关。代价是前端渲染行数与预览载荷随之变大。
+_PREVIEW_CANDIDATE_POOL_LIMIT = 800
 VOLC_REGION_ALIASES = {
     "": "cn-beijing",
     "beijing": "cn-beijing",
@@ -654,6 +661,120 @@ def _active_task_log_id() -> str:
     return str(getattr(_TASK_LOG_CONTEXT, "task_id", "") or "").strip()
 
 
+_PERSISTED_FAILURE_TASKS: set[str] = set()
+_TASK_FAILURE_LOCK = threading.Lock()
+
+
+def _task_has_failures(task: Mapping[str, Any]) -> bool:
+    """True when a task carries a task-level error, batch failures, or failed items."""
+
+    if str(task.get("status") or "") == "failed":
+        return True
+    if int(task.get("batch_failed") or 0) > 0:
+        return True
+    if str(task.get("error") or "").strip():
+        return True
+    details = task.get("batch_failure_details")
+    return bool(isinstance(details, list) and details)
+
+
+def _task_failure_rows(task: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Flatten one finished task into per-item rows for the durable failure list."""
+
+    task_id = str(task.get("id") or "")
+    scope = str(task.get("scope") or "")
+    title = str(task.get("title") or "")
+    created = _now()
+    rows: list[dict[str, Any]] = []
+    details = task.get("batch_failure_details")
+    if isinstance(details, list):
+        for index, item in enumerate(details, 1):
+            data = item if isinstance(item, Mapping) else {"message": item}
+            raw_message = str(data.get("message") or "").strip()
+            label = str(data.get("label") or "").strip()
+            if not label and not raw_message:
+                continue
+            rows.append({
+                "time": created,
+                "task_id": task_id,
+                "scope": scope,
+                "title": title,
+                "kind": "item",
+                "index": index,
+                "label": label or f"失败任务 {index}",
+                "message": raw_message or "任务处理失败。",
+                "code": str(data.get("code") or "processing_failed"),
+            })
+    error = str(task.get("error") or "").strip()
+    if error and not rows:
+        rows.append({
+            "time": created,
+            "task_id": task_id,
+            "scope": scope,
+            "title": title,
+            "kind": "task",
+            "index": 0,
+            "label": title or "任务",
+            "message": error,
+            "code": "task_failed",
+        })
+    return rows
+
+
+def _persist_task_failures(task: Mapping[str, Any]) -> None:
+    """Append a finished task's failures to the durable list (at most once per task)."""
+
+    task_id = str(task.get("id") or "")
+    if not task_id:
+        return
+    with _TASK_FAILURE_LOCK:
+        if task_id in _PERSISTED_FAILURE_TASKS:
+            return
+        _PERSISTED_FAILURE_TASKS.add(task_id)
+        try:
+            rows = _task_failure_rows(task)
+            if not rows:
+                return
+            path = _task_failures_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            _LOG.warning("task failure list append failed", exc_info=True)
+
+
+def _read_task_failures(limit: int = 200) -> list[dict[str, Any]]:
+    """Read the durable failure list, newest first."""
+
+    path = _task_failures_log_path()
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                rows.append(data)
+    except OSError:
+        return []
+    safe_limit = max(1, int(limit or 200))
+    return list(reversed(rows[-safe_limit:]))
+
+
+def _task_failure_csv_cell(value: Any) -> str:
+    text = str(value if value is not None else "").replace('"', '""')
+    if any(ch in text for ch in ',"\r\n'):
+        text = f'"{text}"'
+    return text
+
+
 def _record_task_alert(task_id: str, level: str, message: str) -> tuple[str, str]:
     """Attach actionable task warnings to the task without making logs the source of truth."""
 
@@ -741,17 +862,25 @@ def _legacy_runtime_overlays_present() -> bool:
     return any((USER_DATA_ROOT / name).exists() for name in ("app", "web_client", "tools"))
 
 
+# 默认卖点权重。**必须等权**：这组默认值会写进每一个尚未自定义权重的设置文件，
+# 并经 ai_clipper 直接拼进 AI 选片提示词（ai_clipper.py:12300 起）。
+# 历史问题：这里曾把「版型显瘦 = 2.0」「面料质感 = 2.0」设为最高档，
+# 而「情绪感染 = 1.0」——等于把服装品类的卖点先验当成全局默认，
+# 于是任何非食品商品（家居/美妆/母婴…）的默认选片都会偏向显瘦。
+# 等权 1.0 时 ai_clipper 会把它们全部过滤掉（`v > 0 and v != 1.0`），
+# 即默认不预设任何卖点倾向，由提示词里的中性兜底文案接管。
+# 需要按类目给默认时，应在构建提示词处按类目取值，不要改回这里的偏置默认。
 DEFAULT_PREFERENCE_WEIGHTS = {
-    "版型显瘦": 2.0,
-    "上身效果": 1.5,
-    "面料质感": 2.0,
-    "颜色氛围": 1.5,
+    "版型显瘦": 1.0,
+    "上身效果": 1.0,
+    "面料质感": 1.0,
+    "颜色氛围": 1.0,
     "风格定位": 1.0,
-    "场景搭配": 1.5,
+    "场景搭配": 1.0,
     "情绪感染": 1.0,
     "性价比": 1.0,
-    "流行趋势": 0.5,
-    "紧迫稀缺": 0.5,
+    "流行趋势": 1.0,
+    "紧迫稀缺": 1.0,
 }
 
 PREFERENCE_WEIGHT_ALIASES = {
@@ -970,6 +1099,7 @@ def _load_settings() -> dict[str, Any]:
         "local_asr_quality_retry_enabled": False,
         "local_asr_device": "auto",
         "local_asr_cpu_threads": 0,
+        "local_asr_engine": "sensevoice",
         "asr_provider": "火山引擎",
         "asr_api_key": "",
         "asr_base_url": "https://dashscope.aliyuncs.com",
@@ -1662,6 +1792,737 @@ def _live_rooms_file() -> Path:
     return _safe_user_child("live_rooms.json")
 
 
+# --------------------------------------------------------------------------
+# 素材库：把录屏目录的字幕建成可检索索引
+# --------------------------------------------------------------------------
+
+MATERIAL_DEFAULT_ROOT = r"E:\切片\录屏"
+MATERIAL_INDEX_DIRNAME = "material_library"
+MATERIAL_INDEX_FILENAME = "material.sqlite3"
+#: 素材库使用语音识别生成字幕时的任务作用域
+MATERIAL_SCOPE_ASR = "smart-cut"
+
+
+def _material_database_path() -> Path:
+    return _safe_user_child(MATERIAL_INDEX_DIRNAME, MATERIAL_INDEX_FILENAME)
+
+
+def _material_settings() -> dict[str, Any]:
+    prefs = _load_preferences()
+    block = prefs.get("material_library")
+    return block if isinstance(block, dict) else {}
+
+
+def _material_save_settings(patch: Mapping[str, Any]) -> dict[str, Any]:
+    prefs = _load_preferences()
+    block = prefs.get("material_library")
+    merged = dict(block) if isinstance(block, dict) else {}
+    merged.update({str(key): value for key, value in dict(patch).items()})
+    prefs["material_library"] = merged
+    _save_preferences(prefs)
+    return merged
+
+
+def _material_root() -> str:
+    configured = str(_material_settings().get("root") or "").strip()
+    if configured:
+        return configured
+    if Path(MATERIAL_DEFAULT_ROOT).is_dir():
+        return MATERIAL_DEFAULT_ROOT
+    return str(Path.home() / "Videos")
+
+
+def _material_index() -> Any:
+    from material_library import MaterialIndex
+
+    return MaterialIndex(_material_database_path())
+
+
+def _material_rebuild_library_worker(task_id: str, lib_id: int, generate_srt: bool) -> None:
+    """重建某一个索引：先清掉它自己的内容，再从它的素材目录重扫。
+
+    只动这个索引，其他索引不受影响。
+    """
+    from material_library import ScanOptions, scan_and_index
+
+    scope = "material"
+    try:
+        _ensure_feature_access("素材库")
+        index = _material_index()
+        row = index.library(lib_id)
+        if row is None:
+            raise ValueError("这个索引不存在了，请刷新页面。")
+        name = str(row["name"] or "")
+        root = str(row["root"] or "")
+        if not root or not Path(root).is_dir():
+            raise ValueError(f"索引「{name}」的素材目录不可用：{root or '（未记录）'}")
+
+        emit_log("info", f"开始重建索引「{name}」：{root}", scope)
+        removed = index.remove_library(lib_id)
+        emit_log(
+            "info",
+            f"已清掉「{name}」原有内容：{removed['videos']} 个视频 / {removed['sentences']} 句",
+            scope,
+        )
+        lib_id = index.create_library(
+            name=name or index.library_name_for_root(root),
+            kind="directory",
+            root=root,
+            origin_label=name or index.library_name_for_root(root),
+            note=f"来自素材目录 {root}",
+        )
+        index.add_root(root)
+        if generate_srt:
+            _material_ensure_asr_scope_idle()
+        options = ScanOptions(
+            root=root,
+            recursive=True,
+            generate_missing_srt=bool(generate_srt),
+        )
+        report = scan_and_index(
+            index,
+            options,
+            progress=_material_progress_reporter(task_id, scope),
+            cancel_event=_task_cancel_event(task_id),
+            lib_id=lib_id,
+        )
+        index.rebuild_suggestions()
+        with index._session() as connection:
+            index._refresh_library_stats(connection, lib_id)
+        stats = index.library(lib_id)
+        videos = int(stats["videos"] or 0) if stats else 0
+        _set_task(task_id, status="completed", finished_at=time.time(), result_count=videos)
+        emit_log(
+            "success",
+            f"索引「{name}」重建完成：{videos} 个视频 / "
+            f"{int(stats['sentences'] or 0) if stats else 0} 句。",
+            scope,
+        )
+        _ = report
+    except HTTPException as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc.detail))
+        emit_log("error", f"重建索引失败：{exc.detail}", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"重建索引失败：{type(exc).__name__}: {exc}", scope)
+
+
+def _material_ensure_asr_scope_idle() -> None:
+    with _TASK_LOCK:
+        for task in _TASKS.values():
+            scope = str(task.get("scope") or "")
+            if scope not in {MATERIAL_SCOPE_ASR, "mix", "mix-batch"}:
+                continue
+            if str(task.get("status") or "") in {"queued", "running"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "语音识别通道正被其他任务占用（字幕识别与成片共用同一条通道）。"
+                        "请等它结束或先停止，再继续为素材库生成字幕。"
+                    ),
+                )
+
+
+def _material_choose_libraries(options: Sequence[Mapping[str, Any]]) -> list[int]:
+    """弹窗让用户挑要导出哪些索引（推荐方式：一个素材目录/导入包 = 一个索引）。"""
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        root = tk.Tk()
+        root.title("导出哪些索引")
+        root.geometry("640x460")
+        root.attributes("-topmost", True)
+        tk.Label(
+            root,
+            text="勾选要导出的索引（可多选）。一个索引一个 zip 包，发给同事导入即可检索；包里不含视频文件。",
+            wraplength=600, justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        frame = tk.Frame(root)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("name", "kind", "videos", "sentences", "hours")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        for key, title, width in (
+            ("name", "索引", 190), ("kind", "类型", 70), ("videos", "视频", 60),
+            ("sentences", "句子", 80), ("hours", "时长(小时)", 90),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w" if key in {"name", "kind"} else "e")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        rows = list(options or [])
+        for item in rows:
+            tree.insert(
+                "", "end",
+                values=(
+                    str(item.get("name") or ""),
+                    "导入" if str(item.get("kind")) == "imported" else "本机",
+                    int(item.get("videos") or 0),
+                    int(item.get("sentences") or 0),
+                    f"{float(item.get('duration') or 0) / 3600:.1f}",
+                ),
+            )
+        if rows:
+            tree.selection_set(tree.get_children()[0])
+
+        button_row = tk.Frame(root)
+        button_row.pack(fill="x", padx=14, pady=12)
+        chosen: dict[str, list[int]] = {"values": []}
+
+        def confirm() -> None:
+            picked: list[int] = []
+            for index in tree.selection():
+                position = tree.index(index)
+                if 0 <= position < len(rows):
+                    picked.append(int(rows[position].get("id") or 0))
+            if not picked:
+                messagebox.showwarning("还没选索引", "请至少勾选一个索引。", parent=root)
+                return
+            chosen["values"] = picked
+            root.destroy()
+
+        ttk.Button(button_row, text="全选", command=lambda: tree.selection_set(tree.get_children())).pack(side="left")
+        ttk.Button(button_row, text="导出", command=confirm).pack(side="right")
+        ttk.Button(button_row, text="取消", command=root.destroy).pack(side="right", padx=(0, 8))
+        root.bind("<Double-1>", lambda _event: confirm())
+
+        root.update_idletasks()
+        root.deiconify()
+        root.mainloop()
+        return chosen["values"]
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_choose_directory(options: Sequence[Mapping[str, Any]]) -> list[str]:
+    """弹窗让用户挑要导出哪些目录（目录结构是"日期/单品"时比按主播更好用）。"""
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        root = tk.Tk()
+        root.title("导出哪些目录的索引")
+        root.geometry("620x460")
+        root.attributes("-topmost", True)
+        tk.Label(
+            root,
+            text="勾选要导出的目录（可多选）。一个目录一个索引包，用户只下载自己要搜的那几份。",
+            wraplength=580, justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        frame = tk.Frame(root)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("label", "videos", "sentences", "hours")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        for key, title, width in (
+            ("label", "目录", 300), ("videos", "视频", 70),
+            ("sentences", "句子", 80), ("hours", "时长(小时)", 90),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w" if key == "label" else "e")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        rows = list(options or [])
+        for item in rows:
+            tree.insert(
+                "", "end",
+                values=(
+                    str(item.get("label") or item.get("path") or ""),
+                    int(item.get("videos") or 0),
+                    int(item.get("sentences") or 0),
+                    f"{float(item.get('duration') or 0) / 3600:.1f}",
+                ),
+            )
+        if rows:
+            tree.selection_set(tree.get_children()[0])
+
+        button_row = tk.Frame(root)
+        button_row.pack(fill="x", padx=14, pady=12)
+        chosen: dict[str, list[str]] = {"values": []}
+
+        def confirm() -> None:
+            picked: list[str] = []
+            for index in tree.selection():
+                position = tree.index(index)
+                if 0 <= position < len(rows):
+                    picked.append(str(rows[position].get("path") or ""))
+            if not picked:
+                messagebox.showwarning("还没选目录", "请至少勾选一个目录。", parent=root)
+                return
+            chosen["values"] = picked
+            root.destroy()
+
+        ttk.Button(button_row, text="全选", command=lambda: tree.selection_set(tree.get_children())).pack(side="left")
+        ttk.Button(button_row, text="导出", command=confirm).pack(side="right")
+        ttk.Button(button_row, text="取消", command=root.destroy).pack(side="right", padx=(0, 8))
+        root.bind("<Double-1>", lambda _event: confirm())
+
+        root.update_idletasks()
+        root.deiconify()
+        root.mainloop()
+        return chosen["values"]
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_choose_streamers(options: Sequence[Mapping[str, Any]]) -> list[str]:
+    """弹窗让用户挑要导出哪些主播（大机构按主播分卷分发索引）。
+
+    返回空列表表示取消。勾选"(未标注主播)"会以空串的形式出现在结果里。
+    """
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        root = tk.Tk()
+        root.title("导出哪些主播的索引")
+        root.geometry("520x460")
+        root.attributes("-topmost", True)
+        tk.Label(
+            root,
+            text="勾选要导出的主播（可多选）。建议按主播分别导出，用户只下载自己要搜的那几个。",
+            wraplength=480, justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 6))
+
+        frame = tk.Frame(root)
+        frame.pack(fill="both", expand=True, padx=14)
+        columns = ("publisher", "videos", "sentences", "hours")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        for key, title, width in (
+            ("publisher", "主播", 210), ("videos", "视频", 70),
+            ("sentences", "句子", 80), ("hours", "时长(小时)", 90),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="w" if key == "publisher" else "e")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        rows = list(options or [])
+        for item in rows:
+            tree.insert(
+                "", "end",
+                values=(
+                    str(item.get("label") or item.get("publisher") or "(未标注主播)"),
+                    int(item.get("videos") or 0),
+                    int(item.get("sentences") or 0),
+                    f"{float(item.get('duration') or 0) / 3600:.1f}",
+                ),
+            )
+        if rows:
+            tree.selection_set(tree.get_children()[0])
+
+        button_row = tk.Frame(root)
+        button_row.pack(fill="x", padx=14, pady=12)
+
+        chosen: dict[str, list[str]] = {"values": []}
+
+        def select_all() -> None:
+            tree.selection_set(tree.get_children())
+
+        def confirm() -> None:
+            picked: list[str] = []
+            for index in tree.selection():
+                position = tree.index(index)
+                if 0 <= position < len(rows):
+                    picked.append(str(rows[position].get("publisher") or ""))
+            if not picked:
+                messagebox.showwarning("还没选主播", "请至少勾选一个主播。", parent=root)
+                return
+            chosen["values"] = picked
+            root.destroy()
+
+        ttk.Button(button_row, text="全选", command=select_all).pack(side="left")
+        ttk.Button(button_row, text="导出", command=confirm).pack(side="right")
+        ttk.Button(button_row, text="取消", command=root.destroy).pack(side="right", padx=(0, 8))
+        root.bind("<Double-1>", lambda _event: confirm())
+
+        root.update_idletasks()
+        root.deiconify()
+        root.mainloop()
+        return chosen["values"]
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_choose_import_file() -> str:
+    """选择要导入的索引包。"""
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        paths = filedialog.askopenfilenames(
+            title="导入素材库索引包（可多选，例如分别来自不同主播）",
+            filetypes=[("素材库索引包", "*.zip"), ("全部文件", "*.*")],
+        )
+        return list(paths or [])
+    except Exception as exc:
+        raise RuntimeError(f"打开选择窗口失败：{exc}") from exc
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_export_dialog(default_name: str) -> str:
+    """导出用的保存对话框（返回空串表示取消）。"""
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.asksaveasfilename(
+            title="导出素材库索引（发给同事导入用）",
+            defaultextension=".zip",
+            initialfile=default_name,
+            filetypes=[("素材库索引包", "*.zip"), ("全部文件", "*.*")],
+        )
+        return str(path or "")
+    except Exception as exc:
+        raise RuntimeError(f"打开保存窗口失败：{exc}") from exc
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_ask_export_mode() -> str:
+    """问一次按什么维度导出：目录 还是 主播。取消返回空串。"""
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.title("导出索引")
+        root.geometry("440x230")
+        root.attributes("-topmost", True)
+        tk.Label(
+            root,
+            text="按什么维度导出索引包？\n\n· 按索引：一个素材目录 / 一个导入包一个包（推荐）\n· 按主播：一个主播一个包\n· 按目录：一个文件夹一个包",
+            justify="left", wraplength=400,
+        ).pack(anchor="w", padx=16, pady=(14, 8))
+        chosen: dict[str, str] = {"mode": ""}
+        row = tk.Frame(root)
+        row.pack(fill="x", padx=16, pady=10)
+
+        def pick(mode: str) -> None:
+            chosen["mode"] = mode
+            root.destroy()
+
+        tk.Button(row, text="按索引导出", width=12, command=lambda: pick("library")).pack(side="left")
+        tk.Button(row, text="按主播", width=10, command=lambda: pick("publisher")).pack(side="left", padx=6)
+        tk.Button(row, text="按目录", width=10, command=lambda: pick("directory")).pack(side="left")
+        tk.Button(row, text="取消", width=8, command=root.destroy).pack(side="right")
+        root.update_idletasks()
+        root.deiconify()
+        root.mainloop()
+        return chosen["mode"]
+    except Exception:
+        # 弹窗不可用时默认按索引导出，不阻塞
+        return "library"
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+
+def _material_export_path(index: Any, source_label: str) -> str:
+    """确定导出位置：优先弹保存框，弹不出来就落到用户数据目录。"""
+    from material_archive import default_export_name
+
+    default_name = default_export_name(source_label)
+    try:
+        chosen = _material_export_dialog(default_name)
+    except Exception as exc:
+        emit_log("warning", f"保存窗口不可用，改为导出到用户数据目录：{exc}", "material")
+        chosen = ""
+    if chosen:
+        return chosen
+    fallback_dir = _safe_user_child("material_exports")
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return str(fallback_dir / default_name)
+
+
+def _material_export_worker(task_id: str, output_path: str, source_label: str,
+                            publishers: Sequence[str] | None = None,
+                            paths: Sequence[str] | None = None,
+                            lib_ids: Sequence[int] | None = None) -> None:
+    from material_archive import export_index
+
+    scope = "material"
+    try:
+        index = _material_index()
+        if index.stats()["videos"] <= 0:
+            raise ValueError("素材库还是空的，先建立索引再导出。")
+        result = export_index(
+            index,
+            output_path,
+            source_label=source_label,
+            publishers=list(publishers or []) or None,
+            paths=list(paths or []) or None,
+            lib_ids=list(lib_ids or []) or None,
+            progress=_material_progress_reporter(task_id, scope),
+        )
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            result_count=int(result.get("videos") or 0),
+        )
+        emit_log(
+            "success",
+            f"素材库索引已导出：{result['path']}"
+            f"（{result['size_bytes'] / 1024 / 1024:.1f} MB，{result['videos']} 个视频）",
+            scope,
+        )
+    except HTTPException as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc.detail))
+        emit_log("error", f"导出素材库索引失败：{exc.detail}", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"导出素材库索引失败：{type(exc).__name__}: {exc}", scope)
+
+
+def _material_import_worker(task_id: str, archive_paths: Sequence[str]) -> None:
+    from material_archive import import_index
+
+    scope = "material"
+    paths = [str(item) for item in (archive_paths or []) if str(item).strip()]
+    try:
+        index = _material_index()
+        totals = {"added": 0, "skipped": 0, "matched_local": 0, "sentences": 0}
+        sources: list[str] = []
+        for position, archive_path in enumerate(paths, 1):
+            if _is_task_cancelled(task_id):
+                emit_log("warning", "导入已中断。", scope)
+                break
+            _emit_import_scope = f"[{position}/{len(paths)}] {Path(archive_path).name}"
+            emit_log("info", f"{_emit_import_scope} 开始导入", scope)
+            try:
+                result = import_index(
+                    index,
+                    archive_path,
+                    progress=_material_progress_reporter(task_id, scope),
+                    cancel_event=_task_cancel_event(task_id),
+                )
+            except Exception as exc:
+                emit_log("error", f"{_emit_import_scope} 导入失败：{exc}", scope)
+                continue
+            for key in totals:
+                totals[key] += int(result.get(key) or 0)
+            label = str(result.get("source_label") or Path(archive_path).stem)
+            sources.append(label)
+            emit_log(
+                "success",
+                f"{_emit_import_scope} 完成：新增 {result.get('added', 0)} / "
+                f"跳过 {result.get('skipped', 0)}",
+                scope,
+            )
+        message = (
+            f"导入完成：共新增 {totals['added']} 个视频 / {totals['sentences']} 句，"
+            f"跳过重复 {totals['skipped']} 个"
+        )
+        if totals["matched_local"]:
+            message += f"，其中 {totals['matched_local']} 个本地已有同名视频（可直接跳转播放）"
+        if sources:
+            message += f"；来源：{'、'.join(sources[:5])}"
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            result_count=int(totals["added"]),
+        )
+        emit_log("success", message + "。", scope)
+    except HTTPException as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc.detail))
+        emit_log("error", f"导入素材库索引失败：{exc.detail}", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"导入素材库索引失败：{type(exc).__name__}: {exc}", scope)
+
+
+def _material_progress_reporter(task_id: str, scope: str) -> Callable[[str, str], None]:
+    """把素材库的进度回调转成"日志 + 进度条"。
+
+    只有 warning/error/success 和每 5 条 info 才写日志：导入/导出时回调很密，
+    全写会把日志面板刷屏，也会让前端队列堆积。
+    """
+    counter = {"n": 0}
+
+    def report(message: str, level: str = "info") -> None:
+        counter["n"] += 1
+        resolved = level or "info"
+        if resolved != "info" or counter["n"] % 5 == 0:
+            emit_log(resolved, message, scope)
+        _set_task_progress(
+            task_id,
+            min(95.0, 5.0 + counter["n"] * 0.6),
+            message,
+        )
+
+    return report
+
+
+def _material_build_worker(task_id: str, payload: "MaterialIndexPayload") -> None:
+    from material_library import (
+        ScanOptions,
+        probe_directory,
+        scan_and_index,
+    )
+
+    scope = "material"
+    root = payload.path.strip() or _material_root()
+    try:
+        _ensure_feature_access("素材库")
+        if payload.probe_only:
+            info = probe_directory(root, recursive=payload.recursive)
+            emit_log(
+                "info",
+                f"素材库试扫 | {root}：视频 {info['videos']} 个，"
+                f"已索引 {info.get('already_indexed', 0)} 个，本次新增 {info.get('new_videos', 0)} 个；"
+                f"已有字幕 {info['with_srt']} 个，待识别 {info['pending_asr']} 个。",
+                scope,
+            )
+            _set_task(task_id, status="completed", finished_at=time.time(), result_count=info["videos"])
+            return
+
+        options = ScanOptions(
+            root=root,
+            recursive=bool(payload.recursive),
+            generate_missing_srt=bool(payload.generate_srt),
+            asr_engine=str(payload.asr_engine or "auto"),
+            default_publisher=str(payload.publisher or ""),
+        )
+        if options.generate_missing_srt:
+            _material_ensure_asr_scope_idle()
+
+        index = _material_index()
+        # 把扫描目录登记为素材根：跨机器共享索引需要"相对素材根的路径"当身份，
+        # 不登记的话导出去的索引在别人机器上对不上（只能靠文件名，会误并同名场次）。
+        try:
+            filled = index.add_root(root)
+            if filled:
+                emit_log("info", f"已把 {filled} 个视频的相对路径对齐到素材目录：{root}", scope)
+        except Exception as exc:
+            emit_log("warning", f"登记素材根目录失败（不影响入库）：{exc}", scope)
+
+        # 一个素材目录 = 一个独立索引：同名目录再次建索引时"更新它自己"，
+        # 不再往一个全局大库里面混着加。这样界面上的索引列表才说得清。
+        lib_name = index.library_name_for_root(root)
+        existing_lib = index.find_library_by_root(root)
+        if existing_lib is not None:
+            lib_id = int(existing_lib["id"])
+            index.update_library(lib_id, name=lib_name, root=root)
+            emit_log("info", f"更新已有索引「{lib_name}」：{root}", scope)
+        else:
+            lib_id = index.create_library(
+                name=lib_name, kind="directory", root=root, origin_label=lib_name,
+                note=f"来自素材目录 {root}",
+            )
+            emit_log("info", f"新建索引「{lib_name}」：{root}", scope)
+        emit_log("info", f"素材库开始建索引：{root}", scope)
+        report = scan_and_index(
+            index,
+            options,
+            progress=_material_progress_reporter(task_id, scope),
+            cancel_event=_task_cancel_event(task_id),
+            lib_id=lib_id,
+        )
+        if payload.publish:
+            _material_save_settings({"root": root})
+        index.rebuild_suggestions()
+        try:
+            with index._session() as connection:
+                index._refresh_library_stats(connection, lib_id)
+        except Exception:
+            pass
+        stats = index.stats()
+        _material_save_settings(
+            {
+                "root": root,
+                "last_build_at": time.time(),
+                "last_videos": int(stats.get("videos") or 0),
+                "last_sentences": int(stats.get("sentences") or 0),
+            }
+        )
+        if _is_task_cancelled(task_id):
+            emit_log("warning", "素材库建索引已中断。", scope)
+            return
+        message = (
+            f"素材库建索引完成：入库 {report['videos_indexed']} 个视频"
+            f"（复用字幕 {report['srt_reused']}，新识别 {report['srt_generated']}），"
+            f"共 {report['sentences']} 句。"
+        )
+        if report["failed"]:
+            message += f" 失败 {report['failed']} 个，详情见日志。"
+        emit_log("success" if not report["failed"] else "warning", message, scope)
+        _set_task(
+            task_id,
+            status="completed",
+            finished_at=time.time(),
+            result_count=int(report["videos_indexed"]),
+        )
+    except HTTPException as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc.detail))
+        emit_log("error", f"素材库建索引失败：{exc.detail}", scope)
+    except Exception as exc:
+        _set_task(task_id, status="failed", finished_at=time.time(), error=str(exc))
+        emit_log("error", f"素材库建索引失败：{type(exc).__name__}: {exc}", scope)
+
+
+def _live_room_override_number(value: Any, low: float, high: float) -> str:
+    """右栏逐房间覆盖值：空/非法 = 跟随全局（返回空串），否则返回夹取后的数字字符串。"""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number):
+        return ""
+    return f"{min(high, max(low, number)):g}"
+
+
 def _normalize_live_room_cache_item(room: Any) -> dict[str, Any] | None:
     if not isinstance(room, dict):
         return None
@@ -1671,16 +2532,18 @@ def _normalize_live_room_cache_item(room: Any) -> dict[str, Any] | None:
         return None
     platform = str(room.get("platform") or "抖音").strip() or "抖音"
     naming = str(room.get("product_naming_mode") or room.get("productNamingMode") or room.get("naming_mode") or "").strip()
-    if naming == "product_name":
-        naming_mode = "product_name"
+    if naming == "product_id":
+        naming_mode = "product_id"
     elif naming == "room_timestamp":
         naming_mode = "room_timestamp"
     else:
-        naming_mode = "product_id"
+        # 未设置 / 历史中文值 → 按「商品名+时间戳」命名（与 _live_product_naming_mode 一致）。
+        # 显式选过「商品ID命名」的房间仍是 product_id，不受影响。
+        naming_mode = "product_name"
     segment = str(room.get("segment") or "").strip()[:16]
     product_clip_minutes = str(room.get("product_clip_minutes") or room.get("productClipMinutes") or "").strip()[:8]
     record_mode = str(room.get("record_mode") or room.get("recordMode") or "").strip().lower()
-    if record_mode not in {"duration", "product"}:
+    if record_mode not in {"duration", "product", "single"}:
         record_mode = ""
     return {
         "name": name,
@@ -1690,6 +2553,11 @@ def _normalize_live_room_cache_item(room: Any) -> dict[str, Any] | None:
         "segment": segment,
         "product_clip_minutes": product_clip_minutes,
         "record_mode": record_mode,
+        "product_switch_confirm_seconds": _live_room_override_number(room.get("product_switch_confirm_seconds"), 0.0, 120.0),
+        "product_min_minutes": _live_room_override_number(room.get("product_min_minutes"), 0.5, 15.0),
+        "product_max_minutes": _live_room_override_number(room.get("product_max_minutes"), 1.0, 15.0),
+        "product_head_seconds": _live_room_override_number(room.get("product_head_seconds"), 0.0, 300.0),
+        "product_tail_seconds": _live_room_override_number(room.get("product_tail_seconds"), 0.0, 300.0),
     }
 
 
@@ -2076,6 +2944,7 @@ class SettingsPayload(BaseModel):
     local_asr_quality_retry_enabled: bool = False
     local_asr_device: str = "auto"
     local_asr_cpu_threads: int = Field(default=0, ge=0, le=8)
+    local_asr_engine: str = "sensevoice"
     asr_provider: str = "火山引擎"
     asr_api_key: str = ""
     asr_base_url: str = ""
@@ -2156,6 +3025,85 @@ class StopScopePayload(BaseModel):
     scope: str = ""
 
 
+class MaterialSearchPayload(BaseModel):
+    """素材库检索参数。搜索只查索引，范围可以按主播/目录限定。"""
+
+    query: str = ""
+    mode: str = "smart"
+    context: int = Field(default=2, ge=0, le=8)
+    publisher: str = ""
+    #: 搜索前选定的范围（多选）。publishers 里的空串代表"未标注主播"。
+    publishers: list[str] = Field(default_factory=list)
+    #: 索引库：用户在「搜索范围」下拉里选的就是这个（一个素材目录/导入包 = 一个索引）
+    lib_ids: list[int] = Field(default_factory=list)
+    #: 索引批次（origin_label）
+    batches: list[str] = Field(default_factory=list)
+    directories: list[str] = Field(default_factory=list)
+    video: str = ""
+    limit_groups: int = Field(default=200, ge=1, le=1000)
+    windows_per_group: int = Field(default=5, ge=1, le=50)
+    scope_label: str = ""
+
+
+class MaterialIndexPayload(BaseModel):
+    """素材库建索引参数。"""
+
+    path: str = ""
+    recursive: bool = True
+    generate_srt: bool = True
+    asr_engine: str = "auto"
+    publisher: str = ""
+    probe_only: bool = False
+    publish: bool = True
+
+
+class MaterialLabelPayload(BaseModel):
+    """给某个目录批量标注主播名。"""
+
+    folder: str = ""
+    publisher: str = ""
+
+
+class MaterialOpenPayload(BaseModel):
+    """用系统播放器打开命中的源视频。"""
+
+    path: str = ""
+    start: float = Field(default=0.0, ge=0.0)
+
+
+class MaterialLibraryPayload(BaseModel):
+    """针对某个索引的操作（重建 / 删除）。"""
+
+    library_id: int = 0
+    generate_srt: bool = False
+
+
+class MaterialExportPayload(BaseModel):
+    """导出索引：支持按索引 / 主播 / 目录分卷。
+
+    - lib_ids 非空    -> 只导出这些索引（一个素材目录或一个导入包 = 一个索引，推荐）
+    - publishers 非空 -> 只导出这些主播
+    - paths 非空      -> 只导出这些目录
+    - 都为空 + choose=True -> 弹窗让用户先选维度再勾选
+    - path 给定时直接用该路径存盘（自动化/测试用），不弹保存框；
+      不给 path 且 choose=False（机器调用）时，固定落到
+      ``%APPDATA%\\LiveClipper\\material_exports``，不会写进用户的素材目录。
+    """
+
+    lib_ids: list[int] = Field(default_factory=list)
+    publishers: list[str] = Field(default_factory=list)
+    paths: list[str] = Field(default_factory=list)
+    mode: str = ""          # "" 弹窗问一次 / "library" 索引 / "publisher" 主播 / "directory" 目录
+    choose: bool = True
+    path: str = ""
+
+
+class MaterialImportPayload(BaseModel):
+    """导入索引包：paths 为空时弹窗选择。"""
+
+    paths: list[str] = Field(default_factory=list)
+
+
 class StopTaskPayload(BaseModel):
     task_id: str = ""
 
@@ -2183,10 +3131,10 @@ class SmartCutPayload(BaseModel):
     transition: dict[str, Any] = Field(default_factory=dict)
     mirror_enabled: bool = True
     subtitle_overlay: bool = True
-    smart_crop_enabled: bool = True
+    smart_crop_enabled: bool = False
     crop_level: str = "medium"
     ken_burns_enabled: bool = True
-    ken_burns_intensity: str = "中"
+    ken_burns_intensity: str = "轻"
     pip_enabled: bool = False
     pip_path: str = ""
     pip_folder: str = ""
@@ -2212,10 +3160,10 @@ class MixPayload(BaseModel):
     transition: dict[str, Any] = Field(default_factory=dict)
     mirror_enabled: bool = True
     subtitle_overlay: bool = True
-    smart_crop_enabled: bool = True
+    smart_crop_enabled: bool = False
     crop_level: str = "medium"
     ken_burns_enabled: bool = True
-    ken_burns_intensity: str = "中"
+    ken_burns_intensity: str = "轻"
     pip_enabled: bool = False
     pip_path: str = ""
     pip_folder: str = ""
@@ -2301,6 +3249,13 @@ class SmartPreviewClipPayload(BaseModel):
     inspect_only: bool = False
 
 
+class PreviewSentenceMaterializePayload(BaseModel):
+    """把源字幕里的一句话补进本次预览的候选池（只加池，不排序、不自动选中）。"""
+
+    preview_id: str = ""
+    subtitle_id: int = Field(default=0, ge=0)
+
+
 class CommerceDirectorReviewPayload(BaseModel):
     preview_id: str = ""
 
@@ -2383,7 +3338,7 @@ class LiveRecPayload(BaseModel):
     platform: str = "自定义RTMP"
     record_mode: str = "product"
     product_split_enabled: bool = False
-    product_auto_cut: bool = False
+    product_auto_cut: bool = True
     product_default_minutes: float = Field(default=10.0, ge=1.0, le=60.0)
     product_min_minutes: float = Field(default=3.0, ge=0.5, le=60.0)
     product_max_minutes: float = Field(default=15.0, ge=1.0, le=120.0)
@@ -2639,6 +3594,7 @@ def _director_render_queued(task_id: str, render: Callable[..., Any], *args: Any
 
 def _set_task(task_id: str, **updates: Any) -> None:
     completed_snapshot: dict[str, Any] | None = None
+    failure_snapshot: dict[str, Any] | None = None
     with _TASK_LOCK:
         if task_id in _TASKS:
             current = _TASKS[task_id]
@@ -2680,9 +3636,13 @@ def _set_task(task_id: str, **updates: Any) -> None:
             _TASKS[task_id].update(updates)
             if _TASKS[task_id].get("status") == "completed":
                 completed_snapshot = dict(_TASKS[task_id])
+            if _TASKS[task_id].get("status") in {"completed", "failed", "cancelled"}:
+                failure_snapshot = dict(_TASKS[task_id])
             if next_status in {"completed", "failed"}:
                 _TASK_CANCEL_EVENTS.pop(task_id, None)
                 _CANCELLED_TASKS.discard(task_id)
+    if failure_snapshot:
+        _persist_task_failures(failure_snapshot)
     if completed_snapshot:
         _record_output_history(completed_snapshot)
 
@@ -3133,18 +4093,41 @@ def _feature_is_free(feature_name: str) -> bool:
     return str(feature_name or "").strip() in FREE_FEATURE_NAMES
 
 
+class FeatureAccessDenied(RuntimeError):
+    """付费功能的授权门禁未通过（未激活 / 已到期 / 被吊销 / 试用耗尽）。
+
+    单独的类型，是为了让**批量任务**能分辨"这一组素材有问题（跳过继续）"和
+    "授权已经失效（必须整体停止，不能再往下花钱）"。它是 RuntimeError 的子类，
+    所以既有的 except Exception 处理全部照旧生效。
+    """
+
+
 def _ensure_feature_access(feature_name: str) -> None:
+    """付费功能的统一门禁：必须在**任何 AI 调用之前**判定，且不采信过期缓存。
+
+    2026-10-10 修复：原来用 get_feature_access(refresh=False)，而它内部是
+    check_activation_cached(allow_stale=True) —— 缓存超过 10 分钟后仍返回旧结果。
+    授权到期/吊销后旧结果继续放行，于是 AI 照跑、用户自己付的 AI 费用照花，
+    等某次后台刷新之后才失败。实测有用户批量剪 20 个视频，20 个全部走完 AI
+    才因授权过期整体失败。
+
+    现在传 strict=True：改为重读本地授权状态（纯本地、不联网，无性能代价），
+    本地检查本来就能识别"激活码已于 X 过期""授权已被吊销"，所以会在第一次
+    调用时就拦住，不再出现"跑一半才停"。
+    """
     if _feature_is_free(feature_name):
         return
     try:
         from license_guard import get_feature_access
 
-        access = get_feature_access(refresh=False)
+        access = get_feature_access(refresh=False, strict=True)
         if access.get("ok"):
             return
-        raise RuntimeError(access.get("reason") or "试用次数已用完，请激活后继续使用。")
+        raise FeatureAccessDenied(access.get("reason") or "试用次数已用完，请激活后继续使用。")
+    except FeatureAccessDenied:
+        raise
     except Exception as exc:
-        raise RuntimeError(f"{feature_name} 权限检查失败：{exc}") from exc
+        raise FeatureAccessDenied(f"{feature_name} 权限检查失败：{exc}") from exc
 
 
 def _consume_trial(feature_name: str, units: int = 1, scope: str = "system") -> None:
@@ -6754,6 +7737,128 @@ def _preview_selection_public_clips(preview: dict[str, Any]) -> list[dict[str, A
     return clips
 
 
+PREVIEW_MANUAL_SENTENCE_MAX_SECONDS = 8.05
+
+
+def _preview_materialize_sentence(payload: PreviewSentenceMaterializePayload) -> dict[str, Any]:
+    """Add one source sentence to this preview pool for manual editing only.
+
+    The Director still owns selection, ranking and order.  This only makes an
+    existing source sentence addressable inside the preview, exactly like the
+    rows that already ship in the "AI 备用" pool, so the normal
+    "加入已选片段" path can pick it up afterwards.  Nothing is re-ranked,
+    reordered, auto-selected, or written to disk.
+    """
+    preview_id = str(payload.preview_id or "").strip()
+    subtitle_id = int(payload.subtitle_id or 0)
+    if not preview_id:
+        raise HTTPException(status_code=400, detail="请先生成 AI 选片预览。")
+    if subtitle_id <= 0:
+        raise HTTPException(status_code=400, detail="要补的句子编号无效。")
+    with _CLIP_PREVIEW_LOCK:
+        preview = _CLIP_PREVIEWS.get(preview_id)
+        if not preview:
+            raise HTTPException(status_code=404, detail="没有找到这次 AI 选片预览，请重新生成。")
+        if preview.get("status") != "ready":
+            raise HTTPException(status_code=400, detail="AI 选片预览还没有完成，请稍后再试。")
+        sources = list(preview.get("sources") or [])
+        if len(sources) > 1:
+            raise HTTPException(status_code=409, detail="多素材混剪预览暂不支持补句。")
+        srt_text = str(preview.get("srt_text") or "")
+        if not srt_text.strip():
+            raise HTTPException(status_code=409, detail="这次预览没有绑定源字幕，无法补句。")
+        public_clips = preview.get("candidate_clips") or preview.get("clips") or []
+        for existing in public_clips:
+            if not isinstance(existing, Mapping):
+                continue
+            # 同一句源字幕既可能是「推荐」故事句（带 candidate_id），也可能是
+            # 「AI 备用」库存句（带 source_subtitle_id）——三个 id 字段一起比对，
+            # 已经在池里就直接复用它的下标，绝不重复造句子。
+            existing_ids = {
+                int(existing.get("source_subtitle_id") or 0),
+                int(existing.get("director_candidate_id") or 0),
+                int(existing.get("candidate_id") or 0),
+            }
+            if subtitle_id in existing_ids:
+                return {
+                    "ok": True,
+                    "index": int(existing.get("index") or 0),
+                    "clip": dict(existing),
+                    "reused": True,
+                }
+        try:
+            from cutter_logic import _parse_srt_to_segments
+
+            rows = [
+                dict(item) for item in (_parse_srt_to_segments(srt_text) or [])
+                if isinstance(item, Mapping)
+            ]
+        except Exception:
+            rows = []
+        row = rows[subtitle_id - 1] if 0 < subtitle_id <= len(rows) else None
+        if not row:
+            raise HTTPException(status_code=404, detail="源字幕里没有这一句（源文件可能已被移动或替换）。")
+        text = str(row.get("text") or "").strip()
+        try:
+            start = float(row.get("start") or 0.0)
+            end = float(row.get("end") or start)
+        except (TypeError, ValueError):
+            start, end = 0.0, 0.0
+        if not text or end <= start:
+            raise HTTPException(status_code=400, detail="这一句的时间轴不完整，不能补进候选池。")
+        if end - start > PREVIEW_MANUAL_SENTENCE_MAX_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail="这一句 %.1f 秒，超过补句上限 %.1f 秒。"
+                % (end - start, PREVIEW_MANUAL_SENTENCE_MAX_SECONDS),
+            )
+        video = str(preview.get("video") or "")
+        raw_clip = _preview_clip_with_source(
+            ("product", text, round(start, 3), round(end, 3), 0.0, round(end - start, 3), "", video),
+            video,
+        )
+        content_policy = (preview.get("dedup_summary") or {}).get("task_content_policy")
+        built = _preview_public_clips(
+            [raw_clip],
+            srt_text,
+            sources=sources,
+            merge_mode=False,
+            preserve_director_selection=True,
+            content_policy=content_policy if isinstance(content_policy, Mapping) else None,
+        )
+        public_clip = dict(built[0]) if built else _clip_public(0, raw_clip)
+        # 手动补的句子不属于任何连续窗，前端单独归到「补充句（手动加入）」。
+        for stale_key in ("continuity_group", "continuity_position", "continuity_size", "_continuity_source"):
+            public_clip.pop(stale_key, None)
+        _annotate_commerce_director_public_clips(
+            [public_clip],
+            [
+                {
+                    "director_candidate_id": subtitle_id,
+                    "source_subtitle_id": subtitle_id,
+                    "candidate_asset_role": "",
+                    "candidate_purchase_value_hints": [],
+                    "hook_eligible": True,
+                    "manual_candidate_only": True,
+                    "manual_added_sentence": True,
+                }
+            ],
+            recommended=False,
+            origin="source_inventory",
+        )
+        raw_list = list(preview.get("candidate_raw_clips") or preview.get("raw_clips") or [])
+        new_index = len(raw_list)
+        public_clip["index"] = new_index
+        raw_list.append(raw_clip)
+        public_clips.append(public_clip)
+        preview["candidate_raw_clips"] = raw_list
+        preview["candidate_clips"] = public_clips
+        preview["manual_added_sentences"] = [
+            *list(preview.get("manual_added_sentences") or []), new_index
+        ]
+        return {"ok": True, "index": new_index, "clip": dict(public_clip), "reused": False}
+
+
 def _preview_requested_word_indices(
     selected_words_by_segment: Any,
     segment_index: int,
@@ -7244,6 +8349,10 @@ def _log_preview_selection(
 
 def _preview_feedback_log_path() -> Path:
     return _safe_user_child("ai_feedback", "preview_selection_feedback.jsonl")
+
+
+def _task_failures_log_path() -> Path:
+    return _safe_user_child("ai_feedback", "task_failures.jsonl")
 
 
 _AUTO_CATEGORY_VALUES = {"", "自动", "自动检测", "自动识别", "auto"}
@@ -9189,11 +10298,12 @@ def _ensure_srt_unlocked(
         if legacy_srt.is_file() and legacy_srt.with_suffix(".words.json").is_file():
             legacy_status = inspect_cache(video, legacy_srt)
             if not legacy_status.get("managed"):
+                _legacy_provider, _legacy_model = _local_asr_cache_identity(legacy_srt)
                 write_metadata(
                     video,
                     legacy_srt,
-                    provider="sensevoice",
-                    model="iic/SenseVoiceSmall",
+                    provider=_legacy_provider,
+                    model=_legacy_model,
                     timing_precision="word",
                 )
                 legacy_status = inspect_cache(video, legacy_srt)
@@ -9555,6 +10665,12 @@ def _run_mix_batch(task_id: str, payload: MixBatchPayload) -> None:
                     batch_failure_details=list(failure_details),
                 )
                 emit_log("success", f"混剪批量 [{index}/{total_groups}] 完成：{group_name}", scope)
+            except FeatureAccessDenied as access_exc:
+                # 授权失效必须整批停止：继续往下只会一组组白跑 AI。
+                failures.append(f"第 {index} 组 {group_name}: {access_exc}")
+                failure_details.append(_batch_failure_detail(f"第 {index} 组 {group_name}", access_exc))
+                emit_log("err", f"授权已失效，批量已停止（不再继续消耗 AI 费用）：{access_exc}", scope)
+                break
             except Exception as group_exc:
                 failures.append(f"第 {index} 组 {group_name}: {group_exc}")
                 failure_details.append(_batch_failure_detail(f"第 {index} 组 {group_name}", group_exc))
@@ -11041,10 +12157,13 @@ def _live_product_id_token(value: Any, max_chars: int = 32) -> str:
 
 
 def _live_product_naming_mode(payload: LiveRecPayload | None = None, mode: Any = "") -> str:
-    raw = str(mode or getattr(payload, "product_naming_mode", "") or "product_id").strip().lower()
+    raw = str(mode or getattr(payload, "product_naming_mode", "") or "").strip().lower()
     if raw in {"product_name", "name", "title", "商品名称", "商品名"}:
         return "product_name"
-    return "product_id"
+    if raw in {"product_id", "id", "商品id", "商品编号"}:
+        return "product_id"
+    # 未设置或「直播间名+时间戳」：单品片段统一按「商品名+时间戳」命名（母带命名另有规则，不受影响）。
+    return "product_name"
 
 
 def _live_product_recording_stamp(value: Any) -> str:
@@ -11066,6 +12185,13 @@ def _live_product_segment_filename(
     if segment.get("review_status") == "pending_user_confirm":
         index = _live_product_segment_index(segment)
         stamp = _live_product_recording_stamp(recording_stamp or segment.get("recording_stamp") or "")
+        if segment.get("evidence_low_confidence"):
+            # 弱信号证据兜底命名：用「低置信_」前缀明示仍需复核。
+            evidence_id = _live_product_id_token(segment.get("product_id")) or _live_product_id_token(segment.get("promotion_id"))
+            if mode == "product_id" and evidence_id:
+                return f"低置信_{evidence_id}"
+            evidence_title = str(segment.get("title") or "").strip() or evidence_id
+            return f"低置信_{evidence_title or '未命名商品'}_{stamp}"
         return f"待确认_{stamp}_{index:02d}"
     if mode == "product_id":
         if product_id:
@@ -11084,6 +12210,9 @@ def _live_product_segment_filename(
 
 
 def _live_product_segment_naming_source(segment: dict[str, Any], payload: LiveRecPayload | None = None) -> str:
+    if segment.get("evidence_low_confidence"):
+        # 必须放在最前面：低置信段也带 product_id，不能让它被算成 auto_product_id。
+        return "evidence_low_confidence"
     mode = _live_product_naming_mode(payload, segment.get("naming_mode"))
     if mode == "product_name":
         if segment.get("review_status") == "pending_user_confirm":
@@ -11134,6 +12263,7 @@ def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
     segments = list(queue.get("segments") or [])
     bound = 0
     pending = 0
+    evidence_named = 0
     for segment in segments:
         has_bound_id = bool(segment.get("product_id") or segment.get("promotion_id"))
         if segment.get("review_status") == "auto_bound" and has_bound_id:
@@ -11142,6 +12272,8 @@ def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
             bound += 1
         if segment.get("review_status") == "pending_user_confirm" or segment.get("naming_source") == "pending_user_confirm":
             pending += 1
+        if segment.get("evidence_low_confidence"):
+            evidence_named += 1
     return {
         "active_product_changed": bool(queue.get("active_product_changed")),
         "product_bound_segments": bound,
@@ -11153,8 +12285,12 @@ def _live_product_queue_stats(queue: dict[str, Any] | None) -> dict[str, Any]:
         "active_product_confirmed_count": int(queue.get("active_product_confirmed_count") or 0),
         "active_product_rule_review_count": int(queue.get("active_product_rule_review_count") or 0),
         "product_evidence_count": int(queue.get("product_evidence_count") or 0),
+        "evidence_low_confidence_segments": evidence_named,
         "unresolved_reason": str(queue.get("unresolved_reason") or ""),
         "recording_returncode": queue.get("recording_returncode"),
+        # 页面活性（F2）：本函数是任务负载的统一出口，加在这里即可覆盖全部调用点。
+        "liveness": queue.get("liveness") if isinstance(queue.get("liveness"), dict) else {},
+        "liveness_action": str(queue.get("liveness_action") or ""),
     }
 
 
@@ -11197,6 +12333,7 @@ def _write_live_record_user_artifacts(queue: dict[str, Any], summary: dict[str, 
                 "source": segment.get("source") or "",
                 "confidence": segment.get("confidence") or "",
                 "reason": segment.get("reason") or "",
+                "evidence_low_confidence": bool(segment.get("evidence_low_confidence")),
             }
         )
     product_timeline = {
@@ -11312,6 +12449,192 @@ def _remux_live_recording_to_mp4(output: Path, scope: str, name: str) -> Path:
         return output
 
 
+def _live_change_product_fields(change: object) -> tuple[str, str, str]:
+    """从换品事件里取（商品名, product_id, promotion_id）。"""
+    item = change if isinstance(change, dict) else {}
+    product = item.get("product") if isinstance(item.get("product"), dict) else {}
+    title = str(
+        product.get("title") or product.get("name") or product.get("product_name") or item.get("title") or ""
+    ).strip()
+    product_id = str(product.get("product_id") or item.get("product_id") or "")
+    promotion_id = str(product.get("promotion_id") or item.get("promotion_id") or "")
+    return title, product_id, promotion_id
+
+
+def _live_companion_entry(run: dict[str, Any]) -> dict[str, Any]:
+    """把一段运行记成「搭配商品」条目（同场搭配讲解里被折叠进来的那一件）。"""
+    title, product_id, promotion_id = _live_change_product_fields(run.get("change"))
+    return {
+        "key": str(run.get("key") or ""),
+        "title": title[:80],
+        "product_id": product_id,
+        "promotion_id": promotion_id,
+        "seconds": round(max(0.0, float(run.get("end") or 0) - float(run.get("start") or 0)), 3),
+        "change": run.get("change") if isinstance(run.get("change"), dict) else {},
+    }
+
+
+def _live_companion_append(unit: dict[str, Any], entry: dict[str, Any]) -> None:
+    """同一件搭配商品重复出现时累计时长（保持首次出现的顺序）。"""
+    key = str(entry.get("key") or "")
+    if not key or key == str(unit.get("key") or ""):
+        return
+    items = unit.setdefault("_companion_products", [])
+    for item in items:
+        if str(item.get("key") or "") == key:
+            item["seconds"] = round(float(item.get("seconds") or 0) + float(entry.get("seconds") or 0), 3)
+            return
+    items.append(dict(entry))
+
+
+def _live_companion_absorb(unit: dict[str, Any], run: dict[str, Any]) -> None:
+    """把一段被并入的运行（含它自己的搭配清单）记进目标单元的搭配清单。
+
+    被并入的运行若内部已经折叠过子商品，它自身的跨度里包含子商品的时长；
+    这里先扣掉再入账，避免同一段时间被两个条目重复计入。
+    """
+    if not isinstance(run, dict):
+        return
+    nested = [entry for entry in (run.get("_companion_products") or []) if isinstance(entry, dict)]
+    nested_seconds = sum(float(entry.get("seconds") or 0) for entry in nested)
+    if str(run.get("key") or "") != str(unit.get("key") or ""):
+        entry = _live_companion_entry(run)
+        entry["seconds"] = round(max(0.0, float(entry.get("seconds") or 0) - nested_seconds), 3)
+        _live_companion_append(unit, entry)
+    for entry in nested:
+        _live_companion_append(unit, entry)
+
+
+def _live_promote_heaviest_companion(unit: dict[str, Any]) -> None:
+    """主商品取单元内累计时长更长的一件（2026-10-01 定：更信时长，不信卡片证据）。"""
+    items = unit.get("_companion_products") or []
+    if not items:
+        return
+    total = max(0.0, float(unit.get("end") or 0) - float(unit.get("start") or 0))
+    main_seconds = max(0.0, total - sum(float(entry.get("seconds") or 0) for entry in items))
+    heaviest = max(items, key=lambda entry: float(entry.get("seconds") or 0))
+    if float(heaviest.get("seconds") or 0) <= main_seconds + 1e-6:
+        return
+    title, product_id, promotion_id = _live_change_product_fields(unit.get("change"))
+    rest = [entry for entry in items if entry is not heaviest]
+    rest.append({
+        "key": str(unit.get("key") or ""),
+        "title": title[:80],
+        "product_id": product_id,
+        "promotion_id": promotion_id,
+        "seconds": round(main_seconds, 3),
+        "change": unit.get("change") if isinstance(unit.get("change"), dict) else {},
+    })
+    unit["key"] = str(heaviest.get("key") or unit.get("key") or "")
+    if isinstance(heaviest.get("change"), dict) and heaviest.get("change"):
+        unit["change"] = heaviest["change"]
+    unit["_companion_products"] = rest
+
+
+def _collapse_companion_runs(runs: list[dict[str, Any]], min_seconds: float) -> list[dict[str, Any]]:
+    """同场搭配讲解折叠：A → B → A 且 B 短于最短单品时长 → B 并回 A。
+
+    服装类直播间常在同一场里搭配讲解两件（例如毛衣 + 牛仔裤），商品卡片位在
+    两件之间轮播，探针会如实上报 A/B 交替的换品事件。照原样成段会把两件都切碎
+    且各自都不完整。这里只折叠「回头」的短运行：
+
+    - 必须回到同一件商品（A → B → A）；单向换品（A → B → C）不动；
+    - 中间的 B 必须短于最短单品时长，两件各讲很久的正常讲解不会被合并；
+    - 主商品取单元内累计时长更长的一件，其余商品记入搭配清单。
+    """
+    merged: list[dict[str, Any]] = []
+    for run in runs:
+        if merged and merged[-1]["key"] == run["key"]:
+            merged[-1]["end"] = float(run["end"])
+            _live_companion_absorb(merged[-1], run)
+            continue
+        merged.append(dict(run))
+    while len(merged) >= 3:
+        folded = False
+        for index in range(1, len(merged) - 1):
+            first, middle, last = merged[index - 1], merged[index], merged[index + 1]
+            if first["key"] != last["key"] or middle["key"] == first["key"]:
+                continue
+            if float(middle["end"]) - float(middle["start"]) >= min_seconds:
+                continue
+            first["end"] = float(last["end"])
+            _live_companion_absorb(first, middle)
+            _live_companion_absorb(first, last)
+            del merged[index:index + 2]
+            folded = True
+            break
+        if not folded:
+            break
+    for index in range(len(merged) - 1):
+        merged[index]["end"] = float(merged[index + 1]["start"])
+    for unit in merged:
+        _live_promote_heaviest_companion(unit)
+    return merged
+
+
+def _absorb_short_runs(runs: list[dict[str, Any]], min_seconds: float) -> list[dict[str, Any]]:
+    """兜底：仍短于最短单品时长的孤立运行并入相邻更长的运行（不丢时间）。"""
+    kept: list[dict[str, Any]] = []
+    for run in runs:
+        item = dict(run)
+        item["_companion_products"] = [dict(entry) for entry in (run.get("_companion_products") or [])]
+        kept.append(item)
+    while len(kept) > 1:
+        target = None
+        for index, run in enumerate(kept):
+            if float(run["end"]) - float(run["start"]) < min_seconds:
+                target = index
+                break
+        if target is None:
+            break
+        run = kept[target]
+        options: list[tuple[int, float]] = []
+        if target > 0:
+            options.append((target - 1, float(kept[target - 1]["end"]) - float(kept[target - 1]["start"])))
+        if target + 1 < len(kept):
+            options.append((target + 1, float(kept[target + 1]["end"]) - float(kept[target + 1]["start"])))
+        if not options:
+            break
+        neighbour = max(options, key=lambda item: item[1])[0]
+        if neighbour < target:
+            kept[neighbour]["end"] = float(run["end"])
+        else:
+            kept[neighbour]["start"] = float(run["start"])
+        _live_companion_absorb(kept[neighbour], run)
+        del kept[target]
+    for index in range(len(kept) - 1):
+        kept[index]["end"] = float(kept[index + 1]["start"])
+    for unit in kept:
+        _live_promote_heaviest_companion(unit)
+    return kept
+
+
+def _live_paired_products(source: object) -> list[dict[str, Any]]:
+    """段/事件里的搭配商品清单（同场搭配讲解里被折叠进来的商品，按累计时长降序）。"""
+    item = source if isinstance(source, dict) else {}
+    raw = item.get("_companion_products")
+    if not isinstance(raw, list):
+        raw = item.get("paired_products")
+    result: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return result
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()[:80]
+        product_id = str(entry.get("product_id") or "")
+        if not title and not product_id:
+            continue
+        result.append({
+            "title": title,
+            "product_id": product_id,
+            "promotion_id": str(entry.get("promotion_id") or ""),
+            "seconds": round(float(entry.get("seconds") or 0), 3),
+        })
+    result.sort(key=lambda row: -float(row.get("seconds") or 0))
+    return result
+
+
 def _stable_active_product_changes(changes: list[dict[str, Any]], duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
     for change in sorted(changes, key=lambda item: float(item.get("elapsed") or 0)):
@@ -11336,8 +12659,12 @@ def _stable_active_product_changes(changes: list[dict[str, Any]], duration: floa
 
     # A product card can flicker or rotate faster than the anchor is actually
     # explaining products. Treat very short runs as boundary noise.
-    stable_seconds = max(30.0, float(settings.get("switch_confirm_seconds") or 0))
-    min_export_seconds = 10.0
+    stable_seconds = max(8.0, float(settings.get("switch_confirm_seconds") or 0))
+    # 2026-10-01：房间/全局设置的「最短单品时长」正式接入成段过滤；8 秒只作绝对下限兜底。
+    min_export_seconds = max(8.0, float(settings.get("min_seconds") or 0))
+    # 2026-10-01 搭配讲解：先折叠「A→B→A」的短回头（同场搭配两件），
+    # 再把仍短于最短单品时长的孤立运行并入相邻段（不丢时间）。
+    runs = _absorb_short_runs(_collapse_companion_runs(runs, min_export_seconds), min_export_seconds)
     stable_runs: list[dict[str, Any]] = []
     index = 0
     while index < len(runs):
@@ -11348,26 +12675,33 @@ def _stable_active_product_changes(changes: list[dict[str, Any]], duration: floa
         if run_duration < stable_seconds:
             if prev_run and next_run and prev_run["key"] == next_run["key"]:
                 prev_run["end"] = float(next_run["end"])
+                _live_companion_absorb(prev_run, run)
+                _live_companion_absorb(prev_run, next_run)
                 index += 2
                 continue
             index += 1
             continue
         if stable_runs and stable_runs[-1]["key"] == run["key"]:
             stable_runs[-1]["end"] = float(run["end"])
+            _live_companion_absorb(stable_runs[-1], run)
         else:
             stable_runs.append(run)
         index += 1
 
-    return [
-        run["change"]
-        | {
+    # 整段母带只有一个商品时没有可并的邻居：只要过 8 秒绝对下限就保留，不能什么都不给。
+    floor_seconds = min_export_seconds if len(stable_runs) > 1 else 8.0
+    result: list[dict[str, Any]] = []
+    for run in stable_runs:
+        if float(run["end"]) - float(run["start"]) < floor_seconds:
+            continue
+        item = run["change"] | {
             "_stable_start": round(float(run["start"]), 3),
             "_stable_end": round(float(run["end"]), 3),
             "_stable_duration": round(max(0.0, float(run["end"]) - float(run["start"])), 3),
         }
-        for run in stable_runs
-        if float(run["end"]) - float(run["start"]) >= min_export_seconds
-    ]
+        item["_companion_products"] = [dict(entry) for entry in (run.get("_companion_products") or [])]
+        result.append(item)
+    return result
 
 
 def _write_live_product_split_queue(output: Path, room_dir: Path, payload: LiveRecPayload) -> dict[str, Any]:
@@ -11512,8 +12846,546 @@ def _normalize_live_stream_quality(value: Any, fallback: str = "") -> str:
     return text
 
 
-def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, settings: dict[str, Any]) -> list[dict[str, Any]]:
+def _probe_evidence_path_for_timeline(timeline_path: Path) -> Path:
+    name = str(timeline_path)
+    if name.endswith(".timeline.jsonl"):
+        return Path(name[: -len(".timeline.jsonl")] + ".product_evidence_log.jsonl")
+    return Path(name + ".product_evidence_log.jsonl")
+
+
+def _probe_evidence_best_product(evidence_path: Path | None) -> dict[str, Any]:
+    """把探针已经抓到、却被判成弱信号的商品证据读回来。
+
+    探针只在「强信号」时才写 active_product_change；弱信号（例如画面商品卡只匹配到
+    标题、置信度 62）只会落进 product_evidence_log.jsonl，而服务端过去从不读它。
+    这里取出现次数最多的那个商品名/ID，供「按录制时长兜底」的分段使用（低置信，
+    仍需人工复核），避免整场退化成「待确认」。
+    """
+    raw_path = str(evidence_path or "").strip()
+    if not raw_path:
+        return {}
+    path = Path(raw_path)
+    if not path.exists():
+        return {}
+    buckets: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                title = str(row.get("product_name") or "").strip()
+                product_id = _live_product_id_token(row.get("product_id"))
+                promotion_id = _live_product_id_token(row.get("promotion_id"))
+                key = product_id or promotion_id or title
+                if not key:
+                    continue
+                bucket = buckets.get(key)
+                if bucket is None:
+                    bucket = {"title": title, "product_id": product_id, "promotion_id": promotion_id, "count": 0}
+                    buckets[key] = bucket
+                    order.append(key)
+                bucket["count"] = int(bucket["count"]) + 1
+                if title and not bucket["title"]:
+                    bucket["title"] = title
+                if product_id and not bucket["product_id"]:
+                    bucket["product_id"] = product_id
+                if promotion_id and not bucket["promotion_id"]:
+                    bucket["promotion_id"] = promotion_id
+    except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
+        return {}
+    if not buckets:
+        return {}
+    seen_order = {key: index for index, key in enumerate(order)}
+    best_key = sorted(order, key=lambda key: (-int(buckets[key]["count"]), seen_order[key]))[0]
+    best = dict(buckets[best_key])
+    best["product_count"] = len(buckets)
+    return best
+
+
+# ===== B 档：换品边界「语音回溯对齐」(2026-10-02) =====
+# 主播可能先讲品、后上车（商品卡片才出现），而成段只认「换品事件」→ 这类内容会归到上一件商品。
+# 做法：对每个换品时刻回溯转写前 N 秒音频，连同前后两件商品名交 AI 定位「从哪一句开始讲后一件」，
+# 把边界（上段 end / 下段 start）拉过去；头尾缓冲交给既有的「首尾相接」clamp 重算，不另写缓冲代码。
+# 只作用于段结束后的收尾阶段（live-finalize 后台流水线），录制中场次不受影响，探针不动。
+# 成本：本地 ASR 常驻 worker（模型热）单窗口约 7 秒 + 1 次 AI；每份母带一次模型加载（约 45 秒）。
+_LIVE_BOUNDARY_LOOKBACK_SEC = 120.0      # 向前回溯上限（秒）
+_LIVE_BOUNDARY_LEAD_SEC = 5.0            # 窗口向后多取（秒），覆盖卡片出现后的第一句
+_LIVE_BOUNDARY_MIN_SHIFT_SEC = 5.0       # 改动量小于此值视为无意义，不动
+_LIVE_BOUNDARY_MIN_WINDOW_SEC = 20.0     # 可用窗口短于此值直接跳过
+_LIVE_BOUNDARY_MAX_PER_RECORDING = 8     # 每份母带最多修正的边界数（成本护栏）
+_LIVE_BOUNDARY_CACHE_DIR = "live_boundary_cache"
+
+
+def _live_boundary_parse_srt_rows(text: str) -> list[dict[str, Any]]:
+    # 把窗口 SRT 解析成 [{start, text}]；start 是相对窗口起点的秒数。
+    rows: list[dict[str, Any]] = []
+    for block in str(text or "").replace("\r\n", "\n").split("\n\n"):
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if len(lines) < 2:
+            continue
+        match = re.search(r"(\d{2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->", lines[1])
+        if not match:
+            continue
+        hours, minutes, seconds, millis = (int(match.group(i)) for i in range(1, 5))
+        body = " ".join(lines[2:]).strip()
+        if not body:
+            continue
+        rows.append({
+            "start": round(hours * 3600 + minutes * 60 + seconds + millis / 1000.0, 3),
+            "text": body,
+        })
+    return rows
+
+
+def _live_boundary_window_rows(
+    video_path: Path,
+    start: float,
+    end: float,
+    session: Any,
+    engine: str,
+    cache_scope: str,
+    wav_stem: str,
+    log_fn: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    # 抽窗口音频 + 本地转写；结果按「房间+母带」缓存进用户数据目录，重跑不重复转写。
+    def _log(message: str) -> None:
+        if log_fn:
+            try:
+                log_fn(message)
+            except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
+
+    cache_dir: Path | None = None
+    srt_path: Path | None = None
+    try:
+        cache_dir = _safe_user_child(_LIVE_BOUNDARY_CACHE_DIR, cache_scope)
+    except Exception:
+        cache_dir = None
+    if cache_dir is not None:
+        srt_path = cache_dir / ("win_%d_%d.srt" % (int(round(start)), int(round(end))))
+        try:
+            if srt_path.is_file() and srt_path.stat().st_size > 32:
+                return _live_boundary_parse_srt_rows(srt_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
+    work_dir = Path(tempfile.gettempdir()) / "liveclipper_boundary"
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return []
+    wav_path = work_dir / ("%s.wav" % wav_stem)
+    cmd = [
+        _ffmpeg_cmd(),
+        "-y",
+        "-ss",
+        "%.3f" % max(0.0, float(start)),
+        "-t",
+        "%.3f" % max(0.5, float(end) - float(start)),
+        "-i",
+        str(video_path),
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(wav_path),
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        _log("换品边界回溯：窗口音频抽取失败（%s）。" % exc)
+        return []
+    try:
+        if not wav_path.is_file() or wav_path.stat().st_size < 2000:
+            return []
+    except Exception:
+        return []
+    tmp_srt = work_dir / ("%s_win.srt" % wav_stem)
+    ok = False
+    try:
+        ok = bool(session.transcribe(str(wav_path), str(tmp_srt), log_fn=log_fn, engine=engine))
+    except Exception as exc:
+        _log("换品边界回溯：窗口转写失败（%s）。" % exc)
+        return []
+    if not ok:
+        return []
+    try:
+        text = tmp_srt.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    if cache_dir is not None and srt_path is not None:
+        try:
+            srt_path.parent.mkdir(parents=True, exist_ok=True)
+            srt_path.write_text(text, encoding="utf-8")
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
+    return _live_boundary_parse_srt_rows(text)
+
+
+_LIVE_BOUNDARY_PROMPT = """你在帮直播切片工具定位「换品边界」。
+
+前一件商品：@PREV@
+后一件商品：@NEXT@
+
+下面是主播在换品前后的连续语音转写，行首是行号，方括号里是相对秒数（从窗口起点算）：
+@LINES@
+
+补充：系统识别到「后一件商品」的商品卡片出现，时刻约在第 @CARDLINE@ 行（@CARDSEC@ 秒）。
+
+问题：主播从第几行开始，讲的是「后一件商品」？
+注意：主播可能先讲品、后上车，真正的切换点有可能明显早于卡片出现时刻；请按语音内容判断，不要直接套用卡片时刻。
+只在能明确判断时给 high；判断不了就给 low。
+
+只输出 JSON，不要任何解释文字，格式如：{"line": 行号整数, "confidence": "high", "reason": "20字以内的依据"}
+判断不了时输出：{"line": null, "confidence": "low", "reason": "原因"}
+"""
+
+
+def _live_boundary_ai_judge(
+    prev_title: str,
+    next_title: str,
+    rows: list[dict[str, Any]],
+    card_offset: float,
+    log_fn: Callable[[str], None] | None = None,
+) -> tuple[int, str, str]:
+    # 问 AI：主播从第几行开始讲的是后一件商品。返回 (行号从 1 开始 | 0, 置信度, 原因)。
+    settings = _load_settings() or {}
+    api_key = str(settings.get("api_key") or "").strip()
+    base_url = str(settings.get("base_url") or "").strip()
+    model = str(settings.get("model") or "").strip()
+    if not api_key or not base_url or not model:
+        return 0, "", "未配置 AI"
+    if not rows:
+        return 0, "", "窗口无转写文本"
+    lines: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        lines.append("%d. [%.1fs] %s" % (index, float(row.get("start") or 0.0), str(row.get("text") or "")[:80]))
+    card_line = len(rows)
+    for index, row in enumerate(rows, start=1):
+        if float(row.get("start") or 0.0) >= max(0.0, float(card_offset)):
+            card_line = index
+            break
+    prompt = (
+        _LIVE_BOUNDARY_PROMPT.replace("@PREV@", str(prev_title or "（未知）"))
+        .replace("@NEXT@", str(next_title or "（未知）"))
+        .replace("@LINES@", "\n".join(lines))
+        .replace("@CARDLINE@", str(card_line))
+        .replace("@CARDSEC@", "%.1f" % max(0.0, float(card_offset)))
+    )
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 512,
+        "stream": False,
+    }
+    if "deepseek" in model.lower() and "seed" not in model.lower():
+        body["thinking"] = {"type": "disabled"}
+    raw = ""
+    try:
+        from ai_model_config import ai_chat_completions_url
+
+        request = urllib.request.Request(
+            ai_chat_completions_url(base_url),
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
+            method="POST",
+        )
+        context = ssl.create_default_context()
+        with urllib.request.urlopen(request, timeout=60, context=context) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        choices = result.get("choices") if isinstance(result, dict) else None
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                raw = str(message.get("content") or "")
+    except Exception as exc:
+        return 0, "", "AI 调用失败：%s" % exc
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    try:
+        data = json.loads(match.group(0) if match else cleaned)
+    except Exception:
+        return 0, "", "AI 返回无法解析"
+    if not isinstance(data, dict):
+        return 0, "", "AI 返回格式异常"
+    confidence = str(data.get("confidence") or "").strip().lower()
+    reason = str(data.get("reason") or "").strip()[:80]
+    try:
+        line_no = int(data.get("line"))
+    except (TypeError, ValueError):
+        return 0, confidence, reason or "AI 未定位到起点"
+    if line_no < 1 or line_no > len(rows):
+        return 0, confidence, reason or "AI 行号越界"
+    return line_no, confidence, reason
+
+
+def _refine_live_product_boundaries(
+    segments: list[dict[str, Any]],
+    video_path: Path,
+    settings: dict[str, Any],
+    room_name: str = "",
+    log_fn: Callable[[str], None] | None = None,
+) -> int:
+    # 对每个换品边界做一次「语音回溯对齐」。返回实际修正的边界数。
+    def _log(message: str) -> None:
+        if log_fn:
+            try:
+                log_fn(message)
+            except Exception:
+                _LOG.warning("unexpected error", exc_info=True)
+
+    if not isinstance(segments, list) or len(segments) < 2:
+        return 0
+    try:
+        min_seconds = max(8.0, float(settings.get("min_seconds") or 0.0))
+    except (TypeError, ValueError):
+        min_seconds = 180.0
+    # 只认「换品边界」：下一段是本件商品的第一块，且与上一段不是同一件（按时长切的内部边界不碰）。
+    pairs: list[tuple[int, float]] = []
+    for index in range(len(segments) - 1):
+        current = segments[index]
+        following = segments[index + 1]
+        try:
+            start_next = float(following.get("start") or 0.0)
+            active_next = float(following.get("active_product_start") or 0.0)
+            active_current = float(current.get("active_product_start") or 0.0)
+            end_current = float(current.get("end") or 0.0)
+            end_active_current = float(current.get("active_product_end") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(start_next - active_next) > 0.01:
+            continue
+        if abs(active_next - active_current) < 0.01:
+            continue
+        if abs(end_current - end_active_current) > 1.5:
+            continue
+        pairs.append((index, start_next))
+    if not pairs:
+        return 0
+    try:
+        import stt
+
+        engine = stt.resolve_local_asr_engine_name("")
+        session: Any = stt.LocalASRWorkerSession()
+    except Exception as exc:
+        _log("换品边界回溯：本地识别不可用，已跳过（%s）。" % exc)
+        return 0
+    digest = hashlib.md5(("%s|%s" % (room_name, video_path.name)).encode("utf-8")).hexdigest()[:10]
+    cache_scope = "%s_%s" % (_safe_stem(room_name or "live"), digest)
+    wav_stem = _safe_stem(room_name or "live")
+    changed = 0
+    try:
+        for index, boundary in pairs:
+            if changed >= _LIVE_BOUNDARY_MAX_PER_RECORDING:
+                _log("换品边界回溯：已达单场上限 %d 次，剩余换品点不再回溯。" % _LIVE_BOUNDARY_MAX_PER_RECORDING)
+                break
+            current = segments[index]
+            following = segments[index + 1]
+            window_start = max(0.0, float(boundary) - _LIVE_BOUNDARY_LOOKBACK_SEC)
+            window_end = float(boundary) + _LIVE_BOUNDARY_LEAD_SEC
+            if float(boundary) - window_start < _LIVE_BOUNDARY_MIN_WINDOW_SEC:
+                continue
+            rows = _live_boundary_window_rows(
+                video_path,
+                window_start,
+                window_end,
+                session,
+                engine,
+                cache_scope,
+                wav_stem,
+                log_fn=log_fn,
+            )
+            if not rows:
+                _log("换品边界回溯：%.1fs 处窗口转写为空，跳过。" % float(boundary))
+                continue
+            line_no, confidence, reason = _live_boundary_ai_judge(
+                str(current.get("title") or ""),
+                str(following.get("title") or ""),
+                rows,
+                float(boundary) - window_start,
+                log_fn=log_fn,
+            )
+            if not line_no or confidence != "high":
+                _log("换品边界回溯：%.1fs 处未回溯（%s）。" % (float(boundary), reason or "AI 未定位"))
+                continue
+            candidate = window_start + float(rows[line_no - 1].get("start") or 0.0)
+            new_start = max(candidate, float(current.get("start") or 0.0) + min_seconds)
+            shift = float(boundary) - new_start
+            if shift < _LIVE_BOUNDARY_MIN_SHIFT_SEC:
+                _log(
+                    "换品边界回溯：%.1fs 处提前量仅 %.1fs（<%.0fs），保持不动。"
+                    % (float(boundary), max(0.0, shift), _LIVE_BOUNDARY_MIN_SHIFT_SEC)
+                )
+                continue
+            current["end"] = round(new_start, 3)
+            current["duration"] = round(max(0.0, new_start - float(current.get("start") or 0.0)), 3)
+            current["cut_end"] = round(min(float(current.get("cut_end") or new_start), new_start), 3)
+            following["start"] = round(new_start, 3)
+            following["duration"] = round(max(0.0, float(following.get("end") or new_start) - new_start), 3)
+            following["cut_start"] = round(new_start, 3)
+            following["boundary_adjust"] = {
+                "from": round(float(boundary), 3),
+                "to": round(new_start, 3),
+                "delta": round(new_start - float(boundary), 3),
+                "confidence": "high",
+                "reason": reason[:80],
+                "engine": engine,
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            changed += 1
+            _log(
+                "换品边界回溯：%s → %s 从 %.1fs 提前到 %.1fs（%+.1fs，%s）。"
+                % (
+                    str(current.get("title") or "上一件")[:24],
+                    str(following.get("title") or "下一件")[:24],
+                    float(boundary),
+                    new_start,
+                    new_start - float(boundary),
+                    reason or "high",
+                )
+            )
+        if pairs:
+            _log("换品边界回溯：检查 %d 个换品点，修正 %d 个（引擎 %s）。" % (len(pairs), changed, engine))
+    except Exception:
+        _LOG.warning("换品边界回溯异常", exc_info=True)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
+    return changed
+
+
+def _manual_marker_cut_segments(
+    manual_items: list[dict[str, Any]],
+    auto_changes: list[dict[str, Any]],
+    duration: float,
+    settings: dict[str, Any],
+    evidence_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """按人工「换品标记」切段（权威边界）。
+
+    为什么单独走一条路：``_stable_active_product_changes`` 会把短于「最短单品时长」的
+    片段吸收进相邻段（还有「A→B→A 短回头折叠」），那是给**自动检测去噪**用的。
+    人工按下的边界是刻意的，被当成噪声吞掉就等于按钮没用。所以这里直接按切点分段，
+    并把自动检测到的换品时刻也并进来（两种来源互补）。
+
+    商品名：优先用该切点自己带的商品；没有就用探针证据里最可信的商品；再没有就
+    「单品候选_NN」—— 对「讲完品才弹小黄车」的直播间，标记时往往确实还不知道商品名，
+    **切点照切，名字后补**。
+    """
+    head_seconds = float(settings["head_seconds"])
+    tail_seconds = float(settings["tail_seconds"])
+    dedupe_seconds = 3.0
+
+    marks: list[tuple[float, dict[str, Any]]] = []
+    for item in manual_items:
+        try:
+            at = float(item.get("elapsed") or 0)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < at < float(duration):
+            marks.append((at, item))
+    for change in auto_changes:
+        try:
+            at = float(change.get("elapsed") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (0.0 < at < float(duration)):
+            continue
+        # 人工切点附近已经有一个边界了，就别再叠一个。
+        if any(abs(at - mark_at) <= dedupe_seconds for mark_at, _ in marks):
+            continue
+        marks.append((at, change))
+    if not marks:
+        return []
+    marks.sort(key=lambda pair: pair[0])
+
+    best_evidence = _probe_evidence_best_product(evidence_path)
+    edges = [0.0] + [at for at, _ in marks] + [float(duration)]
+    segments: list[dict[str, Any]] = []
+    for index in range(len(edges) - 1):
+        start = float(edges[index])
+        end = float(edges[index + 1])
+        span = max(0.0, end - start)
+        if span < 1:
+            continue
+        origin: dict[str, Any] = marks[index - 1][1] if index > 0 else {}
+        from_manual = str(origin.get("type") or "") == "manual_observed_product_switch"
+        product = origin.get("product") if isinstance(origin.get("product"), dict) else {}
+        product_title = str(product.get("title") or "").strip()
+        bound_id = str(product.get("product_id") or product.get("promotion_id") or "").strip()
+        if not (product_title or bound_id) and best_evidence:
+            product_title = str(best_evidence.get("title") or "").strip()
+        title = (product_title or bound_id or f"单品候选_{len(segments) + 1:02d}").strip()
+        has_product = bool(product_title or bound_id)
+        # review_status 只沿用既有的两个值：下游多处用 `status != "auto_bound"` 判「待确认」
+        # （见 _live_product_schedule_rows 的 bound_count/pending_count 与前端 2495 行），
+        # 自造一个新值会把已经绑定商品的人工片段误算成待确认。
+        # 「边界来自人工」这件事由 source 表达 —— source 没有任何相等判断消费它。
+        if index == 0:
+            source_label = "segment_head"
+        elif from_manual:
+            source_label = "manual_marker"
+        else:
+            source_label = "active_product_change"
+        head_use = min(head_seconds, max(2.0, span * 0.15))
+        tail_use = min(tail_seconds, max(3.0, span * 0.20))
+        segments.append(
+            {
+                "index": len(segments) + 1,
+                "source": source_label,
+                "confidence": origin.get("confidence") or "",
+                "reason": origin.get("reason") or ("manual_switch_marker" if from_manual else ""),
+                "review_status": "auto_bound" if has_product else "pending_user_confirm",
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "cut_start": round(max(0.0, start - head_use), 3),
+                "cut_end": round(min(float(duration), end + tail_use), 3),
+                "duration": round(span, 3),
+                "title": title[:80],
+                "product_id": str(product.get("product_id") or ""),
+                "promotion_id": str(product.get("promotion_id") or ""),
+                "detail_url": str(product.get("detail_url") or ""),
+                "evidence_source": source_label,
+                "boundary_origin": "manual_marker" if from_manual else ("segment_head" if index == 0 else "active_product_change"),
+                "manual_note": str(origin.get("note") or "") if from_manual else "",
+                "paired_products": _live_paired_products(origin) if origin else [],
+                "active_product_start": round(start, 3),
+                "active_product_end": round(end, 3),
+                "chunked_by_duration": False,
+            }
+        )
+    return segments
+
+
+def _active_probe_segments_from_timeline(
+    timeline_path: Path,
+    duration: float,
+    settings: dict[str, Any],
+    evidence_path: Path | None = None,
+    boundary_refiner: Callable[[list[dict[str, Any]]], Any] | None = None,
+) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
+    manual_items: list[dict[str, Any]] = []
     if timeline_path.exists():
         with timeline_path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -11523,13 +13395,51 @@ def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, s
                     continue
                 if item.get("type") == "active_product_change":
                     changes.append(item)
+                elif item.get("type") == "manual_observed_product_switch":
+                    manual_items.append(item)
+
+    # 人工「换品标记」是权威边界，优先按它切段。
+    # 背景：切段原先只认 active_product_change，而标记只进 summary/report —— 于是
+    # 「换品标记」按钮按了等于没按（历史 374 份 summary 里 manual_switch_marker_count
+    # 全是 0）。对「讲完品才弹小黄车」的直播间，人工标记是唯一可靠的边界来源。
+    if manual_items:
+        manual_segments = _manual_marker_cut_segments(
+            manual_items, changes, duration, settings, evidence_path,
+        )
+        if manual_segments:
+            if boundary_refiner is not None:
+                try:
+                    boundary_refiner(manual_segments)
+                except Exception:
+                    _LOG.warning("换品边界回溯失败", exc_info=True)
+            for _idx, _segment in enumerate(manual_segments):
+                _prev_end = float(manual_segments[_idx - 1]["end"]) if _idx > 0 else 0.0
+                _next_start = (
+                    float(manual_segments[_idx + 1]["start"])
+                    if _idx + 1 < len(manual_segments) else float(duration)
+                )
+                _segment["cut_start"] = round(max(_prev_end, min(float(_segment["cut_start"]), float(_segment["start"]))), 3)
+                _segment["cut_end"] = round(min(_next_start, max(float(_segment["cut_end"]), float(_segment["end"]))), 3)
+            return manual_segments
+
     if not changes:
         segments = _fallback_live_product_segments(duration, settings)
+        evidence = _probe_evidence_best_product(evidence_path)
         for segment in segments:
             segment["source"] = "pending_user_confirm"
             segment["confidence"] = "unresolved"
             segment["reason"] = "active_product_unresolved"
             segment["review_status"] = "pending_user_confirm"
+            if evidence:
+                # 名字来自探针弱信号证据（product_evidence_log.jsonl）：定位不到换品时刻，
+                # 但名字不该丢。低置信标记 + 继续标记待复核。
+                evidence_title = str(evidence.get("title") or "").strip()
+                segment["title"] = evidence_title[:80] or f"单品候选_{segment['index']:02d}"
+                segment["product_id"] = str(evidence.get("product_id") or "")
+                segment["promotion_id"] = str(evidence.get("promotion_id") or "")
+                segment["evidence_low_confidence"] = True
+                segment["evidence_title"] = evidence_title
+                segment["evidence_product_count"] = int(evidence.get("product_count") or 0)
         return segments
 
     head_seconds = float(settings["head_seconds"])
@@ -11566,6 +13476,9 @@ def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, s
                 chunk_end = end
             if chunk_end - chunk_start < 1:
                 break
+            segment_span = max(0.0, chunk_end - chunk_start)
+            head_use = min(head_seconds, max(2.0, segment_span * 0.15))
+            tail_use = min(tail_seconds, max(3.0, segment_span * 0.20))
             segments.append(
                 {
                     "index": len(segments) + 1,
@@ -11575,24 +13488,566 @@ def _active_probe_segments_from_timeline(timeline_path: Path, duration: float, s
                     "review_status": "auto_bound",
                     "start": round(chunk_start, 3),
                     "end": round(chunk_end, 3),
-                    "cut_start": round(max(0.0, chunk_start - head_seconds), 3),
-                    "cut_end": round(min(duration, chunk_end + tail_seconds), 3),
+                    "cut_start": round(max(0.0, chunk_start - head_use), 3),
+                    "cut_end": round(min(duration, chunk_end + tail_use), 3),
                     "duration": round(max(0.0, chunk_end - chunk_start), 3),
                     "title": title[:80],
                     "product_id": str(product.get("product_id") or ""),
                     "promotion_id": str(product.get("promotion_id") or ""),
                     "detail_url": str(product.get("detail_url") or ""),
                     "evidence_source": change.get("source") or "",
+                    "paired_products": _live_paired_products(change),
                     "active_product_start": round(start, 3),
                     "active_product_end": round(end, 3),
                     "chunked_by_duration": end - start > segment_seconds + 0.5,
                 }
             )
             chunk_start = chunk_end
+    if boundary_refiner is not None:
+        try:
+            boundary_refiner(segments)
+        except Exception:
+            _LOG.warning("换品边界回溯失败", exc_info=True)
+    # 商品分段首尾相接：头尾缓冲不得越过相邻商品的区间，否则本文件会掺进邻段商品。
+    for _idx, _segment in enumerate(segments):
+        _prev_end = float(segments[_idx - 1]["end"]) if _idx > 0 else 0.0
+        _next_start = float(segments[_idx + 1]["start"]) if _idx + 1 < len(segments) else float(duration)
+        _segment["cut_start"] = round(max(_prev_end, min(float(_segment["cut_start"]), float(_segment["start"]))), 3)
+        _segment["cut_end"] = round(min(_next_start, max(float(_segment["cut_end"]), float(_segment["end"]))), 3)
     return segments
 
 
-def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload: LiveRecPayload) -> dict[str, Any]:
+# ===== 单品识别工作台 + 商品讲解时间表（2026-09-26）=====
+# 数据来源：录制段结束后的诊断归档（%APPDATA%\LiveClipper\live_rec_diagnostics\<房间>\<段戳>\*.split_queue.json）。
+# 直播目录里的中间文件会被清理，归档不会被清理，所以这里只读归档，不碰录制流水线。
+_LIVE_PRODUCT_SESSION_GAP_SEC = 1200.0  # 相邻段间隔超过 20 分钟算新的一场
+_LIVE_PRODUCT_EXACT_NAMING = {"product_name_timestamp", "evidence_low_confidence"}
+_LIVE_PRODUCT_PRICE_RE = re.compile(r"[¥￥]\s*([0-9]+(?:\.[0-9]+)?)")
+
+
+def _live_product_diagnostics_room(room_name: str) -> Path | None:
+    room = _safe_stem(str(room_name or ""))
+    if not room:
+        return None
+    try:
+        root = _safe_user_child("live_rec_diagnostics", room)
+    except Exception:
+        return None
+    return root if root.is_dir() else None
+
+
+def _live_product_url_key(url: Any) -> str:
+    """直播间链接规范化：抖音房间号优先，其次去掉协议/尾斜杠的小写全串。"""
+    text = _extract_url_from_text(url).strip().lower()
+    if not text:
+        return ""
+    match = re.search(r"(?:live|v)\.douyin\.com/(\d+)", text)
+    if match:
+        return "douyin:" + match.group(1)
+    return text.rstrip("/")
+
+
+def _live_product_room_url_keys(room_name: str) -> set[str]:
+    """该直播间名当前对应的全部链接键（来自房间列表），用于认领改名前的归档目录。"""
+    wanted = str(room_name or "").strip()
+    if not wanted:
+        return set()
+    keys: set[str] = set()
+    try:
+        rooms = _load_live_rooms_cache()
+    except Exception:
+        rooms = []
+    for room in rooms or []:
+        if str(room.get("name") or "").strip() != wanted:
+            continue
+        key = _live_product_url_key(room.get("url"))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _live_product_archive_dir_url(sub: Path) -> str:
+    """归档目录里记的直播间链接（取该目录下最早一个 split_queue.json 的 room_url）。"""
+    try:
+        files = sorted(sub.glob("*/*.split_queue.json"))
+    except Exception:
+        return ""
+    for queue_file in files:
+        try:
+            data = json.loads(queue_file.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            url = str(data.get("room_url") or "").strip()
+            if url:
+                return url
+    return ""
+
+
+def _live_product_archive_dirs(room_name: str) -> list[Path]:
+    """该直播间的归档目录：名字相同，或归档里记的链接与该房间链接一致（认领改名前的旧目录）。"""
+    try:
+        root = _safe_user_child("live_rec_diagnostics")
+    except Exception:
+        return []
+    if not root.is_dir():
+        return []
+    room = _safe_stem(str(room_name or ""))
+    if not room:
+        return []
+    urls = _live_product_room_url_keys(room_name)
+    dirs: list[Path] = []
+    for sub in sorted(root.iterdir()):
+        if not sub.is_dir():
+            continue
+        if sub.name == room:
+            dirs.append(sub)
+            continue
+        if not urls:
+            continue
+        key = _live_product_url_key(_live_product_archive_dir_url(sub))
+        if key and key in urls:
+            dirs.append(sub)
+    return dirs
+
+
+def _live_product_display_room_name(dir_name: str, dir_url: str = "") -> str:
+    """归档目录对应的「用户看到的房间名」：能按链接匹配到房间就用房间名，否则用目录名。"""
+    fallback = str(dir_name or "").strip()
+    key = _live_product_url_key(dir_url)
+    if not key:
+        return fallback
+    try:
+        rooms = _load_live_rooms_cache()
+    except Exception:
+        rooms = []
+    for room in rooms or []:
+        if _live_product_url_key(room.get("url")) == key:
+            name = str(room.get("name") or "").strip()
+            if name:
+                return name
+    return fallback
+
+
+def _live_product_stamp_epoch(stamp: str) -> float:
+    try:
+        return datetime.strptime(str(stamp), "%Y%m%d_%H%M%S").timestamp()
+    except Exception:
+        return 0.0
+
+
+def _live_product_hms(seconds: float) -> str:
+    total = max(0, int(round(float(seconds or 0))))
+    return "%d:%02d:%02d" % (total // 3600, (total % 3600) // 60, total % 60)
+
+
+def _live_product_price_hint(raw: str) -> str:
+    match = _LIVE_PRODUCT_PRICE_RE.search(str(raw or ""))
+    return match.group(1) if match else ""
+
+
+def _live_product_archive_records(room_name: str) -> list[dict[str, Any]]:
+    """读该房间诊断归档里全部段记录（每段一个子目录），按段戳升序。纯读。
+
+    目录 = 名字相同的目录 ∪ 归档里链接与本房间一致的目录（认领改名前的旧目录）。"""
+    dirs = _live_product_archive_dirs(room_name)
+    if not dirs:
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for root in dirs:
+        for sub in sorted(root.iterdir()):
+            if not sub.is_dir():
+                continue
+            for queue_file in sorted(sub.glob("*.split_queue.json")):
+                try:
+                    data = json.loads(queue_file.read_text(encoding="utf-8-sig"))
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                segments = [s for s in (data.get("segments") or []) if isinstance(s, dict)]
+                if not segments:
+                    continue
+                stamp = _live_product_recording_stamp(str(data.get("recording") or queue_file.stem))
+                key = (stamp, str(sub))
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append({
+                    "stamp": stamp,
+                    "archive_dir": str(sub),
+                    "recording": str(data.get("recording") or ""),
+                    "clips_dir": str(data.get("clips_dir") or ""),
+                    "room_name": str(data.get("room_name") or room_name),
+                    "naming_mode": str(data.get("naming_mode") or ""),
+                    "recording_duration": float(data.get("recording_duration") or 0),
+                    "segments": segments,
+                    "queue_path": str(queue_file),
+                })
+    records.sort(key=lambda item: item.get("stamp") or "")
+    return records
+
+
+def _live_product_evidence_texts(record: dict[str, Any]) -> list[str]:
+    """该段证据日志里的原文（用来自取页面价格）。"""
+    texts: list[str] = []
+    try:
+        sub = Path(str(record.get("archive_dir") or ""))
+        for hit in sorted(sub.glob("*.product_evidence_log.jsonl")):
+            for line in hit.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict):
+                    raw = str(item.get("raw_excerpt") or "")
+                    pid = str(item.get("product_id") or "")
+                    if raw:
+                        texts.append(pid + "\u0000" + raw)
+    except Exception:
+        return texts
+    return texts
+
+
+def _live_product_price_index(records: list[dict[str, Any]]) -> dict[str, str]:
+    index: dict[str, str] = {}
+    for record in records:
+        for blob in _live_product_evidence_texts(record):
+            pid, _, raw = blob.partition("\u0000")
+            hint = _live_product_price_hint(raw)
+            if hint and pid and pid not in index:
+                index[pid] = hint
+    return index
+
+
+def _live_product_sessions(records: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    sessions: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous_end = None
+    for record in records:
+        start = _live_product_stamp_epoch(record.get("stamp") or "")
+        if previous_end is not None and start and start - previous_end > _LIVE_PRODUCT_SESSION_GAP_SEC:
+            sessions.append(current)
+            current = []
+        current.append(record)
+        previous_end = (start + float(record.get("recording_duration") or 0)) if start else previous_end
+    if current:
+        sessions.append(current)
+    return sessions
+
+
+def _live_product_segment_output_path(
+    record: dict[str, Any], segment: dict[str, Any], occurrence: int = 0
+) -> Path | None:
+    """复刻导出时的命名规则，定位该段对应的成品文件。
+
+    occurrence: 同一个文件名前缀在本段录制里是第几次出现（1 起）。同一商品被切成
+    <名称>.mp4 / <名称>_1.mp4 / <名称>_2.mp4 … 时，让第 k 行对应第 k 个文件，
+    避免多行全指向同一个文件。
+    """
+    clips_dir = Path(str(record.get("clips_dir") or ""))
+    if not str(clips_dir):
+        return None
+    naming_source = str(segment.get("naming_source") or "")
+    exact = naming_source in _LIVE_PRODUCT_EXACT_NAMING or (
+        str(segment.get("naming_mode") or record.get("naming_mode") or "") == "product_id"
+        and naming_source in {"auto_product_id", "auto_promotion_id"}
+    )
+    try:
+        from schedule_splitter import _safe_output_stem
+    except Exception:
+        return None
+    stem = _clean_forbidden_title_text(
+        str(segment.get("filename_stem") or segment.get("title") or ""), fallback="单品候选"
+    )
+    if exact:
+        short = _safe_output_stem(stem, max_chars=140)
+        target = clips_dir / (short + ".mp4")
+        # occurrence<=1：本段录制里该文件名前缀第一次出现（商品名命名下每段名唯一，
+        # 永远走这里）→ 直取，保持原行为。出现第 2、3 次说明同一商品被切成多个同名
+        # 文件（商品ID命名），交给下面的 occurrence 排序，避免所有行都指向第一个文件。
+        if occurrence <= 1 and target.is_file():
+            return target
+        matches = [
+            hit
+            for hit in sorted(clips_dir.glob("*.mp4"))
+            if hit.name.startswith(short[:48]) or short.startswith(hit.stem[:48])
+        ]
+        if matches:
+            def _suffix_rank(item: Path) -> tuple[int, str]:
+                number = re.search(r"_(\d+)$", item.stem)
+                return (int(number.group(1)) if number else 0, item.name)
+
+            matches.sort(key=_suffix_rank)
+            if 1 <= occurrence <= len(matches):
+                return matches[occurrence - 1]
+            return matches[0]
+        return target
+    short_dir = _safe_output_stem(stem, max_chars=80)[:40]
+    candidates = sorted(clips_dir.glob(short_dir + "_*.mp4"))
+    index = int(segment.get("index") or 1)
+    if candidates:
+        if 1 <= index <= len(candidates):
+            return candidates[index - 1]
+        return candidates[0]
+    target = clips_dir / (_safe_output_stem(stem, max_chars=80) + ".mp4")
+    return target
+
+
+def _live_product_session_rows(records: list[dict[str, Any]], price_index: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """把一个场次展开成「每个成品时段一行」。"""
+    if not records:
+        return []
+    prices = price_index if isinstance(price_index, dict) else {}
+    base = _live_product_stamp_epoch(records[0].get("stamp") or "")
+    rows: list[dict[str, Any]] = []
+    # 同一段录制内、同一文件名前缀的出现次序（给 occurrence 用）。
+    occurrences: dict[tuple[str, str], int] = {}
+    for record in records:
+        offset = max(0.0, _live_product_stamp_epoch(record.get("stamp") or "") - base) if base else 0.0
+        room_dir = Path(str(record.get("clips_dir") or ""))
+        for segment in record.get("segments") or []:
+            raw_start = segment.get("cut_start")
+            if raw_start is None:
+                raw_start = segment.get("start")
+            raw_end = segment.get("cut_end")
+            if raw_end is None:
+                raw_end = segment.get("end")
+            start = float(raw_start or 0)
+            end = float(raw_end or start)
+            if end - start < 0.5:
+                continue
+            occurrence_key = (
+                str(record.get("stamp") or ""),
+                str(segment.get("filename_stem") or segment.get("title") or ""),
+            )
+            occurrence = occurrences.get(occurrence_key, 0) + 1
+            occurrences[occurrence_key] = occurrence
+            output = _live_product_segment_output_path(record, segment, occurrence)
+            inside = False
+            if output is not None and str(room_dir):
+                try:
+                    inside = _is_within_directory(output.resolve(), room_dir.resolve())
+                except Exception:
+                    inside = False
+            exists = bool(output is not None and inside and output.is_file())
+            product_id = str(segment.get("product_id") or "")
+            rows.append({
+                "seqIndex": len(rows),
+                "index": int(segment.get("index") or 0),
+                "title": str(segment.get("title") or ""),
+                "product_id": product_id,
+                "promotion_id": str(segment.get("promotion_id") or ""),
+                "detail_url": str(segment.get("detail_url") or ""),
+                "status": str(segment.get("review_status") or ("auto_bound" if product_id else "pending_user_confirm")),
+                "naming_source": str(segment.get("naming_source") or ""),
+                "confidence": segment.get("confidence") if segment.get("confidence") is not None else "",
+                "source": str(segment.get("source") or ""),
+                "reason": str(segment.get("reason") or ""),
+                "low_confidence": bool(segment.get("evidence_low_confidence")),
+                "duration": round(end - start, 3),
+                "abs_start": round(offset + start, 3),
+                "abs_end": round(offset + end, 3),
+                "stamp": str(record.get("stamp") or ""),
+                "recording": str(record.get("recording") or ""),
+                "file": str(output) if output is not None else "",
+                "file_exists": exists,
+                "file_size": int(output.stat().st_size) if exists else 0,
+                "file_mtime": int(output.stat().st_mtime) if exists else 0,
+                "price": prices.get(product_id, ""),
+                "paired_products": _live_paired_products(segment),
+            })
+    return rows
+
+
+def _live_product_session_summary(rows: list[dict[str, Any]], records: list[dict[str, Any]]) -> dict[str, Any]:
+    products: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row.get("product_id") or row.get("title") or ""
+        item = products.setdefault(key, {"title": row.get("title") or "", "count": 0, "duration": 0.0})
+        item["count"] += 1
+        item["duration"] = float(item["duration"]) + float(row.get("duration") or 0)
+    stamps = [str(record.get("stamp") or "") for record in records]
+    return {
+        "segment_count": len(rows),
+        "product_count": len(products),
+        "bound_count": sum(1 for row in rows if row.get("status") == "auto_bound"),
+        "pending_count": sum(1 for row in rows if row.get("status") != "auto_bound"),
+        "low_confidence_count": sum(1 for row in rows if row.get("low_confidence")),
+        "missing_file_count": sum(1 for row in rows if not row.get("file_exists")),
+        "total_duration": round(sum(float(row.get("duration") or 0) for row in rows), 3),
+        "record_count": len(records),
+        "start_stamp": stamps[0] if stamps else "",
+        "end_stamp": stamps[-1] if stamps else "",
+    }
+
+
+def _live_product_schedule_payload(room_name: str, session_index: int | None = None) -> dict[str, Any]:
+    records = _live_product_archive_records(room_name)
+    sessions = _live_product_sessions(records)
+    if not sessions:
+        return {"ok": False, "room": room_name, "message": "还没有这个直播间的单品识别记录。", "sessions": [], "rows": []}
+    index = len(sessions) - 1 if session_index is None else max(0, min(int(session_index), len(sessions) - 1))
+    chosen = sessions[index]
+    price_index = _live_product_price_index(chosen)
+    rows = _live_product_session_rows(chosen, price_index)
+    rows.sort(key=lambda item: (float(item.get("abs_start") or 0), int(item.get("index") or 0)))
+    options = []
+    for position, group in enumerate(sessions):
+        group_rows = _live_product_session_rows(group, {})
+        options.append({
+            "index": position,
+            "start_stamp": str(group[0].get("stamp") or ""),
+            "end_stamp": str(group[-1].get("stamp") or ""),
+            "product_count": len({(row.get("product_id") or row.get("title")) for row in group_rows}),
+            "segment_count": len(group_rows),
+            "start_offset": 0.0,
+            "end_offset": round(max([float(row.get("abs_end") or 0) for row in group_rows] or [0.0]), 3),
+        })
+    return {
+        "ok": True,
+        "room": room_name,
+        "session_index": index,
+        "session_count": len(sessions),
+        "sessions": options,
+        "summary": _live_product_session_summary(rows, chosen),
+        "rows": rows,
+        "archive_dir": str(
+            Path(str(chosen[0].get("archive_dir") or "")).parent
+            if chosen and str(chosen[0].get("archive_dir") or "").strip()
+            else (_live_product_diagnostics_room(room_name) or "")
+        ),
+        "clips_dir": str(chosen[0].get("clips_dir") or ""),
+    }
+
+
+def _live_product_schedule_out_dir(payload: dict[str, Any]) -> tuple[Path, str]:
+    """导出目录：优先该场直播间的录制目录（clips_dir），不可用时退回客户端导出目录。
+
+    返回 (目录, 说明)，说明用于前端提示与「打开导出目录」文案。
+    """
+    raw = str((payload or {}).get("clips_dir") or "").strip()
+    if raw:
+        try:
+            candidate = Path(raw)
+            if candidate.is_dir():
+                return candidate, "录制目录"
+        except Exception:
+            pass
+    return _safe_user_child("product_schedule"), "客户端导出目录"
+
+
+def _build_live_product_schedule_xlsx(room_name: str, session_index: int | None = None) -> Path:
+    """生成「商品讲解时间表」xlsx（列结构与 David 的样例一致）。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    payload = _live_product_schedule_payload(room_name, session_index)
+    rows = payload.get("rows") or []
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="这个直播间当前没有可导出的单品识别记录（正在录制中时，这一场结束后会自动归入时间表）。",
+        )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "商品讲解时间表"
+    # 按商品聚合：一行一个商品，讲解次数 = 时段数，时段按时间正序铺开
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row.get("product_id") or row.get("title") or ""
+        item = groups.get(key)
+        if not item:
+            item = {"title": row.get("title") or "", "product_id": row.get("product_id") or "", "price": row.get("price") or "", "slots": []}
+            groups[key] = item
+        if not item["price"] and row.get("price"):
+            item["price"] = row["price"]
+        item["slots"].append(row)
+    ordered = sorted(groups.values(), key=lambda item: min(float(slot.get("abs_start") or 0) for slot in item["slots"]))
+    slot_count = max([len(item["slots"]) for item in ordered] or [1])
+    headers = ["日期", "商品标题", "商品ID", "价格", "讲解次数"] + ["讲解时段%d" % (i + 1) for i in range(slot_count)]
+    head_font = Font(name="宋体", size=12, bold=True, color="FFFFFFFF")
+    head_fill = PatternFill("solid", start_color="FF4A4A4A")
+    cell_border = Border(bottom=Side(style="thin"))
+    for column, title in enumerate(headers, start=1):
+        cell = sheet.cell(row=1, column=column, value=title)
+        cell.font = head_font
+        cell.fill = head_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    start_stamp = str(payload.get("summary", {}).get("start_stamp") or "")
+    session_date = None
+    try:
+        session_date = datetime.strptime(start_stamp, "%Y%m%d_%H%M%S").date()
+    except Exception:
+        session_date = datetime.now().date()
+    for row_index, item in enumerate(ordered, start=2):
+        date_cell = sheet.cell(row=row_index, column=1, value=datetime.combine(session_date, datetime.min.time()))
+        date_cell.number_format = "yyyy-mm-dd"
+        date_cell.alignment = Alignment(horizontal="center")
+        sheet.cell(row=row_index, column=2, value=item["title"]).font = Font(name="宋体", size=11)
+        sheet.cell(row=row_index, column=3, value=item["product_id"]).font = Font(name="宋体", size=11)
+        sheet.cell(row=row_index, column=4, value=float(item["price"]) if str(item["price"]).strip() else "")
+        sheet.cell(row=row_index, column=5, value=len(item["slots"]))
+        for slot_index, slot in enumerate(item["slots"]):
+            text = "%s-%s" % (_live_product_hms(slot.get("abs_start")), _live_product_hms(slot.get("abs_end")))
+            sheet.cell(row=row_index, column=6 + slot_index, value=text)
+        for column in range(1, len(headers) + 1):
+            sheet.cell(row=row_index, column=column).border = cell_border
+    widths = {1: 12, 2: 66, 3: 22, 4: 10, 5: 10}
+    for column in range(6, len(headers) + 1):
+        widths[column] = 22
+    for column, width in widths.items():
+        sheet.column_dimensions[sheet.cell(row=1, column=column).column_letter].width = width
+    out_dir, _save_where = _live_product_schedule_out_dir(payload)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_room = _safe_stem(str(room_name or "直播间")) or "直播间"
+    target = out_dir / ("%s直播时间点%s.xlsx" % (safe_room, session_date.strftime("%Y%m%d")))
+    workbook.save(str(target))
+    return target
+
+
+def _live_product_segment_file(room_name: str, stamp: str, index: int) -> Path:
+    """按 房间 + 段戳 + 段序号 解析成品文件（只从服务端归档解析，不接受任意路径）。"""
+    records = _live_product_archive_records(room_name)
+    if not records:
+        raise HTTPException(status_code=404, detail="没有找到这个直播间的识别记录。")
+    chosen = None
+    wanted = str(stamp or "").strip()
+    for record in records:
+        if wanted and str(record.get("stamp")) == wanted:
+            chosen = record
+    if chosen is None:
+        chosen = records[-1]
+    room_dir = None
+    try:
+        room_dir = Path(str(chosen.get("clips_dir") or "")).resolve()
+    except Exception:
+        room_dir = None
+    for segment in chosen.get("segments") or []:
+        if int(segment.get("index") or 0) != int(index):
+            continue
+        path = _live_product_segment_output_path(chosen, segment)
+        if path is None or not path.is_file():
+            raise HTTPException(status_code=404, detail="该时段的成品视频还没生成。")
+        try:
+            resolved = path.resolve()
+        except Exception:
+            raise HTTPException(status_code=404, detail="无法解析视频路径。")
+        if room_dir is not None and not _is_within_directory(resolved, room_dir):
+            raise HTTPException(status_code=400, detail="视频路径不在该直播间目录内。")
+        return resolved
+    raise HTTPException(status_code=404, detail="没有找到这个时段。")
+
+
+def _write_active_probe_split_queue(
+    summary_path: Path,
+    room_dir: Path,
+    payload: LiveRecPayload,
+    log_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
     output = Path(str(summary.get("recording_output") or ""))
     if not output.exists() or output.stat().st_size < 1000:
@@ -11614,7 +14069,21 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
     if duration <= 0:
         duration = float(summary.get("duration_sec") or _live_segment_seconds(payload.segment))
     timeline_path = Path(str(summary.get("timeline_path") or output.with_suffix(".timeline.jsonl")))
-    segments = _active_probe_segments_from_timeline(timeline_path, duration, settings)
+    evidence_raw = str(summary.get("product_evidence_log_path") or "").strip()
+    evidence_path = Path(evidence_raw) if evidence_raw else _probe_evidence_path_for_timeline(timeline_path)
+    segments = _active_probe_segments_from_timeline(
+        timeline_path,
+        duration,
+        settings,
+        evidence_path,
+        boundary_refiner=lambda _segments: _refine_live_product_boundaries(
+            _segments,
+            output,
+            settings,
+            room_name=payload.room_name or "",
+            log_fn=log_fn,
+        ),
+    )
     _apply_live_product_segment_names(segments, payload, output.stem)
     created_at = datetime.now().isoformat(timespec="seconds")
     queue = {
@@ -11642,6 +14111,9 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
         "probe_version": summary.get("probe_version") or "",
         "probe_build": summary.get("probe_build") or "",
         "probe_script_hash": _short_file_hash(_douyin_active_probe_script()),
+        # 页面活性（F2）：探针写入的 liveness 块原样带下来，供任务负载与详情展示。
+        "liveness": summary.get("liveness") if isinstance(summary.get("liveness"), dict) else {},
+        "liveness_action": str(summary.get("liveness_action") or ""),
         "active_product_changed": bool(summary.get("active_product_changed")),
         "strong_signal_count": int(summary.get("strong_signal_count") or 0),
         "candidate_signal_count": int(summary.get("candidate_signal_count") or 0),
@@ -11653,6 +14125,38 @@ def _write_active_probe_split_queue(summary_path: Path, room_dir: Path, payload:
         "unresolved_reason": summary.get("unresolved_reason") or "",
         "recording_returncode": summary.get("recording_returncode"),
     }
+    # 收不到商品信号必须【大声报出来】（2026-10-07）。
+    #
+    # 实测「影子」13:08–14:55 连续 8 段：探针轮询 869 次，candidate_signal 事件 0 个，
+    # probe_poll 一直报 patchedMessageInstances:0 —— 一次都没挂上抖音页面的商品消息拦截点。
+    # 结果整段只产出一个「单品候选_01 / unresolved」，而界面上只有一句「待确认 1 段」，
+    # 用户要过很久才发现这一场基本白录了。
+    #
+    # 这里在段结束时就明确告警，并说清常见原因与排查动作。
+    _signal_total = (
+        int(queue.get("candidate_signal_count") or 0)
+        + int(queue.get("strong_signal_count") or 0)
+        + int(queue.get("product_evidence_count") or 0)
+    )
+    _room_label = str(payload.room_name or "直播间")
+    if _signal_total <= 0:
+        _msg = (
+            f"{_room_label}: 这一段【没有收到任何商品信号】—— 只会得到一个「待确认」候选，"
+            f"无法自动分品（原因：{queue.get('unresolved_reason') or '未知'}）。"
+            "常见原因是探针没能挂上抖音页面的商品消息（探针轮询里的 patchedMessageInstances 一直为 0）。"
+            "请确认录制期间抖音直播间页面在 Chrome 里保持打开且在前台，然后重新开始监测。"
+        )
+        emit_log("warning", _msg, "live-rec")
+        if log_fn:
+            log_fn(_msg)
+    elif not queue.get("active_product_changed"):
+        _msg = (
+            f"{_room_label}: 收到了商品信号但没能确认换品"
+            f"（{queue.get('unresolved_reason') or '未确认'}），这一段按「待确认」保留。"
+        )
+        emit_log("warning", _msg, "live-rec")
+        if log_fn:
+            log_fn(_msg)
     queue_path = output.with_suffix(".split_queue.json")
     queue["timeline_path"] = str(timeline_path)
     queue["queue_path"] = str(queue_path)
@@ -11727,7 +14231,7 @@ def _schedule_live_probe_force_stop(task_id: str, proc: subprocess.Popen[Any], n
     threading.Thread(target=_watchdog, daemon=True).start()
 
 
-def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_dir: Path, name: str, scope: str) -> tuple[Path, dict[str, Any] | None, list[str]]:
+def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_dir: Path, name: str, scope: str) -> tuple[Path, dict[str, Any]]:
     script = _douyin_active_probe_script()
     _validate_active_probe_script(script)
     seconds = _live_segment_seconds(payload.segment)
@@ -11747,6 +14251,7 @@ def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_
         "--room-name",
         f"{name}_active_probe",
         "--manual-markers",
+        "--open-catalog",
     ]
     min_stream_quality = str(payload.min_stream_quality or "").strip()
     if min_stream_quality:
@@ -11838,17 +14343,22 @@ def _run_douyin_active_probe_record(task_id: str, payload: LiveRecPayload, room_
             min_quality = _normalize_live_stream_quality(summary.get("min_stream_quality") or payload.min_stream_quality, "自动最高")
             raise RuntimeError(f"直播流清晰度未达到要求：当前捕获 {selected_quality}，最低要求 {min_quality}，未启动录制。")
         raise RuntimeError("直播间未直播或未拿到直播流，未启动录制。")
-    queue = _write_active_probe_split_queue(summary_path, room_dir, payload)
-    output = Path(str(queue.get("recording") or ""))
-    report = queue.get("probe_report") or ""
-    if queue.get("active_product_changed"):
-        emit_log("success", f"{name}: 已捕获当前讲解商品强信号：{queue.get('strong_signal_count')} 条。", scope)
-    elif queue.get("active_product_candidate_count"):
-        emit_log("warning", f"{name}: 已捕获 {queue.get('active_product_candidate_count')} 个商品候选，但缺少二次佐证，已进入待确认。", scope)
-    else:
-        emit_log("warning", f"{name}: 未捕获当前讲解商品强信号，已生成待确认单品候选段，不绑定商品ID。", scope)
-    emit_log("success", f"{name}: 商品探针报告：{Path(report).name if report else summary_path.name}", scope)
-    return output, queue, []
+    # A′（录制与处理解耦）：母带转封装、队列生成、片段切分、归档清理统一交给
+    # _run_live_record 的后台收尾流水线处理；本函数只负责「录制 + 摘要校验」，
+    # 校验通过后立刻返回，让主循环马上进入下一段录制。
+    return summary_path, summary
+
+
+def _merge_time_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """把同一商品的多段出现区间合并（重叠/相邻的并成一段）。"""
+    ordered = sorted((float(lo), float(hi)) for lo, hi in intervals if float(hi) - float(lo) > 0)
+    merged: list[tuple[float, float]] = []
+    for lo, hi in ordered:
+        if merged and lo <= merged[-1][1] + 0.5:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
 
 
 def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope: str) -> list[dict[str, Any]]:
@@ -11874,13 +14384,14 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
                 segment.get("naming_mode") == "product_id"
                 and segment.get("naming_source") in {"auto_product_id", "auto_promotion_id"}
             )
-            or segment.get("naming_source") == "product_name_timestamp"
+            or segment.get("naming_source") in {"product_name_timestamp", "evidence_low_confidence"}
         )
         if exact_product_name:
-            previous = exact_segments_by_title.get(title)
-            if previous and end - start <= float(previous.get("duration") or 0):
-                continue
-            exact_segments_by_title[title] = {"segment": segment, "start": start, "end": end, "duration": end - start}
+            item = exact_segments_by_title.get(title)
+            if not item:
+                item = {"segment": segment, "intervals": []}
+                exact_segments_by_title[title] = item
+            item["intervals"].append((start, end))
             continue
         group = groups_by_name.get(title)
         if not group:
@@ -11893,8 +14404,9 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
                 "exact_name": (
                     segment.get("naming_mode") == "product_id"
                     and segment.get("naming_source") in {"auto_product_id", "auto_promotion_id"}
-                ) or segment.get("naming_source") == "product_name_timestamp",
+                ) or segment.get("naming_source") in {"product_name_timestamp", "evidence_low_confidence"},
                 "flat_output": True,
+                "skip_existing": True,
                 "segments": [],
                 "total_duration": 0.0,
             }
@@ -11903,8 +14415,9 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
         group["total_duration"] = float(group.get("total_duration") or 0) + max(0.0, end - start)
     for title, item in exact_segments_by_title.items():
         segment = item["segment"]
-        start = float(item["start"])
-        end = float(item["end"])
+        intervals = _merge_time_intervals(item.get("intervals") or [])
+        if not intervals:
+            continue
         groups_by_name[title] = {
             "name": title,
             "product_id": segment.get("product_id") or "",
@@ -11913,8 +14426,9 @@ def _export_live_product_split_queue(task_id: str, queue: dict[str, Any], scope:
             "naming_source": segment.get("naming_source") or "",
             "exact_name": True,
             "flat_output": True,
-            "segments": [(start, end)],
-            "total_duration": max(0.0, end - start),
+            "skip_existing": True,
+            "segments": intervals,
+            "total_duration": sum(hi - lo for lo, hi in intervals),
         }
     groups = []
     for group in groups_by_name.values():
@@ -11942,6 +14456,18 @@ def _is_within_directory(path: Path, directory: Path) -> bool:
         return resolved == base or str(resolved).lower().startswith(str(base).lower() + os.sep)
     except Exception:
         return False
+
+
+_LIVE_VIDEO_SUFFIXES = (".mp4", ".flv", ".mkv", ".mov", ".webm", ".avi")
+_LIVE_SOURCE_SUFFIXES = (".ts",)
+
+
+def _is_live_video_file(path: Path) -> bool:
+    """需要保留的视频文件（母带/成品切片）。.sync_tmp.mp4 是中间转码产物，不算。"""
+    name = path.name.lower()
+    if name.endswith(".sync_tmp.mp4"):
+        return False
+    return name.endswith(_LIVE_VIDEO_SUFFIXES)
 
 
 def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]:
@@ -11978,11 +14504,39 @@ def _live_product_intermediate_paths(queue: dict[str, Any] | None) -> list[Path]
             ".probe_summary.json",
             ".review_segments.json",
             ".catalog.jsonl",
+            ".catalog.json",
             ".active_product_probe_report.md",
             ".ffmpeg.log",
             ".remux.log",
+            ".sync.log",
+            ".srt",
+            ".asr-cache.json",
+            ".asr_quality.json",
+            ".words.json",
         ):
             paths.append(recording.with_suffix(suffix))
+        # 通用规则：同目录下以母带名为前缀的其它非视频文件（日志/时间线/缓存/原始 TS…）。
+        # 视频本体与成品切片永不进入清理清单。
+        prefix = recording.stem.lower() + "."
+        try:
+            for sibling in recording.parent.iterdir():
+                if not sibling.is_file():
+                    continue
+                if sibling.name.lower() == recording.name.lower():
+                    continue
+                lower = sibling.name.lower()
+                if not lower.startswith(prefix):
+                    continue
+                if _is_live_video_file(sibling):
+                    continue
+                if lower.endswith(_LIVE_SOURCE_SUFFIXES):
+                    # 原始录制只在已成功转出同名 mp4 后才算可清理；
+                    # 否则视为中断残留的孤儿母带，必须保留。
+                    if not sibling.with_suffix(".mp4").is_file():
+                        continue
+                paths.append(sibling)
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
     seen: set[str] = set()
     unique: list[Path] = []
     for path in paths:
@@ -12015,6 +14569,9 @@ def _archive_live_product_diagnostics(queue: dict[str, Any] | None, room_dir: Pa
                 continue
             if not _is_within_directory(resolved, room_dir):
                 continue
+            if resolved.suffix.lower() in _LIVE_SOURCE_SUFFIXES:
+                # 原始录制容器体积大，不复制进诊断归档
+                continue
             target = archive_dir / resolved.name
             if target.exists():
                 target = archive_dir / f"{resolved.stem}_{int(time.time())}{resolved.suffix}"
@@ -12032,7 +14589,7 @@ def _cleanup_live_product_intermediates(
     scope: str,
     name: str,
 ) -> list[str]:
-    if not queue or not product_outputs:
+    if not queue:
         return []
     keep = {
         str(Path(path).resolve()).lower()
@@ -12579,6 +15136,80 @@ def _run_live_record_stream_guard(
     emit_log("warning" if cancelled else "success", f"{name}: {message}", scope)
 
 
+def _live_cycle_finalize(
+    task_id: str,
+    payload: LiveRecPayload,
+    room_dir: Path,
+    name: str,
+    scope: str,
+    cycle_index: int,
+    summary_path: Path,
+) -> dict[str, Any]:
+    """A′ 后台收尾：母带转封装 → 生成队列 → 片段切分 → 诊断归档 → 清理中间文件。
+
+    由 _run_live_record 的单线程后台池串行执行，与下一段录制并行，互不阻塞。
+    """
+    result: dict[str, Any] = {
+        "cycle": cycle_index,
+        "output": "",
+        "product_queue": None,
+        "split_outputs": [],
+        "error": "",
+    }
+    try:
+        # 内含 _remux_live_recording_to_mp4()：TS→MP4 转封装 + 音画同步校验（可能需要整片重编码）
+        queue = _write_active_probe_split_queue(
+            summary_path,
+            room_dir,
+            payload,
+            log_fn=lambda message: emit_log("info", message, scope),
+        )
+    except Exception as exc:
+        result["error"] = f"母带转封装/队列生成失败：{exc}"
+        emit_log("warning", f"{name}: 第 {cycle_index} 段母带收尾失败，已跳过该段片段导出：{exc}", scope)
+        try:
+            failed_summary = json.loads(summary_path.read_text(encoding="utf-8-sig"))
+            result["output"] = str(failed_summary.get("recording_output") or "")
+        except Exception:
+            result["output"] = ""
+        return result
+    output = Path(str(queue.get("recording") or ""))
+    result["output"] = str(output)
+    result["product_queue"] = queue
+    report = queue.get("probe_report") or ""
+    if queue.get("active_product_changed"):
+        emit_log("success", f"{name}: 已捕获当前讲解商品强信号：{queue.get('strong_signal_count')} 条。", scope)
+    elif queue.get("active_product_candidate_count"):
+        emit_log("warning", f"{name}: 已捕获 {queue.get('active_product_candidate_count')} 个商品候选，但缺少二次佐证，已进入待确认。", scope)
+    else:
+        emit_log("warning", f"{name}: 未捕获当前讲解商品强信号，已生成待确认单品候选段，不绑定商品ID。", scope)
+    emit_log("success", f"{name}: 商品探针报告：{Path(report).name if report else summary_path.name}", scope)
+    size = output.stat().st_size if output.exists() else 0
+    cycle_product_outputs: list[str] = []
+    if payload.product_auto_cut:
+        try:
+            split_results = _export_live_product_split_queue(task_id, queue, scope)
+        except Exception as exc:
+            split_results = []
+            emit_log("warning", f"{name}: 第 {cycle_index} 段自动分割失败：{exc}", scope)
+        cycle_product_outputs = [
+            str(item.get("output_path") or "")
+            for item in split_results
+            if item.get("output_path") and Path(str(item.get("output_path"))).is_file()
+        ]
+        if cycle_product_outputs:
+            emit_log("success", f"{name}: 第 {cycle_index} 段自动分割完成：导出 {len(cycle_product_outputs)} 个单品候选段。", scope)
+        else:
+            emit_log("warning", f"{name}: 第 {cycle_index} 段未导出有效片段，请检查队列时长和源视频。", scope)
+    result["split_outputs"] = cycle_product_outputs
+    try:
+        _cleanup_live_product_intermediates(queue, cycle_product_outputs, room_dir, scope, name)
+    except Exception as exc:
+        emit_log("warning", f"{name}: 第 {cycle_index} 段中间文件清理失败：{exc}", scope)
+    emit_log("success", f"{name}: 第 {cycle_index} 段录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
+    return result
+
+
 def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
     scope = "live-rec"
     _set_task(task_id, status="running", started_at=time.time(), progress=8, message="准备录屏")
@@ -12604,74 +15235,115 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
             product_outputs: list[str] = []
             last_output: Path | None = None
             last_queue: dict[str, Any] | None = None
-            while not _is_task_cancelled(task_id):
-                cycle_index += 1
-                _set_task(task_id, status="running", progress=18, message=f"准备第 {cycle_index} 段录屏")
-                emit_log("info", f"{name}: 开始第 {cycle_index} 段录制。", scope)
-                try:
-                    output, product_queue, _ = _run_douyin_active_probe_record(task_id, payload, room_dir, name, scope)
-                except Exception as cycle_exc:
-                    if _is_task_cancelled(task_id):
-                        break
-                    if recording_outputs and re.search(r"未直播|未拿到直播流|未生成 probe_summary|no_stream", str(cycle_exc), re.I):
-                        emit_log("warning", f"{name}: 继续录制时直播已不可用，已保留前 {len(recording_outputs)} 段。", scope)
-                        break
-                    raise
-                last_output = output
-                last_queue = product_queue
-                recording_outputs.append(str(output))
-                completed_cycles += 1
-                size = output.stat().st_size if output.exists() else 0
-                cycle_product_outputs: list[str] = []
-                if payload.product_auto_cut and product_queue:
-                    split_results = _export_live_product_split_queue(task_id, product_queue, scope)
-                    cycle_product_outputs = [
-                        str(item.get("output_path") or "")
-                        for item in split_results
-                        if item.get("output_path") and Path(str(item.get("output_path"))).is_file()
-                    ]
-                    for output_path in cycle_product_outputs:
-                        if output_path and output_path not in product_outputs:
-                            product_outputs.append(output_path)
-                    if cycle_product_outputs:
-                        emit_log("success", f"{name}: 第 {cycle_index} 段自动分割完成：导出 {len(cycle_product_outputs)} 个单品候选段。", scope)
-                        _cleanup_live_product_intermediates(product_queue, cycle_product_outputs, room_dir, scope, name)
-                    else:
-                        emit_log("warning", f"{name}: 第 {cycle_index} 段未导出有效片段，请检查队列时长和源视频。", scope)
-                if not consumed_trial:
-                    _consume_trial("录屏", scope=scope)
-                    consumed_trial = True
-                product_stats = _live_product_queue_stats(product_queue)
+            # A′（录制与处理解耦）：收尾（母带转封装 → 队列 → 切分 → 归档 → 清理）
+            # 交给一条单线程后台流水线串行执行；主循环录完一段立刻开下一段。
+            post_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-finalize")
+            pending_finalize: list[tuple[int, concurrent.futures.Future]] = []
+
+            def _publish_cycle_result(cycle_no: int, result: dict[str, Any]) -> None:
+                nonlocal last_output, last_queue
+                output_text = str(result.get("output") or "")
+                if output_text and output_text not in recording_outputs:
+                    recording_outputs.append(output_text)
+                    last_output = Path(output_text)
+                queue = result.get("product_queue")
+                if not isinstance(queue, dict) or not queue:
+                    return
+                last_queue = queue
+                for output_path in list(result.get("split_outputs") or []):
+                    if output_path and output_path not in product_outputs:
+                        product_outputs.append(output_path)
                 partial_payload: dict[str, Any] = {
-                    "output": str(output),
+                    "output": str(last_output) if last_output else "",
                     "recording_outputs": recording_outputs,
                     "rolling_cycle_count": completed_cycles,
-                    "product_timeline": product_queue.get("timeline_path") if product_queue else "",
-                    "product_timeline_json": product_queue.get("product_timeline_json") if product_queue else "",
-                    "product_split_queue": product_queue.get("queue_path") if product_queue else "",
-                    "recording_summary": product_queue.get("recording_summary") if product_queue else "",
-                    "product_evidence_log": product_queue.get("product_evidence_log") if product_queue else "",
-                    "product_segments": len(product_queue.get("segments") or []) if product_queue else 0,
-                    "product_clips_dir": product_queue.get("clips_dir") if product_queue else "",
-                    "probe_summary": product_queue.get("probe_summary") if product_queue else "",
-                    "probe_report": product_queue.get("probe_report") if product_queue else "",
-                    "stream_quality": _normalize_live_stream_quality(product_queue.get("stream_quality")) if product_queue else "",
-                    **product_stats,
+                    "product_timeline": queue.get("timeline_path") or "",
+                    "product_timeline_json": queue.get("product_timeline_json") or "",
+                    "product_split_queue": queue.get("queue_path") or "",
+                    "recording_summary": queue.get("recording_summary") or "",
+                    "product_evidence_log": queue.get("product_evidence_log") or "",
+                    "product_segments": len(queue.get("segments") or []),
+                    "product_clips_dir": queue.get("clips_dir") or "",
+                    "probe_summary": queue.get("probe_summary") or "",
+                    "probe_report": queue.get("probe_report") or "",
+                    "stream_quality": _normalize_live_stream_quality(queue.get("stream_quality")),
+                    **_live_product_queue_stats(queue),
                 }
                 if product_outputs:
                     partial_payload["outputs"] = product_outputs
                     partial_payload["result_count"] = len(product_outputs)
                 _set_task(task_id, **partial_payload)
-                emit_log("success", f"{name}: 第 {cycle_index} 段录制完成：{output.name} ({size / 1024 / 1024:.1f}MB)", scope)
-                if not rolling_enabled:
-                    break
-                if _is_task_cancelled(task_id):
-                    break
-                _set_task(task_id, status="running", progress=35, message=f"第 {cycle_index} 段完成，继续录制下一段")
-                emit_log("info", f"{name}: 第 {cycle_index} 段已处理完成，继续录制下一段。", scope)
-                with _LIVE_LOCK:
-                    _LIVE_PROCS[task_id] = {"process": None, "output": str(output), "name": name, "stderr": "", "kind": "active_product_probe_rolling"}
-                time.sleep(1.0)
+
+            def _drain_finalize(wait_all: bool = False) -> None:
+                while pending_finalize:
+                    cycle_no, future = pending_finalize[0]
+                    if not wait_all and not future.done():
+                        return
+                    pending_finalize.pop(0)
+                    try:
+                        result = future.result(timeout=1800 if wait_all else None)
+                    except Exception as finalize_exc:
+                        emit_log("warning", f"{name}: 第 {cycle_no} 段收尾异常：{finalize_exc}", scope)
+                        continue
+                    if isinstance(result, dict):
+                        _publish_cycle_result(cycle_no, result)
+
+            try:
+                while not _is_task_cancelled(task_id):
+                    _drain_finalize()
+                    cycle_index += 1
+                    _set_task(task_id, status="running", progress=18, message=f"准备第 {cycle_index} 段录屏")
+                    emit_log("info", f"{name}: 开始第 {cycle_index} 段录制。", scope)
+                    try:
+                        summary_path, _probe_summary = _run_douyin_active_probe_record(task_id, payload, room_dir, name, scope)
+                    except Exception as cycle_exc:
+                        if _is_task_cancelled(task_id):
+                            break
+                        if completed_cycles and re.search(r"未直播|未拿到直播流|未生成 probe_summary|no_stream", str(cycle_exc), re.I):
+                            emit_log("warning", f"{name}: 继续录制时直播已不可用，已保留前 {completed_cycles} 段。", scope)
+                            break
+                        raise
+                    completed_cycles += 1
+                    if not consumed_trial:
+                        _consume_trial("录屏", scope=scope)
+                        consumed_trial = True
+                    _set_task(task_id, status="running", progress=30, message=f"第 {cycle_index} 段已录完，后台导出片段中")
+                    pending_finalize.append(
+                        (
+                            cycle_index,
+                            post_pool.submit(
+                                _live_cycle_finalize,
+                                task_id,
+                                payload,
+                                room_dir,
+                                name,
+                                scope,
+                                cycle_index,
+                                summary_path,
+                            ),
+                        )
+                    )
+                    if not rolling_enabled:
+                        break
+                    if _is_task_cancelled(task_id):
+                        break
+                    _set_task(task_id, status="running", progress=35, message=f"第 {cycle_index} 段完成，继续录制下一段")
+                    emit_log("info", f"{name}: 第 {cycle_index} 段已录完并转入后台收尾，继续录制下一段。", scope)
+                    with _LIVE_LOCK:
+                        _LIVE_PROCS[task_id] = {
+                            "process": None,
+                            "output": str(last_output) if last_output else "",
+                            "name": name,
+                            "stderr": "",
+                            "kind": "active_product_probe_rolling",
+                        }
+                    time.sleep(1.0)
+            finally:
+                if pending_finalize:
+                    _set_task_progress(task_id, 92, "正在完成剩余片段导出")
+                    emit_log("info", f"{name}: 正在完成剩余 {len(pending_finalize)} 段录制文件的片段导出与清理。", scope)
+                _drain_finalize(wait_all=True)
+                post_pool.shutdown(wait=True)
             if _is_task_cancelled(task_id):
                 message = f"录制已停止，已保留 {len(recording_outputs)} 段录制文件。"
                 result_payload = {
@@ -12778,11 +15450,15 @@ def _run_live_record(task_id: str, payload: LiveRecPayload) -> None:
                     ]
                     if product_outputs:
                         emit_log("success", f"{name}: 录后自动分割完成：导出 {len(product_outputs)} 个单品候选段。", scope)
-                        _cleanup_live_product_intermediates(product_queue, product_outputs, room_dir, scope, name)
                     else:
                         emit_log("warning", f"{name}: 录后自动分割未导出有效片段，请检查队列时长和源视频。", scope)
             except Exception as split_exc:
                 emit_log("warning", f"{name}: 录制完成，但单品分段队列生成失败：{split_exc}", scope)
+        # 录制收尾：清理中间产物，导出目录只留视频（母带与成品切片不动）
+        if product_queue:
+            _cleanup_live_product_intermediates(product_queue, product_outputs, room_dir, scope, name)
+        else:
+            _cleanup_live_product_intermediates({"recording": str(output)}, [], room_dir, scope, name)
         _consume_trial("录屏", scope=scope)
         result_payload: dict[str, Any] = {"status": "completed", "finished_at": time.time(), "output": str(output)}
         if product_queue:
@@ -12886,25 +15562,47 @@ def _stop_orphan_active_probe_processes() -> int:
         return 0
 
 
-def _mark_live_product_switch(note: str = "") -> int:
-    marked = 0
-    marker_note = note.strip() or f"manual marker from LiveClipper UI {datetime.now().isoformat(timespec='seconds')}"
+def _mark_live_product_switch(note: str = "") -> tuple[int, list[str], list[str]]:
+    """把换品标记写进各房间探针的 stdin。
+
+    返回 (标记成功数, 成功房间名, 跳过房间名+原因)。
+
+    注意两个实测到的坑（2026-10-08）：
+      ① 注册字段是 name/output，不是 room_name —— 取错字段会让备注里没有房间名，
+         而一次标记会同时发给所有房间，事后翻 timeline 就分不清这条属于谁。
+      ② 换段收尾期间 kind 会变成 active_product_probe_rolling 且 process=None，
+         此时无法投递。以前这种房间被静默跳过，而 API 只回报「已标记 N 个」，
+         用户会以为自己的房间标上了，其实标到别的房间去了。
+    """
     with _LIVE_LOCK:
         items = list(_LIVE_PROCS.items())
+    marked = 0
+    done: list[str] = []
+    skipped: list[str] = []
     for _task_id, info in items:
-        if info.get("kind") != "active_product_probe":
+        kind = str(info.get("kind") or "")
+        if not kind.startswith("active_product_probe"):
             continue
+        room = Path(str(info.get("name") or info.get("output") or "")).name or str(_task_id)
         proc = info.get("process")
         stdin = info.get("stdin")
-        if not proc or proc.poll() is not None or not stdin:
+        if kind != "active_product_probe":
+            skipped.append(f"{room}（正在换段收尾，标记暂不可达）")
             continue
+        if not proc or proc.poll() is not None or not stdin:
+            skipped.append(f"{room}（探针未在接收标记的状态）")
+            continue
+        pieces = [note.strip()] if note.strip() else []
+        pieces.append(f"room={room}")
+        marker_note = " | ".join(pieces)
         try:
             stdin.write(marker_note + "\n")
             stdin.flush()
             marked += 1
-        except Exception:
-            continue
-    return marked
+            done.append(room)
+        except Exception as exc:  # noqa: BLE001
+            skipped.append(f"{room}（写入失败：{type(exc).__name__}）")
+    return marked, done, skipped
 
 
 def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
@@ -13074,6 +15772,12 @@ def _run_smart_cut(task_id: str, payload: SmartCutPayload) -> None:
                     _consume_trial("智能成片", scope="smart-cut")
                 except Exception as trial_exc:
                     emit_log("warning", f"{video.name} 已成片，但使用记录保存失败：{trial_exc}", "smart-cut")
+            except FeatureAccessDenied as access_exc:
+                # 授权失效必须整批停止：继续往下只会一个个视频白跑 AI。
+                failures.append(f"{video.name}: {access_exc}")
+                failure_details.append(_batch_failure_detail(video.name, access_exc))
+                emit_log("err", f"授权已失效，批量已停止（不再继续消耗 AI 费用）：{access_exc}", "smart-cut")
+                break
             except Exception as video_exc:
                 if _is_task_cancelled(task_id):
                     emit_log("warning", "任务已停止。", "smart-cut")
@@ -13178,6 +15882,24 @@ def _preview_product_review_warnings(preview: Mapping[str, Any]) -> list[str]:
         detail = "；".join(str(item).strip() for item in (final.get("scope_errors") or []) if str(item).strip())
         warnings.append(detail or "已选原话的商品归属仍待核实")
     return warnings
+
+
+MIX_DISTINCT_VERSIONS_ONLY = True
+
+
+def _mix_variant_cards_for_export(preview: Any, requested_versions: int) -> list[dict[str, Any]]:
+    """Return the DISTINCT director variant cards available for export.
+
+    Rendering the same plan N times is not a "version": every export path must
+    use the distinct plans the director already produced.  Zero extra AI calls.
+    Set MIX_DISTINCT_VERSIONS_ONLY = False to restore the old copy-N behaviour.
+    """
+    cards = [
+        dict(card)
+        for card in list(dict((preview or {}).get("director_review") or {}).get("director_variants") or [])
+        if isinstance(card, Mapping) and bool(card.get("available"))
+    ]
+    return cards[: max(1, int(requested_versions or 1))]
 
 
 def _run_mix_from_preview(
@@ -13693,6 +16415,172 @@ def _write_preview_plan_audit(
         _LOG.warning("preview plan audit write failed", exc_info=True)
 
 
+STORY_POLICY_RESPONSE_SUFFIX = ".director_story_content_policy.response.txt"
+STORY_DEPTH_RESPONSE_SUFFIX = ".director_story_delivery_depth.response.txt"
+
+
+def _director_story_policy_receipt(output_dir: Path) -> dict[str, Any]:
+    """Expose the M1 content-boundary trim and delivery-depth receipt for review only.
+
+    Both M1 stages write their audit into the run directory.  This reads those two
+    files back so the preview panel can show what the content boundary removed and
+    whether the depth contract was met.  It never changes the story, the trim or
+    any selection.
+    """
+
+    def _load(suffix: str) -> Mapping[str, Any]:
+        try:
+            matches = sorted(output_dir.glob("*" + suffix))
+        except OSError:
+            return {}
+        for path in reversed(matches):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8-sig", errors="replace").strip())
+            except (OSError, ValueError):
+                continue
+            if isinstance(raw, Mapping):
+                return raw
+        return {}
+
+    def _rows(source: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+        raw = source.get(key) or ()
+        if isinstance(raw, Mapping):
+            raw = (raw,)
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            row: dict[str, Any] = {
+                "strategy_id": str(item.get("strategy_id") or ""),
+                "blocked_kinds": [str(value) for value in (item.get("blocked_kinds") or ())],
+            }
+            for field in ("chapter_id", "field"):
+                if item.get(field):
+                    row[field] = str(item.get(field))
+            if item.get("package_index") is not None:
+                try:
+                    row["package_index"] = int(item.get("package_index") or 0)
+                except (TypeError, ValueError):
+                    row["package_index"] = 0
+            removed = item.get("removed_requirements")
+            if isinstance(removed, (list, tuple)):
+                row["removed_requirements"] = [str(value) for value in removed]
+            rows.append(row)
+        return rows
+
+    policy = _load(STORY_POLICY_RESPONSE_SUFFIX)
+    depth = _load(STORY_DEPTH_RESPONSE_SUFFIX)
+
+    depth_rows: list[dict[str, Any]] = []
+    raw_depth_rows = depth.get("strategies") or ()
+    if isinstance(raw_depth_rows, Mapping):
+        raw_depth_rows = (raw_depth_rows,)
+    for item in raw_depth_rows:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            chapters = int(item.get("chapter_count") or 0)
+        except (TypeError, ValueError):
+            chapters = 0
+        try:
+            planned = round(float(item.get("planned_source_seconds") or 0.0), 2)
+        except (TypeError, ValueError):
+            planned = 0.0
+        depth_rows.append({
+            "strategy_id": str(item.get("strategy_id") or ""),
+            "chapter_count": chapters,
+            "planned_source_seconds": planned,
+            "sufficient": bool(item.get("sufficient")),
+        })
+
+    def _seconds(value: Any) -> float:
+        try:
+            return round(float(value or 0.0), 2)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _count(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "available": bool(policy or depth),
+        "status": str(policy.get("status") or ""),
+        "blocked_kinds": [str(value) for value in (policy.get("blocked_kinds") or ())],
+        "removed_chapters": _rows(policy, "removed_chapters"),
+        "trimmed_chapters": _rows(policy, "trimmed_chapters"),
+        "cleared_story_fields": _rows(policy, "cleared_story_fields"),
+        "removed_opening_evidence_packages": _rows(policy, "removed_opening_evidence_packages"),
+        "depth": {
+            "status": str(depth.get("status") or ""),
+            "requested_seconds": _seconds(depth.get("requested_seconds")),
+            "minimum_chapters": _count(depth.get("minimum_chapters")),
+            "minimum_planned_source_seconds": _seconds(depth.get("minimum_planned_source_seconds")),
+            "strategies": depth_rows,
+        },
+    }
+
+
+OPENING_HOOK_POOL_RESPONSE_SUFFIX = ".director_opening_hook_recall.response.txt"
+
+
+def _director_opening_hook_pool_rows(output_dir: Path) -> list[dict[str, Any]]:
+    """Expose the independent Hook recall pool for review only, never as a selector.
+
+    The recall stage writes its own response into the run directory.  This reads
+    that file back so the sentence-preview panel can show what the pool actually
+    offered.  Nothing here ranks, filters or changes selection.
+    """
+    try:
+        matches = sorted(output_dir.glob("*" + OPENING_HOOK_POOL_RESPONSE_SUFFIX))
+    except OSError:
+        return []
+    payload: Any = None
+    for path in reversed(matches):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig", errors="replace").strip())
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, Mapping):
+            payload = raw
+            break
+    if not isinstance(payload, Mapping):
+        return []
+    rows: Any = None
+    try:
+        from opening_hook_recall_adapter import hook_pool_prompt_rows
+
+        rows = hook_pool_prompt_rows(payload)
+    except Exception:
+        rows = payload.get("hook_candidates")
+    if not isinstance(rows, (list, tuple)):
+        return []
+    pool: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, 1):
+        if not isinstance(row, Mapping):
+            continue
+        raw_ids = row.get("subtitle_ids") or row.get("source_subtitle_ids") or ()
+        ids = [
+            int(value)
+            for value in raw_ids
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        if not ids:
+            continue
+        pool.append({
+            "pool_rank": index,
+            "hook_id": str(row.get("hook_id") or ""),
+            "subtitle_ids": ids,
+            "text": str(row.get("text") or "").strip(),
+            "hook_type": str(row.get("hook_type") or "").strip(),
+            "hook_strength": row.get("hook_strength"),
+            "duration": row.get("duration"),
+        })
+    return pool
+
+
 def _write_commerce_director_preview_artifacts(
     output_dir: Path,
     *,
@@ -14011,6 +16899,34 @@ def _commerce_director_review_video(preview_id: str) -> Path:
     return target
 
 
+def _local_asr_cache_identity(srt_path: Path) -> tuple[str, str]:
+    """Resolve (provider, model) for a local-ASR SRT instead of assuming SenseVoice.
+
+    The word-timing sidecar is written by whichever engine actually produced the
+    SRT, so it is the most accurate source of truth; fall back to the engine this
+    run would use when the sidecar predates the provider field.
+    """
+    try:
+        from volcengine_asr import word_timing_sidecar_path
+
+        sidecar = Path(word_timing_sidecar_path(srt_path))
+        if sidecar.is_file():
+            payload = json.loads(sidecar.read_text(encoding="utf-8-sig"))
+            provider = str(payload.get("provider") or "").strip().lower()
+            if provider:
+                from stt import local_asr_provider_model
+
+                return provider, local_asr_provider_model(provider)
+    except Exception:
+        pass
+    try:
+        from stt import local_asr_provider_identity
+
+        return local_asr_provider_identity()
+    except Exception:
+        return "sensevoice", "iic/SenseVoiceSmall"
+
+
 def _verify_local_asr_temp_identity_for_experiment(video: Path, srt_path: Path, scope: str) -> bool:
     """Attach verifiable source identity to a known local-ASR temp sidecar.
 
@@ -14040,11 +16956,12 @@ def _verify_local_asr_temp_identity_for_experiment(video: Path, srt_path: Path, 
     if identity.get("valid") and identity.get("managed") and identity.get("timing_precision") == "word":
         return True
     try:
+        _identity_provider, _identity_model = _local_asr_cache_identity(srt_path)
         write_metadata(
             video,
             srt_path,
-            provider="sensevoice",
-            model="iic/SenseVoiceSmall",
+            provider=_identity_provider,
+            model=_identity_model,
             timing_precision="word",
         )
         verified = inspect_cache(video, srt_path)
@@ -14588,18 +17505,62 @@ def _run_commerce_director_preview(
             except (TypeError, ValueError):
                 main_product_ids = set()
             if main_product_ids:
+                # 规则层的 foreign_product_ranges 只作为**旁证保留**，不再从主商品里扣减。
+                #
+                # 为什么（2026-10-08，方案 A）：它取「第一个锚点 → 最后一个锚点」的整段跨度
+                # （director_product_contract.foreign_product_ranges：锚点间隔 ≤20 行就并成一簇，
+                # end_id = cluster[-1]），中间的主商品带货内容会被整段吞掉。实测一次混剪：
+                # 它扣掉 120 行，其中 76 行是 AI 明确判为主商品的（如"这款是100的锦纶""我现在
+                # 给你们换内搭"）；而同期提示词改进后 AI 已把 other 从 84% 降到 17%。
+                # 继续扣减等于用更糙的规则层推翻更准的 AI 层。
+                # 这里把它记成 foreign_product_suspected 供追溯，判定本身以 AI 的 sections 为准。
+                foreign_product_ids: set[int] = set()
                 for foreign in dict(product_control.get("final") or {}).get("foreign_product_ranges") or []:
                     if isinstance(foreign, Mapping):
                         try:
-                            main_product_ids.difference_update(range(int(foreign["start_id"]), int(foreign["end_id"]) + 1))
+                            foreign_product_ids.update(
+                                range(int(foreign["start_id"]), int(foreign["end_id"]) + 1)
+                            )
                         except (KeyError, TypeError, ValueError):
                             pass
+
                 def _keep_product_candidates(raw_items: list[Any], metadata_items: list[dict[str, Any]]) -> tuple[list[Any], list[dict[str, Any]]]:
                     kept = [(raw, meta) for raw, meta in zip(raw_items, metadata_items)
                             if int(meta.get("source_subtitle_id") or meta.get("director_candidate_id") or 0) in main_product_ids]
                     return [item[0] for item in kept], [item[1] for item in kept]
+
+                def _mark_product_candidates(metadata_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                    """只**标记**不**过滤**：供「完整句库」使用。
+
+                    源清单的定位是 complete executable sentence pool for manual editing
+                    （完整可执行句子池，仅供人工编辑）。旧写法对它套了主商品过滤，
+                    30 分钟、423 行字幕的混剪素材里只有 59 行判为主商品，
+                    完整池被从 245 条压到 21 条 —— 名不副实（2026-10-08 反馈）。
+                    这里保留全部条目，只加 within_main_product 供前端标注；
+                    真正参与自动选片的 alternative 仍然按主商品过滤。
+                    另外把规则层的意见记成 foreign_product_suspected（只做旁证，不参与判定）。
+                    注意只改元数据、不动 raw 列表，两者靠 zip 对齐，长度必须一致。
+                    """
+                    marked: list[dict[str, Any]] = []
+                    for metadata_raw in metadata_items:
+                        item = dict(metadata_raw or {})
+                        try:
+                            subtitle_id = int(
+                                item.get("source_subtitle_id")
+                                or item.get("director_candidate_id")
+                                or 0
+                            )
+                        except (TypeError, ValueError):
+                            subtitle_id = 0
+                        item["within_main_product"] = subtitle_id in main_product_ids
+                        if subtitle_id in foreign_product_ids:
+                            item["foreign_product_suspected"] = True
+                        marked.append(item)
+                    return marked
+
                 alternative_raw_clips, alternative_metadata = _keep_product_candidates(alternative_raw_clips, alternative_metadata)
-                inventory_raw_clips, inventory_metadata = _keep_product_candidates(inventory_raw_clips, inventory_metadata)
+                # 源清单不过滤，只标记（见 _mark_product_candidates 的说明）
+                inventory_metadata = _mark_product_candidates(inventory_metadata)
             if bundle:
                 raw_clips = _remap_mix_director_raw_clips(raw_clips, bundle)
                 mapped_alternatives: list[Any] = []
@@ -14818,6 +17779,8 @@ def _run_commerce_director_preview(
                 story["core_commercial_idea"] = str(final_story["core_desire"])
             if final_story.get("opening_promise"):
                 story["payoff"] = str(final_story["opening_promise"])
+            opening_hook_pool_rows = _director_opening_hook_pool_rows(experiment_dir)
+            story_policy_receipt = _director_story_policy_receipt(experiment_dir)
             director_review = {
                 "kind": "m2_sentence_preview",
                 "headline": "AI 导演逐句预览",
@@ -14836,6 +17799,8 @@ def _run_commerce_director_preview(
                 "m2_candidate_timeline": _commerce_director_candidate_timeline(case),
                 "duration_assessment": duration_assessment,
                 "opening_selection": dict(primary_strategy.get("opening_selection") or {}),
+                "opening_hook_pool": opening_hook_pool_rows,
+                "story_policy_receipt": story_policy_receipt,
                 "candidate_pool_summary": {
                     "recommended_count": len(public_clips),
                     "alternative_count": len(alternative_public_clips),
@@ -14904,6 +17869,8 @@ def _run_commerce_director_preview(
                     }),
                     "duration_assessment": variant_duration,
                     "opening_selection": dict(variant_strategy.get("opening_selection") or {}),
+                    "opening_hook_pool": opening_hook_pool_rows,
+                    "story_policy_receipt": story_policy_receipt,
                     "candidate_pool_summary": {
                         "recommended_count": len(prepared_variant["clips"]),
                         "alternative_count": 0,
@@ -16301,6 +19268,26 @@ def _run_smart_cut_from_preview(
         if not clips:
             raise RuntimeError("请至少保留一个片段再成片。")
         _log_preview_selection(scope, "预览成片子句选择", selected_indices, selected_segments, clips)
+        # [v9.8 / 丙+] 片单顺序核对：前端传来的 order 载荷若落后于界面状态，未在 order 里的片段
+        # 会被静默追加到队尾（_ordered_preview_selection_indices 的既有行为），渲染顺序就与你
+        # 屏幕上看到的顺序不一致。这里直接报出来，避免"看片才发现"。
+        try:
+            _order_payload = _clean_preview_int_list(
+                payload.order or draft.get("order"), len(raw_clips)
+            )
+            _order_set = set(_order_payload)
+            _tail_added = [i for i in selected_indices if i not in _order_set]
+            if _tail_added:
+                emit_log(
+                    "warning",
+                    "片单顺序核对：有 %d 个片段不在前端传来的 order 载荷里（已按既有逻辑追加到队尾）：%s；"
+                    "渲染顺序可能与你在界面上看到的顺序不一致。" % (len(_tail_added), _tail_added[:12]),
+                    scope, task_id=task_id,
+                )
+            else:
+                emit_log("info", "片单顺序核对：渲染顺序与 order 载荷一致（%d 段）。" % len(selected_indices), scope, task_id=task_id)
+        except Exception as _ord_err:
+            emit_log("warning", "片单顺序核对失败：%s" % _ord_err, scope, task_id=task_id)
         _set_task_progress(task_id, 18, f"确认 {len(clips)} 个片段")
 
         video = Path(str(preview.get("video", "")))
@@ -16308,6 +19295,18 @@ def _run_smart_cut_from_preview(
             raise FileNotFoundError(f"视频不存在：{video}")
         srt_path = str(preview.get("srt_path") or video.with_suffix(".srt"))
         emit_log("info", f"预览成片：按预览保留结果使用 {len(clips)} 个片段/子句组，不二次去重。", scope)
+        # [v9.8 / 丙+] 把真正交给渲染器的顺序与区间打出来：导出即可核对，不用看片。
+        try:
+            for _ci, _clip in enumerate(clips[:60]):
+                try:
+                    _ct = str(_clip[0]) if len(_clip) > 0 else ""
+                    _cx = str(_clip[1])[:40] if len(_clip) > 1 else ""
+                    _cs, _ce = float(_clip[2]), float(_clip[3])
+                except Exception:
+                    continue
+                emit_log("info", f"渲染输入 #{_ci + 1} [{_ct}] {_cs:.2f}-{_ce:.2f}s | {_cx}", scope, task_id=task_id)
+        except Exception:
+            pass
         _set_task_progress(task_id, 28, "准备输出")
         output_dir = Path(payload.output_dir.strip().strip('"')) if payload.output_dir.strip() else video.parent / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -16658,6 +19657,17 @@ def _run_commerce_director_smart_cut(task_id: str, payload: SmartCutPayload) -> 
                         variant_preview = _get_preview(variant_preview_id) or {}
                         recommended_count = len(list(variant_preview.get("raw_clips") or []))
                         if not recommended_count:
+                            # 与混剪路径同一个坑：预览只在内存（_CLIP_PREVIEWS），
+                            # 「清理缓存」或重启程序后就取不到备选方案；以前是静默跳过，
+                            # 用户只看到"少了几版"却不知道为什么。
+                            emit_log(
+                                "warning",
+                                f"差异化导演成片 {variant_index}/{len(variant_cards)} 跳过："
+                                f"「{card.get('title') or '导演方案'}」的方案数据已不在内存中"
+                                "（常见原因：生成预览之后清理过缓存，或重启过程序）。"
+                                "请重新生成一次该预览，再导出多版本。",
+                                scope,
+                            )
                             continue
                         render_data = dict(item_data)
                         render_data.update({
@@ -16697,6 +19707,11 @@ def _run_commerce_director_smart_cut(task_id: str, payload: SmartCutPayload) -> 
                         finalize_task=False,
                         raise_errors=True,
                     ))
+            except FeatureAccessDenied as access_exc:
+                # 授权失效必须整批停止：继续往下只会一个个视频白跑 AI。
+                failures.append(_batch_failure_detail(video.name, access_exc))
+                emit_log("err", f"授权已失效，批量已停止（不再继续消耗 AI 费用）：{access_exc}", scope)
+                break
             except Exception as item_exc:
                 detail = _batch_failure_detail(video.name, item_exc)
                 failures.append(detail)
@@ -16761,17 +19776,33 @@ def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
             # The worker remains lazy and is shared only by this direct
             # multi-plan render.  Every output still recognises its own audio.
             local_asr_session = LocalASRWorkerSession()
-        variant_cards = [
-            dict(card) for card in list(dict(preview.get("director_review") or {}).get("director_variants") or [])
-            if isinstance(card, Mapping) and bool(card.get("available"))
-        ][:requested_versions]
+        variant_cards = _mix_variant_cards_for_export(preview, requested_versions)
         outputs: list[str] = []
         if len(variant_cards) > 1:
+            # 前置说明：先说清本次会输出几版，用户就能在第一时间发现"少了"，
+            # 而不是等到文件出来才发现。
+            emit_log(
+                "info",
+                f"多版本导出：请求 {requested_versions} 版，本次将输出 {len(variant_cards)} 版差异化方案。",
+                scope,
+            )
             for variant_index, card in enumerate(variant_cards, 1):
                 variant_preview_id = str(card.get("preview_id") or preview_id)
                 variant_preview = _get_preview(variant_preview_id) or {}
                 recommended_count = len(list(variant_preview.get("raw_clips") or []))
                 if not recommended_count:
+                    # 这里以前是静默 continue：用户只会看到"少了几版"，却不知道原因。
+                    # 实测根因：预览只存在内存（_CLIP_PREVIEWS），而「清理缓存」
+                    # （POST /api/cache/clear）会执行 _CLIP_PREVIEWS.clear()，重启程序同理；
+                    # 多版本预览的备选方案随之消失，只有主版还能出 —— 表现就是"选了 3 版只出 1 版"。
+                    emit_log(
+                        "warning",
+                        f"差异化导演混剪 {variant_index}/{len(variant_cards)} 跳过："
+                        f"「{card.get('title') or '导演方案'}」的方案数据已不在内存中"
+                        "（常见原因：生成预览之后清理过缓存，或重启过程序）。"
+                        "请重新生成一次该预览，再导出多版本。",
+                        scope,
+                    )
                     continue
                 render_data = _payload_to_dict(payload)
                 render_data.update({
@@ -16795,7 +19826,15 @@ def _run_commerce_director_mix(task_id: str, payload: MixPayload) -> None:
         else:
             recommended_count = len(list(preview.get("raw_clips") or []))
             render_data = _payload_to_dict(payload)
+            single_versions = 1 if MIX_DISTINCT_VERSIONS_ONLY else requested_versions
+            if MIX_DISTINCT_VERSIONS_ONLY and requested_versions > 1:
+                emit_log(
+                    "warning",
+                    f"导演只返回 {len(variant_cards)} 套方案，按不复制原则输出 {single_versions} 个版本（不重复凑数）。",
+                    scope,
+                )
             render_data.update({
+                "versions": single_versions,
                 "preview_id": preview_id,
                 "selected_indices": list(range(recommended_count)),
                 "order": list(range(recommended_count)),
@@ -16867,21 +19906,85 @@ def _run_commerce_director_mix_batch(task_id: str, payload: MixBatchPayload) -> 
                 preview_id, preview = _build_director_preview_for_direct_output(
                     task_id, item_payload, scope=scope,
                 )
-                recommended_count = len(list(preview.get("raw_clips") or []))
-                render_data = dict(item_data)
-                render_data.update({
-                    "preview_id": preview_id,
-                    "selected_indices": list(range(recommended_count)),
-                    "order": list(range(recommended_count)),
-                })
-                produced = _run_mix_from_preview(
-                    task_id,
-                    MixPreviewCutPayload(**render_data),
-                    finalize_task=False,
-                    raise_errors=True,
-                    output_extra_suffix=f"_g{index:02d}",
+                requested_versions = max(1, int(item_data.get("versions") or 1))
+                variant_cards = _mix_variant_cards_for_export(preview, requested_versions)
+                if len(variant_cards) > 1:
+                    emit_log(
+                        "info",
+                        f"多版本导出：请求 {requested_versions} 版，本次将输出 {len(variant_cards)} 版差异化方案。",
+                        scope,
+                    )
+                    for variant_index, card in enumerate(variant_cards, 1):
+                        variant_preview_id = str(card.get("preview_id") or preview_id)
+                        variant_preview = _get_preview(variant_preview_id) or {}
+                        recommended_count = len(list(variant_preview.get("raw_clips") or []))
+                        if not recommended_count:
+                            # 同混剪路径：预览只在内存，清缓存/重启后会丢备选方案。
+                            emit_log(
+                                "warning",
+                                f"差异化导演混剪 {variant_index}/{len(variant_cards)} 跳过："
+                                f"「{card.get('title') or '导演方案'}」的方案数据已不在内存中"
+                                "（常见原因：生成预览之后清理过缓存，或重启过程序）。"
+                                "请重新生成一次该预览，再导出多版本。",
+                                scope,
+                            )
+                            continue
+                        render_data = dict(item_data)
+                        render_data.update({
+                            "versions": 1,
+                            "preview_id": variant_preview_id,
+                            "selected_indices": list(range(recommended_count)),
+                            "order": list(range(recommended_count)),
+                        })
+                        emit_log(
+                            "info",
+                            f"[{index}/{total}] {group_name} 差异化方案 {variant_index}/{len(variant_cards)}："
+                            f"{card.get('title') or '导演方案'}（不再调用 AI）",
+                            scope,
+                        )
+                        outputs.extend(_run_mix_from_preview(
+                            task_id,
+                            MixPreviewCutPayload(**render_data),
+                            finalize_task=False,
+                            raise_errors=True,
+                            output_extra_suffix=f"_g{index:02d}_v{variant_index}",
+                        ))
+                else:
+                    recommended_count = len(list(preview.get("raw_clips") or []))
+                    render_data = dict(item_data)
+                    single_versions = 1 if MIX_DISTINCT_VERSIONS_ONLY else requested_versions
+                    if MIX_DISTINCT_VERSIONS_ONLY and requested_versions > 1:
+                        emit_log(
+                            "warning",
+                            f"[{index}/{total}] {group_name}：导演只返回 {len(variant_cards)} 套方案，"
+                            f"按不复制原则输出 {single_versions} 个版本（不重复凑数）。",
+                            scope,
+                        )
+                    render_data.update({
+                        "versions": single_versions,
+                        "preview_id": preview_id,
+                        "selected_indices": list(range(recommended_count)),
+                        "order": list(range(recommended_count)),
+                    })
+                    outputs.extend(_run_mix_from_preview(
+                        task_id,
+                        MixPreviewCutPayload(**render_data),
+                        finalize_task=False,
+                        raise_errors=True,
+                        output_extra_suffix=(
+                            f"_g{index:02d}_v1" if MIX_DISTINCT_VERSIONS_ONLY else f"_g{index:02d}"
+                        ),
+                    ))
+            except FeatureAccessDenied as access_exc:
+                # 授权失效不是"这一组素材有问题"，继续往下只会一组组白跑。
+                # 立即中止整批，并把原因报给用户。
+                failures.append(_batch_failure_detail(group_name, access_exc))
+                emit_log(
+                    "err",
+                    f"授权已失效，批量已停止（不再继续消耗 AI 费用）：{access_exc}",
+                    scope,
                 )
-                outputs.extend(produced)
+                break
             except Exception as group_exc:
                 detail = _batch_failure_detail(group_name, group_exc)
                 failures.append(detail)
@@ -17696,6 +20799,246 @@ def save_live_rooms(payload: LiveRoomsPayload) -> dict[str, Any]:
     return {"ok": True, "rooms": rooms}
 
 
+# ---------- 录屏页：直播间实时画面（本地 MJPEG 预览） ----------
+# 服务端把直播流转成 6 帧/秒、480p 的 JPEG 序列，按 multipart/x-mixed-replace 推给浏览器，
+# 浏览器原生 <img> 即可显示，不需要播放器库。
+# 每个预览 = 1 个 ffmpeg 进程 + 1 个读帧线程。进程回收有两条保险：
+#   1) 生成器被关闭（浏览器断开 / 切页）时立刻收尾；
+#   2) 空闲守护：超过 _LIVE_PREVIEW_IDLE_SECONDS 没有任何一帧被取走，也收尾。
+_LIVE_PREVIEW_BOUNDARY = "lcframe"
+_LIVE_PREVIEW_LIMIT = 2
+_LIVE_PREVIEW_IDLE_SECONDS = 20
+_LIVE_PREVIEW_LOCK = threading.Lock()
+_LIVE_PREVIEWS: dict[str, "_LivePreview"] = {}
+_LIVE_PREVIEW_JANITOR: threading.Thread | None = None
+# 未开播 / 解析失败 / 启动失败时显示的一帧深色占位图（204x360，竖屏）
+_LIVE_PREVIEW_IDLE_FRAME = bytes.fromhex(
+    "ffd8ffe000104a46494600010200000100010000fffe00104c61766336322e32382e31303000ffdb0043000810101310131616161616161a181a1b1b1b1a1a1a1a1b1b1b1d1d1d2222221d1d1d1b1b1d1d2020222225262523232223262628282830302e2e38383a454553ffc4004c0001010000000000000000000000000000000701010100000000000000000000000000000002100100000000000000000000000000000000110100000000000000000000000000000000ffc0001108016800cc03012200021100031100ffda000c03010002110311003f008a80b48000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003fffd9"
+)
+
+
+def _live_preview_ffmpeg() -> str:
+    """定位 ffmpeg：先问 platform_config，再回退到 app/ffmpeg/ffmpeg.exe。"""
+    candidates: list[str] = []
+    try:
+        candidates.append(_ffmpeg_cmd())
+    except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
+    try:
+        candidates.append(str(Path(__file__).resolve().parents[1] / "app" / "ffmpeg" / "ffmpeg.exe"))
+    except Exception:
+        _LOG.warning("unexpected error", exc_info=True)
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return candidates[0] if candidates else "ffmpeg"
+
+
+def _live_preview_command(stream_url: str) -> list[str]:
+    """低延迟取流 → 6 帧/秒 480p JPEG 序列（image2pipe）。"""
+    return [
+        _live_preview_ffmpeg(),
+        "-v", "error",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-i", stream_url,
+        "-an",
+        "-vf", "fps=6,scale=-2:480",
+        "-q:v", "6",
+        "-flush_packets", "1",
+        "-f", "image2pipe",
+        "-c:v", "mjpeg",
+        "-",
+    ]
+
+
+def _live_preview_part(jpeg: bytes) -> bytes:
+    return (
+        ("--" + _LIVE_PREVIEW_BOUNDARY + "\r\n").encode("ascii")
+        + b"Content-Type: image/jpeg\r\n"
+        + ("Content-Length: %d\r\n\r\n" % len(jpeg)).encode("ascii")
+        + jpeg
+        + b"\r\n"
+    )
+
+
+class _LivePreview:
+    """一路预览：ffmpeg 出 JPEG 流 → 读帧线程切帧入队 → 生成器逐帧推给浏览器。"""
+
+    def __init__(self, key: str, proc: subprocess.Popen) -> None:
+        self.key = key
+        self.proc = proc
+        self.queue: "queue.Queue[bytes | None]" = queue.Queue(maxsize=8)
+        self.last_frame_at = time.time()
+        self.stopped = False
+        self.thread = threading.Thread(target=self._pump, name="live-preview-pump", daemon=True)
+        self.thread.start()
+
+    def _pump(self) -> None:
+        buf = b""
+        try:
+            while True:
+                chunk = self.proc.stdout.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    start = buf.find(b"\xff\xd8\xff")
+                    if start < 0:
+                        break
+                    end = buf.find(b"\xff\xd9", start)
+                    if end < 0:
+                        break
+                    frame = buf[start:end + 2]
+                    buf = buf[end + 2:]
+                    try:
+                        self.queue.put(frame, timeout=1.0)
+                    except queue.Full:
+                        pass  # 接收端跟不上就丢帧，直播画面宁可丢帧也不要积压
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
+        finally:
+            try:
+                self.queue.put(None, timeout=0.5)
+            except Exception:
+                pass
+
+    async def stream(self, request: Request):
+        """逐帧推给浏览器；每轮主动问一次"客户端还在吗"，断开就立刻收尾。"""
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    frame = await asyncio.to_thread(self.queue.get, True, 0.5)
+                except queue.Empty:
+                    if self.proc.poll() is not None:
+                        break
+                    continue
+                if frame is None:
+                    break
+                self.last_frame_at = time.time()
+                yield _live_preview_part(frame)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        with _LIVE_PREVIEW_LOCK:
+            if self.stopped:
+                return
+            self.stopped = True
+            if _LIVE_PREVIEWS.get(self.key) is self:
+                _LIVE_PREVIEWS.pop(self.key, None)
+        try:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    try:
+                        self.proc.wait(timeout=4)
+                    except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
+        except Exception:
+            _LOG.warning("unexpected error", exc_info=True)
+        for stream in (self.proc.stdout, self.proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
+
+
+def _live_preview_janitor() -> None:
+    while True:
+        time.sleep(5)
+        now = time.time()
+        with _LIVE_PREVIEW_LOCK:
+            stale = [
+                item for item in _LIVE_PREVIEWS.values()
+                if not item.stopped and now - item.last_frame_at > _LIVE_PREVIEW_IDLE_SECONDS
+            ]
+        for item in stale:
+            emit_log("info", "实时画面：长时间没有接收，已自动停止预览。", "live-rec")
+            item.close()
+
+
+def _live_preview_start(key: str, stream_url: str) -> "_LivePreview":
+    global _LIVE_PREVIEW_JANITOR
+    proc = subprocess.Popen(
+        _live_preview_command(stream_url),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        bufsize=0,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    preview = _LivePreview(key, proc)
+    stale: list["_LivePreview"] = []
+    with _LIVE_PREVIEW_LOCK:
+        old = _LIVE_PREVIEWS.pop(key, None)
+        if old is not None:
+            stale.append(old)
+        while len(_LIVE_PREVIEWS) >= _LIVE_PREVIEW_LIMIT:
+            oldest_key = next(iter(_LIVE_PREVIEWS))
+            stale.append(_LIVE_PREVIEWS.pop(oldest_key))
+        _LIVE_PREVIEWS[key] = preview
+        if _LIVE_PREVIEW_JANITOR is None or not _LIVE_PREVIEW_JANITOR.is_alive():
+            _LIVE_PREVIEW_JANITOR = threading.Thread(target=_live_preview_janitor, name="live-preview-janitor", daemon=True)
+            _LIVE_PREVIEW_JANITOR.start()
+    for item in stale:
+        item.close()
+    return preview
+
+
+def _live_preview_placeholder(headers: dict[str, str]) -> StreamingResponse:
+    def _one_shot():
+        yield _live_preview_part(_LIVE_PREVIEW_IDLE_FRAME)
+
+    return StreamingResponse(
+        _one_shot(),
+        media_type="multipart/x-mixed-replace; boundary=%s" % _LIVE_PREVIEW_BOUNDARY,
+        headers=headers,
+    )
+
+
+@app.get("/api/live-rec/preview")
+async def live_rec_preview(request: Request, index: int = -1, url: str = "") -> StreamingResponse:
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+    rooms = _load_live_rooms_cache()
+    room: dict[str, Any] = {}
+    if 0 <= index < len(rooms):
+        room = rooms[index]
+    room_url = _extract_url_from_text(room.get("url") or url or "")
+    if not room_url:
+        raise HTTPException(status_code=400, detail="缺少直播间地址。")
+    key = _live_room_task_key(room_url) or room_url[:120]
+
+    try:
+        stream_url = _resolve_live_url(room_url, "live-rec")
+    except Exception as exc:
+        emit_log("warning", "实时画面：%s" % exc, "live-rec")
+        return _live_preview_placeholder(headers)
+
+    try:
+        preview = _live_preview_start(key, stream_url)
+    except Exception as exc:
+        emit_log("warning", "实时画面启动失败：%s" % exc, "live-rec")
+        return _live_preview_placeholder(headers)
+
+    emit_log("info", "实时画面：已开始预览（6 帧/秒 · 480p）。", "live-rec")
+    return StreamingResponse(
+        preview.stream(request),
+        media_type="multipart/x-mixed-replace; boundary=%s" % _LIVE_PREVIEW_BOUNDARY,
+        headers=headers,
+    )
+
+
 @app.get("/api/ai-feedback/stats")
 def get_ai_feedback_stats() -> dict[str, Any]:
     return {"ok": True, **_preview_feedback_stats()}
@@ -17979,6 +21322,20 @@ def clear_cache() -> dict[str, Any]:
         if result:
             removed_items.append(result)
 
+    # 关键预防：预览只存在内存里。多版本预览的**备选方案**是各自独立的隐藏预览，
+    # 一旦被清掉，之后再导出多版本时只有主版能出——表现就是「选了 3 版只出 1 版」，
+    # 而且以前完全没有提示。这里先数清楚，明确告知后再清。
+    with _CLIP_PREVIEW_LOCK:
+        pending_multi = []
+        for _pid, _prev in _CLIP_PREVIEWS.items():
+            _review = _prev.get("director_review") if isinstance(_prev, Mapping) else None
+            _cards = [
+                _c for _c in list((_review or {}).get("director_variants") or [])
+                if isinstance(_c, Mapping) and _c.get("available")
+            ]
+            if len(_cards) > 1:
+                pending_multi.append((str(_pid), len(_cards)))
+
     with _CLIP_PREVIEW_LOCK:
         _PREVIEW_CLEARED_AT = time.time()
         _CLIP_PREVIEWS.clear()
@@ -18004,6 +21361,15 @@ def clear_cache() -> dict[str, Any]:
     else:
         message = f"缓存清理完成，释放约 {freed_mb} MB"
         emit_log("success", message, "settings")
+    if pending_multi:
+        # 说清后果与补救办法，别让用户过一会儿才发现"怎么只出了一版"。
+        _detail = "、".join(f"{count} 版方案" for _pid, count in pending_multi[:3])
+        message += (
+            f"；注意：本次清理丢掉了 {len(pending_multi)} 个多版本预览（{_detail}）。"
+            "这些预览的备选方案只在内存中，之后再导出多版本时只会有主版；"
+            "需要多版本请重新生成一次预览再导出。"
+        )
+        emit_log("warning", message, "settings")
     return {
         "ok": True,
         "message": message,
@@ -18073,9 +21439,174 @@ def inspect_pip_pool(payload: PathPayload) -> dict[str, Any]:
 
 
 @app.get("/api/tasks")
-def list_tasks() -> dict[str, Any]:
+def list_tasks(only_failed: int = 0) -> dict[str, Any]:
+    """List recent tasks; pass only_failed=1 to see just the failed ones."""
+
     with _TASK_LOCK:
-        return {"tasks": list(_TASKS.values())[-50:]}
+        tasks = list(_TASKS.values())[-50:]
+    if int(only_failed or 0):
+        tasks = [task for task in tasks if _task_has_failures(task)]
+    return {"tasks": tasks}
+
+
+@app.get("/api/task-failures")
+def task_failures(limit: int = 200) -> dict[str, Any]:
+    """Return the durable failed-task list so nobody has to dig through logs."""
+
+    safe_limit = max(1, min(2000, int(limit or 200)))
+    items = _read_task_failures(safe_limit)
+    return {
+        "ok": True,
+        "items": items,
+        "count": len(items),
+        "path": str(_task_failures_log_path()),
+    }
+
+
+@app.get("/api/task-failures/export")
+def export_task_failures() -> StreamingResponse:
+    """Download every recorded failed task as a CSV file."""
+
+    rows = _read_task_failures(5000)
+    header = "时间,任务ID,范围,任务名,类型,失败项,失败原因"
+    lines = [header]
+    for row in rows:
+        lines.append(",".join(_task_failure_csv_cell(row.get(key)) for key in (
+            "time", "task_id", "scope", "title", "kind", "label", "message",
+        )))
+    payload = "\ufeff" + "\r\n".join(lines) + "\r\n"
+    filename = f"task_failures_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([payload]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# --- 可选 GPU 加速组件（P1：只检测与展示，不做下载） -------------------------
+GPU_ACCEL_COMPONENT_DOWNLOAD_MB = 2700
+GPU_ACCEL_REQUIRED_DRIVER = (525, 60)
+GPU_ACCEL_REQUIRED_VRAM_MB = 4096
+GPU_ACCEL_MARKER_NAME = ".liveclipper-gpu.json"
+_GPU_ACCEL_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+
+
+def _parse_version_tuple(text: Any) -> tuple[int, ...]:
+    numbers = re.findall(r"\d+", str(text or ""))
+    return tuple(int(item) for item in numbers[:3])
+
+
+def _query_nvidia_gpu() -> tuple[str, int, str] | None:
+    """Return (name, vram_mb, driver) for the first NVIDIA GPU, or None when absent."""
+
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,driver_version",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    for line in (result.stdout or "").splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3 or not parts[0]:
+            continue
+        try:
+            vram = int(float(parts[1]))
+        except ValueError:
+            vram = 0
+        return parts[0], vram, parts[2]
+    return None
+
+
+def _find_gpu_accel_component() -> str:
+    """Return the marker path of an installed GPU component, or an empty string."""
+
+    bases: list[Path] = []
+    for candidate in (BUNDLE_DIR, REPO_ROOT, Path(sys.executable).resolve().parent):
+        try:
+            path = Path(candidate)
+        except TypeError:
+            continue
+        if path not in bases:
+            bases.append(path)
+    for base in bases:
+        try:
+            matches = sorted(base.glob("core/*/_internal/" + GPU_ACCEL_MARKER_NAME))
+        except OSError:
+            continue
+        if matches:
+            return str(matches[0])
+    return ""
+
+
+def _gpu_accel_status(force: bool = False) -> dict[str, Any]:
+    """Detect whether this machine can use the optional GPU acceleration component."""
+
+    cached = _GPU_ACCEL_STATUS_CACHE
+    now = time.time()
+    if not force and isinstance(cached.get("payload"), dict) and now - float(cached.get("at") or 0) < 60:
+        return cached["payload"]
+
+    info = _query_nvidia_gpu()
+    marker = _find_gpu_accel_component()
+    payload: dict[str, Any] = {
+        "has_nvidia": bool(info),
+        "gpu_name": info[0] if info else "",
+        "vram_mb": info[1] if info else 0,
+        "driver_version": info[2] if info else "",
+        "required_driver": ".".join(str(item) for item in GPU_ACCEL_REQUIRED_DRIVER),
+        "required_vram_mb": GPU_ACCEL_REQUIRED_VRAM_MB,
+        "component_download_mb": GPU_ACCEL_COMPONENT_DOWNLOAD_MB,
+        "driver_ok": False,
+        "vram_ok": False,
+        "supported": False,
+        "component_installed": bool(marker),
+        "component_path": marker,
+        "download_available": False,
+        "stage": "p1-display-only",
+        "reasons": [],
+    }
+    reasons: list[str] = payload["reasons"]
+    if info:
+        driver = _parse_version_tuple(info[2])
+        payload["driver_ok"] = bool(driver) and driver >= GPU_ACCEL_REQUIRED_DRIVER
+        payload["vram_ok"] = payload["vram_mb"] >= GPU_ACCEL_REQUIRED_VRAM_MB
+        if not payload["driver_ok"]:
+            reasons.append(
+                f"显卡驱动 {info[2]} 低于要求的 {payload['required_driver']}，升级驱动后可用"
+            )
+        if not payload["vram_ok"]:
+            reasons.append(f"显存 {payload['vram_mb']} MB 低于建议的 {GPU_ACCEL_REQUIRED_VRAM_MB} MB")
+        payload["supported"] = payload["driver_ok"] and payload["vram_ok"]
+    else:
+        reasons.append("未检测到 NVIDIA 显卡，本地识别继续使用 CPU（CPU 已经够用）")
+    if payload["component_installed"]:
+        payload["supported"] = True
+    payload["status"] = (
+        "installed"
+        if payload["component_installed"]
+        else "supported"
+        if payload["supported"]
+        else "unsupported"
+    )
+    payload["checked_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cached.update({"at": now, "payload": payload})
+    return payload
+
+
+@app.get("/api/gpu-status")
+def gpu_status(refresh: int = 0) -> dict[str, Any]:
+    """Report optional GPU acceleration readiness (display only in P1)."""
+
+    return {"ok": True, **_gpu_accel_status(force=bool(int(refresh or 0)))}
 
 
 @app.get("/api/output-history")
@@ -18968,6 +22499,13 @@ def smart_preview_clip_video(payload: SmartPreviewClipPayload) -> dict[str, Any]
     }
 
 
+@app.post("/api/smart-cut/preview/materialize-candidate")
+def smart_preview_materialize_candidate(payload: PreviewSentenceMaterializePayload) -> dict[str, Any]:
+    """把源字幕里的一句话补进本次预览的候选池，供人工「加入已选片段」使用。"""
+
+    return _preview_materialize_sentence(payload)
+
+
 @app.get("/api/smart-cut/preview/clip-video/{preview_id}/{clip_index}")
 def get_smart_preview_clip_video(preview_id: str, clip_index: int, inspect_only: bool = False) -> FileResponse:
     path = _preview_clip_video(preview_id, clip_index, inspect_only=inspect_only)
@@ -19251,6 +22789,117 @@ def check_dedup(payload: DedupPayload) -> dict[str, Any]:
     return {"ok": True, "summary": summary, "items": public_items, "groups": groups}
 
 
+def _live_product_archive_rooms() -> list[dict[str, Any]]:
+    """列出有单品识别归档的房间（按最近活动倒序）。纯读。"""
+    try:
+        root = _safe_user_child("live_rec_diagnostics")
+    except Exception:
+        return []
+    if not root.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for sub in root.iterdir():
+        if not sub.is_dir():
+            continue
+        count = 0
+        latest = 0.0
+        stamps: list[str] = []
+        dir_url = ""
+        for queue_file in sorted(sub.glob("*/*.split_queue.json")):
+            count += 1
+            if not dir_url:
+                dir_url = _live_product_archive_dir_url(sub)
+            match = re.search(r"(\d{8}_\d{6})", queue_file.stem)
+            if match:
+                stamps.append(match.group(1))
+                latest = max(latest, _live_product_stamp_epoch(match.group(1)))
+        if not count:
+            continue
+        items.append({
+            "room": sub.name,
+            "display_room": _live_product_display_room_name(sub.name, dir_url),
+            "segment_count": count,
+            "latest_stamp": max(stamps) if stamps else "",
+            "latest_epoch": latest,
+        })
+    items.sort(key=lambda item: item.get("latest_epoch") or 0, reverse=True)
+    return items
+
+
+@app.get("/api/live-rec/product-rooms")
+def live_rec_product_rooms() -> dict[str, Any]:
+    return {"ok": True, "rooms": _live_product_archive_rooms()}
+
+
+@app.get("/api/live-rec/product-schedule")
+def get_live_rec_product_schedule(room: str = "", session: str = "") -> dict[str, Any]:
+    """右栏「单品识别」页的数据源：某直播间某一场的单品时段清单。只读归档。"""
+    wanted = str(room or "").strip()
+    if not wanted:
+        raise HTTPException(status_code=400, detail="请先选择直播间。")
+    index = None
+    if str(session or "").strip():
+        try:
+            index = int(str(session).strip())
+        except Exception:
+            index = None
+    return _live_product_schedule_payload(wanted, index)
+
+
+@app.get("/api/live-rec/product-video")
+def get_live_rec_product_video(room: str, stamp: str = "", index: int = 0) -> FileResponse:
+    """单品时段预览流：路径由服务端按 房间+段戳+段序号 解析，不接受任意路径。"""
+    path = _live_product_segment_file(str(room or "").strip(), stamp, int(index))
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)
+
+
+@app.get("/api/live-rec/product-schedule/export")
+def export_live_rec_product_schedule(room: str = "", session: str = "") -> FileResponse:
+    """导出「商品讲解时间表」xlsx（一行一个商品，讲解次数 + 多个讲解时段）。"""
+    wanted = str(room or "").strip()
+    if not wanted:
+        raise HTTPException(status_code=400, detail="请先选择直播间。")
+    index = None
+    if str(session or "").strip():
+        try:
+            index = int(str(session).strip())
+        except Exception:
+            index = None
+    target = _build_live_product_schedule_xlsx(wanted, index)
+    return FileResponse(
+        str(target),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=target.name,
+        headers={"X-Save-Path": urllib.parse.quote(str(target))},
+    )
+
+
+@app.get("/api/live-rec/product-schedule/open")
+def open_live_rec_product_schedule_dir(room: str = "", session: str = "") -> dict[str, Any]:
+    """打开「商品讲解时间表」的保存目录（优先该场直播间的录制目录）。"""
+    wanted = str(room or "").strip()
+    if not wanted:
+        raise HTTPException(status_code=400, detail="请先选择直播间。")
+    index = None
+    if str(session or "").strip():
+        try:
+            index = int(str(session).strip())
+        except Exception:
+            index = None
+    try:
+        payload = _live_product_schedule_payload(wanted, index)
+    except Exception:
+        payload = {}
+    target, where = _live_product_schedule_out_dir(payload)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="导出目录还不存在，请先导出一次时间表。")
+    try:
+        os.startfile(str(target))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="打开目录失败：%s" % exc)
+    return {"ok": True, "dir": str(target), "where": where, "message": "已打开%s：%s" % (where, target)}
+
+
 @app.post("/api/live-rec-detect/start")
 def start_live_detect(payload: LiveRecPayload) -> dict[str, Any]:
     _raise_preflight_errors("live-rec-detect", payload)
@@ -19290,6 +22939,26 @@ def start_live_monitor(payload: LiveRecPayload) -> dict[str, Any]:
     }
 
 
+@app.post("/api/live-rec/resolve-name")
+def resolve_live_room_name(payload: LiveRecPayload) -> dict[str, Any]:
+    """抓一次直播间页面，解析「直播间名称」（主播昵称 → 直播间标题）。"""
+    url = _extract_url_from_text(payload.room_url)
+    if not url:
+        return {"ok": False, "name": "", "message": "请先粘贴达人主页或直播间链接"}
+    try:
+        from douyin_stream import resolve_room_display_name
+    except Exception as exc:
+        return {"ok": False, "name": "", "message": f"直播间名称解析模块不可用: {exc}"}
+    try:
+        name = resolve_room_display_name(url, log_fn=lambda msg: emit_log("info", msg, "live-rec")) or ""
+    except Exception as exc:
+        emit_log("warning", f"直播间名称解析失败: {exc}", "live-rec")
+        return {"ok": False, "name": "", "message": f"直播间名称解析失败: {exc}"}
+    if not name:
+        return {"ok": False, "name": "", "message": "页面里没找到直播间名称（可能是需登录、短链失效或页面结构变化）"}
+    return {"ok": True, "name": name}
+
+
 @app.post("/api/live-rec-delete-all/start")
 def live_stop_all(payload: LiveRecPayload | None = None) -> dict[str, Any]:
     stopped = _stop_live_all()
@@ -19298,13 +22967,33 @@ def live_stop_all(payload: LiveRecPayload | None = None) -> dict[str, Any]:
 
 
 @app.post("/api/live-rec-marker/start")
-def live_mark_product_switch(payload: LiveRecPayload | None = None) -> dict[str, Any]:
-    marked = _mark_live_product_switch()
+def live_mark_product_switch(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    # 以前这里收了 payload 却从不把备注传下去，于是无论前端/脚本写什么备注，
+    # 落盘都是兜底文案（实测 2026-10-08：note="验证标记链路" 丢失）。
+    # 现在宽松地从几个常见字段名里取备注。
+    note = ""
+    if isinstance(payload, Mapping):
+        for key in ("note", "message", "text", "detail", "remark"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                note = value.strip()
+                break
+    marked, done, skipped = _mark_live_product_switch(note)
     if marked:
-        emit_log("success", f"已标记 {marked} 个录制任务的换品观察点。", "live-rec")
-        return {"ok": True, "message": f"已标记 {marked} 个换品观察点。"}
+        detail = f"已标记：{'、'.join(done)}"
+        if skipped:
+            detail += f"；未标记：{'、'.join(skipped)}"
+        suffix = f"（备注：{note}）" if note else ""
+        emit_log("success", f"换品标记已投递到 {marked} 个房间。{detail}{suffix}", "live-rec")
+        return {"ok": True, "message": f"{detail}{suffix}".strip(),
+                "marked": marked, "rooms": done, "skipped": skipped}
+    if skipped:
+        detail = f"未标记：{'、'.join(skipped)}"
+        emit_log("warning", f"换品标记没有投递成功。{detail}", "live-rec")
+        return {"ok": False, "message": detail, "marked": 0, "rooms": [], "skipped": skipped}
     emit_log("warning", "当前没有可标记的 active_product_probe 录制任务。", "live-rec")
-    return {"ok": False, "message": "当前没有可标记的商品探针录制任务。"}
+    return {"ok": False, "message": "当前没有可标记的商品探针录制任务。",
+            "marked": 0, "rooms": [], "skipped": []}
 
 
 @app.post("/api/{feature}/start")
@@ -19337,6 +23026,478 @@ def start_placeholder(feature: str, payload: dict[str, Any] | None = None) -> di
         emit_log("info", f"{label} 已收到页面参数。", scope)
     emit_log("warning", f"{label} 的 Web 接口还在迁移中。", scope)
     return {"ok": False, "message": f"{label} 的 Web 接口还在迁移中。"}
+
+
+@app.post("/api/material/pick-directory")
+async def material_pick_directory() -> dict[str, Any]:
+    """选择素材库目录（前端会提示默认素材根目录）。"""
+    initial = _material_root()
+    try:
+        path = await asyncio.to_thread(
+            _choose_directory_dialog, "选择录屏素材目录（下面按主播分文件夹）"
+        )
+        return {"ok": True, "path": path, "initial_dir": initial}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开目录选择窗口失败：{exc}") from exc
+
+
+@app.get("/api/material/status")
+def material_status() -> dict[str, Any]:
+    """素材库概况：索引条数、主播分布、当前素材根目录。"""
+    try:
+        index = _material_index()
+        stats = index.stats()
+        settings = _material_settings()
+        root = _material_root()
+        try:
+            sources = index.sources()
+        except Exception:
+            sources = {"batches": [], "batch_count": 0, "imports": []}
+        return {
+            "ok": True,
+            "root": root,
+            "root_exists": Path(root).is_dir(),
+            "default_root": MATERIAL_DEFAULT_ROOT,
+            "index_path": str(_material_database_path()),
+            "videos": stats["videos"],
+            "sentences": stats["sentences"],
+            "duration": stats["duration"],
+            "publishers": stats["publishers"],
+            "fts_enabled": stats["fts_enabled"],
+            "last_build_at": float(settings.get("last_build_at") or 0.0),
+            # 本机只有一个库文件，导入的主播索引都合并进它，所以要把来源列出来
+            "sources": sources,
+        }
+    except Exception as exc:
+        emit_log("error", f"素材库状态读取失败：{type(exc).__name__}: {exc}", "material")
+        return {"ok": False, "message": f"素材库不可用：{exc}"}
+
+
+@app.post("/api/material/probe")
+def material_probe(payload: MaterialIndexPayload) -> dict[str, Any]:
+    """试扫目录：先看清有多少视频、多少缺字幕，不写索引。"""
+    from material_library import probe_directory
+
+    root = payload.path.strip() or _material_root()
+    try:
+        info = probe_directory(root, recursive=payload.recursive, index=_material_index())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"扫描目录失败：{exc}") from exc
+    if payload.publish:
+        _material_save_settings({"root": root})
+    return info
+
+
+@app.post("/api/material/index/start")
+def material_index_start(payload: MaterialIndexPayload) -> dict[str, Any]:
+    """建立/更新素材库索引（缺字幕的视频可自动跑一次语音识别）。
+
+    这是素材库唯一需要授权的地方：建索引会用本机 ASR 识别缺失字幕的视频，
+    是真正消耗算力的一步。检索、筛选、查看一律免费。
+    """
+    root = payload.path.strip() or _material_root()
+    if not Path(root).is_dir() and not payload.probe_only:
+        raise HTTPException(status_code=400, detail=f"素材目录不存在：{root}")
+    # 先过授权门禁再建任务：避免建了一个注定失败的任务，用户只看到"任务失败"
+    try:
+        _ensure_feature_access("素材库")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    _ensure_scope_idle("material", "素材库建索引")
+    task_id = _new_task("material", "素材库建索引")
+    _set_task(task_id, message="准备扫描素材目录")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _material_build_worker, task_id, payload),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "root": root,
+        "message": "素材库建索引已启动。",
+    }
+
+
+@app.post("/api/material/search")
+def material_search(payload: MaterialSearchPayload) -> dict[str, Any]:
+    """检索一句话/关键词，返回它在哪些视频的哪几段出现过。"""
+    query = payload.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="请输入要检索的关键词或整句文案。")
+    try:
+        index = _material_index()
+        if index.stats()["sentences"] <= 0:
+            return {
+                "ok": False,
+                "message": "素材库还是空的：先选好素材目录并点「建立/更新索引」。",
+                "groups": [],
+                "hits": 0,
+                "videos": 0,
+            }
+        if payload.video.strip():
+            paths = index.resolve_video_paths(payload.video.strip())
+            if not paths:
+                return {
+                    "ok": True,
+                    "query": query,
+                    "groups": [],
+                    "hits": 0,
+                    "videos": 0,
+                    "elapsed_ms": 0.0,
+                    "message": "这个视频不在素材库里。",
+                }
+        result = index.search(
+            query,
+            mode=payload.mode,
+            context=payload.context,
+            publisher=payload.publisher.strip(),
+            publishers=list(payload.publishers or []),
+            lib_ids=[int(item) for item in (payload.lib_ids or []) if int(item or 0) > 0],
+            batches=list(payload.batches or []),
+            directories=list(payload.directories or []),
+            video=payload.video.strip(),
+            limit_groups=payload.limit_groups,
+            windows_per_group=payload.windows_per_group,
+        )
+        # 回显这次搜索的范围，前端据此提示"你只在影子里搜了"
+        if payload.scope_label.strip():
+            result["scope_label"] = payload.scope_label.strip()
+        result["scope_publishers"] = list(payload.publishers or [])
+        result["scope_batches"] = list(payload.batches or [])
+        result["scope_lib_ids"] = [int(item) for item in (payload.lib_ids or [])]
+        result["scope_directories"] = list(payload.directories or [])
+    except Exception as exc:
+        emit_log("error", f"素材库检索失败：{type(exc).__name__}: {exc}", "material")
+        raise HTTPException(status_code=500, detail=f"检索失败：{exc}") from exc
+    result["ok"] = True
+    return result
+
+
+@app.post("/api/material/videos")
+def material_videos(payload: MaterialSearchPayload) -> dict[str, Any]:
+    """列出已入库的视频（可按主播筛选），用于右栏"只看某个视频"。"""
+    try:
+        index = _material_index()
+        rows = index.list_videos(payload.publisher.strip(), limit=500)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取素材列表失败：{exc}") from exc
+    return {
+        "ok": True,
+        "videos": [
+            {
+                "name": row.get("name") or "",
+                "publisher": row.get("publisher") or "",
+                "session_epoch": float(row.get("session_epoch") or 0.0),
+                "duration": float(row.get("duration") or 0.0),
+                "sentences": int(row.get("sentence_count") or 0),
+                "with_srt": Path(str(row.get("path") or "")).with_suffix(".srt").is_file(),
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.post("/api/material/suggest")
+def material_suggest(payload: MaterialSearchPayload) -> dict[str, Any]:
+    """搜索框联想：热门文案 / 以输入开头的句子。可按主播过滤。"""
+    try:
+        index = _material_index()
+        return {
+            "ok": True,
+            "items": index.suggest(
+                payload.query, limit=20, publisher=str(payload.publisher or "")
+            ),
+        }
+    except Exception as exc:
+        return {"ok": False, "items": [], "message": str(exc)}
+
+
+@app.post("/api/material/label")
+def material_label(payload: MaterialLabelPayload) -> dict[str, Any]:
+    """给某个目录下的素材统一标注主播名。"""
+    folder = payload.folder.strip()
+    publisher = payload.publisher.strip()
+    if not folder or not publisher:
+        raise HTTPException(status_code=400, detail="目录和主播名都不能为空。")
+    try:
+        index = _material_index()
+        updated = index.set_publisher_for_folder(folder, publisher)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"标注失败：{exc}") from exc
+    emit_log("success", f"素材库：已把 {updated} 个视频标注为主播「{publisher}」。", "material")
+    return {"ok": True, "updated": updated, "publisher": publisher}
+
+
+@app.post("/api/material/open")
+def material_open(payload: MaterialOpenPayload) -> dict[str, Any]:
+    """用系统默认播放器打开命中的源视频。"""
+    try:
+        index = _material_index()
+        return index.open_source(payload.path.strip(), payload.start)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开视频失败：{exc}") from exc
+
+
+@app.post("/api/material/reveal")
+def material_reveal(payload: MaterialOpenPayload) -> dict[str, Any]:
+    """在资源管理器里定位命中的视频（打开文件夹并选中该文件）。
+
+    导入的共享索引本机没有文件，会返回 404 并说明"按文件名去网盘找"。
+    """
+    try:
+        index = _material_index()
+        return index.reveal_source(payload.path.strip())
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开视频地址失败：{exc}") from exc
+
+
+@app.post("/api/material/clear")
+def material_clear() -> dict[str, Any]:
+    """清空素材库索引（不动视频和字幕文件）。"""
+    try:
+        index = _material_index()
+        index.clear()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"清空失败：{exc}") from exc
+    emit_log("warning", "素材库索引已清空（视频与字幕文件未改动）。", "material")
+    return {"ok": True, "message": "素材库索引已清空。"}
+
+
+@app.post("/api/material/export")
+def material_export(payload: "MaterialExportPayload | None" = None) -> dict[str, Any]:
+    """导出素材库索引（可选只导出指定主播）。
+
+    大机构有几十个主播、几百 TB 素材，索引必须能按主播分卷：
+    用户只下载自己要搜的那几个主播的索引包。
+    """
+    try:
+        _ensure_feature_access("素材库")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    from material_archive import default_export_name
+
+    index = _material_index()
+    stats = index.stats()
+    if stats["videos"] <= 0:
+        raise HTTPException(status_code=400, detail="素材库还是空的，先建立索引再导出。")
+
+    publishers = [str(item) for item in (getattr(payload, "publishers", None) or []) if str(item).strip()]
+    export_paths = [str(item) for item in (getattr(payload, "paths", None) or []) if str(item).strip()]
+    export_libs = [int(item) for item in (getattr(payload, "lib_ids", None) or []) if int(item or 0) > 0]
+    mode = str(getattr(payload, "mode", "") or "").strip().lower()
+    if getattr(payload, "choose", False) and not publishers and not export_paths and not export_libs:
+        if not mode:
+            mode = _material_ask_export_mode()
+            if not mode:
+                return {"ok": False, "cancelled": True, "message": "已取消导出。"}
+        try:
+            if mode == "library":
+                export_libs = _material_choose_libraries(index.libraries())
+            elif mode == "directory":
+                export_paths = _material_choose_directory(index.directory_options())
+            else:
+                publishers = _material_choose_streamers(index.streamer_options())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"打开选择窗口失败：{exc}") from exc
+        if not publishers and not export_paths and not export_libs:
+            return {"ok": False, "cancelled": True, "message": "已取消导出。"}
+
+    if export_libs:
+        names = {item["id"]: item["name"] for item in index.libraries()}
+        picked = [names.get(item, f"索引{item}") for item in export_libs]
+        streamers = "、".join(picked[:3]) + (f" 等 {len(picked)} 个索引" if len(picked) > 3 else "")
+    elif export_paths:
+        name_map = {item["path"]: item["label"] for item in index.directory_options()}
+        labels = [name_map.get(item, Path(item).name) for item in export_paths]
+        streamers = "、".join(labels[:3]) + (f" 等 {len(labels)} 个目录" if len(labels) > 3 else "")
+    else:
+        streamers = ", ".join(
+            item["publisher"] or "(未标注主播)"
+            for item in index.streamer_options()
+            if item["publisher"] in publishers
+        ) or "全部主播"
+    explicit_path = str(getattr(payload, "path", "") or "").strip()
+    interactive = bool(getattr(payload, "choose", False))
+    if explicit_path:
+        output_path = explicit_path
+    elif not interactive:
+        # 机器调用（自动化/测试/脚本）不弹对话框：固定落到用户数据目录，
+        # 绝不允许悄悄写进用户的素材目录（曾经因此把 zip 写进 E:\切片\...）。
+        from material_archive import default_export_name
+
+        fallback_dir = _safe_user_child("material_exports")
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(fallback_dir / default_export_name(streamers.split(" 等 ")[0]))
+    elif export_libs:
+        output_path = _material_export_path(index, streamers.split(" 等 ")[0])
+    elif export_paths:
+        output_path = _material_export_path(index, Path(export_paths[0]).name if len(export_paths) == 1 else f"{len(export_paths)}个目录")
+    else:
+        output_path = _material_export_path(
+            index, publishers[0] if len(publishers) == 1 else f"{len(publishers)}个主播"
+        )
+    if not output_path:
+        return {"ok": False, "cancelled": True, "message": "已取消导出。"}
+
+    _ensure_scope_idle("material", "素材库导出")
+    task_id = _new_task("material", "导出素材库索引")
+    _set_task(task_id, message=f"准备导出 {streamers}")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _material_export_worker, task_id, output_path, streamers,
+              publishers, export_paths, export_libs),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "path": output_path,
+        "publishers": publishers,
+        "paths": export_paths,
+        "lib_ids": export_libs,
+        "mode": "library" if export_libs else ("directory" if export_paths else "publisher"),
+        "message": f"正在导出「{streamers}」的索引：{Path(output_path).name}",
+    }
+
+
+@app.post("/api/material/import")
+def material_import(payload: "MaterialImportPayload | None" = None) -> dict[str, Any]:
+    """导入别人分享的素材库索引包（可一次选多个，例如不同主播各一个）。"""
+    try:
+        _ensure_feature_access("素材库")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    paths = [str(item) for item in (getattr(payload, "paths", None) or []) if str(item).strip()]
+    if not paths:
+        try:
+            paths = _material_choose_import_file()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"打开选择窗口失败：{exc}") from exc
+    if not paths:
+        return {"ok": False, "cancelled": True, "message": "已取消导入。"}
+
+    missing = [item for item in paths if not Path(item).is_file()]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"索引包不存在：{missing[0]}")
+
+    from material_archive import inspect_archive
+
+    summaries = []
+    for item in paths:
+        try:
+            manifest = inspect_archive(item)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"{Path(item).name} 无法识别：{exc}") from exc
+        summaries.append(
+            {
+                "name": Path(item).name,
+                "source": manifest.get("source_label", ""),
+                "videos": manifest.get("videos", 0),
+                "sentences": manifest.get("sentences", 0),
+                "created_at": manifest.get("created_at", 0),
+            }
+        )
+
+    _ensure_scope_idle("material", "素材库导入")
+    task_id = _new_task("material", "导入素材库索引")
+    _set_task(task_id, message=f"准备导入 {len(paths)} 个索引包")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _material_import_worker, task_id, paths),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "summaries": summaries,
+        "message": f"正在导入 {len(paths)} 个索引包。",
+    }
+
+
+@app.post("/api/material/export-options")
+def material_export_options() -> dict[str, Any]:
+    """导出前查看索引/主播/目录的规模，供选择分卷。"""
+    try:
+        index = _material_index()
+        return {
+            "ok": True,
+            "libraries": index.libraries(),
+            "streamers": index.streamer_options(),
+            "directories": index.directory_options(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取索引/主播/目录列表失败：{exc}") from exc
+
+
+@app.post("/api/material/libraries")
+def material_libraries() -> dict[str, Any]:
+    """所有索引列表（一个素材目录 / 一个导入包 = 一个索引）。"""
+    try:
+        index = _material_index()
+        return {"ok": True, "libraries": index.libraries()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取索引列表失败：{exc}") from exc
+
+
+@app.post("/api/material/library/rebuild")
+def material_library_rebuild(payload: "MaterialLibraryPayload") -> dict[str, Any]:
+    """重建某个索引：清掉它自己的内容，再从它的素材目录重扫（不动其他索引）。"""
+    try:
+        _ensure_feature_access("素材库")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    lib_id = int(payload.library_id or 0)
+    if lib_id <= 0:
+        raise HTTPException(status_code=400, detail="请指定要重建的索引。")
+    index = _material_index()
+    row = index.library(lib_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="这个索引不存在了，请刷新页面。")
+    if str(row["kind"]) == "imported":
+        raise HTTPException(
+            status_code=400,
+            detail="这是导入的索引，本机没有源素材目录，不能重建。请让分享的人重新导出一份给你。",
+        )
+    _ensure_scope_idle("material", "素材库重建索引")
+    task_id = _new_task("material", f"重建索引「{row['name']}」")
+    _set_task(task_id, message=f"准备重建 {row['root']}")
+    threading.Thread(
+        target=_run_task_worker,
+        args=(task_id, _material_rebuild_library_worker, task_id, lib_id, bool(payload.generate_srt)),
+        daemon=True,
+    ).start()
+    return {"ok": True, "task_id": task_id, "message": f"正在重建索引「{row['name']}」"}
+
+
+@app.post("/api/material/library/remove")
+def material_library_remove(payload: "MaterialLibraryPayload") -> dict[str, Any]:
+    """删除某个索引（只删它自己的内容，不影响其他索引）。"""
+    lib_id = int(payload.library_id or 0)
+    if lib_id <= 0:
+        raise HTTPException(status_code=400, detail="请指定要删除的索引。")
+    try:
+        index = _material_index()
+        row = index.library(lib_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="这个索引不存在了，请刷新页面。")
+        name = str(row["name"] or "")
+        result = index.remove_library(lib_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"删除索引失败：{exc}") from exc
+    emit_log(
+        "success",
+        f"已删除索引「{name}」：{result['videos']} 个视频 / {result['sentences']} 句。",
+        "material",
+    )
+    return {"ok": True, "name": name, **result}
 
 
 @app.websocket("/ws/log")

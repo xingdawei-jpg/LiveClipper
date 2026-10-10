@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Shared feature access guard for activation/trial checks."""
+"""Shared feature access guard for activation/trial checks.
 
-from tkinter import messagebox
+注意：这里**不再**在模块顶层 import tkinter。桌面版已废弃，而本模块被 Web 服务端
+（web_client/server.py 的 _ensure_feature_access）直接引用 —— 顶层 import tkinter
+会让整条授权门禁硬依赖图形库。弹窗只在桌面调用方传了 root 时才会用到，
+因此改为用到时再惰性导入。
+"""
 
 
 LOCKED_REASON = "未激活。加客服微信 LeyiDeco 可领 3 天免费试用码，或在官网购买后自动获取激活码。"
@@ -43,12 +47,24 @@ def _record_event(event_type, feature_name, units=1, metadata=None):
 
 
 
-def get_feature_access(refresh=False):
-    """Return normalized access state without showing UI."""
+def get_feature_access(refresh=False, strict=False):
+    """Return normalized access state without showing UI.
+
+    strict=True（2026-10-10 修复）：不采信可能已经过期的内存缓存，改为重读本地授权
+    状态（仍是纯本地判断，不联网，所以没有性能代价、也不影响离线宽限）。
+
+    为什么付费功能必须传 strict=True：check_activation_cached 默认 allow_stale=True ——
+    缓存超过 10 分钟后依然返回**旧结果**，只在后台异步刷新。授权到期或吊销后，旧结果
+    会继续放行，于是 AI 照跑、费用照花，直到某次刷新后才失败。实测过一次批量 20 个
+    视频全部走完 AI 才因授权过期整体失败。
+    """
     try:
         import license_client as lc
 
-        status = lc.check_activation() if refresh else lc.check_activation_cached()
+        if refresh:
+            status = lc.check_activation()
+        else:
+            status = lc.check_activation_cached(allow_stale=not strict)
         if status.get("activated"):
             return {"ok": True, "activated": True, "trial": False, "raw": status}
 
@@ -90,9 +106,14 @@ def get_feature_access(refresh=False):
 
 
 
-def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=True, refresh=False):
-    """Gate a user-facing feature before it starts running."""
-    access = get_feature_access(refresh=refresh)
+def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=True, refresh=False,
+                           strict=False):
+    """Gate a user-facing feature before it starts running.
+
+    strict=True 时按本地最新授权状态判定，不采信可能过期的缓存 —— 会花钱（AI）的
+    功能应当用 strict=True，避免"授权已失效却先跑一半再失败"。
+    """
+    access = get_feature_access(refresh=refresh, strict=strict)
     if access.get("ok"):
         warning = str((access.get("raw") or {}).get("online_warning") or "").strip()
         if warning:
@@ -115,6 +136,8 @@ def require_feature_access(feature_name, root=None, log_fn=None, show_dialog=Tru
     _log(log_fn, f"{feature_name}已锁定：{reason}", "err")
     if show_dialog and root is not None:
         try:
+            from tkinter import messagebox  # 仅在桌面调用方传了 root 时才需要
+
             messagebox.showwarning(
                 "功能已锁定",
                 f"{feature_name}需要激活后使用。\n\n{reason}",
@@ -166,6 +189,8 @@ def consume_trial_after_success(feature_name, units=1, root=None, log_fn=None):
                 pass
             if root is not None:
                 try:
+                    from tkinter import messagebox  # 仅桌面调用方传了 root 时才需要
+
                     messagebox.showinfo("试用已用完", LOCKED_REASON, parent=root)
                 except Exception:
                     pass
