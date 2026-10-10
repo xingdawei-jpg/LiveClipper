@@ -67,21 +67,32 @@ def _emit(message_type: str, **payload: object) -> None:
     record = {"type": message_type, **payload}
     print(json.dumps(record, ensure_ascii=False), flush=True)
 
+def _engine_label(engine: str | None) -> str:
+    """显示名与 stt.local_asr_engine_label 同源；不读设置项，未指定时按 SenseVoice 兜底。"""
+    try:
+        from stt import LOCAL_ASR_ENGINE_LABELS
+
+        labels = LOCAL_ASR_ENGINE_LABELS
+    except Exception:
+        labels = {}
+    key = str(engine or "").strip().lower()
+    return labels.get(key) or labels.get("sensevoice") or "本地识别"
+
 
 def _serve() -> int:
     """Keep one SenseVoice model alive for a caller-owned batch session."""
     _configure_runtime_path()
     try:
-        from local_asr import sensevoice_to_srt
+        from local_asr import transcribe_audio_to_srt
     except Exception as exc:
-        _emit("log", message=f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
+        _emit("log", message=f"本地语音识别异常: {type(exc).__name__}: {exc}")
         return 1
 
     for raw_line in sys.stdin:
         try:
             request = json.loads(raw_line)
         except json.JSONDecodeError:
-            _emit("log", message="SenseVoice worker 收到无法解析的批量请求。")
+            _emit("log", message="本地识别 worker 收到无法解析的批量请求。")
             continue
         if not isinstance(request, dict):
             continue
@@ -93,17 +104,20 @@ def _serve() -> int:
         if not request_id or not audio_path or not srt_output:
             _emit("result", id=request_id, ok=False)
             continue
+        engine = str(request.get("engine") or "") or None
+        label = _engine_label(engine)
         try:
             ok = bool(
-                sensevoice_to_srt(
+                transcribe_audio_to_srt(
                     audio_path,
                     srt_output,
                     log_fn=lambda message, rid=request_id: _emit("log", id=rid, message=str(message)),
+                    engine=engine,
                 )
             )
             _emit("result", id=request_id, ok=ok)
         except Exception as exc:
-            _emit("log", id=request_id, message=f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
+            _emit("log", id=request_id, message=f"{label} 本地识别异常: {type(exc).__name__}: {exc}")
             _emit("result", id=request_id, ok=False)
     return 0
 
@@ -116,26 +130,34 @@ def main(argv: list[str] | None = None) -> int:
     if args == ["--serve"]:
         return _serve()
     if len(args) != 2:
-        _emit("log", message="SenseVoice worker 参数不完整。")
+        _emit("log", message="本地识别 worker 参数不完整。")
         _emit("result", ok=False)
         return 2
 
     audio_path, srt_output = args
     _configure_runtime_path()
+    engine = None
+    label = "本地识别"
     try:
-        from local_asr import sensevoice_to_srt
+        from local_asr import _ENV_LOCAL_ASR_ENGINE, transcribe_audio_to_srt
 
+        # 单发模式同样要尊重调用方指定的引擎：_run_local_asr_worker() 通过环境变量传入，
+        # 这里必须显式透传给 transcribe_audio_to_srt()。否则 resolve_local_asr_engine()
+        # 会优先读「设置项」，调用方的指定会被静默忽略。
+        engine = str(os.environ.get(_ENV_LOCAL_ASR_ENGINE, "")).strip() or None
+        label = _engine_label(engine)
         ok = bool(
-            sensevoice_to_srt(
+            transcribe_audio_to_srt(
                 audio_path,
                 srt_output,
                 log_fn=lambda message: _emit("log", message=str(message)),
+                engine=engine,
             )
         )
         _emit("result", ok=ok)
         return 0 if ok else 1
     except Exception as exc:
-        _emit("log", message=f"SenseVoice 本地识别异常: {type(exc).__name__}: {exc}")
+        _emit("log", message=f"{label} 本地识别异常: {type(exc).__name__}: {exc}")
         _emit("result", ok=False)
         return 1
 

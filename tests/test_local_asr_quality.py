@@ -425,7 +425,7 @@ class LocalAsrQualityTests(unittest.TestCase):
 
         self.assertIn("_copy_srt_with_word_timing_sidecar(", source)
         self.assertIn("source_video=original_vp", source)
-        self.assertIn("provider=\"sensevoice\"", source)
+        self.assertIn("provider=_local_asr_identity()[0]", source)
         self.assertIn("cancel_event=cancel_event", source)
         self.assertNotIn("shutil.copy2(_temp, _sc)", source)
 
@@ -639,7 +639,7 @@ class LocalAsrQualityTests(unittest.TestCase):
             transcribe.call_args.kwargs,
             {"log_fn": logs.append, "cancel_event": None},
         )
-        self.assertTrue(any("本地 SenseVoice" in message for message in logs))
+        self.assertTrue(any(cutter_logic._local_asr_engine_label() in message for message in logs))
 
     def test_final_subtitle_stage_uses_shared_sensevoice_entrypoint(self) -> None:
         source = inspect.getsource(cutter_logic._add_subtitles_final)

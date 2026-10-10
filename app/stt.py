@@ -20,6 +20,69 @@ from config import FFMPEG_PATH
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _LOCAL_ASR_TIMEOUT_SECONDS = 4 * 60 * 60
 _LOCAL_ASR_TOOL_FLAG = "--liveclipper-run-tool"
+# 方案A 开关：默认空= SenseVoice；设为 paraformer 时走 Paraformer 模型级分段。
+LOCAL_ASR_ENGINE_ENV = "LIVECLIPPER_LOCAL_ASR_ENGINE"
+
+
+_PARAFORMER_REQUESTS = {"paraformer", "paraformer-large", "plan-a", "plan_a"}
+
+LOCAL_ASR_ENGINE_LABELS = {
+    "sensevoice": "SenseVoice",
+    "paraformer": "Paraformer-large",
+}
+
+
+def saved_local_asr_engine() -> str:
+    """Return the local engine saved in settings ("" when unset or unreadable)."""
+    try:
+        from ai_clipper import load_settings
+
+        raw = str((load_settings() or {}).get("local_asr_engine") or "").strip().lower()
+    except Exception:
+        raw = ""
+    if raw in _PARAFORMER_REQUESTS:
+        return "paraformer"
+    if raw == "sensevoice":
+        return "sensevoice"
+    return ""
+
+
+def resolve_local_asr_engine_name(engine: str = "") -> str:
+    """Return "paraformer" or "sensevoice".
+
+    Priority: explicit argument > saved setting > environment variable > SenseVoice.
+    """
+    requested = str(engine or "").strip().lower()
+    if not requested or requested == "auto":
+        requested = saved_local_asr_engine() or str(
+            os.environ.get(LOCAL_ASR_ENGINE_ENV, "") or ""
+        ).strip().lower()
+    if requested in _PARAFORMER_REQUESTS:
+        return "paraformer"
+    return "sensevoice"
+
+
+def local_asr_engine_label(engine: str = "") -> str:
+    """Return the display name of the local engine that would run now."""
+    return LOCAL_ASR_ENGINE_LABELS.get(resolve_local_asr_engine_name(engine), "SenseVoice")
+
+
+# 本地引擎 -> 缓存身份：唯一来源，避免各处再硬编码 SenseVoice。
+LOCAL_ASR_PROVIDER_MODELS = {
+    "sensevoice": "iic/SenseVoiceSmall",
+    "paraformer": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+}
+
+
+def local_asr_provider_model(provider: str) -> str:
+    """Return the model id recorded for a known local ASR provider ("" when unknown)."""
+    return LOCAL_ASR_PROVIDER_MODELS.get(str(provider or "").strip().lower(), "")
+
+
+def local_asr_provider_identity(engine: str = "") -> tuple[str, str]:
+    """Return the (provider, model) pair for the local ASR engine that would run now."""
+    name = resolve_local_asr_engine_name(engine)
+    return name, LOCAL_ASR_PROVIDER_MODELS.get(name, "")
 
 
 class LocalASRFailure(RuntimeError):
@@ -49,7 +112,7 @@ def _actionable_local_asr_failure(messages: list[str]) -> LocalASRFailure | None
     combined = "\n".join(str(message or "") for message in messages).lower()
     if any(token in combined for token in _LOCAL_ASR_MEMORY_TOKENS):
         return LocalASRFailure(
-            "本机可用内存或 Windows 虚拟内存不足，SenseVoice 无法启动。"
+            "本机可用内存或 Windows 虚拟内存不足，本地语音识别无法启动。"
             "请关闭占用内存的软件后重试；仍失败时把虚拟内存设为系统管理，"
             "或启用云端语音识别、提供与视频同名的 SRT 字幕。",
             code="local_asr_out_of_memory",
@@ -205,20 +268,21 @@ def _decode_worker_message(raw_line: str) -> tuple[str, str | bool] | None:
     return None
 
 
-def _local_asr_exit_diagnostic(return_code: int | None) -> str:
+def _local_asr_exit_diagnostic(return_code: int | None, engine: str = "") -> str:
     """Describe native worker crashes without retrying an unstable process."""
+    label = local_asr_engine_label(engine)
     if return_code is None:
-        return "SenseVoice 本地识别进程意外退出，未取得退出码。"
+        return f"{label} 本地识别进程意外退出，未取得退出码。"
     try:
         unsigned = int(return_code) & 0xFFFFFFFF
     except (TypeError, ValueError):
-        return f"SenseVoice 本地识别进程失败（返回码 {return_code}）。"
+        return f"{label} 本地识别进程失败（返回码 {return_code}）。"
     if unsigned == 0xC0000005:
         return (
-            "SenseVoice 本地识别进程发生原生访问冲突（0xC0000005）。"
+            f"{label} 本地识别进程发生原生访问冲突（0xC0000005）。"
             "已停止重试并释放模型内存；请改用云端识别或检查本机 Python/Torch/显卡驱动环境。"
         )
-    return f"SenseVoice 本地识别进程失败（返回码 {return_code} / 0x{unsigned:08X}）。"
+    return f"{label} 本地识别进程失败（返回码 {return_code} / 0x{unsigned:08X}）。"
 
 
 class LocalASRWorkerSession:
@@ -251,16 +315,20 @@ class LocalASRWorkerSession:
     def _start(self, log_fn: Callable[[str], None] | None) -> bool:
         if self._proc is not None and self._proc.poll() is None:
             return True
+        label = local_asr_engine_label(str(getattr(self, "_engine", "") or ""))
         worker = _local_asr_worker_script()
         if worker is None:
             if log_fn:
-                log_fn("SenseVoice 独立识别进程缺少 worker 文件，请重新安装完整版本。")
+                log_fn(f"{label} 独立识别进程缺少 worker 文件，请重新安装完整版本。")
             return False
         try:
             worker_env = os.environ.copy()
             worker_env["PYTHONIOENCODING"] = "utf-8"
+            engine = str(getattr(self, "_engine", "") or "")
+            if engine:
+                worker_env[LOCAL_ASR_ENGINE_ENV] = engine
             if log_fn:
-                log_fn("正在启动可复用 SenseVoice 批量识别进程...")
+                log_fn(f"正在启动可复用 {label} 批量识别进程...")
             self._lines = queue.Queue()
             self._proc = subprocess.Popen(
                 _local_asr_worker_serve_command(worker),
@@ -292,7 +360,7 @@ class LocalASRWorkerSession:
             return True
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             if log_fn:
-                log_fn(f"SenseVoice 批量识别进程启动失败: {exc}")
+                log_fn(f"{label} 批量识别进程启动失败: {exc}")
             self._terminate()
             return False
 
@@ -328,12 +396,15 @@ class LocalASRWorkerSession:
         *,
         log_fn: Callable[[str], None] | None = None,
         cancel_event: _CancelEvent | None = None,
+        engine: str = "",
     ) -> bool:
         """Run one request, keeping the already-loaded model for the next one."""
         with self._lock:
+            self._engine = engine
+            label = local_asr_engine_label(engine)
             if self._closed:
                 if log_fn:
-                    log_fn("SenseVoice 批量识别进程已关闭，无法继续识别。")
+                    log_fn(f"{label} 批量识别进程已关闭，无法继续识别。")
                 return False
             if cancel_event is not None and cancel_event.is_set():
                 return False
@@ -353,11 +424,12 @@ class LocalASRWorkerSession:
                     "id": request_id,
                     "audio_path": audio_path,
                     "srt_output": srt_output,
+                    "engine": engine,
                 }, ensure_ascii=False) + "\n")
                 proc.stdin.flush()
             except (OSError, ValueError) as exc:
                 if log_fn:
-                    log_fn(f"SenseVoice 批量识别请求发送失败: {exc}")
+                    log_fn(f"{label} 批量识别请求发送失败: {exc}")
                 self._terminate()
                 _remove_local_asr_outputs(srt_output)
                 return False
@@ -369,13 +441,13 @@ class LocalASRWorkerSession:
             while result_ok is None:
                 if cancel_event is not None and cancel_event.is_set():
                     if log_fn:
-                        log_fn("SenseVoice 本地识别已停止。")
+                        log_fn(f"{label} 本地识别已停止。")
                     self._terminate()
                     _remove_local_asr_outputs(srt_output)
                     return False
                 if time.monotonic() >= deadline:
                     if log_fn:
-                        log_fn("SenseVoice 本地识别超时，识别进程已结束。")
+                        log_fn(f"{label} 本地识别超时，识别进程已结束。")
                     self._terminate()
                     _remove_local_asr_outputs(srt_output)
                     return False
@@ -392,7 +464,7 @@ class LocalASRWorkerSession:
                         _remove_local_asr_outputs(srt_output)
                         raise failure
                     if log_fn:
-                        log_fn(_local_asr_exit_diagnostic(proc.poll()))
+                        log_fn(_local_asr_exit_diagnostic(proc.poll(), self._engine))
                     self._terminate()
                     _remove_local_asr_outputs(srt_output)
                     return False
@@ -406,7 +478,7 @@ class LocalASRWorkerSession:
                             _remove_local_asr_outputs(srt_output)
                             raise failure
                         if log_fn:
-                            log_fn(_local_asr_exit_diagnostic(proc.returncode))
+                            log_fn(_local_asr_exit_diagnostic(proc.returncode, self._engine))
                         self._terminate()
                         _remove_local_asr_outputs(srt_output)
                         return False
@@ -439,8 +511,8 @@ class LocalASRWorkerSession:
                 failure = _actionable_local_asr_failure(worker_messages + diagnostics)
                 if log_fn:
                     for diagnostic in diagnostics:
-                        log_fn(f"SenseVoice 诊断: {diagnostic[:300]}")
-                    log_fn(str(failure) if failure is not None else "SenseVoice 批量识别未生成可用字幕。")
+                        log_fn(f"{label} 诊断: {diagnostic[:300]}")
+                    log_fn(str(failure) if failure is not None else f"{label} 批量识别未生成可用字幕。")
                 _remove_local_asr_outputs(srt_output)
                 if failure is not None:
                     raise failure
@@ -461,8 +533,9 @@ class LocalASRWorkerSession:
                 except (OSError, subprocess.SubprocessError, ValueError):
                     pass
             self._terminate()
+            label = local_asr_engine_label(str(getattr(self, "_engine", "") or ""))
             if log_fn:
-                log_fn("SenseVoice 批量识别进程已退出，本地模型内存已释放。")
+                log_fn(f"{label} 批量识别进程已退出，本地模型内存已释放。")
 
 
 def _run_local_asr_worker(
@@ -470,14 +543,16 @@ def _run_local_asr_worker(
     srt_output: str,
     log_fn: Callable[[str], None] | None = None,
     cancel_event: _CancelEvent | None = None,
+    engine: str = "",
 ) -> bool:
     def _log(message: str) -> None:
         if log_fn and message:
             log_fn(message)
 
+    label = local_asr_engine_label(engine)
     worker = _local_asr_worker_script()
     if worker is None:
-        _log("SenseVoice 独立识别进程缺少 worker 文件，请重新安装完整版本。")
+        _log(f"{label} 独立识别进程缺少 worker 文件，请重新安装完整版本。")
         return False
 
     _remove_local_asr_outputs(srt_output)
@@ -498,9 +573,11 @@ def _run_local_asr_worker(
     reader: threading.Thread | None = None
 
     try:
-        _log("正在启动独立 SenseVoice 识别进程...")
+        _log(f"正在启动独立 {label} 识别进程...")
         worker_env = os.environ.copy()
         worker_env["PYTHONIOENCODING"] = "utf-8"
+        if engine:
+            worker_env[LOCAL_ASR_ENGINE_ENV] = engine
         proc = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -529,13 +606,13 @@ def _run_local_asr_worker(
             if cancel_event is not None and cancel_event.is_set():
                 proc.kill()
                 proc.wait(timeout=10)
-                _log("SenseVoice 本地识别已停止。")
+                _log(f"{label} 本地识别已停止。")
                 _remove_local_asr_outputs(srt_output)
                 return False
             if time.monotonic() >= deadline:
                 proc.kill()
                 proc.wait(timeout=10)
-                _log("SenseVoice 本地识别超时，识别进程已结束。")
+                _log(f"{label} 本地识别超时，识别进程已结束。")
                 return False
             try:
                 raw_line = line_queue.get(timeout=0.2)
@@ -569,14 +646,14 @@ def _run_local_asr_worker(
         if not succeeded:
             failure = _actionable_local_asr_failure(worker_messages + raw_diagnostics)
             for diagnostic in raw_diagnostics:
-                _log(f"SenseVoice 诊断: {diagnostic[:300]}")
-            _log(str(failure) if failure is not None else _local_asr_exit_diagnostic(return_code))
+                _log(f"{label} 诊断: {diagnostic[:300]}")
+            _log(str(failure) if failure is not None else _local_asr_exit_diagnostic(return_code, engine))
             _remove_local_asr_outputs(srt_output)
             if failure is not None:
                 raise failure
         return succeeded
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        _log(f"SenseVoice 独立识别进程启动失败: {exc}")
+        _log(f"{label} 独立识别进程启动失败: {exc}")
         _remove_local_asr_outputs(srt_output)
         return False
     finally:
@@ -591,44 +668,50 @@ def _run_local_asr_worker(
         if proc is not None and proc.stdout is not None:
             proc.stdout.close()
         if proc is not None:
-            _log("SenseVoice 识别进程已退出，本地模型内存已释放。")
+            _log(f"{label} 识别进程已退出，本地模型内存已释放。")
 
 
 def transcribe_local_audio_to_srt(
     audio_path: str,
     srt_output: str,
     log_fn: Callable[[str], None] | None = None,
-    asr_engine: str = "sensevoice",
+    asr_engine: str = "auto",
     cancel_event: _CancelEvent | None = None,
     worker_session: LocalASRWorkerSession | None = None,
 ) -> bool:
-    """Transcribe through SenseVoice only; never silently switch engines."""
+    """Transcribe with the selected local engine; never silently switch engines."""
     def _log(message: str) -> None:
         if log_fn:
             log_fn(message)
 
-    selected_engine = str(asr_engine or "sensevoice").strip().lower()
-    if selected_engine not in {"", "auto", "sensevoice"}:
-        _log("本地识别仅支持 SenseVoice，已忽略过期的本地模型设置。")
+    requested = str(asr_engine or "").strip().lower()
+    if requested in {"", "auto", "sensevoice"}:
+        # 必须**显式**传出解析结果，不能像以前那样"是 SenseVoice 就传空字符串"。
+        # worker 是独立进程，它直接用 os.environ 读 LIVECLIPPER_LOCAL_ASR_ENGINE；
+        # 一旦这里传空，环境里残留的旧值就会盖掉界面设置。实测踩到：User 级残留
+        # paraformer，界面选 SenseVoice 却实际跑 Paraformer，可见字幕随之失去语义断句。
+        # 显式传递可覆盖环境变量，让界面设置成为唯一权威。
+        engine = resolve_local_asr_engine_name(requested)
+    elif requested in {"paraformer", "paraformer-large", "plan-a", "plan_a"}:
+        engine = "paraformer"
+    else:
+        _log("本地识别仅支持 SenseVoice 与 Paraformer，已忽略过期的本地模型设置。")
+        engine = resolve_local_asr_engine_name("")
+    worker_kwargs = {
+        "log_fn": log_fn,
+        "cancel_event": cancel_event,
+    }
+    if engine:
+        worker_kwargs["engine"] = engine
     if worker_session is not None:
-        return worker_session.transcribe(
-            audio_path,
-            srt_output,
-            log_fn=log_fn,
-            cancel_event=cancel_event,
-        )
-    return _run_local_asr_worker(
-        audio_path,
-        srt_output,
-        log_fn=log_fn,
-        cancel_event=cancel_event,
-    )
+        return worker_session.transcribe(audio_path, srt_output, **worker_kwargs)
+    return _run_local_asr_worker(audio_path, srt_output, **worker_kwargs)
 
 
 def generate_srt(
     video_path: str,
     log_fn: Callable[[str], None] | None = None,
-    asr_engine: str = "sensevoice",
+    asr_engine: str = "auto",
     cancel_event: _CancelEvent | None = None,
     worker_session: LocalASRWorkerSession | None = None,
 ) -> str | None:
@@ -661,11 +744,16 @@ def generate_srt(
         try:
             from asr_cache import write_metadata
 
+            engine_name = resolve_local_asr_engine_name(asr_engine)
             write_metadata(
                 source_video,
                 srt_path,
-                provider="sensevoice",
-                model="iic/SenseVoiceSmall",
+                provider=engine_name,
+                model=(
+                    "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+                    if engine_name == "paraformer"
+                    else "iic/SenseVoiceSmall"
+                ),
                 timing_precision=(
                     "word" if Path(srt_path).with_suffix(".words.json").is_file() else "segment"
                 ),

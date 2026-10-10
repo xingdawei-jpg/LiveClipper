@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import importlib
+import importlib.util
 import inspect
 import json
 import os
@@ -262,6 +263,55 @@ def _cached_sensevoice_model_dir(configured: str = "") -> str | None:
     return None
 
 
+def _modelscope_cache_roots() -> list[Path]:
+    """ModelScope cache roots that may already hold a downloaded snapshot."""
+    roots: list[str] = [
+        os.environ.get("MODELSCOPE_CACHE", "").strip(),
+        os.environ.get("MODELSCOPE_HOME", "").strip(),
+        str(Path.home() / ".cache" / "modelscope"),
+    ]
+    return [Path(root) for root in roots if root]
+
+
+def _cached_modelscope_model_dir(repo_id: str, marker: str = "model.pt") -> str | None:
+    """Return a complete local snapshot path for a ModelScope repo id.
+
+    FunASR asks ModelScope to resolve a bare model name even when the snapshot
+    is already on disk.  That request fails whenever the machine is offline or
+    the Windows system proxy points at a dead port, and it then surfaces as a
+    misleading "model ... is not registered" error.  Resolving to the local
+    folder keeps loading fully offline; callers fall back to the original name
+    when nothing is cached yet, so a first run still downloads normally.
+    """
+    repo = str(repo_id or "").strip()
+    if "/" not in repo:
+        return None
+    folder = repo.replace("/", "--")
+    for root in _modelscope_cache_roots():
+        model_root = root / "models" / folder
+        candidates = [model_root, root / folder]
+        if model_root.is_dir():
+            candidates.extend(path for path in model_root.glob("snapshots/*") if path.is_dir())
+        for candidate in candidates:
+            if candidate.is_file():
+                candidate = candidate.parent
+            if (candidate / marker).is_file():
+                return str(candidate.resolve())
+    return None
+
+
+_LOCAL_ASR_MODEL_IDS = {
+    "fsmn-vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "ct-punc": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+}
+
+
+def _prefer_cached_model(model: str) -> str:
+    """Prefer an on-disk snapshot so loading never depends on the network."""
+    repo_id = _LOCAL_ASR_MODEL_IDS.get(model, model)
+    return _cached_modelscope_model_dir(repo_id) or model
+
+
 def _sensevoice_model_dir(log_fn: Callable[[str], None] | None = None) -> str:
     """Download once and return a SentencePiece-safe model path.
 
@@ -344,7 +394,7 @@ def _load_sensevoice(
         cpu_threads = _sensevoice_cpu_threads()
         model_kwargs = {
             "model": _sensevoice_model_dir(log_fn),
-            "vad_model": "fsmn-vad",
+            "vad_model": _prefer_cached_model("fsmn-vad"),
             "vad_kwargs": {"max_single_segment_time": 15000},
             "device": selected_device,
             "ncpu": cpu_threads,
@@ -706,6 +756,121 @@ def _review_sensevoice_segments(
     return reviewed
 
 
+# ---------------------------------------------------------------------------
+# 单独语气词过滤（口径A）
+# ---------------------------------------------------------------------------
+# “嗯，”“呃，”“啊，”这类整条只有语气词的单元不是内容：丢了它，选片候选池
+# 和成片字幕都不会再出现 0.2 秒的空话片段。只处理“整条”，以语气词开头但
+# 内容完整的句子（如“嗯然后今天的新款羽绒…”）不受影响。
+
+_FILLER_ONLY_CHARS = frozenset("嗯呃啊哦噢喔唉诶欸唔")
+_FILLER_ONLY_MAX_CHARS = 3
+_FILLER_ONLY_IGNORED = "，。！？、；：,.!?;:…~～—－-— \u3000\"'“”‘’()（）《》【】[]"
+
+
+def _is_filler_only_text(text: object) -> bool:
+    """整条只有语气词（可带标点/空白）时返回 True。"""
+    compact = "".join(ch for ch in str(text or "") if ch not in _FILLER_ONLY_IGNORED)
+    if not compact or len(compact) > _FILLER_ONLY_MAX_CHARS:
+        return False
+    return all(ch in _FILLER_ONLY_CHARS for ch in compact)
+
+
+def _drop_filler_only_segments(
+    segments: object,
+    log_fn: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """丢弃整条只有语气词的单元，返回保留的单元（顺序不变）。"""
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for segment in list(segments or []):
+        if not isinstance(segment, dict):
+            continue
+        if _is_filler_only_text(segment.get("text")):
+            dropped += 1
+            continue
+        kept.append(segment)
+    if dropped and log_fn:
+        log_fn(f"已剔除 {dropped} 条单独语气词单元（嗯/呃/啊等无实质内容）")
+    return kept
+
+
+def _apply_visible_resegmentation(segments, *, log_fn=None):
+    """[默认关闭] 把可见字幕重分段为「可独立播放的完整语句」。
+
+    背景：可见字幕来自 ASR 的声学分段，实测 172 条里有 53% 无法作为可独立播放的
+    单元（59 条以逗号结尾、24 条以承接词开头、19 条以语气词结尾）。而
+    ``local_asr.py`` 上方注释已声明「visible SRT 可以自由重分段，不影响切割精度」。
+
+    两种模式互斥，用环境变量开启（都未开启时**原样返回**，行为与改动前一致）：
+
+      LIVECLIPPER_DETERMINISTIC_CLOSURE=1   纯确定性闭合，**无 AI 调用**（推荐）
+          起点是每条条目各自成组，只在播放闸门报违规处按规则合并。
+          实测 172 -> 82 条，边界通过率 47.1% -> 100%。
+
+      LIVECLIPPER_AI_SEGMENTATION=1         AI 语义分组 + 确定性闭合（需 2 次 AI 调用）
+          实测 172 -> 62 条。**注意**：AI 分组粒度过粗会把下游可用候选从 48 降到 30，
+          并触发 ``candidate_reused_by_plan``（见 ai_sentence_segmentation 模块注释）。
+
+    安全性：任何失败/输出非法/未改善，都**原样返回入参**，绝不影响识别结果。
+    """
+    try:
+        from ai_sentence_segmentation import (
+            apply_ai_sentence_segmentation,
+            apply_deterministic_closure,
+            deterministic_closure_enabled,
+            segmentation_ai_enabled,
+        )
+
+        ai_on = segmentation_ai_enabled()
+        det_on = deterministic_closure_enabled()
+        if not ai_on and not det_on:
+            return segments
+
+        if not ai_on:
+            # 纯确定性：不需要 api_key / 设置，失败即原样返回。
+            merged, report = apply_deterministic_closure(segments, log_fn=log_fn)
+            if log_fn:
+                log_fn(
+                    "可见字幕重分段(确定性): "
+                    f"applied={report.get('applied')} reason={report.get('reason')} "
+                    f"{report.get('before', {}).get('unit_count')} -> "
+                    f"{(report.get('after') or {}).get('unit_count')}"
+                )
+            return list(merged) if report.get("applied") else list(segments)
+
+        try:
+            from ai_clipper import load_settings
+
+            settings = load_settings() or {}
+        except Exception:
+            return segments
+        api_key = str(settings.get("api_key") or "").strip()
+        if not api_key:
+            if log_fn:
+                log_fn("AI 语义重分段: 未配置 api_key，跳过（保留原分段）")
+            return segments
+        merged, report = apply_ai_sentence_segmentation(
+            segments,
+            api_key=api_key,
+            base_url=str(settings.get("base_url") or "https://api.deepseek.com"),
+            model=str(settings.get("model") or "deepseek-v4-flash"),
+            log_fn=log_fn,
+        )
+        if log_fn:
+            log_fn(
+                "可见字幕重分段(AI): "
+                f"applied={report.get('applied')} reason={report.get('reason')} "
+                f"{report.get('before', {}).get('unit_count')} -> "
+                f"{(report.get('after') or {}).get('unit_count')}"
+            )
+        return list(merged) if report.get("applied") else list(segments)
+    except Exception as exc:  # noqa: BLE001 - 重分段失败绝不能影响识别结果
+        if log_fn:
+            log_fn(f"可见字幕重分段异常，保留原分段: {type(exc).__name__}: {exc}")
+        return segments
+
+
 def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], None] | None = None) -> bool:
     """Run local SenseVoice and persist SRT plus CTC-aligned word timings."""
     model = _load_sensevoice(log_fn)
@@ -753,11 +918,17 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
     from volcengine_asr import semantic_segments_to_srt, write_word_timing_sidecar
 
     segments, semantic_segments = improve_sensevoice_segments(segments, log_fn=log_fn)
+    # 单独语气词不是内容：整条丢弃（SRT 与词级 sidecar 同步过滤，保持两者一致）
+    semantic_segments = _drop_filler_only_segments(semantic_segments, log_fn)
+    srt_segments = _drop_filler_only_segments(segments, None)
     if semantic_segments:
+        # [默认关闭] AI 语义重分段：把声学分段重组成「可独立播放的完整语句」。
+        # 失败/未改善时原样返回，可见 SRT 与词级 sidecar 的契约不变。
+        semantic_segments = _apply_visible_resegmentation(semantic_segments, log_fn=log_fn)
         srt_content = semantic_segments_to_srt(semantic_segments)
     else:
         srt_lines: list[str] = []
-        for index, segment in enumerate(segments, 1):
+        for index, segment in enumerate(srt_segments, 1):
             srt_lines.extend((
                 str(index),
                 f"{_format_srt_time(segment['start'])} --> {_format_srt_time(segment['end'])}",
@@ -770,11 +941,13 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
 
     # Preserve corrected raw tokens in one provider-neutral sidecar. The
     # visible SRT can be resegmented freely without changing cutting precision.
-    sidecar = write_word_timing_sidecar(srt_output, segments, provider="sensevoice", log_fn=log_fn)
-    word_count = sum(len(segment["words"]) for segment in segments)
+    sidecar = write_word_timing_sidecar(
+        srt_output, srt_segments, provider="sensevoice", log_fn=log_fn,
+    )
+    word_count = sum(len(segment["words"]) for segment in srt_segments)
     if log_fn:
         suffix = f"，{word_count} 个 CTC 对齐单元" if sidecar else "，未得到可用的词级对齐"
-        visible_count = len(semantic_segments) if semantic_segments else len(segments)
+        visible_count = len(semantic_segments) if semantic_segments else len(srt_segments)
         punctuation = "标点恢复" if _SENSEVOICE_PUNCTUATION else "停顿断句"
         log_fn(
             f"SenseVoice 识别完成：{len(segments)} 条原始语音段"
@@ -783,3 +956,490 @@ def sensevoice_to_srt(audio_path: str, srt_output: str, log_fn: Callable[[str], 
             f"{visible_count} 条字幕（{punctuation}）{suffix}"
         )
     return True
+
+
+# ---------------------------------------------------------------------------
+# 方案A（STEP 1 可选旁路）：Paraformer-large 模型级分段
+# ---------------------------------------------------------------------------
+# 默认不启用：只有显式选择 paraformer（参数或环境变量
+# LIVECLIPPER_LOCAL_ASR_ENGINE）时才加载；SenseVoice 仍是默认引擎。
+# 输出契约与 SenseVoice 一致：SRT + <srt>.words.json。
+
+SENSEVOICE_ENGINE = "sensevoice"
+PARAFORMER_ENGINE = "paraformer"
+
+_ENV_LOCAL_ASR_ENGINE = "LIVECLIPPER_LOCAL_ASR_ENGINE"
+_PARAFORMER_ASR_MODEL = (
+    "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+)
+_PARAFORMER_VAD_MODEL = "fsmn-vad"
+_PARAFORMER_PUNC_MODEL = "ct-punc"
+_PARAFORMER_EXTRA_MODULES = (
+    "funasr.models.paraformer.model",
+    "funasr.models.transformer.model",
+    "funasr.models.ct_transformer.model",
+)
+_PARAFORMER_MODEL: Any | None = None
+
+
+def resolve_local_asr_engine(engine: str | None = None) -> str:
+    """Resolve the local engine name; saved setting first, then env, then SenseVoice."""
+    requested = str(engine or "").strip().lower()
+    if not requested or requested == "auto":
+        try:
+            from stt import saved_local_asr_engine
+
+            requested = saved_local_asr_engine()
+        except Exception:
+            requested = ""
+        if not requested:
+            requested = str(os.environ.get(_ENV_LOCAL_ASR_ENGINE, "") or "").strip().lower()
+    if requested in {"paraformer", "paraformer-large", "plan-a", "plan_a"}:
+        return PARAFORMER_ENGINE
+    return SENSEVOICE_ENGINE
+
+
+def _register_paraformer_components() -> None:
+    original_getsourcelines = inspect.getsourcelines
+
+    def _frozen_safe_getsourcelines(target: object):
+        try:
+            return original_getsourcelines(target)
+        except OSError:
+            return ([""], 0)
+
+    try:
+        inspect.getsourcelines = _frozen_safe_getsourcelines
+        try:
+            for module_name in _SENSEVOICE_REGISTRATION_MODULES + _PARAFORMER_EXTRA_MODULES:
+                importlib.import_module(module_name)
+        finally:
+            inspect.getsourcelines = original_getsourcelines
+    except Exception as exc:
+        raise LocalASRUnavailable(f"Paraformer runtime component import failed: {exc}") from exc
+
+
+def _release_paraformer_model() -> None:
+    global _PARAFORMER_MODEL
+    with _MODEL_LOCK:
+        _PARAFORMER_MODEL = None
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
+
+def _load_paraformer(
+    log_fn: Callable[[str], None] | None = None,
+    *,
+    force_device: str | None = None,
+):
+    global _PARAFORMER_MODEL
+    _install_funasr_frozen_shims(log_fn)
+    if _PARAFORMER_MODEL is not None and force_device is None:
+        return _PARAFORMER_MODEL
+    with _MODEL_LOCK:
+        if _PARAFORMER_MODEL is not None and force_device is None:
+            return _PARAFORMER_MODEL
+        if force_device is not None:
+            selected_device = force_device
+            preference = "recovery"
+        else:
+            preference, selected_device = _resolve_sensevoice_device()
+        try:
+            _register_paraformer_components()
+            from funasr.auto.auto_model import AutoModel
+        except ImportError as exc:
+            raise LocalASRUnavailable("Paraformer runtime is not installed") from exc
+        if log_fn:
+            log_fn("正在加载本地 Paraformer（首次使用会下载模型）...")
+        configured_dir = os.environ.get("LIVECLIPPER_PARAFORMER_MODEL_DIR", "").strip()
+        model_kwargs = {
+            "model": configured_dir or _prefer_cached_model(_PARAFORMER_ASR_MODEL),
+            "vad_model": _prefer_cached_model(_PARAFORMER_VAD_MODEL),
+            "vad_kwargs": {"max_single_segment_time": 15000},
+            "punc_model": _prefer_cached_model(_PARAFORMER_PUNC_MODEL),
+            "device": selected_device,
+            "ncpu": int(_sensevoice_cpu_threads()),
+            "output_timestamp": True,
+            "disable_update": True,
+        }
+        try:
+            _PARAFORMER_MODEL = _run_modelscope_quietly(lambda: AutoModel(**model_kwargs))
+            if log_fn:
+                log_fn("Paraformer 已就绪（模型级分段 + 标点恢复）")
+        except Exception as exc:
+            if selected_device.startswith("cuda") and preference == "auto":
+                _release_paraformer_model()
+                if log_fn:
+                    log_fn("Paraformer CUDA 初始化失败，已自动回退 CPU：" + str(exc))
+                return _load_paraformer(log_fn, force_device="cpu")
+            raise LocalASRUnavailable(f"Paraformer model unavailable: {exc}") from exc
+    return _PARAFORMER_MODEL
+
+
+def _paraformer_sentence_segments(payload: object) -> list[dict[str, Any]]:
+    """Map one Paraformer result to sentence-level segments (方案A 原样分段)."""
+    if not isinstance(payload, dict):
+        return []
+    segments: list[dict[str, Any]] = []
+    sentences = payload.get("sentence_info")
+    if isinstance(sentences, (list, tuple)) and sentences:
+        for item in sentences:
+            if not isinstance(item, dict):
+                continue
+            text = _clean_text(item.get("text"))
+            start = _as_seconds(item.get("start"))
+            end = _as_seconds(item.get("end"))
+            if not text or start is None or end is None or end <= start:
+                continue
+            words = _words_from_timestamp(text, item.get("timestamp"))
+            if words:
+                start = words[0]["start"]
+                end = words[-1]["end"]
+            else:
+                # 段级时间戳可用但字级对齐缺失：保留模型自己的句子跨度，
+                # 否则该句在下游词级 sidecar 里会整条消失。
+                words = [{"text": text, "start": round(start, 3), "end": round(end, 3)}]
+            segments.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+                "words": words,
+            })
+        if segments:
+            return segments
+    text = _clean_text(payload.get("text"))
+    words = _words_from_timestamp(text, payload.get("timestamp"))
+    if text and words:
+        return [{
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "text": text,
+            "words": words,
+        }]
+    return []
+
+
+# --- FunASR 句级后处理越界保护（Paraformer 专用）--------------------------
+# funasr 的 sentence_postprocess() 拼句时直接按编号取时间戳
+# （postprocess_utils.py 的 begin = time_stamp[i][0]），而它的时间戳来自 CIF
+# 峰值触发，偶尔会比 token 数少一条（实测 900 秒素材约 0.5%/段）。少一条就是
+# IndexError，整条本地识别直接失败；funasr 1.3.16 / 1.4.16 都没有长度检查。
+# 这里在本地识别入口装一层保护：先走 funasr 原实现，只有真的越界时才切到等价
+# 的安全实现继续跑，其余情况行为完全不变（实测 196 次调用仅 1 次接管）。
+# 置为 False 即恢复原状。
+PARAFORMER_SENTENCE_POSTPROCESS_GUARD = True
+# Paraformer 万一仍然失败（模型加载失败 / 推理异常 / 无可用分段），
+# 带日志自动改用本地 SenseVoice 重跑，最坏只是慢一点，不至于整条任务失败。
+PARAFORMER_FALLBACK_TO_SENSEVOICE = True
+_PARAFORMER_POSTPROCESS_GUARD_INSTALLED = False
+_PARAFORMER_POSTPROCESS_GUARD_TAKEOVERS = 0
+# 冻结核心（PyInstaller 打包的 LiveClipperHost.exe）只把 SenseVoice 那一支的
+# funasr 模块收进了 PYZ，Paraformer 那一支的模块不在包内。下列模块随业务包一起
+# 分发（app/funasr_compat/），本地识别启动时按标准模块名补挂进 sys.modules，
+# 再登记组件；环境自带这些模块时（源码模式）完全不干预。置 False 即关闭。
+PARAFORMER_FROZEN_MODULE_SHIM = True
+_FUNASR_FROZEN_SHIM_INSTALLED = False
+_FUNASR_FROZEN_SHIM_MODULES = (
+    ("funasr.utils.postprocess_utils", "utils/postprocess_utils.py"),
+    ("funasr.losses.cr_ctc", "losses/cr_ctc.py"),
+    ("funasr.models.transformer.utils.add_sos_eos",
+     "models/transformer/utils/add_sos_eos.py"),
+    ("funasr.models.transformer.scorers.ctc_prefix_score",
+     "models/transformer/scorers/ctc_prefix_score.py"),
+    ("funasr.models.transformer.scorers.ctc", "models/transformer/scorers/ctc.py"),
+    ("funasr.models.transformer.scorers.length_bonus",
+     "models/transformer/scorers/length_bonus.py"),
+    ("funasr.models.transformer.search", "models/transformer/search.py"),
+    ("funasr.models.transformer.model", "models/transformer/model.py"),
+    ("funasr.models.paraformer.export_meta", "models/paraformer/export_meta.py"),
+    ("funasr.models.paraformer.cif_predictor", "models/paraformer/cif_predictor.py"),
+    ("funasr.models.paraformer.model", "models/paraformer/model.py"),
+)
+
+
+def _paraformer_safe_sentence_postprocess(words: Any, time_stamp: Any = None):
+    """funasr sentence_postprocess 的等价实现 + 时间戳越界保护。"""
+    import funasr.utils.postprocess_utils as postprocess_utils
+
+    is_all_chinese = getattr(postprocess_utils, "isAllChinese", None)
+    is_all_alpha = getattr(postprocess_utils, "isAllAlpha", None)
+    abbr_dispose = getattr(postprocess_utils, "abbr_dispose", None)
+    specials = ("<s>", "</s>", "<unk>", "<OOV>")
+
+    middle_lists = []
+    for item in words:
+        word = item if isinstance(item, str) else item.decode("utf-8")
+        if word not in specials:
+            middle_lists.append(word)
+
+    word_lists: list[str] = []
+    ts_lists: list[Any] = []
+    word_item = ""
+    begin: Any = 0
+    end: Any = 0
+
+    def stamp_at(index: int):
+        """取第 index 个 token 的时间戳；越界时沿用上一条（通常只差一两条）。"""
+        if time_stamp is None:
+            return None
+        if index < len(time_stamp):
+            return time_stamp[index][0], time_stamp[index][1]
+        if len(time_stamp) > 0:
+            return time_stamp[-1][0], time_stamp[-1][1]
+        return None
+
+    if is_all_chinese and is_all_chinese(middle_lists):
+        for char in middle_lists:
+            word_lists.append(char.replace(" ", ""))
+        if time_stamp is not None:
+            ts_lists = list(time_stamp)
+    elif is_all_alpha and is_all_alpha(middle_lists):
+        ts_flag = True
+        for index, char in enumerate(middle_lists):
+            if ts_flag and time_stamp is not None:
+                stamp = stamp_at(index)
+                if stamp is not None:
+                    begin, end = stamp
+            if "@@" in char:
+                word_item += char.replace("@@", "")
+                if time_stamp is not None:
+                    ts_flag = False
+                    stamp = stamp_at(index)
+                    if stamp is not None:
+                        end = stamp[1]
+            else:
+                word_item += char
+                word_lists.append(word_item)
+                word_lists.append(" ")
+                word_item = ""
+                if time_stamp is not None:
+                    ts_flag = True
+                    stamp = stamp_at(index)
+                    if stamp is not None:
+                        end = stamp[1]
+                    ts_lists.append([begin, end])
+                    begin = end
+    else:
+        alpha_blank = False
+        for index, char in enumerate(middle_lists):
+            if time_stamp is not None:
+                stamp = stamp_at(index)
+                if stamp is not None:
+                    begin, end = stamp
+            if is_all_chinese and is_all_chinese(char):
+                if alpha_blank is True and word_lists:
+                    word_lists.pop()
+                word_lists.append(char)
+                alpha_blank = False
+                if time_stamp is not None:
+                    ts_lists.append([begin, end])
+                    begin = end
+            elif "@@" in char:
+                word_item += char.replace("@@", "")
+                alpha_blank = False
+                if time_stamp is not None:
+                    stamp = stamp_at(index)
+                    if stamp is not None:
+                        end = stamp[1]
+            elif is_all_alpha and is_all_alpha(char):
+                word_item += char
+                word_lists.append(word_item)
+                word_lists.append(" ")
+                word_item = ""
+                alpha_blank = True
+                if time_stamp is not None:
+                    stamp = stamp_at(index)
+                    if stamp is not None:
+                        end = stamp[1]
+                    ts_lists.append([begin, end])
+                    begin = end
+            else:
+                word_lists.append(char)
+
+    if abbr_dispose is not None:
+        if time_stamp is not None:
+            word_lists, ts_lists = abbr_dispose(word_lists, ts_lists)
+        else:
+            word_lists = abbr_dispose(word_lists)
+    if time_stamp is not None:
+        real_word_lists = [item for item in word_lists if item != " "]
+        return " ".join(real_word_lists).strip(), ts_lists, real_word_lists
+    real_word_lists = [item for item in word_lists if item != " "]
+    return "".join(word_lists).strip(), real_word_lists
+
+
+def _paraformer_postprocess_guard(words: Any, time_stamp: Any = None):
+    """原实现优先；只有它抛 IndexError 时才接管，可用场景的行为完全不变。"""
+    global _PARAFORMER_POSTPROCESS_GUARD_TAKEOVERS
+    import funasr.utils.postprocess_utils as postprocess_utils
+
+    original = getattr(postprocess_utils, "_liveclipper_original_sentence_postprocess", None)
+    if original is None:
+        return _paraformer_safe_sentence_postprocess(words, time_stamp)
+    try:
+        return original(words, time_stamp)
+    except IndexError:
+        _PARAFORMER_POSTPROCESS_GUARD_TAKEOVERS += 1
+        log_fn = getattr(postprocess_utils, "_liveclipper_guard_log_fn", None)
+        if log_fn is not None:
+            try:
+                log_fn(
+                    "Paraformer 句级后处理越界（第 %d 次），已用保护逻辑继续"
+                    % _PARAFORMER_POSTPROCESS_GUARD_TAKEOVERS
+                )
+            except Exception:
+                pass
+        return _paraformer_safe_sentence_postprocess(words, time_stamp)
+
+
+def _install_paraformer_postprocess_guard(log_fn: Callable[[str], None] | None = None) -> bool:
+    """幂等安装 funasr 句级后处理保护；重复调用无副作用。"""
+    global _PARAFORMER_POSTPROCESS_GUARD_INSTALLED
+    if not PARAFORMER_SENTENCE_POSTPROCESS_GUARD:
+        return False
+    try:
+        import funasr.utils.postprocess_utils as postprocess_utils
+    except Exception:
+        return False
+    try:
+        postprocess_utils._liveclipper_guard_log_fn = log_fn
+    except Exception:
+        pass
+    if _PARAFORMER_POSTPROCESS_GUARD_INSTALLED:
+        return True
+    current = getattr(postprocess_utils, "sentence_postprocess", None)
+    if current is None:
+        return False
+    if getattr(current, "__name__", "") == "_paraformer_postprocess_guard":
+        _PARAFORMER_POSTPROCESS_GUARD_INSTALLED = True
+        return True
+    postprocess_utils._liveclipper_original_sentence_postprocess = current
+    postprocess_utils.sentence_postprocess = _paraformer_postprocess_guard
+    _PARAFORMER_POSTPROCESS_GUARD_INSTALLED = True
+    return True
+
+
+def _install_funasr_frozen_shims(log_fn: Callable[[str], None] | None = None) -> int:
+    """补齐冻结核心缺少的 funasr 模块（幂等；源码模式什么都不做）。"""
+    global _FUNASR_FROZEN_SHIM_INSTALLED
+    if not PARAFORMER_FROZEN_MODULE_SHIM or _FUNASR_FROZEN_SHIM_INSTALLED:
+        return 0
+    try:
+        root = Path(__file__).resolve().with_name("funasr_compat")
+    except Exception:
+        return 0
+    if not root.is_dir():
+        _FUNASR_FROZEN_SHIM_INSTALLED = True
+        return 0
+    installed: list[str] = []
+    pending = list(_FUNASR_FROZEN_SHIM_MODULES)
+    failures: dict[str, str] = {}
+    # 多轮重试：被依赖的模块先挂上，后面的才可能成功（最多 3 轮）
+    for _round in range(3):
+        still: list[tuple[str, str]] = []
+        for module_name, relative in pending:
+            if module_name in sys.modules:
+                failures.pop(module_name, None)
+                continue
+            try:
+                importlib.import_module(module_name)
+                failures.pop(module_name, None)
+                continue
+            except Exception:
+                pass
+            path = root / relative
+            if not path.is_file():
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, str(path))
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                spec.loader.exec_module(module)
+                installed.append(module_name)
+                failures.pop(module_name, None)
+            except Exception as exc:
+                sys.modules.pop(module_name, None)
+                failures[module_name] = str(exc)
+                still.append((module_name, relative))
+        if not still:
+            break
+        pending = still
+    if log_fn:
+        for failed_name, failed_err in failures.items():
+            log_fn(f"funasr 模块补挂失败（{failed_name}）：{failed_err}")
+    _FUNASR_FROZEN_SHIM_INSTALLED = True
+    if installed and log_fn:
+        log_fn(f"已为冻结环境补挂 funasr 模块 {len(installed)} 个（Paraformer 引擎可加载）")
+    return len(installed)
+
+
+def paraformer_to_srt(
+    audio_path: str,
+    srt_output: str,
+    log_fn: Callable[[str], None] | None = None,
+) -> bool:
+    """Run local Paraformer-large and persist sentence-level SRT + word sidecar."""
+    model = _load_paraformer(log_fn)
+    if log_fn:
+        log_fn("启动本地 Paraformer 识别（模型级分段 + 标点恢复 + 字级时间戳）...")
+    _install_paraformer_postprocess_guard(log_fn)
+    try:
+        results = model.generate(
+            input=audio_path,
+            cache={},
+            language="zh",
+            use_itn=True,
+            batch_size_s=120,
+            merge_vad=False,
+            output_timestamp=True,
+            pred_timestamp=True,
+            sentence_timestamp=True,
+        )
+    except Exception as exc:
+        raise LocalASRUnavailable(f"Paraformer inference failed: {exc}") from exc
+    payload = results[0] if isinstance(results, (list, tuple)) and results else results
+    segments = _paraformer_sentence_segments(payload)
+    if not segments:
+        raise LocalASRUnavailable("Paraformer returned no timestamped speech segments")
+
+    from volcengine_asr import semantic_segments_to_srt, write_word_timing_sidecar
+
+    # 单独语气词不是内容：整条丢弃（SRT 与词级 sidecar 同步过滤，保持两者一致）
+    srt_segments = _drop_filler_only_segments(segments, log_fn)
+    # [默认关闭] 与 SenseVoice 路径同一逻辑：AI 语义重分段，失败原样返回。
+    srt_segments = _apply_visible_resegmentation(srt_segments, log_fn=log_fn)
+    with open(srt_output, "w", encoding="utf-8") as handle:
+        handle.write(semantic_segments_to_srt(srt_segments))
+    sidecar = write_word_timing_sidecar(
+        srt_output, srt_segments, provider=PARAFORMER_ENGINE, log_fn=log_fn,
+    )
+    if log_fn:
+        word_count = sum(len(segment["words"]) for segment in srt_segments)
+        suffix = f"，{word_count} 个字级对齐单元" if sidecar else "，未得到可用的字级对齐"
+        log_fn(f"Paraformer 识别完成：{len(srt_segments)} 条句子级字幕（模型级分段）{suffix}")
+    return True
+
+
+def transcribe_audio_to_srt(
+    audio_path: str,
+    srt_output: str,
+    log_fn: Callable[[str], None] | None = None,
+    engine: str | None = None,
+) -> bool:
+    """Transcribe with the selected local engine; SenseVoice remains the default."""
+    selected = resolve_local_asr_engine(engine)
+    if selected == PARAFORMER_ENGINE:
+        try:
+            return paraformer_to_srt(audio_path, srt_output, log_fn=log_fn)
+        except LocalASRUnavailable as exc:
+            if not PARAFORMER_FALLBACK_TO_SENSEVOICE:
+                raise
+            if log_fn:
+                log_fn(f"Paraformer 识别失败，已自动回退本地 SenseVoice 重跑：{exc}")
+            _release_paraformer_model()
+            return sensevoice_to_srt(audio_path, srt_output, log_fn=log_fn)
+    return sensevoice_to_srt(audio_path, srt_output, log_fn=log_fn)
