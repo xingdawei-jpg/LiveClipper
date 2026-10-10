@@ -657,10 +657,18 @@ class ReleaseArchitectureTests(unittest.TestCase):
     def test_bootstrap_has_no_appdata_code_loader(self) -> None:
         desktop = (ROOT / "web_client" / "desktop.py").read_text(encoding="utf-8")
         server = (ROOT / "web_client" / "server.py").read_text(encoding="utf-8")
-        launcher = (ROOT / "app" / "launcher.py").read_text(encoding="utf-8")
         self.assertNotIn("_updated_server_path", desktop)
         self.assertNotIn("USER_UPDATE_ROOT", server)
-        self.assertNotIn("LiveClipper', 'app", launcher)
+        # 旧桌面版入口 app/launcher.py 已于 2026-10-10 随桌面版一起删除。
+        # 「引导程序不得从 APPDATA 加载业务代码」这条约束不能跟着一起丢掉，
+        # 改为对仍在使用的两个引导模块做同样的检查。
+        for bootstrap_name in ("web_client/desktop.py", "web_client/server.py"):
+            bootstrap = (ROOT / bootstrap_name).read_text(encoding="utf-8")
+            self.assertNotIn(
+                "LiveClipper', 'app",
+                bootstrap,
+                f"{bootstrap_name} 不得从 APPDATA 加载业务代码",
+            )
         launcher_tool = (ROOT / "tools" / "liveclipper_launcher.py").read_text(
             encoding="utf-8"
         )

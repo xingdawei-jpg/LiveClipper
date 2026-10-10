@@ -47,6 +47,132 @@ LAST_CLIP_AUDIO_TAIL_GUARD_SECONDS = 0.22
 CLIP_AUDIO_FADE_SECONDS = 0.015
 CLIP_VIDEO_TRANSITION_SECONDS = 0.12
 
+# 成片合并：输出顺序相邻、且源视频里本来就连续（间隔 <= 阈值）的句子并成一个渲染单元，
+# 镜像 / SmartCrop / Ken Burns 每个单元只决定一次。不设组上限；预览成片同样适用。
+RENDER_MERGE_ADJACENT_ENABLED = True
+RENDER_MERGE_MAX_GAP_SECONDS = 1.2
+
+# [v9.7] 切点音频锚定：把 SRT 句子边界修到真实语音骨位（修准，不给死余量）
+AUDIO_ANCHOR_ENABLED = True
+AUDIO_ANCHOR_LEVEL_RATIO = 0.12    # 静音判定：局部语音参考电平比例
+AUDIO_ANCHOR_MIN_PAUSE = 0.10      # 视为“音节间隙”的最短时长(s)
+AUDIO_ANCHOR_HEAD_LOOKBACK = 0.40  # 头部回看窗口(s)
+AUDIO_ANCHOR_TAIL_LOOKBACK = 0.35  # 尾部回看窗口(s)
+AUDIO_ANCHOR_HEAD_PULLBACK_ENABLED = False  # [v9.8] 头部锚定只允许后移：不再把切点往前拉（曾把上一句尾巴吃进成片，实测 17/55 段 / 累计 -2.884s）
+_AUDIO_ANCHOR_CACHE = {}
+
+
+def _audio_envelope_10ms(video_path, log_fn=None):
+    """(按视频缓存) 16k 单声道 10ms RMS 包络；失败返回 None。"""
+    import numpy as _np
+    try:
+        key = (os.fspath(video_path), os.path.getmtime(video_path))
+    except Exception:
+        key = (os.fspath(video_path), 0)
+    if key in _AUDIO_ANCHOR_CACHE:
+        return _AUDIO_ANCHOR_CACHE[key]
+    env = None
+    wav = None
+    try:
+        import subprocess as _sp, tempfile as _tf, wave as _wave
+        ffmpeg = get_ffmpeg_cmd()
+        fd, wav = _tf.mkstemp(prefix="lc_anchor_", suffix=".wav")
+        os.close(fd)
+        _sp.run([ffmpeg, "-v", "error", "-y", "-i", os.fspath(video_path),
+                 "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", wav],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=900,
+                creationflags=globals().get("_NO_WINDOW", 0))
+        with _wave.open(wav, "rb") as _w:
+            raw = _np.frombuffer(_w.readframes(_w.getnframes()), dtype=_np.int16).astype(_np.float64)
+        h = 160
+        if len(raw) < h * 16:
+            raise RuntimeError("audio too short")
+        frames = len(raw) // h
+        env = _np.sqrt((raw[:frames * h].reshape(frames, h) ** 2).mean(axis=1))
+    except Exception as exc:
+        env = None
+        if log_fn:
+            log_fn(f"音频锚定: 包络提取失败({exc})，跳过锚定")
+    finally:
+        if wav:
+            try:
+                os.remove(wav)
+            except Exception:
+                pass
+    _AUDIO_ANCHOR_CACHE[key] = env
+    return env
+
+
+def _anchor_boundaries_to_audio(video_path, start, end, log_fn=None, head_contiguous=True):
+    """把 [start,end] 修到真实语音骨位。
+    头部：仅当 SRT 上一条正好在此处结束（紧贴=SRT 把停顿吞进去了）时，回退到真实停顿
+    之后、也就是真正的词首——找回被切掉的第一个字；尾部：若终点越进了一个新词（前面
+    有停顿），回退到该停顿结束处。只修准、不加余量；判断不了就保持原值。"""
+    if not AUDIO_ANCHOR_ENABLED:
+        return start, end
+    try:
+        start = float(start)
+        end = float(end)
+    except Exception:
+        return start, end
+    env = _audio_envelope_10ms(video_path, log_fn)
+    if env is None:
+        return start, end
+    try:
+        import numpy as _np
+        n = len(env)
+        step = 0.01
+
+        def _ref(t):
+            a = max(0, int((t - 1.5) / step))
+            b = min(n, int((t + 1.5) / step) + 1)
+            if b <= a:
+                return float(env.max() or 1.0)
+            return max(float(_np.percentile(env[a:b], 80)), 1.0)
+
+        def _idx(t):
+            return min(n - 1, max(0, int(round(t / step))))
+
+        new_start, new_end = start, end
+        s = _idx(start)
+        ref = _ref(start)
+        if AUDIO_ANCHOR_HEAD_PULLBACK_ENABLED and head_contiguous and s > int(0.40 / step):
+            lo = s - int(0.40 / step)
+            k = lo + int(_np.argmin(env[lo:s + 1]))
+            if env[k] <= ref * 0.20 and (start - k * step) <= 0.35:
+                onset = s
+                m = k + 1
+                while m <= s:
+                    if env[m] >= ref * 0.30:
+                        onset = m
+                        break
+                    m += 1
+                cand = onset * step
+                if cand < start:
+                    new_start = max(cand, start - 0.40)
+        e = _idx(end)
+        refe = _ref(end)
+        if env[e] > max(refe * AUDIO_ANCHOR_LEVEL_RATIO, 200.0):
+            elo = max(0, e - int(AUDIO_ANCHOR_TAIL_LOOKBACK / step))
+            j = e
+            while j > elo:
+                if env[j] <= max(refe * AUDIO_ANCHOR_LEVEL_RATIO, 200.0):
+                    run_end = j
+                    while run_end + 1 < e and env[run_end + 1] <= max(refe * AUDIO_ANCHOR_LEVEL_RATIO, 200.0):
+                        run_end += 1
+                    if (run_end - j + 1) * step >= 0.08 and (end - run_end * step) <= 0.25:
+                        new_end = run_end * step
+                    break
+                j -= 1
+        if abs(new_start - start) > 0.001 or abs(new_end - end) > 0.001:
+            if log_fn:
+                log_fn(f"音频锚定: {start:.2f}-{end:.2f}s -> {new_start:.2f}-{new_end:.2f}s")
+        return new_start, new_end
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"音频锚定异常({exc})，保持原切点")
+        return start, end
+
 
 def _is_ascii_path(path):
     try:
@@ -1786,6 +1912,340 @@ def _probe_media_duration(media_path, ffprobe_cmd=None):
         return 0.0
 
 
+def _clip_source_ref(clip):
+    """Best-effort source reference for a clip of any shape ("" for single-source runs)."""
+    if isinstance(clip, dict):
+        source = clip.get("source") or clip.get("video") or ""
+    else:
+        try:
+            source = clip[7] if len(clip) > 7 and not isinstance(clip[7], dict) else ""
+        except Exception:
+            source = ""
+    return str(source or "")
+
+
+def _clip_unit_fields(clip):
+    """Return (type, text, start, end, score, duration, source) for any clip shape."""
+    if isinstance(clip, dict):
+        start = clip.get("start", 0.0)
+        end = clip.get("end", start)
+        return (
+            str(clip.get("type") or clip.get("clip_type") or ""),
+            str(clip.get("text") or ""),
+            start,
+            end,
+            clip.get("score", 0),
+            clip.get("duration"),
+            _clip_source_ref(clip),
+        )
+    c_type = clip[0] if len(clip) > 0 else ""
+    text = clip[1] if len(clip) > 1 else ""
+    start = clip[2] if len(clip) > 2 else 0.0
+    end = clip[3] if len(clip) > 3 else start
+    score = clip[4] if len(clip) > 4 else 0
+    duration = clip[5] if len(clip) > 5 else None
+    return str(c_type or ""), str(text or ""), start, end, score, duration, _clip_source_ref(clip)
+
+
+def _join_render_units(head, clip, head_fields, clip_fields, new_start, new_end):
+    """Return one merged unit shaped like `head` (tuple stays tuple, dict stays dict)."""
+    text = str(head_fields[1] or "") + str(clip_fields[1] or "")
+    duration = max(0.0, float(new_end) - float(new_start))
+    source = head_fields[6] or clip_fields[6]
+    if isinstance(head, dict):
+        merged = dict(head)
+        merged["type"] = head_fields[0]
+        if "clip_type" in merged:
+            merged["clip_type"] = head_fields[0]
+        merged["text"] = text
+        merged["start"] = new_start
+        merged["end"] = new_end
+        merged["duration"] = duration
+        if source:
+            merged["source"] = source
+        if isinstance(clip, dict):
+            merged["preview_exact"] = bool(head.get("preview_exact")) or bool(clip.get("preview_exact"))
+        return merged
+    extras = list(head[6:])
+    for extra in list(clip[6:]):
+        if extra not in extras:
+            extras.append(extra)
+    return (head_fields[0], text, new_start, new_end, head_fields[4], duration) + tuple(extras)
+
+
+_RENDER_UNIT_MEMBERS_KEY = "render_unit_members"
+
+
+def _attach_render_unit_members(clip, members):
+    """Attach the original sub-clips of a merged unit without changing its shape."""
+    stored = [m for m in (members or []) if isinstance(m, (dict, list, tuple))]
+    if len(stored) < 2:
+        return clip
+    if isinstance(clip, dict):
+        merged = dict(clip)
+        merged[_RENDER_UNIT_MEMBERS_KEY] = stored
+        return merged
+    return tuple(clip) + ({_RENDER_UNIT_MEMBERS_KEY: stored},)
+
+
+def _clip_unit_members(clip):
+    """Return the original sub-clips of a merged unit ([] for a single shot)."""
+    members = None
+    if isinstance(clip, dict):
+        members = clip.get(_RENDER_UNIT_MEMBERS_KEY)
+    elif isinstance(clip, (list, tuple)):
+        for item in clip:
+            if isinstance(item, dict) and _RENDER_UNIT_MEMBERS_KEY in item:
+                members = item.get(_RENDER_UNIT_MEMBERS_KEY)
+                break
+    if isinstance(members, (list, tuple)) and len(members) >= 2:
+        return list(members)
+    return []
+
+
+def _unit_member_text(members):
+    """Joined text of every selected sentence inside one render unit."""
+    parts = []
+    for member in members or []:
+        try:
+            text = str(_clip_unit_fields(member)[1] or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _unit_member_ranges(members, srt_boundaries=None, limit=None):
+    """Cut ranges for the sub-clips of one unit; internal gaps are never cut.
+
+    Every sentence keeps its own start/end (with the same SRT edge snap a single
+    clip gets).  Only the final sentence keeps an audio tail guard: extending the
+    earlier ones would pull the next breath back into the seam, which is exactly
+    the 气口 this step removes.
+    """
+    ranges = []
+    total = len(members or [])
+    for index, member in enumerate(members or []):
+        fields = _clip_unit_fields(member)
+        start = float(fields[2])
+        end = float(fields[3])
+        if not _clip_range_locked(member) and srt_boundaries:
+            start_srt = None
+            end_srt = None
+            # [v9.7] 刚越过句尾（<=0.16s 缓冲）→ 收在该句尾；起点刚落在句首前 → 对齐句首
+            _pe = [f for b, f in srt_boundaries if b < f and (end - 0.16) <= f <= end]
+            _ns = [b for b, f in srt_boundaries if b < f and start <= b <= start + 0.16]
+            if _pe:
+                end = max(_pe)
+            else:
+                for begin, finish in srt_boundaries:
+                    if begin <= end <= finish and (end_srt is None or finish < end_srt):
+                        end_srt = finish
+                if end_srt is not None and end_srt - end <= 8.0:
+                    end = end_srt
+            if _ns:
+                start = min(_ns)
+            else:
+                for begin, finish in srt_boundaries:
+                    if begin <= start <= finish and (start_srt is None or begin > start_srt):
+                        start_srt = begin
+                if start_srt is not None and start - start_srt <= 3.0:
+                    start = start_srt
+        if index == total - 1:
+            end = end + CLIP_AUDIO_TAIL_GUARD_SECONDS
+        elif index + 1 < total:
+            next_start = float(_clip_unit_fields(members[index + 1])[2])
+            end = min(end, next_start - 0.02)
+        if limit is not None:
+            limit_value = float(limit)
+            end = min(end, limit_value)
+            start = min(start, max(0.0, limit_value - 0.2))
+        if end - start < 0.2:
+            end = start + 0.2
+        ranges.append((start, end))
+    return ranges
+
+
+def _seamless_unit_cut_cmd(ffmpeg, video_path, ranges, video_filter, audio_filter, output_path, vcodec_args, fps=None):
+    """Cut one unit by trimming every sentence and joining them back to back."""
+    usable = []
+    base = None
+    for start, end in ranges or []:
+        start_value, end_value = float(start), float(end)
+        if end_value - start_value < 0.05:
+            continue
+        usable.append((start_value, end_value))
+        base = start_value if base is None else min(base, start_value)
+    if not usable:
+        return None
+    base = max(0.0, base - 1.0)
+    parts = []
+    labels = []
+    for index, (start_value, end_value) in enumerate(usable):
+        trim_start = max(0.0, start_value - base)
+        trim_end = max(trim_start + 0.05, end_value - base)
+        parts.append(
+            "[0:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS[v%d]" % (trim_start, trim_end, index)
+        )
+        parts.append(
+            "[0:a]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS[a%d]" % (trim_start, trim_end, index)
+        )
+        labels.append("[v%d][a%d]" % (index, index))
+    graph = ";".join(parts)
+    graph += ";%sconcat=n=%d:v=1:a=1[cv][ca]" % ("".join(labels), len(usable))
+    graph += ";[cv]%s[vout]" % video_filter
+    graph += ";[ca]%s[aout]" % audio_filter
+    cmd = [ffmpeg, "-y"]
+    if _is_ts_like_video(video_path):
+        cmd += ["-fflags", "+genpts"]
+    if base > 0.001:
+        cmd += ["-ss", "%.3f" % base]
+    cmd += ["-i", video_path]
+    cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", "[aout]"]
+    cmd += _stable_cfr_output_args(fps)
+    cmd += list(vcodec_args or _intermediate_software_vcodec_args())
+    cmd += [
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+        "-async", "1", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart",
+        output_path,
+    ]
+    return cmd
+
+
+def _merge_render_units(clips, log_fn=None):
+    """Merge output-adjacent source-continuous clips into one render unit.
+
+    Selection granularity is untouched: this only decides how many units the
+    renderer treats as one shot, so mirror / SmartCrop / Ken Burns are decided
+    once per unit instead of once per sentence.  Members are still cut from their
+    own ranges and then joined back to back, so the pauses and filler between two
+    selected sentences are dropped instead of being carried into the output
+    (去气口).
+    """
+    items = list(clips or [])
+    if not RENDER_MERGE_ADJACENT_ENABLED or len(items) < 2:
+        return items
+
+    merged = []
+    unit_members = []
+    for clip in items:
+        if not isinstance(clip, (dict, list, tuple)):
+            merged.append(clip)
+            unit_members.append([clip])
+            continue
+        try:
+            fields = _clip_unit_fields(clip)
+            start = float(fields[2])
+            end = float(fields[3])
+        except Exception:
+            merged.append(clip)
+            unit_members.append([clip])
+            continue
+        joined = False
+        if merged:
+            head = merged[-1]
+            try:
+                head_fields = _clip_unit_fields(head)
+                head_start = float(head_fields[2])
+                head_end = float(head_fields[3])
+            except Exception:
+                head = None
+            if head is not None:
+                gap = start - head_end
+                same_source = (
+                    not head_fields[6] or not fields[6] or head_fields[6] == fields[6]
+                )
+                if same_source and -0.25 <= gap <= RENDER_MERGE_MAX_GAP_SECONDS:
+                    merged[-1] = _join_render_units(
+                        head, clip, head_fields, fields,
+                        min(head_start, start), max(head_end, end),
+                    )
+                    unit_members[-1].append(clip)
+                    joined = True
+        if not joined:
+            merged.append(clip)
+            unit_members.append([clip])
+
+    for index, group in enumerate(unit_members):
+        if len(group) > 1:
+            merged[index] = _attach_render_unit_members(merged[index], group)
+
+    if log_fn and len(merged) != len(items):
+        groups = [
+            "#%d(%d句)" % (idx + 1, len(group))
+            for idx, group in enumerate(unit_members) if len(group) > 1
+        ]
+        log_fn(
+            "成片合并(去气口): %d 段 -> %d 组（输出相邻且源间隔<=%.1fs，句间内容丢弃，不设组上限）"
+            % (len(items), len(merged), RENDER_MERGE_MAX_GAP_SECONDS)
+        )
+        if groups:
+            log_fn("  合并组: " + "、".join(groups))
+    return merged
+
+# ── 超短独立镜头拦截（P0-2，2026-09-30）────────────────────────────
+# 0.6 秒以内的单元不可能承载完整语义，实测出现的都是「对，」「吧」「好了」「快点」这类水词。
+# 能并进前一个同源相邻单元就并（不丢内容），并不了就丢掉，绝不让它单独成一镜。
+# 置 0 即关闭。
+SHORT_STANDALONE_MIN_SECONDS = 0.6
+
+
+def _drop_short_standalone_units(clips, log_fn=None):
+    """Merge or drop sub-second filler shots so none of them plays as its own shot."""
+    items = list(clips or [])
+    limit = float(SHORT_STANDALONE_MIN_SECONDS or 0.0)
+    if limit <= 0 or not items:
+        return items
+    kept = []
+    handled = []
+    for clip in items:
+        if not isinstance(clip, (dict, list, tuple)):
+            kept.append(clip)
+            continue
+        try:
+            fields = _clip_unit_fields(clip)
+            start = float(fields[2])
+            end = float(fields[3])
+        except Exception:
+            kept.append(clip)
+            continue
+        if (end - start) >= limit:
+            kept.append(clip)
+            continue
+        merged = False
+        if kept:
+            head = kept[-1]
+            try:
+                head_fields = _clip_unit_fields(head)
+                head_start = float(head_fields[2])
+                head_end = float(head_fields[3])
+                gap = start - head_end
+                same_source = (
+                    not head_fields[6] or not fields[6] or head_fields[6] == fields[6]
+                )
+            except Exception:
+                head_fields, same_source, gap = None, False, 999.0
+            if head_fields is not None and same_source and -0.25 <= gap <= RENDER_MERGE_MAX_GAP_SECONDS:
+                kept[-1] = _join_render_units(
+                    head, clip, head_fields, fields, min(head_start, start), max(head_end, end),
+                )
+                merged = True
+        handled.append({
+            "text": str(fields[1] or "")[:12],
+            "duration": round(end - start, 3),
+            "action": "merged" if merged else "dropped",
+        })
+    if log_fn and handled:
+        summary = "、".join(
+            "%s(%.2fs)%s" % (item["text"], item["duration"], "并入" if item["action"] == "merged" else "丢弃")
+            for item in handled[:12]
+        )
+        log_fn("超短镜头处理: %d 个碎片（<%.2fs）→ %s" % (len(handled), limit, summary))
+    return kept
+
+
 def _transition_boundary_mask(cut_maps, clip_count, continuous_gap=1.2):
     """Return which clip boundaries should use dissolve instead of a hard join."""
     if clip_count < 2:
@@ -2329,8 +2789,26 @@ def _get_clip_duration(filepath):
 
 
 
-def _build_cut_report(ordered_clips, success_count, total_clips, output_path, size_mb):
-    """构建切割评分报告"""
+def _build_cut_report(
+    ordered_clips,
+    success_count,
+    total_clips,
+    output_path,
+    size_mb,
+    actual_duration=None,
+    speed_factor=None,
+):
+    """构建切割评分报告。
+
+    ``actual_duration`` 是 ffprobe 读出的**成品真实时长**（变速后），
+    ``speed_factor`` 是本次计划的变速系数。两者都由调用方传入。
+
+    历史行为：评分与 UI 显示直接用 ``sum(end - start)``，那是**裁剪前的计划区间**，
+    既没有经过渲染前的边界裁剪、也没有乘变速系数。实测（夜忘川 JE6NSW13，3 个方案）
+    计划区间合计 86.7 / 62.4 / 84.2 秒，而成品真实时长是 65.6 / 47.8 / 63.8 秒 ——
+    时长项因此被误判为「偏长」（只得 15/30 分）并打出错误告警。
+    现改为：有真实时长就用真实时长评分与显示；缺失时退回「计划区间 ÷ 变速系数」。
+    """
     import os
     report = {
         "ok": True,
@@ -2369,7 +2847,37 @@ def _build_cut_report(ordered_clips, success_count, total_clips, output_path, si
         if hook_found is None and "hook" in c_type.lower():
             hook_found = c_type
 
-    report["duration"] = round(total_dur, 1)
+    # ── 时长口径（2026-10-06 修）────────────────────────────────────────────
+    # planned_source : 裁剪前的计划区间合计（旧口径，保留供追溯，不再用于评分/显示）
+    # actual_source  : 实际渲染的素材长度（= 裁剪后的区间合计），由调用方给出时更准
+    # 有效时长       : 成品真实时长（变速后）> 计划÷变速  两者取小（偏短更安全）
+    planned_source = float(total_dur)
+    try:
+        _speed = float(speed_factor) if speed_factor else 1.0
+    except (TypeError, ValueError):
+        _speed = 1.0
+    if _speed <= 0.05:
+        _speed = 1.0
+
+    candidates: list[float] = [planned_source / _speed]
+    try:
+        _actual = float(actual_duration) if actual_duration else 0.0
+    except (TypeError, ValueError):
+        _actual = 0.0
+    if _actual > 0.05:
+        candidates.append(_actual)
+
+    effective_dur = min(candidates)
+
+    report["duration"] = round(effective_dur, 1)
+    report["duration_source"] = round(planned_source, 1)
+    report["duration_source_note"] = "裁剪前的计划区间合计（未变速）"
+    if _actual > 0.05:
+        report["duration_actual"] = round(_actual, 1)
+    if abs(_speed - 1.0) > 0.01:
+        report["duration_speed_factor"] = round(_speed, 3)
+    if effective_dur < planned_source / _speed - 0.05:
+        report["duration_source_note"] += "；成品比计划区间短，已按真实时长记"
     if hook_found:
         report["has_hook"] = True
         report["hook_type"] = hook_found
@@ -2382,23 +2890,24 @@ def _build_cut_report(ordered_clips, success_count, total_clips, output_path, si
     # ---- 评分 ----
     score = 0
 
-    # 时长分 (0-30)
+    # 时长分 (0-30) —— 按**有效时长**（成品真实时长）判定，不再用裁剪前的计划区间
     _dur_tgt = TARGET_DURATION
     _dur_low = _dur_tgt - _dur_tgt // 4
     _dur_high = _dur_tgt + _dur_tgt // 4
-    if _dur_low <= total_dur <= _dur_high:
+    _dur = effective_dur
+    if _dur_low <= _dur <= _dur_high:
         score += 30
-    elif _dur_low - 10 <= total_dur <= _dur_high + 10:
+    elif _dur_low - 10 <= _dur <= _dur_high + 10:
         score += 22
-    elif _dur_low - 20 <= total_dur <= _dur_high + 20:
+    elif _dur_low - 20 <= _dur <= _dur_high + 20:
         score += 15
-        if total_dur < _dur_low:
-            report["warnings"].append(f"时长偏短({total_dur:.0f}s，建议{_dur_low}s+)")
+        if _dur < _dur_low:
+            report["warnings"].append(f"时长偏短({_dur:.0f}s，建议{_dur_low}s+)")
         else:
-            report["warnings"].append(f"时长偏长({total_dur:.0f}s，建议{_dur_high}s以内)")
+            report["warnings"].append(f"时长偏长({_dur:.0f}s，建议{_dur_high}s以内)")
     else:
         score += 5
-        report["warnings"].append(f"时长异常({total_dur:.0f}s)")
+        report["warnings"].append(f"时长异常({_dur:.0f}s)")
 
     # Hook分 (0-25)
     if report["has_hook"]:
@@ -2513,6 +3022,26 @@ def _selection_audit_clip_key(clip):
     text = re.sub(r"\s+", "", str(clip[1] if len(clip) > 1 else ""))
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
     return f"{start:.3f}:{end:.3f}:{digest}"
+
+
+def _local_asr_engine_label() -> str:
+    """本地识别引擎的显示名（跟随设置，异常时退回 SenseVoice）。"""
+    try:
+        from stt import local_asr_engine_label
+
+        return local_asr_engine_label()
+    except Exception:
+        return "SenseVoice"
+
+
+def _local_asr_identity() -> tuple[str, str]:
+    """本地识别引擎的 (provider, model)，用于 SRT 缓存身份。"""
+    try:
+        from stt import local_asr_provider_identity
+
+        return local_asr_provider_identity()
+    except Exception:
+        return "sensevoice", "iic/SenseVoiceSmall"
 
 
 def _selection_audit_source(clip, text):
@@ -2641,6 +3170,17 @@ def _print_cut_report(report, _log):
     _log(f"  {grade_icon} 综合评分: {score}/100 {grade}")
     _log(f"  [{bar}]")
     _log(f"  ⏱ 总时长: {report['duration']:.0f}s | 🎬 片段: {report['clips_count']}/{report['clips_total']}段")
+    # 时长口径留痕：计划区间（未变速）与成品真实时长并列显示，便于人工核对
+    _src = report.get("duration_source")
+    _act = report.get("duration_actual")
+    _spd = report.get("duration_speed_factor")
+    if _src is not None and (_act is not None or _spd):
+        _parts = [f"计划区间 {float(_src):.0f}s"]
+        if _spd:
+            _parts.append(f"变速 {float(_spd):.2f}x")
+        if _act is not None:
+            _parts.append(f"成品真实 {float(_act):.0f}s")
+        _log("  ⓘ 时长口径: " + " | ".join(_parts))
     hook_str = f"{report['hook_type']} ✅" if report['has_hook'] else "无 ❌"
     _log(f"  🪝 Hook: {hook_str}")
     if report['category']:
@@ -2880,7 +3420,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                                     else:
                                         _log("阿里云 ASR 识别失败，将降级")
                                 else:
-                                    _log("音频提取失败，改用本地 SenseVoice")
+                                    _log(f"音频提取失败，改用本地 {_local_asr_engine_label()}")
                             except Exception as _e_ali:
                                 _log(f"阿里云 ASR 异常: {_e_ali}")
                         else:
@@ -2926,7 +3466,7 @@ def process_video(video_path, srt_path=None, output_path=None,
                             else:
                                 _log("⚠️ 云端语音识别失败，已自动切换到本地识别")
                         else:
-                            _log("音频提取失败，改用本地 SenseVoice")
+                            _log(f"音频提取失败，改用本地 {_local_asr_engine_label()}")
                     elif _volc_used:
                         pass  # 阿里云已成功
                     else:
@@ -2936,17 +3476,22 @@ def process_video(video_path, srt_path=None, output_path=None,
         
         if not _volc_used and not srt_path:
             _log("[STEP] 🎬 语音识别中...")
-            _log("启动本地语音识别 (SenseVoice)...")
+            _log(f"启动本地语音识别 ({_local_asr_engine_label()})...")
             try:
                 from stt import generate_srt
                 temp_srt = generate_srt(video_path, log_fn=_log, cancel_event=cancel_event)
                 if not temp_srt:
-                    _log("❌ SenseVoice 本地识别失败；请检查本地模型环境、开启云端 ASR 或提供 SRT 字幕文件")
+                    _log(f"❌ {_local_asr_engine_label()} 本地识别失败；请检查本地模型环境、开启云端 ASR 或提供 SRT 字幕文件")
                 else:
-                    _asr_cache_provider = "sensevoice"
-                    _asr_cache_model = "iic/SenseVoiceSmall"
+                    from stt import resolve_local_asr_engine_name as _resolve_engine_name
+                    if _resolve_engine_name() == "paraformer":
+                        _asr_cache_provider = "paraformer"
+                        _asr_cache_model = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+                    else:
+                        _asr_cache_provider = "sensevoice"
+                        _asr_cache_model = "iic/SenseVoiceSmall"
             except Exception as _sensevoice_err:
-                _log(f"❌ SenseVoice 本地识别失败: {_sensevoice_err}")
+                _log(f"❌ {_local_asr_engine_label()} 本地识别失败: {_sensevoice_err}")
                 _log("💡 建议：开启云端 ASR 或手动提供 SRT 字幕文件")
                 temp_srt = None
         if not temp_srt:
@@ -3206,6 +3751,8 @@ def process_video(video_path, srt_path=None, output_path=None,
         w, h = map(int, cfg["resolution"].split(":"))
         _src_w, _src_h = w, h
         _log(f"分辨率检测失败({_e})，使用默认 {w}x{h}")
+    ordered_clips = _merge_render_units(ordered_clips, log_fn=_log)
+    ordered_clips = _drop_short_standalone_units(ordered_clips, log_fn=_log)
     total_clips = len(ordered_clips)
 
     # 覆盖全局预设
@@ -3324,7 +3871,9 @@ def process_video(video_path, srt_path=None, output_path=None,
         except ImportError:
             def _even(v): return v + (v % 2)
 
-    # Ken Burns uses the stable OpenCV pass. FFmpeg zoompan is faster but can introduce visible jitter.
+    # Ken Burns：优先 FFmpeg zoompan（快），失败才回退 OpenCV 逐帧（稳但慢）。
+    # zoompan 的 x/y 取整会造成顿挫，已在 smart_crop.ken_burns_filter 里用超采样消除
+    # （源分辨率接近输出时放大 3 倍再 zoompan，取整台阶从 1 输出像素降到 1/3）。
     _ken_burns_opencv = None
     _ken_burns_ffmpeg = None
     if ken_burns_enabled:
@@ -3372,19 +3921,38 @@ def process_video(video_path, srt_path=None, output_path=None,
             # [v9.5] 尾部缓冲已禁用：会导致拖入其他片段内容产生重复
             start_buf = 0
             end_buf = 0
-            # [v9.6] 所有片段SRT边界对齐：防止说半句话
-            # 找到start/end所在的SRT条目→对齐到该条目边界；口播长句允许适度补尾。
+            # [v9.8] 切点严格对齐（乙）：只贴"与计划区间重叠最长"的 SRT 条目，禁止跨句吸附。
+            # 回退：把 SRT_SNAP_STRICT 置 False 即恢复 v9.6/v9.7 旧行为。
             if _srt_boundaries and not _range_locked:
-                start_srt, end_srt = None, None
-                for _ts, _te in _srt_boundaries:
-                    if _ts <= end <= _te:
-                        end_srt = _te
-                    if _ts <= start <= _te:
-                        start_srt = _ts
-                if end_srt and end_srt - end <= 8.0:
-                    end = end_srt
-                if start_srt and start - start_srt <= 3.0:
-                    start = start_srt
+                if not SRT_SNAP_STRICT:
+                    _prev_ends = [_te for _ts, _te in _srt_boundaries if _ts < _te and (end - 0.16) <= _te <= end]
+                    _next_starts = [_ts for _ts, _te in _srt_boundaries if _ts < _te and start <= _ts <= start + 0.16]
+                    if _prev_ends:
+                        end = max(_prev_ends)
+                    else:
+                        end_srt = None
+                        for _ts, _te in _srt_boundaries:
+                            if _ts <= end <= _te and (end_srt is None or _te < end_srt):
+                                end_srt = _te
+                        if end_srt and end_srt - end <= 8.0:
+                            end = end_srt
+                    if _next_starts:
+                        start = min(_next_starts)
+                    else:
+                        start_srt = None
+                        for _ts, _te in _srt_boundaries:
+                            if _ts <= start <= _te and (start_srt is None or _ts > start_srt):
+                                start_srt = _ts
+                        if start_srt and start - start_srt <= 3.0:
+                            start = start_srt
+                else:
+                    try:
+                        start, end, _align_notes = _strict_srt_snap(start, end, _srt_boundaries)
+                        for _align_note in _align_notes:
+                            _log(f"切点对齐: {_align_note}")
+                    except Exception:
+                        _LOG.warning("unexpected error", exc_info=True)
+            _pre_extend_end = end
             if (not _range_locked) and _srt_segments_for_cut and (clip_idx == total_clips - 1 or str(c_type).lower() in ("close", "cta", "call_to_action")):
                 try:
                     for _si, _seg in enumerate(_srt_segments_for_cut):
@@ -3403,6 +3971,15 @@ def process_video(video_path, srt_path=None, output_path=None,
                 except Exception:
                     _LOG.warning("unexpected error", exc_info=True)
                     pass
+            if end - _pre_extend_end > 2.5:
+                _log(f"结尾承接收口: 延伸 {end - _pre_extend_end:.2f}s 超限，回退到 {_pre_extend_end:.2f}s")
+                end = _pre_extend_end
+            if not _range_locked and (_orig_end - _orig_start) > 0:
+                _d_end = end - _orig_end
+                _d_start = start - _orig_start
+                if abs(_d_end) > 0.5 or abs(_d_start) > 0.5:
+                    _log("[切点核对] clip %d %s 计划 %.2f-%.2f → 实际 %.2f-%.2f（终点 %+.2fs / 起点 %+.2fs）"
+                         % (clip_idx + 1, c_type, _orig_start, _orig_end, start, end, _d_end, _d_start))
             start = max(0, start - start_buf)
             end = min(video_duration, end + end_buf)
 
@@ -3438,20 +4015,45 @@ def process_video(video_path, srt_path=None, output_path=None,
                 end = min(video_duration, end + 0.0)
                 if end > old_end + 0.01:
                     _log(f"尾音保护: 最后一段延长 {old_end:.2f}s→{end:.2f}s，避免末字被截")
+            _unit_members = _clip_unit_members(clip)
+            _unit_ranges = []
+            _unit_text = ""
+            if len(_unit_members) > 1:
+                _unit_ranges = _unit_member_ranges(
+                    _unit_members, _srt_boundaries, limit=max(0.3, video_duration - 0.1)
+                )
+                if _unit_ranges:
+                    _u0 = _unit_ranges[0][0]
+                    _u_head_contig = any(abs(_te - _u0) <= 0.03 and _ts < _u0 - 0.05 for _ts, _te in _srt_boundaries)
+                    _fs, _fe = _anchor_boundaries_to_audio(video_path, _u0, _unit_ranges[-1][1], log_fn=_log, head_contiguous=_u_head_contig)
+                    _unit_ranges[0] = (_fs, _unit_ranges[0][1])
+                    _unit_ranges[-1] = (_unit_ranges[-1][0], _fe)
+                _unit_duration = sum(_e - _s for _s, _e in _unit_ranges)
+                if _unit_duration > 0.2:
+                    end = start + _unit_duration
+                _unit_text = _unit_member_text(_unit_members)
             # Exact preview ranges may include a small acoustic tail after the
             # final selected word. Keep the reviewed text authoritative so the
             # tail cannot reintroduce source words into the edit contract.
-            _actual_clip_text = (
-                str(text or "")
-                if _range_locked
-                else (_srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or ""))
-            )
+            if _unit_text:
+                _actual_clip_text = _unit_text
+            else:
+                _actual_clip_text = (
+                    str(text or "")
+                    if _range_locked
+                    else (_srt_text_for_range(_srt_segments_for_cut, start, end) or str(text or ""))
+                )
             if abs(start - _orig_start) > 0.01 or abs(end - _orig_end) > 0.01:
                 _log(f"实际切割 [{clip_idx+1}/{total_clips}] {_orig_start:.1f}-{_orig_end:.1f}s -> {start:.1f}-{end:.1f}s | {_actual_clip_text[:120]}")
 
             mirror_vf = ""
             if _mirror_enabled and random.random() < OUTPUT_CLIP_MIRROR_PROBABILITY:
                 mirror_vf = "hflip"
+            if not _unit_ranges:
+                _head_contig = any(abs(_te - start) <= 0.03 and _ts < start - 0.05 for _ts, _te in _srt_boundaries)
+                _as, _ae = _anchor_boundaries_to_audio(video_path, start, end, log_fn=_log, head_contiguous=_head_contig)
+                if _ae - _as >= 0.2:
+                    start, end = _as, _ae
             clip_duration = max(0.2, end - start)
 
             # Smart Crop VF
@@ -3486,24 +4088,33 @@ def process_video(video_path, srt_path=None, output_path=None,
             )
             _log("[T] VF: " + combined_vf[:200])
 
-            if _range_locked:
-                cmd = _preview_exact_cut_cmd(
-                    ffmpeg, video_path, start, clip_duration, combined_vf,
+            cmd = None
+            if len(_unit_ranges) > 1:
+                cmd = _seamless_unit_cut_cmd(
+                    ffmpeg, video_path, _unit_ranges, combined_vf,
                     _audio_filter, temp_file, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
                 )
-            else:
-                cmd = [ffmpeg, "-y"]
-                _append_seek_input_args(cmd, video_path, start, accurate=False)
-                cmd += ["-t", f"{clip_duration:.3f}"]
-                cmd += ["-fflags", "+genpts"]
-                cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-                cmd += _intermediate_vcodec_args()
-                cmd += ["-vf", combined_vf]
-                cmd += ["-pix_fmt", "yuv420p"]
-                cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
-                       "-af", _audio_filter, "-shortest"]
-                cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
-                cmd += [temp_file]
+                if cmd is not None:
+                    _log(f"[T] 去气口合并: 单元 {clip_idx + 1} 由 {len(_unit_ranges)} 句直接相接")
+            if cmd is None:
+                if _range_locked:
+                    cmd = _preview_exact_cut_cmd(
+                        ffmpeg, video_path, start, clip_duration, combined_vf,
+                        _audio_filter, temp_file, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
+                    )
+                else:
+                    cmd = [ffmpeg, "-y"]
+                    _append_seek_input_args(cmd, video_path, start, accurate=False)
+                    cmd += ["-t", f"{clip_duration:.3f}"]
+                    cmd += ["-fflags", "+genpts"]
+                    cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+                    cmd += _intermediate_vcodec_args()
+                    cmd += ["-vf", combined_vf]
+                    cmd += ["-pix_fmt", "yuv420p"]
+                    cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+                           "-af", _audio_filter, "-shortest"]
+                    cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+                    cmd += [temp_file]
             _log(f"[T] [{time.strftime('%H:%M:%S')}] Popen start")
 
             try:
@@ -3555,19 +4166,27 @@ def process_video(video_path, srt_path=None, output_path=None,
                         _log("当前 FFmpeg 不支持 libx264，已使用 mpeg4 作为软件编码兜底。建议发布包内置完整 FFmpeg。")
                     _log(f"当前设备硬件编码不可用，已自动切换到 {_sw_name} 软件编码，后续片段不再尝试硬件编码。")
                     _hw_fallback = True
-                    # 重新构建命令，用软件编码替换硬件编码
-                    cmd = [ffmpeg, "-y"]
-                    _append_seek_input_args(cmd, video_path, start, accurate=_range_locked)
-                    cmd += ["-t", f"{clip_duration:.3f}"]
-                    cmd += ["-fflags", "+genpts"]
-                    cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-                    cmd += _sw_args
-                    cmd += ["-vf", combined_vf]
-                    cmd += ["-pix_fmt", "yuv420p"]
-                    cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-                            "-ac", "2", "-async", "1", "-af", _audio_filter, "-shortest"]
-                    cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
-                    cmd += [temp_file]
+                    _retry_cmd = None
+                    if len(_unit_ranges) > 1:
+                        _retry_cmd = _seamless_unit_cut_cmd(
+                            ffmpeg, video_path, _unit_ranges, combined_vf,
+                            _audio_filter, temp_file, _sw_args, VIDEO_CONFIG["fps"]
+                        )
+                    if _retry_cmd is not None:
+                        cmd = _retry_cmd
+                    else:
+                        cmd = [ffmpeg, "-y"]
+                        _append_seek_input_args(cmd, video_path, start, accurate=_range_locked)
+                        cmd += ["-t", f"{clip_duration:.3f}"]
+                        cmd += ["-fflags", "+genpts"]
+                        cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+                        cmd += _sw_args
+                        cmd += ["-vf", combined_vf]
+                        cmd += ["-pix_fmt", "yuv420p"]
+                        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                                "-ac", "2", "-async", "1", "-af", _audio_filter, "-shortest"]
+                        cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+                        cmd += [temp_file]
                     try:
                         proc = _register_process(subprocess.Popen(cmd, **popen_kwargs, creationflags=_NO_WINDOW))
                         rc2 = _wait_process(proc, timeout=300, cancel_event=cancel_event)
@@ -3593,6 +4212,38 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     _log(f"阶段耗时: 切片 {time.time() - _cut_stage_started:.1f}s")
 
+    # [v9.8 / 丙+] 切片顺序清单：把"实际切出的顺序与区间"落盘进运行日志，
+    # 这样不用看成片就能核对"片单顺序 vs 渲染顺序"。另附计划区间供逐条对账。
+    try:
+        _plan_rows = []
+        for _pc in (ordered_clips or []):
+            try:
+                _pf = _clip_unit_fields(_pc)
+                _plan_rows.append([round(float(_pf[2]), 3), round(float(_pf[3]), 3)])
+            except Exception:
+                _plan_rows.append(None)
+        _cut_rows = []
+        for _mi in range(len(_clip_starts)):
+            _cm = _clip_cut_maps[_mi] if _mi < len(_clip_cut_maps) else {}
+            _cut_rows.append({
+                "切序": _mi + 1,
+                "类型": str(_cm.get("type", "")),
+                "计划": (_plan_rows[_mi] if _mi < len(_plan_rows) else None),
+                "实际": [round(float(_clip_starts[_mi]), 3), round(float(_clip_ends[_mi]), 3)],
+                "文本": str(_cm.get("text", ""))[:200],
+            })
+        _run_log["切片顺序清单"] = _cut_rows
+        _log("切片顺序清单: " + " | ".join(
+            "#%d %s %s->%s" % (
+                r["切序"], r.get("类型") or "-",
+                ("%.2f" % r["计划"][0]) if r.get("计划") else "?",
+                ("%.2f" % r["实际"][1]) if r.get("实际") else "?",
+            )
+            for r in _cut_rows[:12]
+        ))
+    except Exception:
+        _run_log.setdefault("切片顺序清单", [])
+
     if not temp_files:
         _log("没有成功切割任何片段！")
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -3613,7 +4264,7 @@ def process_video(video_path, srt_path=None, output_path=None,
 
     if ken_burns_enabled and temp_files:
         _kb_stage_started = time.time()
-        _log("KenBurns: 稳定模式二次处理开始")
+        _log("KenBurns: FFmpeg 运镜二次处理开始")
         _kb_ok = 0
         for _kbi, _clip_file in enumerate(temp_files):
             if _cancelled():
@@ -3625,27 +4276,34 @@ def process_video(video_path, srt_path=None, output_path=None,
                 if _kb_cap is not None and _kb_cap <= 0.005:
                     _log(f"KenBurns: 片段{_kbi+1}人物接近画面边缘，跳过二次缩放以保护头部和身体")
                     continue
-                if _ken_burns_opencv:
-                    _kb_ok_flag = _ken_burns_opencv(
-                        _clip_file, _kb_out, _kb_dur, w, h, cfg["fps"],
-                        ffmpeg_cmd=get_ffmpeg_cmd(), log_fn=_log,
-                        intensity=kb_intensity, max_zoom_delta=_kb_cap)
-                else:
-                    _kb_ok_flag = False
-                if not _kb_ok_flag and _ken_burns_ffmpeg:
-                    _log("KenBurns: OpenCV稳定模式失败，回退FFmpeg快速模式")
-                    _kb_ok_flag = _ken_burns_ffmpeg(
-                        _clip_file, _kb_out, _kb_dur, w, h, cfg["fps"],
-                        ffmpeg_cmd=get_ffmpeg_cmd(), log_fn=_log,
-                        intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                _kb_ok_flag = False
+                if _ken_burns_ffmpeg:
+                    try:
+                        _kb_ok_flag = _ken_burns_ffmpeg(
+                            _clip_file, _kb_out, _kb_dur, w, h, cfg["fps"],
+                            ffmpeg_cmd=get_ffmpeg_cmd(), log_fn=_log,
+                            intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                    except Exception as _kb_fast_error:
+                        _log(f"KenBurns: 片段{_kbi+1} FFmpeg快速模式异常 {_kb_fast_error}")
+                        _kb_ok_flag = False
+                if not _kb_ok_flag and _ken_burns_opencv:
+                    _log("KenBurns: FFmpeg快速模式失败，回退OpenCV稳定模式")
+                    try:
+                        _kb_ok_flag = _ken_burns_opencv(
+                            _clip_file, _kb_out, _kb_dur, w, h, cfg["fps"],
+                            ffmpeg_cmd=get_ffmpeg_cmd(), log_fn=_log,
+                            intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                    except Exception as _kb_stable_error:
+                        _log(f"KenBurns: OpenCV回退片段{_kbi+1}失败 {_kb_stable_error}")
+                        _kb_ok_flag = False
                 if _kb_ok_flag and os.path.exists(_kb_out):
                     os.replace(_kb_out, _clip_file)
                     _kb_ok += 1
                 elif os.path.exists(_kb_out):
                     os.remove(_kb_out)
             except Exception as _kbe:
-                _log(f"KenBurns: 稳定模式片段{_kbi+1}失败 {_kbe}")
-        _log(f"KenBurns: 稳定模式完成 {_kb_ok}/{len(temp_files)}")
+                _log(f"KenBurns: 运镜片段{_kbi+1}失败 {_kbe}")
+        _log(f"KenBurns: FFmpeg 运镜二次处理完成 {_kb_ok}/{len(temp_files)}")
         _log(f"阶段耗时: KenBurns {time.time() - _kb_stage_started:.1f}s")
 
     _concat_stage_started = time.time()
@@ -3830,7 +4488,8 @@ def process_video(video_path, srt_path=None, output_path=None,
         # 字幕在去重后添加，镜像不会影响字幕
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
         # 音频淡入淡出（消除片段间硬切感）+ 异步重采样
-        af = f"{_stable_audio_tail_filter()},afade=t=in:st=0:d=0.3"
+        # [v9.7] 取消成品开头 0.3s 淡入（会压掉首个词）；片段级 15ms 防爆音仍保留
+        af = _stable_audio_tail_filter()
         if dedup["video_filters"]:
             vf = dedup["video_filters"] + "," + vf
         if dedup["audio_filters"]:
@@ -4130,7 +4789,15 @@ def process_video(video_path, srt_path=None, output_path=None,
             _log(f"时长提示: {_final_contract['duration_soft_warning']}")
 
     # ---- 切割评分 ----
-    report = _build_cut_report(ordered_clips, success_count, total_clips, output_path, size_mb)
+    report = _build_cut_report(
+        ordered_clips,
+        success_count,
+        total_clips,
+        output_path,
+        size_mb,
+        actual_duration=_actual_dur,
+        speed_factor=_planned_speed_factor,
+    )
     _print_cut_report(report, _log)
     if _actual_dur > 0:
         _log(f"  成品真实时长: {_actual_dur:.0f}s")
@@ -4175,6 +4842,63 @@ def cut_and_dedup(video_path, srt_path, output_path, dedup_preset="medium", log_
                           dedup_preset=dedup_preset, subtitle_overlay=False, log_fn=log_fn,
                           cancel_event=cancel_event)
 
+
+
+SRT_SNAP_STRICT = True            # [v9.8] 严格切点对齐总开关；置 False 回退 v9.6/v9.7 旧行为
+SRT_SNAP_END_TOLERANCE = 3.0      # [v9.8] 补尾上限（只在"本句所属条目"内）
+SRT_SNAP_START_TOLERANCE = 1.5    # [v9.8] 起点回拉上限（只在"本句所属条目"内）
+
+
+def _strict_srt_snap(start, end, boundaries, log_fn=None):
+    """[v9.8] 把片段切点对齐到它真正所属的 SRT 条目。
+
+    归属 = 与计划区间 [start, end] 重叠最长的那条 SRT 条目（并列取更早的一条）。
+    对齐只允许发生在该条目内部：
+      - 终点落条内且差 <= SRT_SNAP_END_TOLERANCE  -> 补到句尾（防半句话）；
+      - 终点刚越过句尾 <= 0.16s                     -> 收在该句尾（去掉下句起音）；
+      - 起点落条内且已在句内 <= START_TOLERANCE    -> 回拉到句首（防半句话）；
+      - 起点刚落在句首之前 <= 0.16s                 -> 对齐到句首（去掉上句残音）；
+      - 其余一律保持 AI 给的计划值，绝不贴到邻句边界（这就是"吞掉相邻片段"的根源）。
+    返回 (start, end, notes)，notes 为可写日志的说明列表。
+    """
+    try:
+        start = float(start); end = float(end)
+    except Exception:
+        return start, end, []
+    bounds = []
+    for _s, _e in (boundaries or []):
+        try:
+            _s = float(_s); _e = float(_e)
+        except Exception:
+            continue
+        if _e > _s:
+            bounds.append((_s, _e))
+    if not bounds or end <= start:
+        return start, end, []
+    own = None; own_ov = 0.0
+    for _s, _e in bounds:
+        ov = min(end, _e) - max(start, _s)
+        if ov > own_ov + 1e-9:
+            own, own_ov = (_s, _e), ov
+    if own is None or own_ov <= 0:
+        return start, end, []
+    os_, oe = own
+    notes = []
+    if os_ <= end <= oe:
+        if end < oe and (oe - end) <= SRT_SNAP_END_TOLERANCE:
+            notes.append("终点 %.3f→%.3f（本句条目 %.3f-%.3f 内补尾）" % (end, oe, os_, oe))
+            end = oe
+    elif oe < end <= oe + 0.16:
+        notes.append("终点 %.3f→%.3f（刚越本句尾，收回）" % (end, oe))
+        end = oe
+    if os_ <= start <= oe:
+        if start > os_ and (start - os_) <= SRT_SNAP_START_TOLERANCE:
+            notes.append("起点 %.3f→%.3f（本句条目 %.3f-%.3f 内回拉）" % (start, os_, os_, oe))
+            start = os_
+    elif os_ - 0.16 <= start < os_:
+        notes.append("起点 %.3f→%.3f（对齐本句首）" % (start, os_))
+        start = os_
+    return start, end, notes
 
 
 def _parse_srt_to_segments(srt_text):
@@ -4347,17 +5071,34 @@ def _apply_srt_cut_alignment(c_type, start, end, srt_segments, clip_idx=0, total
             continue
 
     if boundaries:
-        start_srt, end_srt = None, None
-        for seg_start, seg_end in boundaries:
-            if seg_start <= end <= seg_end:
-                end_srt = seg_end
-            if seg_start <= start <= seg_end:
-                start_srt = seg_start
-        if end_srt and end_srt - end <= 8.0:
-            end = end_srt
-        if start_srt and start - start_srt <= 3.0:
-            start = start_srt
+        if SRT_SNAP_STRICT:
+            # [v9.8] 与主路径同一套严格对齐：只贴"与计划区间重叠最长"的条目，禁止跨句吸附。
+            # 该函数在切割循环里晚于主路径对齐执行，必须同步，否则主路径的改动会被它覆盖。
+            start, end, _align_notes = _strict_srt_snap(start, end, boundaries)
+            for _align_note in _align_notes:
+                _LOG.info("切点对齐(对齐函数): %s", _align_note)
+        else:
+            start_srt, end_srt = None, None
+            prev_ends = [se for ss, se in boundaries if ss < se and (end - 0.16) <= se <= end]
+            next_starts = [ss for ss, se in boundaries if ss < se and start <= ss <= start + 0.16]
+            if prev_ends:
+                end = max(prev_ends)
+            else:
+                for seg_start, seg_end in boundaries:
+                    if seg_start <= end <= seg_end and (end_srt is None or seg_end < end_srt):
+                        end_srt = seg_end
+                if end_srt and end_srt - end <= 8.0:
+                    end = end_srt
+            if next_starts:
+                start = min(next_starts)
+            else:
+                for seg_start, seg_end in boundaries:
+                    if seg_start <= start <= seg_end and (start_srt is None or seg_start > start_srt):
+                        start_srt = seg_start
+                if start_srt and start - start_srt <= 3.0:
+                    start = start_srt
 
+    _pre_extend_end = end
     c_type_text = str(c_type or "").lower()
     is_tail = clip_idx == total_clips - 1 or c_type_text in ("close", "cta", "call_to_action")
     if srt_segments and is_tail:
@@ -4379,6 +5120,9 @@ def _apply_srt_cut_alignment(c_type, start, end, srt_segments, clip_idx=0, total
         except Exception:
             _LOG.warning("unexpected error", exc_info=True)
             pass
+    if end - _pre_extend_end > 2.5:
+        # [v9.8] 结尾承接收口：单次延伸不得超过 2.5s
+        end = _pre_extend_end
 
     return start, end, (abs(start - original[0]) > 0.01 or abs(end - original[1]) > 0.01)
 
@@ -4653,8 +5397,23 @@ def _ass_color(hex_color, opacity=100):
     return f"&H{alpha:02X}{blue}{green}{red}"
 
 
+# 成片字幕不显示标点：只去掉标点符号本身，不改动任何文字。
+_SUBTITLE_PUNCTUATION_RE = re.compile(r"[。，、；：！？…·,.;:!?]+")
+
+
+def _strip_subtitle_punctuation(text):
+    """Remove subtitle punctuation while keeping digits such as 3.5 intact."""
+    value = str(text or "")
+    if not value:
+        return ""
+    protected = re.sub(r"(?<=\d)\.(?=\d)", "\x00", value)
+    cleaned = _SUBTITLE_PUNCTUATION_RE.sub("", protected)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).replace("\x00", ".")
+    return cleaned.strip()
+
+
 def _subtitle_ass_text(text, style):
-    escaped = str(text or "").replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+    escaped = _strip_subtitle_punctuation(text).replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
     # The UI stores a 0-100 softness value, while libass takes a pixel radius.
     # Passing the UI value through made the requested default 10 become a huge
     # 10px blur. Scale it so 10 means the intended subtle 1px softening.
@@ -4851,7 +5610,7 @@ def _burn_mapped_subtitles_final(video_path, output_path, w, h, temp_dir, _log, 
         for idx, seg in enumerate(fixed_segments):
             txt_path = os.path.join(temp_dir, f"mapped_sub_{idx:04d}.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(seg["text"])
+                f.write(_strip_subtitle_punctuation(seg["text"]))
             if IS_MAC:
                 text_file = txt_path.replace("'", "'\\''")
             else:
@@ -4887,9 +5646,9 @@ def _final_subtitle_local_asr_segments(
     cancel_event=None,
     local_asr_session=None,
 ):
-    """Use the same SenseVoice-only local ASR policy as smart-cut preview."""
+    """Use the same local ASR policy as smart-cut preview; the engine follows the local ASR setting."""
     local_srt = os.path.join(temp_dir, "final_local_asr.srt")
-    log_fn("字幕阶段：正在使用本地 SenseVoice 识别最终视频音频...")
+    log_fn(f"字幕阶段：正在使用本地 {_local_asr_engine_label()} 识别最终视频音频...")
 
     try:
         from stt import transcribe_local_audio_to_srt
@@ -6191,17 +6950,17 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                             _temp,
                             _sc,
                             source_video=original_vp,
-                            provider="sensevoice",
-                            model="iic/SenseVoiceSmall",
+                            provider=_local_asr_identity()[0],
+                            model=_local_asr_identity()[1],
                         )
                         if _has_word_timing:
-                            _log("  SenseVoice ASR 成功，已保存词级时间")
+                            _log(f"  {_local_asr_engine_label()} ASR 成功，已保存词级时间")
                         else:
-                            _log("  SenseVoice ASR 成功，但未返回词级时间")
+                            _log(f"  {_local_asr_engine_label()} ASR 成功，但未返回词级时间")
                         _asr_ok = True
                         _sc_usable = True
                 except Exception as e:
-                    _log(f"  SenseVoice ASR 失败: {e}")
+                    _log(f"  {_local_asr_engine_label()} ASR 失败: {e}")
         if _sc_usable and os.path.exists(_sc):
             with open(_sc, "r", encoding="utf-8", errors="replace") as f:
                 _srt_text = f.read()
@@ -6751,6 +7510,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
     w, h, _res_note = _output_resolution_for_source(_source_w, _source_h, VIDEO_CONFIG["resolution"])
     _log(f"Source: {_source_w}x{_source_h} -> 输出 {w}x{h}（{_res_note}）")
 
+    # 成片合并：预览成片（process_video_mix）同样按同一规则合并相邻句，
+    # 必须在 SmartCrop 批量检测之前，保证 (source, index) 映射一致。
+    sorted_clips = _merge_render_units(sorted_clips, log_fn=_log)
+    sorted_clips = _drop_short_standalone_units(sorted_clips, log_fn=_log)
+
     # ===== Smart Crop batch detection =====
     _sc_results_all = {}
     _src_dims = {video_list[0]: (_source_w, _source_h)}
@@ -6845,26 +7609,34 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             clip = dict(clip)
             clip["end"] = clip["end"]
         end = float(clip["end"])
-        if not range_locked:
-            end += 0.1  # 非AI精确片段保留最小尾部缓冲
+        # [v9.7] 取消无条件尾部缓冲 +0.1：它会把终点推进下一条 SRT，再被边界
+        # 吸附放大成“吞掉下一整句”。尾部改由音频锚定决定。
 
         # 混剪每个源视频都有自己的0秒时间轴，按当前source的SRT边界补齐完整句。
         try:
             if range_locked:
                 raise RuntimeError("preview exact range")
             _src_entries = [e for e in _mix_srt_entries if e.get("source") == vp]
-            _start_srt, _end_srt = None, None
-            for _entry in _src_entries:
-                _ts = float(_entry.get("start", 0))
-                _te = float(_entry.get("end", _ts))
-                if _ts <= end <= _te:
-                    _end_srt = _te
-                if _ts <= start <= _te:
-                    _start_srt = _ts
-            if _end_srt is not None and _end_srt - end <= 8.0:
-                end = _end_srt
-            if _start_srt is not None and start - _start_srt <= 3.0:
-                start = _start_srt
+            if SRT_SNAP_STRICT:
+                # [v9.8] 与主路径同一套严格对齐：只贴"与计划区间重叠最长"的条目，禁止跨句吸附
+                _mix_bounds = [(float(_entry.get("start", 0)), float(_entry.get("end", float(_entry.get("start", 0))))) for _entry in _src_entries]
+                _ns, _ne, _notes = _strict_srt_snap(start, end, _mix_bounds)
+                for _n in _notes:
+                    _log(f"切点对齐(混剪): {_n}")
+                start, end = _ns, _ne
+            else:
+                _start_srt, _end_srt = None, None
+                for _entry in _src_entries:
+                    _ts = float(_entry.get("start", 0))
+                    _te = float(_entry.get("end", _ts))
+                    if _ts <= end <= _te:
+                        _end_srt = _te
+                    if _ts <= start <= _te:
+                        _start_srt = _ts
+                if _end_srt is not None and _end_srt - end <= 8.0:
+                    end = _end_srt
+                if _start_srt is not None and start - _start_srt <= 3.0:
+                    start = _start_srt
             if ci == len(sorted_clips) - 1 or str(c_type).lower() in ("close", "cta", "call_to_action"):
                 for _ei, _entry in enumerate(_src_entries):
                     _te = float(_entry.get("end", float(_entry.get("start", 0))))
@@ -6876,9 +7648,11 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                             end = _next_end
                             _log(f"结尾承接: 延伸到下一句 {end:.1f}s，避免最后一句截断")
                         break
-        except Exception:
-            _LOG.warning("unexpected error", exc_info=True)
-            pass
+        except Exception as _clip_range_error:
+            # 7618 行是**故意**抛出的区间锁定信号（用来跳过 SRT 边界吸附），不是故障。
+            # 以前它按 "unexpected error" 记了完整 traceback，把导出日志搅得很吓人。
+            if str(_clip_range_error) != "preview exact range":
+                _LOG.warning("unexpected error", exc_info=True)
 
         if _next_same_source_start is not None and end > _next_same_source_start:
             old_end = end
@@ -6906,6 +7680,17 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             end += 0.0
             _log(f"尾音保护: 最后一段延长 {old_end:.2f}s→{end:.2f}s，避免末字被截")
 
+        _unit_members = _clip_unit_members(clip)
+        _unit_ranges = []
+        if len(_unit_members) > 1:
+            _unit_boundaries = [
+                (float(_entry.get("start", 0)), float(_entry.get("end", float(_entry.get("start", 0)))))
+                for _entry in (_mix_srt_entries or []) if _entry.get("source") == vp
+            ]
+            _unit_ranges = _unit_member_ranges(_unit_members, _unit_boundaries, limit=None)
+            _unit_duration = sum(_e - _s for _s, _e in _unit_ranges)
+            if _unit_duration > 0.2:
+                end = start + _unit_duration
         duration = end - start
 
         if start < 0: start = 0
@@ -6959,24 +7744,33 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             )
         )
 
-        if range_locked:
-            cmd = _preview_exact_cut_cmd(
-                ffmpeg, vp, start, duration, combined_vf,
+        cmd = None
+        if len(_unit_ranges) > 1:
+            cmd = _seamless_unit_cut_cmd(
+                ffmpeg, vp, _unit_ranges, combined_vf,
                 _mix_audio_filter, out_clip, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
             )
-        else:
-            cmd = [ffmpeg, "-y"]
-            _append_seek_input_args(cmd, vp, start, accurate=range_locked)
-            cmd += ["-t", f"{duration:.3f}"]
-            cmd += ["-fflags", "+genpts"]
-            cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
-            cmd += _intermediate_vcodec_args()
-            cmd += ["-vf", combined_vf]
-            cmd += ["-pix_fmt", "yuv420p"]
-            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
-                   "-af", _mix_audio_filter, "-shortest"]
-            cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
-            cmd += [out_clip]
+            if cmd is not None:
+                _log(f"[T] 去气口合并: 单元 {ci + 1} 由 {len(_unit_ranges)} 句直接相接")
+        if cmd is None:
+            if range_locked:
+                cmd = _preview_exact_cut_cmd(
+                    ffmpeg, vp, start, duration, combined_vf,
+                    _mix_audio_filter, out_clip, _intermediate_vcodec_args(), VIDEO_CONFIG["fps"]
+                )
+            else:
+                cmd = [ffmpeg, "-y"]
+                _append_seek_input_args(cmd, vp, start, accurate=range_locked)
+                cmd += ["-t", f"{duration:.3f}"]
+                cmd += ["-fflags", "+genpts"]
+                cmd += _stable_cfr_output_args(VIDEO_CONFIG["fps"])
+                cmd += _intermediate_vcodec_args()
+                cmd += ["-vf", combined_vf]
+                cmd += ["-pix_fmt", "yuv420p"]
+                cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-async", "1",
+                       "-af", _mix_audio_filter, "-shortest"]
+                cmd += ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"]
+                cmd += [out_clip]
 
         try:
             proc = _register_process(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -7044,7 +7838,7 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
 
     if ken_burns_enabled and temp_files:
         _kb_stage_started = time.time()
-        _log("KenBurns: 稳定模式二次处理开始")
+        _log("KenBurns: FFmpeg 运镜二次处理开始")
         _kb_ok = 0
         for _kbi, _clip_file in enumerate(temp_files):
             if _cancelled():
@@ -7056,27 +7850,34 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
                 if _kb_cap is not None and _kb_cap <= 0.005:
                     _log(f"KenBurns: 片段{_kbi+1}人物接近画面边缘，跳过二次缩放以保护头部和身体")
                     continue
-                if _ken_burns_opencv:
-                    _kb_ok_flag = _ken_burns_opencv(
-                        _clip_file, _kb_out, _kb_dur, w, h, 30,
-                        ffmpeg_cmd=ffmpeg, log_fn=_log,
-                        intensity=kb_intensity, max_zoom_delta=_kb_cap)
-                else:
-                    _kb_ok_flag = False
-                if not _kb_ok_flag and _ken_burns_ffmpeg:
-                    _log("KenBurns: OpenCV稳定模式失败，回退FFmpeg快速模式")
-                    _kb_ok_flag = _ken_burns_ffmpeg(
-                        _clip_file, _kb_out, _kb_dur, w, h, 30,
-                        ffmpeg_cmd=ffmpeg, log_fn=_log,
-                        intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                _kb_ok_flag = False
+                if _ken_burns_ffmpeg:
+                    try:
+                        _kb_ok_flag = _ken_burns_ffmpeg(
+                            _clip_file, _kb_out, _kb_dur, w, h, 30,
+                            ffmpeg_cmd=ffmpeg, log_fn=_log,
+                            intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                    except Exception as _kb_fast_error:
+                        _log(f"KenBurns: 片段{_kbi+1} FFmpeg快速模式异常 {_kb_fast_error}")
+                        _kb_ok_flag = False
+                if not _kb_ok_flag and _ken_burns_opencv:
+                    _log("KenBurns: FFmpeg快速模式失败，回退OpenCV稳定模式")
+                    try:
+                        _kb_ok_flag = _ken_burns_opencv(
+                            _clip_file, _kb_out, _kb_dur, w, h, 30,
+                            ffmpeg_cmd=ffmpeg, log_fn=_log,
+                            intensity=kb_intensity, max_zoom_delta=_kb_cap)
+                    except Exception as _kb_stable_error:
+                        _log(f"KenBurns: OpenCV回退片段{_kbi+1}失败 {_kb_stable_error}")
+                        _kb_ok_flag = False
                 if _kb_ok_flag and os.path.exists(_kb_out):
                     os.replace(_kb_out, _clip_file)
                     _kb_ok += 1
                 elif os.path.exists(_kb_out):
                     os.remove(_kb_out)
             except Exception as _kbe:
-                _log(f"KenBurns: 稳定模式片段{_kbi+1}失败 {_kbe}")
-        _log(f"KenBurns: 稳定模式完成 {_kb_ok}/{len(temp_files)}")
+                _log(f"KenBurns: 运镜片段{_kbi+1}失败 {_kbe}")
+        _log(f"KenBurns: FFmpeg 运镜二次处理完成 {_kb_ok}/{len(temp_files)}")
         _log(f"阶段耗时: KenBurns {time.time() - _kb_stage_started:.1f}s")
 
     # ============================================================
@@ -7313,7 +8114,8 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
         _log(f"\u53bb\u91cd\u6548\u679c: {applied}")
 
         vf = f"setpts=PTS-STARTPTS,scale=-2:{h}:force_original_aspect_ratio=decrease:flags=lanczos,crop={w}:{h},{_final_sharpen_vf()}"
-        af = f"{_stable_audio_tail_filter()},afade=t=in:st=0:d=0.3"
+        # [v9.7] 取消成品开头 0.3s 淡入（会压掉首个词）；片段级 15ms 防爆音仍保留
+        af = _stable_audio_tail_filter()
         if dedup.get("video_filters"):
             vf = dedup["video_filters"] + "," + vf
         if dedup.get("audio_filters"):
@@ -7494,7 +8296,15 @@ def process_video_mix(video_path, output_path=None, dedup_preset="medium",
             0.0,
             _report_duration_contract.final_max - _report_duration_contract.final_target,
         )
-        _report = _build_cut_report(sorted_clips, len(sorted_clips), len(sorted_clips), final, final_mb)
+        _report = _build_cut_report(
+            sorted_clips,
+            len(sorted_clips),
+            len(sorted_clips),
+            final,
+            final_mb,
+            actual_duration=_actual_dur,
+            speed_factor=_planned_speed_factor,
+        )
         _print_cut_report(_report, _log)
     finally:
         TARGET_DURATION, TARGET_DURATION_TOLERANCE = _report_old_dur, _report_old_tol

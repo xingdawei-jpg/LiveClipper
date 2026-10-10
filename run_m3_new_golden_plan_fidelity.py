@@ -98,6 +98,29 @@ M3_GOLDEN_PRODUCTS = {
 }
 
 
+# ── PoC：候选单元改用 AI 划界的 Beat（默认关闭）──────────────────────────────
+# 问题：现有候选单元是 ASR 的 SRT cue，其边界来自声学分段（停顿 + 标点恢复），
+# 必然会把一句话切在中间。实测同一素材（立暖 JE5PYH10）：285 条 cue 里 118 条
+# 短于 1.2s、67 条短于 0.8s，出现「150到180。」「…其实买羽绒马甲在我们」这类
+# 碎片。而导演只能整条挑 cue、不能跨 cue、不能改写
+# （director_semantic_mutation_disabled = true），于是碎片原样进成片。
+#
+# 做法：候选单元换成 P0.5A.2 由 AI 在**词级素材**上划定的 Beat，边界是 word-exact。
+# 只换候选来源；M1 契约、导演的来源解析、M3 物化、章节/时长组装全部不动。
+#
+# 为什么不需要改 single_pass_director：
+#   PlanningCandidate.origin_subtitle_ids 是 M1↔候选的唯一桥；适配器
+#   （prepare_narrative_mode_beat_execution）已把它填成 Beat 的 subtitle_ids，
+#   而 _candidate_for_subtitle() 同时按 origin_subtitle_ids 与 candidate_id 建索引，
+#   因此导演按 SRT subtitle_ids 的解析会自动落到 Beat 候选上。
+#   同理 run_m3 的 executable_subtitle_ids 也是两者并收，M1 的可用 id 集自动生效。
+#
+# 实测依据（2026-10-07 对照实验，同一素材）：
+#   单遍导演选中 22 句，其中 5 句是用户指出的坏句；
+#   P0.5A Beat 清单两次运行（16/17 条）坏句零入选，且切掉了废话头与 ASR 崩坏。
+BEAT_CANDIDATE_POOL_ENABLED = False
+
+
 def _load_frozen_m1_strategy(report_path: str) -> Strategy:
     """Reuse one previously approved same-source M1 brief for an M2 rerun."""
     path = Path(report_path).resolve()
@@ -497,12 +520,84 @@ def _run_case(
         ledger_context["source_srt"],
         source_video_path=source_video or None,
     )
-    all_candidates = _planning_candidates(assets)
-    all_candidate_words, all_candidate_word_rejections = (
-        ({}, ())
-        if skip_m3_materialization
-        else bind_candidates_by_semantic_srt(all_candidates, timeline)
-    )
+    # ── 候选池：默认 = ASR 的 SRT cue；PoC 开关打开时 = AI 划界的 Beat ──────────
+    # 这里是唯一的注入点：下面同一个 ``candidates`` 既决定 M1 的可用 id 集
+    # （executable_subtitle_ids，两种 id 都收），也作为 safe_candidates 交给导演。
+    beat_pool_report: dict[str, Any] = {"enabled": False}
+    if BEAT_CANDIDATE_POOL_ENABLED and not skip_m3_materialization:
+        _bp_stamp = f"{case_id}_{dt.datetime.now():%Y%m%d_%H%M%S}"
+        _bp_discovery: dict[str, Path] = {}
+        _bp_boundary: dict[str, Path] = {}
+        _bp_adjudication: dict[str, Path] = {}
+
+        def _bp_write_batch(kind: str, batch_id: str, value: str) -> None:
+            store = {
+                "discovery": _bp_discovery,
+                "boundary": _bp_boundary,
+                "adjudication": _bp_adjudication,
+            }[kind]
+            path = output_dir / f"{_bp_stamp}.beat_pool.{kind}.{batch_id}.response.txt"
+            path.write_text(value, encoding="utf-8")
+            store[batch_id] = path
+
+        _bp_source_units = ledger_context.get("source_context_units") or ()
+        _bp_hard_safe = [int(item.get("candidate_id") or 0) for item in assets]
+        _bp_inventory = build_narrative_mode_beat_inventory(
+            source_units=_bp_source_units,
+            hard_safe_subtitle_ids=_bp_hard_safe,
+            word_timeline=timeline,
+            api_key=str(settings["api_key"]),
+            base_url=str(settings.get("base_url") or "https://api.deepseek.com"),
+            model=str(settings.get("model") or "deepseek-v4-flash"),
+            discovery_response_hook=lambda batch_id, value: _bp_write_batch("discovery", batch_id, value),
+            boundary_response_hook=lambda batch_id, value: _bp_write_batch("boundary", batch_id, value),
+            adjudication_response_hook=lambda batch_id, value: _bp_write_batch("adjudication", batch_id, value),
+        )
+        _bp_source_rows = build_micro_beat_source_rows(
+            source_units=_bp_source_units,
+            hard_safe_subtitle_ids=_bp_hard_safe,
+            word_timeline=timeline,
+        )
+        _bp_pool = _build_p05a3_runtime_actor_pool(
+            p05a2_inventory=_bp_inventory,
+            discovery_responses=[
+                path.read_text(encoding="utf-8")
+                for _key, path in sorted(_bp_discovery.items())
+            ],
+            source_rows=_bp_source_rows,
+            settings=settings,
+        )
+        _bp_execution, _bp_candidate_rows = _narrative_candidates_from_execution(
+            inventory=_bp_pool,
+            execution=prepare_narrative_mode_beat_execution(
+                publishable_inventory=_bp_pool, word_timeline=timeline,
+            ),
+        )
+        all_candidates = tuple(_bp_execution["candidates"])
+        all_candidate_words = dict(_bp_execution["candidate_words"])
+        all_candidate_word_rejections = tuple(_bp_execution.get("binding_rejections") or ())
+        beat_pool_report = {
+            "enabled": True,
+            "inventory_status": _bp_inventory.get("status"),
+            "pool_status": _bp_pool.get("status"),
+            "beat_count": len(all_candidates),
+            "candidate_ids": [int(item.candidate_id) for item in all_candidates],
+            "origin_subtitle_ids": {
+                int(item.candidate_id): list(item.origin_subtitle_ids)
+                for item in all_candidates
+            },
+            "binding_rejections": len(all_candidate_word_rejections),
+            "pool_errors": list(_bp_pool.get("errors") or ()),
+            "inventory_raw_beats": _bp_inventory.get("raw_beats"),
+            "inventory_raw_seconds": _bp_inventory.get("raw_seconds"),
+        }
+    else:
+        all_candidates = _planning_candidates(assets)
+        all_candidate_words, all_candidate_word_rejections = (
+            ({}, ())
+            if skip_m3_materialization
+            else bind_candidates_by_semantic_srt(all_candidates, timeline)
+        )
     candidates = []
     materializability_blocked: list[dict[str, Any]] = []
     executable_evidence_facts: dict[int, dict[str, Any]] = {}
@@ -791,6 +886,9 @@ def _run_case(
                 target_duration=target_duration,
                 selection_contract=contract,
                 director_contract=director_strategy_contract,
+                # 子跨度（导演按词收窄首/末边界）需要词级时间线才能按词切片。
+                # 不传时偏移请求一律退回整条候选，行为与改动前一致。
+                candidate_words=all_candidate_words,
             )
             for variant_strategy in discovered_strategies:
                 if variant_strategy.strategy_id == strategy.strategy_id:
@@ -1360,7 +1458,23 @@ def _run_case(
         fidelity_ledger = narrative_mode_beat_execution["execution_ledger"]
     else:
         candidate_words, candidate_word_rejections = bind_candidates_by_semantic_srt(plan.selected_candidates, timeline)
-        fidelity_ledger = assets
+        # 子跨度派生候选：其词切片由计划显式带回（binder 按整行匹配，无法为
+        # 收窄后的文本重建血缘，会报 candidate_text_span_mismatch）。
+        # 用切片覆盖绑定结果，并把这类**预期内**的拒绝从审计里摘掉，
+        # 否则血缘审计会把正常的子跨度误报成缺陷。
+        _derived_words = dict(getattr(plan, "derived_candidate_words", None) or {})
+        if _derived_words:
+            candidate_words = {**candidate_words, **_derived_words}
+            _expected = {
+                f"candidate_text_span_mismatch:{int(candidate_id)}"
+                for candidate_id in _derived_words
+            }
+            candidate_word_rejections = tuple(
+                item for item in candidate_word_rejections if str(item) not in _expected
+            )
+        # 派生候选还要有 Ledger 行，否则保真审计会报 candidate_ledger_identity_mismatch。
+        _derived_ledger = list(getattr(plan, "derived_candidate_ledger", None) or ())
+        fidelity_ledger = [*assets, *_derived_ledger] if _derived_ledger else assets
     if not skip_m3_materialization:
         result = materialize_narrative_plan(plan, candidate_words)
         result_payload = result.to_dict()
@@ -1410,6 +1524,7 @@ def _run_case(
         "m1_story_library": story_library,
         "director_strategy_library": director_strategy_library,
         "director_variant_plans": director_variant_plans,
+        "beat_candidate_pool": beat_pool_report,
         "director_strategy_contract": dict(director_strategy_contract or {}),
         "m2_attempts": m2_attempts,
         "m2_opening_quality_review_attempt": opening_review_attempt,

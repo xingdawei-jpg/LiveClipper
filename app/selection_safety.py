@@ -209,6 +209,70 @@ def live_interaction_or_size_response_reason(text: Any) -> str:
     return ""
 
 
+LIVE_INSTRUCTION_GATE_ENABLED = True
+_LIVE_INSTRUCTION_PATTERNS = (
+    re.compile(r"帮(?:我|忙)[^，。；！？\n]{0,8}(?:[pP]图?|修图?|改|调|剪|整理|弄|处理)(?:一下|一版|一图|下)?"),
+    re.compile(r"(?:帮我|给我|你|谁)[^，。；！？\n]{0,6}(?:把|拿|递|取|带)[^，。；！？\n]{0,6}(?:一下|过来|给我|拿来|上来)"),
+    re.compile(r"(?:包括)?(?:你|咱)(?:就)?把(?:它|这个|那个)(?:放|拉|翻|拿)(?:下来|上来|起来)"),
+    re.compile(r"主播[^，。；！？\n]{0,10}(?:幺七|一七零|1[4-9]\d|身高|体重|斤|码)"),
+    re.compile(r"(?:给|帮)(?:我|你|大家|助理|主播)?[^，。；！？\n]{0,6}(?:加|挂|上)(?:个)?(?:号|链接|购物车|小黄车|库存|一下)"),
+)
+# ── 口播叫卖 / 互动呼语（P0-2，2026-09-30）─────────────────────────
+# 与上面的 live_interaction_or_size_response_reason 刻意分开：
+# 上面的函数被 8 个调用点复用（Hook 判定、成片过滤等），扩它的词表会连带
+# 影响那些路径；这里只给「导演前候选池过滤」用。
+# 只判定「整行是不是话术」，不改写文本、不动时间戳。
+_PITCH_TALK_PATTERNS = (
+    # —— 叫卖 / 逼单：整句就是话术 ——
+    re.compile(r"(?:我是)?真的?很推荐给[^，。；]{0,12}直播间"),
+    re.compile(r"我都讲(?:了|过)"),
+    re.compile(r"(?:是)?专门给你们定(?:的|做)?"),
+    re.compile(r"确定要拍|要拍的?姐妹|想拍的|抓紧拍|赶紧拍|拍下的姐妹|想要的姐妹"),
+    re.compile(r"姐妹(?:们)?[，,。！]?$"),
+    re.compile(r"(?:扣|打)个?[1一](?!\d)"),
+    re.compile(r"公屏|评论区|点赞|收藏"),
+    # —— 互动呼语 / 口头确认 ——
+    re.compile(r"^(?:看到|看见|瞅)(?:了)?(?:没|没有)"),
+    re.compile(r"(?<!但)(?<!却)(?<!倒)是不是|对不对|好不好|行不行|可以吧|有没有|要不要"),
+    re.compile(r"^(?:还有|再有)?什么(?:是|要)"),
+    # —— 观众确认式呼应（2026-10-05）：让观众打字回应，整句不是商品事实 ——
+    re.compile(r"(?:宝宝|姐妹|家人|亲们|朋友们)[^，。；！？\n]{0,6}(?:能看得|看到|听懂|听清)"),
+    re.compile(r"(?:能看得|看到|听懂|听清|证明你)[^，。；！？\n]{0,4}的?\s*(?:宝宝|姐妹|家人|亲们|朋友们)"),
+    re.compile(r"[打扣](?:个|成|一)?(?:能|好|响|想要|喜欢|收到)\s*[吧啊呀哦哈]*[。！？!?]?$"),
+) + (
+    # —— 对助理 / 对现场的指令句（2026-10-05 David 定调：属于「明确证据」）——
+    # 实测漏网：「这个面料蕾丝的帮我 p 一下好了，」成了成片末章第一句；
+    # 「给你再加号」「主播幺七零啊」同属直播现场操作。只认「明确对助理 / 对现场」的
+    # 祈使形态；刻意不认「你可以把帽子放下来」这类对观众的建议（那是风格讲解）。
+    _LIVE_INSTRUCTION_PATTERNS if LIVE_INSTRUCTION_GATE_ENABLED else ()
+)
+
+
+def pitch_talk_reason(text: Any) -> str:
+    """Return why a row is live-room pitch / verification chatter.
+
+    命中即代表「整行就是话术」，不是商品事实。商品事实（如扣子可扣、否定句
+    「不是那种很俗的」）刻意不命中。只分类，不重写。
+    """
+
+    value = _normalized_text(text)
+    if not value:
+        return ""
+    if re.fullmatch(
+        r"(?:是不是|对不对|好不好|行不行|可以吧|有没有|要不要)[啊呀呢吧吗？?，,。]*",
+        value,
+    ):
+        return "互动口头确认"
+    for pattern in _PITCH_TALK_PATTERNS:
+        if pattern.search(value):
+            return "口播叫卖/互动"
+    return ""
+
+
+def is_pitch_talk(text: Any) -> bool:
+    return bool(pitch_talk_reason(text))
+
+
 def is_live_interaction_or_size_response(text: Any) -> bool:
     return bool(live_interaction_or_size_response_reason(text))
 

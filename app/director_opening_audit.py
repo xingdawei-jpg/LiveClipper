@@ -13,6 +13,7 @@ def audit_opening_candidates(
     source_rows: Sequence[Mapping[str, Any]],
     executed_ids: Sequence[int],
     product_context_rows: Sequence[Mapping[str, Any]] = (),
+    hook_pool: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Reconstruct quotes and check membership/order without judging semantics.
 
@@ -27,9 +28,26 @@ def audit_opening_candidates(
         **{row["id"]: row for row in product_context_rows if type(row.get("id")) is int},
         **by_id,
     }
+    pool_ids: set[int] = set()
+    type_by_id: dict[int, str] = {}
+    if hook_pool is not None:
+        for item in hook_pool:
+            if not isinstance(item, Mapping):
+                continue
+            hook_type = str(item.get("hook_type") or "").strip()
+            pool_subtitle_ids = item.get("subtitle_ids")
+            if not isinstance(pool_subtitle_ids, (list, tuple)):
+                continue
+            for pool_id in pool_subtitle_ids:
+                if type(pool_id) is int:
+                    pool_ids.add(pool_id)
+                    if hook_type:
+                        type_by_id[pool_id] = hook_type
     packages = opening.get("compared_packages")
     issues: list[str] = []
     candidates: list[dict[str, Any]] = []
+    selected_hook_ids: list[int] = []
+    candidate_types: list[str] = []
     if not isinstance(packages, list) or not packages:
         packages = []
         issues.append("missing_candidates")
@@ -59,8 +77,13 @@ def audit_opening_candidates(
             errors.append("missing_decision")
         if not str(package.get("reason") or "").strip():
             errors.append("missing_comparison_reason")
+        if decision in {"selected", "alternative"}:
+            resolved_type = next((type_by_id[sid] for sid in hook_ids if sid in type_by_id), "")
+            if resolved_type:
+                candidate_types.append(resolved_type)
         if decision == "selected":
             selected.append(joined)
+            selected_hook_ids[:] = list(hook_ids)
             if not joined or joined != list(executed_ids[:len(joined)]):
                 errors.append("payoff_not_immediately_executed")
             if joined != opening.get("selected_subtitle_ids"):
@@ -81,6 +104,14 @@ def audit_opening_candidates(
         issues.extend(f"candidate_{rank}:{error}" for error in errors)
     if len(selected) != 1:
         issues.append("requires_one_selected_package")
+    hook_pool_status = "not_injected" if hook_pool is None else ("empty" if not pool_ids else "injected")
+    if hook_pool is not None:
+        if not selected_hook_ids:
+            issues.append("selected_hook_missing_for_pool_check")
+        elif not pool_ids or any(sid not in pool_ids for sid in selected_hook_ids):
+            issues.append("selected_hook_not_from_recall_pool")
+        if len(candidate_types) >= 2 and len(set(candidate_types)) == 1:
+            issues.append("opening_candidates_not_distinct_type")
     return {
         "version": OPENING_RECEIPT_VERSION,
         "status": "warning" if issues else "references_consistent",
@@ -90,4 +121,5 @@ def audit_opening_candidates(
         "appeal_and_continuation_status": "human_review_required",
         "candidates": candidates,
         "program_selected_or_reordered": False,
+        "hook_pool_status": hook_pool_status,
     }

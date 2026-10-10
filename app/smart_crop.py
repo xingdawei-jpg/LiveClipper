@@ -579,6 +579,14 @@ def _clamp(v, lo, hi):
     return max(lo, min(int(v), hi))
 
 
+# ── Ken Burns 超采样参数 ──────────────────────────────────────────
+# zoompan 的 x/y 取整到整数输入像素；源分辨率接近输出时每帧位移不足 1 像素，
+# 会退化成「几帧不动、突然跳一格」。放大输入 N 倍可把台阶降到 1/N 输出像素。
+KB_SUPERSAMPLE = 3
+# 源宽 >= 此值时台阶本来就够细，不再放大（省算力）。
+KB_SUPERSAMPLE_MIN_SOURCE_WIDTH = 2000
+
+
 def _ken_burns_motion(intensity=None, max_zoom_delta=None):
     direction = random.choice(['in', 'out'])
     if intensity in ('light', '轻'):
@@ -610,12 +618,27 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None, intensi
     else:
         zoom_expr = "1+%.6f*(1-%s)" % (target_zoom, ease_expr)
 
+    # ── 超采样：消除 zoompan 的整数取整顿挫 ──────────────────────────
+    # zoompan 的 x/y 会取整到**整数输入像素**。源分辨率接近输出时（如 1080 源出 1080），
+    # 轻档缩放全程只移动几十像素，摊到每帧不足 1 像素，于是退化成
+    # 「几帧完全不动、然后突然跳 1 像素」—— 肉眼看就是顿挫。
+    # 实测（1080 宽 / 轻档 5% / 30fps）：2 秒片段 56% 的帧位移为 0，8 秒片段 89%。
+    # 先把输入放大 N 倍再做 zoompan，取整台阶就从 1 输出像素降到 1/N：
+    #   无超采样 1.00px 台阶（跳跃是平均的 5.7 倍）-> 3x 0.33px 台阶（1.9 倍）
+    # 源本身已经够宽时（>= KB_SUPERSAMPLE_MIN_SOURCE_WIDTH）台阶本来就够细，
+    # 不再放大，避免白花算力。
+    supersample = "scale=w='iw*(1+%d*lt(iw,%d))':h='ih*(1+%d*lt(iw,%d))':flags=bicubic," % (
+        KB_SUPERSAMPLE - 1, KB_SUPERSAMPLE_MIN_SOURCE_WIDTH,
+        KB_SUPERSAMPLE - 1, KB_SUPERSAMPLE_MIN_SOURCE_WIDTH,
+    )
+
     result = (
         "fps=fps=%.3f:round=near,"
+        "%s"
         "zoompan=z='%s':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         "d=1:s=%dx%d:fps=%.3f,"
         "setpts=N/(%.3f*TB),format=yuv420p"
-    ) % (target_fps, zoom_expr, w, h, target_fps, target_fps)
+    ) % (target_fps, supersample, zoom_expr, w, h, target_fps, target_fps)
 
     if log_fn:
         label = '\u63a8\u8fdb' if direction == 'in' else '\u62c9\u8fdc'
@@ -630,6 +653,52 @@ def ken_burns_filter(clip_duration, w=1080, h=1920, fps=30, log_fn=None, intensi
     return result
 
 
+# ---------------------------------------------------------------
+# Ken Burns 编码参数：优先硬件编码（复用 platform_config 的探测结果）
+# 硬件编码失败时本进程内自动回退 libx264，避免整段二次缩放静默失效。
+# ---------------------------------------------------------------
+_KB_HW_ENCODER_DISABLED = False
+
+
+def _ken_burns_software_vcodec_args():
+    """Ken Burns 中间文件默认的软件编码参数（近无损，避免二次损失）。"""
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12"]
+
+
+def _ken_burns_vcodec_args():
+    """返回 Ken Burns 使用的视频编码参数；硬件不可用时回退 libx264。"""
+    if _KB_HW_ENCODER_DISABLED:
+        return _ken_burns_software_vcodec_args()
+    try:
+        import platform_config as _pc
+        encoder = getattr(_pc, "HARDWARE_ENCODER", None)
+        enabled = bool(getattr(_pc, "ENABLE_HARDWARE_ENCODER", False))
+    except Exception:
+        encoder, enabled = None, False
+    if not enabled:
+        return _ken_burns_software_vcodec_args()
+    if encoder == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "fast", "-cq", "16", "-b:v", "0"]
+    if encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "16"]
+    if encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-quality", "speed", "-qp", "16"]
+    return _ken_burns_software_vcodec_args()
+
+
+def _ken_burns_uses_hardware(vcodec_args):
+    return any(isinstance(a, str) and a.startswith("h264_") for a in (vcodec_args or []))
+
+
+def _ken_burns_disable_hardware(reason, log_fn=None):
+    """硬件编码失败一次后，本进程内不再尝试硬件编码。"""
+    global _KB_HW_ENCODER_DISABLED
+    if not _KB_HW_ENCODER_DISABLED:
+        _KB_HW_ENCODER_DISABLED = True
+        if log_fn:
+            log_fn("KenBurns: 硬件编码失败，后续改用软件编码 (%s)" % reason)
+
+
 def apply_ken_burns_ffmpeg(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None, max_zoom_delta=None):
     """Apply Ken Burns with FFmpeg zoompan. Much faster than Python/OpenCV frame piping."""
     import subprocess as _sp
@@ -639,39 +708,59 @@ def apply_ken_burns_ffmpeg(clip_path, output_path, clip_duration, w, h, fps, ffm
     vf = ken_burns_filter(clip_duration, w=w, h=h, fps=actual_fps, log_fn=log_fn, intensity=intensity, max_zoom_delta=max_zoom_delta)
     af = "atrim=0:%.3f,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0" % safe_duration
     _cflags = 0x08000000 if sys.platform == "win32" else 0
-    cmd = [
-        ffmpeg_cmd, "-y",
-        "-i", clip_path,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
-        "-pix_fmt", "yuv420p",
-        "-af", af,
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-        "-shortest",
-        "-movflags", "+faststart",
-        output_path,
-    ]
-    try:
-        proc = _sp.run(cmd, stdout=_sp.DEVNULL, stderr=_sp.PIPE,
-                       text=True, encoding="utf-8", errors="replace",
-                       timeout=max(60, int(float(clip_duration or 1) * 12)),
-                       creationflags=_cflags)
-    except Exception as e:
-        if log_fn:
-            log_fn("KenBurns: FFmpeg zoompan failed: %s" % e)
-        return False
+    _vcodec_args = _ken_burns_vcodec_args()
 
-    if proc.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) <= 1000:
+    def _build_kb_cmd(vcodec_args):
+        return [
+            ffmpeg_cmd, "-y",
+            "-i", clip_path,
+            "-vf", vf,
+        ] + list(vcodec_args) + [
+            "-pix_fmt", "yuv420p",
+            "-af", af,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+
+    for _attempt in range(2):
+        cmd = _build_kb_cmd(_vcodec_args)
+        try:
+            proc = _sp.run(cmd, stdout=_sp.DEVNULL, stderr=_sp.PIPE,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=max(60, int(float(clip_duration or 1) * 12)),
+                           creationflags=_cflags)
+        except Exception as e:
+            if log_fn:
+                log_fn("KenBurns: FFmpeg zoompan failed: %s" % e)
+            return False
+
+        if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return True
+
+        err = (proc.stderr or "").strip().split("\n")[-2:]
+        err_text = " ".join(err)[:180]
+        if _attempt == 0 and _ken_burns_uses_hardware(_vcodec_args):
+            _ken_burns_disable_hardware(
+                "FFmpeg zoompan rc=%d %s" % (proc.returncode, err_text[:120]), log_fn)
+            _vcodec_args = _ken_burns_software_vcodec_args()
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except Exception:
+                _LOG.warning("Smart Crop could not remove failed FFmpeg output", exc_info=True)
+            continue
+
         if log_fn:
-            err = (proc.stderr or "").strip().split("\n")[-2:]
-            log_fn("KenBurns: FFmpeg zoompan failed rc=%d %s" % (proc.returncode, " ".join(err)[:180]))
+            log_fn("KenBurns: FFmpeg zoompan failed rc=%d %s" % (proc.returncode, err_text))
         try:
             if os.path.exists(output_path):
                 os.remove(output_path)
         except Exception:
             _LOG.warning("Smart Crop could not remove failed FFmpeg output", exc_info=True)
         return False
-    return True
+    return False
 
 
 def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd, log_fn=None, intensity=None, max_zoom_delta=None):
@@ -712,6 +801,7 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
 
     # FFmpeg pipe: raw video from stdin + audio from original clip
     _cflags = 0x08000000 if sys.platform == "win32" else 0
+    _vcodec_args = _ken_burns_vcodec_args()
     pipe_cmd = [
         ffmpeg_cmd, "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
@@ -719,7 +809,7 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
         "-r", str(target_fps),
         "-i", "-",
         "-i", clip_path,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+    ] + list(_vcodec_args) + [
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-af", "atrim=0:%.3f,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0" % safe_duration,
@@ -810,15 +900,24 @@ def apply_ken_burns_opencv(clip_path, output_path, clip_duration, w, h, fps, ffm
             _LOG.warning("Smart Crop could not close FFmpeg input", exc_info=True)
         proc.wait()
 
+    _kb_failure = None
     if proc.returncode != 0:
+        _kb_failure = "FFmpeg encode failed rc=%d" % proc.returncode
+    elif written_frames < max(1, int(total_frames * 0.85)):
+        _kb_failure = "OpenCV wrote too few frames (%d/%d), fallback needed" % (written_frames, total_frames)
+    if _kb_failure:
+        if _ken_burns_uses_hardware(_vcodec_args):
+            _ken_burns_disable_hardware("OpenCV 管道 " + _kb_failure, log_fn)
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+            except Exception:
+                pass
+            return apply_ken_burns_opencv(
+                clip_path, output_path, clip_duration, w, h, fps, ffmpeg_cmd,
+                log_fn=log_fn, intensity=intensity, max_zoom_delta=max_zoom_delta)
         if log_fn:
-            log_fn("KenBurns: FFmpeg encode failed rc=%d" % proc.returncode)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        return False
-    if written_frames < max(1, int(total_frames * 0.85)):
-        if log_fn:
-            log_fn("KenBurns: OpenCV wrote too few frames (%d/%d), fallback needed" % (written_frames, total_frames))
+            log_fn("KenBurns: " + _kb_failure)
         if os.path.exists(output_path):
             os.remove(output_path)
         return False

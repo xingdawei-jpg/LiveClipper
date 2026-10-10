@@ -17,7 +17,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import Any, Callable, Mapping, Sequence
 
@@ -871,6 +871,15 @@ class NarrativePlan:
     duration_expansion_scout: DurationExpansionScout | None = None
     story_consumption: StoryConsumption | None = None
     opening_quality_review: OpeningQualityReview | None = None
+    # 子跨度派生候选（导演按词收窄首/末边界产生的候选）的词级时间线，按
+    # candidate_id 索引。按「整行」匹配的 binder 无法为这类候选重建血缘，
+    # 因此必须由计划显式带回；为空时行为与改动前完全一致。
+    derived_candidate_words: Mapping[int, tuple[Mapping[str, Any], ...]] = field(
+        default_factory=dict
+    )
+    # 派生候选的 Ledger 行。保真审计要求计划里每个候选都能在 Ledger 中找到，
+    # 且 text/start/end 一致；派生候选不是独立素材，必须由计划自带这一行。
+    derived_candidate_ledger: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def total_seconds(self) -> float:

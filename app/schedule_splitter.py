@@ -1175,6 +1175,21 @@ def extract_by_schedule(groups, video_list, output_dir, ffmpeg="ffmpeg", log_fn=
                         out_path = os.path.join(out_dir, "%s.mp4" % safe_name)
                     else:
                         out_path = os.path.join(out_dir, "%s_%s.mp4" % (safe_dir_name[:40], suffix))
+                    if group.get("skip_existing") and os.path.isfile(out_path) and os.path.getsize(out_path) > 1000:
+                        # 已有同名成品：不再重切、不覆盖，只记一行日志。
+                        if log_fn:
+                            log_fn("  已存在同名成品，跳过重切: %s" % os.path.basename(out_path))
+                        size_mb = round(os.path.getsize(out_path) / 1024 / 1024, 1)
+                        results.append({
+                            "name": name,
+                            "output_path": out_path,
+                            "size_mb": size_mb,
+                            "expected_duration": round(float(part_duration), 3),
+                            "duration_seconds": round(float(part_duration), 3),
+                            "source_video": os.path.basename(video),
+                        })
+                        exported += 1
+                        continue
                     last_error = ""
                     try:
                         cut_source, normalized, av_start_offset = _source_for_cut(video)

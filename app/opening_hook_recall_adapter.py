@@ -212,8 +212,14 @@ def hook_pool_prompt_rows(
     """
     rows: list[dict[str, Any]] = []
     candidates = list((hook_recall or {}).get("hook_candidates") or ())
-    def _strength_key(item: Any) -> float:
-        return -_number(item.get("hook_strength")) if isinstance(item, Mapping) else 0.0
+    def _strength_key(item: Any) -> tuple[float, int]:
+        if not isinstance(item, Mapping):
+            return (0.0, 0)
+        try:
+            rank = int(item.get("hook_rank") or 0)
+        except (TypeError, ValueError):
+            rank = 0
+        return (-_number(item.get("hook_strength")), rank if rank > 0 else 99)
     candidates.sort(key=_strength_key)
     if limit is not None:
         candidates = candidates[:max(1, int(limit))]

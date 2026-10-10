@@ -4131,7 +4131,7 @@ DIRECTOR_SYSTEM_PROMPT = """你是带货短视频的最终剪辑导演。你必�
 3a. 默认Hook必须独立说清一个具体购买价值，并由第二段马上解释、证明或兑现。若下方提供了“已验证A/B HookPackage”，其中短促的强情绪、强态度或强判断可作为Hook，但必须严格使用该主题线程中的第二段兑现；不能把这项例外扩展为普通泛夸。上新预告、“等很久/终于来了/拖欠大家”、或“给你看一眼/就这么搭”等直播铺垫没有商品价值，绝对不可作Hook；没有真实强开头时，使用最完整的Product自然开场。
 4. 叙事顺序应为：强Hook提出效果或痛点 -> 第二段立即兑现Hook -> 核心效果 -> 原因/细节证据 -> 不同场景或顾虑解除 -> 自然总结。没有强Hook时，直接以最具体的Product购买价值自然开场，再展开证据和场景。不要按字幕时间排序，要按观众理解顺序排序。
 5. 每个片段必须能独立听懂。候选表每行都标有精确秒数；srt_indices必须连续，通常1-2条；只有补齐主谓宾或完整句尾时才允许3条。Product以5秒为节奏，通常不超过8秒；优先选择短而完整的候选。只有某段是不可替代的具体上身展示、设计原因或材质证据，且无法在完整候选边界内安全缩短时，才允许保留一段较长完整讲解。洗护/尖锐物提醒、公司或主播解释、直播操作、泛泛材质常识和售后说明不是这种例外，必须换成其他短完整卖点；绝不能为了压时长截断句子。禁止不连续编号，禁止以“而且、然后、所以、但是、因为、就是、还、大头含量是、还有一种人在”等半句开头或结尾。
-6. 严禁重复同一子主题。同一个显瘦部位、同一种帽子搭配、同一个面料结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
+6. 严禁重复同一子主题。同一个效果部位、同一种搭配结论、同一个材质结论只能保留最完整的一段；只有“结果 + 解释结果的具体证据”可以保留两段，而且两段必须提供不同信息。Close也不能只是重复Hook原句，必须形成总结或新的选择理由。
 7. 偏好是主线，不是凑数量。同一偏好下必须选择不同子主题；如果只有一个干净子主题，就只选一个，不得用三段近义表达冒充三段偏好。
 8. 不选直播操作、主播自言自语、现场调度或观众互动，例如“切个歌、我把包取了、帮我拿一下、看后台、今天没洗头”。个人身高体重、报尺码、选码、拍码及其ASR变体在Hook、Product、Close中都绝对不可选。不选“我喜欢它两个点、首先、第一点、几个地方”这类报数式铺垫，除非后续所有点都在紧邻片段中完整展开。不选价格、链接、关注、领券、满减、倒计时和任何标记不可选的字幕。
 9. 目标时长约__TARGET__秒，建议控制在__LOW__-__HIGH__秒。内容不足时优先寻找不同卖点、不同场景、不同顾虑解除的完整片段；若安全、完整、同品类候选已经用尽，保留较短但叙事完整的最佳片单并标注时长不足，绝不能为凑时长混入低质、直播互动、违规内容或截断单句。内容过多时删除整段低价值Product，避免靠超时长蒙混过关。
@@ -6451,10 +6451,14 @@ def _director_freeze_requires_followup(text):
 def _director_standalone_boundary_reason(text):
     """Explain why a candidate cannot start or end a standalone selected clip."""
     value = _director_boundary_text(text)
-    # Keep a completed question intact before normalizing terminal punctuation.
-    # Otherwise a legitimate colloquial question ending in "啊？" becomes "啊"
-    # and is incorrectly treated as an orphaned tail particle.
-    completed_question = re.sub(r"\s+", "", value).endswith(("？", "?"))
+    # A trailing particle is only an *orphaned residue* when the utterance was
+    # NOT closed by sentence-final punctuation.  "…也挺快的哦。" is a complete
+    # colloquial sentence (哦 is a sentence-final modal particle), while
+    # "…嗯，" is a dangling residue that must not end a standalone clip.
+    # Questions already had this carve-out; applying it to every sentence-final
+    # mark is the same rule stated consistently instead of punctuation-blind.
+    _terminal = re.sub(r"\s+", "", value)
+    closed_sentence = _terminal.endswith(("。", "！", "？", "!", "?"))
     compact = re.sub(r"\s+", "", value).strip("，。！？!?、；;：:")
     if not compact:
         return "空白或语气残句"
@@ -6465,7 +6469,7 @@ def _director_standalone_boundary_reason(text):
         return "开头承接上句"
     if compact.startswith(("吧对", "吧是", "吧然后", "吧而且")):
         return "开头承接上句"
-    if not completed_question and compact.endswith(("呃", "嗯", "啊", "哦", "诶")):
+    if not closed_sentence and compact.endswith(("呃", "嗯", "啊", "哦", "诶")):
         return "结尾语气残留"
     _needs_previous, starts_hard, ends_incomplete = _director_context_boundary_flags(value)
     if starts_hard:
@@ -12267,9 +12271,9 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     else:
         _diff_vibes = [
             "★本轮选片重点：优先选主播语气最激动、情绪最饱满且能被后续证明的片段；正文只保留2-3个有证据闭环的关键卖点，禁止罗列卖点★",
-            "★本轮选片重点：优先选展示上身效果、穿搭场景的片段，少选纯面料描述★",
-            "★本轮选片重点：优先选对比类、痛点解决类的内容，搭配推荐最佳★",
-            "★本轮选片重点：优先选版型显瘦、修饰身材的内容，效果优先于参数★",
+            "★本轮选片重点：优先选能直接看到使用效果的片段，少选纯参数描述★",
+            "★本轮选片重点：优先选对比类、痛点解决类的内容，给出明确推荐理由★",
+            "★本轮选片重点：优先选解决具体顾虑的内容，效果优先于参数★",
             "★本轮选片重点：优先选品质背书、细节讲解的内容，信任感优先★",
         ]
     if _manual_focus_label and not _skip_focus:
@@ -12289,7 +12293,7 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
     _chapter_progression_rule = (
         "★正文段落合同★ 正文只允许由2-3个卖点小段落组成。每个小段落连续1-3段："
         "先给一个具体购买价值，再给直接证据、解释或场景结果，最后必须以完整句收束后才换主题。"
-        "同一素材、同样带有‘好看/显瘦/面料’等泛词，不等于同一故事链，不能据此连续堆叠。"
+        "同一素材、同样带有‘好看/不错/很好’等泛词，不等于同一故事链，不能据此连续堆叠。"
         "同一具体卖点最多连续3段；第4段只有在提供新的直接证据时才可保留。"
         "段落之间允许按语义跨时间安排，但前一段必须独立完整，不能留下半句或展示口令。"
     )
@@ -12446,19 +12450,37 @@ def _call_ai(api_key, base_url, model, srt_text, log_fn, focus_hint=None, srt_en
         _example_close_focus = "发货保鲜"
         _example_close_reason = "售后信任"
     else:
+        # 这里的兜底文案与输出范例必须是「卖点中性」的。
+        # 历史问题：本分支把 `focus="版型显瘦" / reason="显瘦卖点突出"` 写成固定范例
+        # （插值进 12497/12498/12605 的多处示例），并在未指定卖点时兜底
+        # 「显瘦>面料>颜色>场景」。该分支服务于**所有非食品类目**，于是等于对每一个
+        # 非食品商品都预设了服装的显瘦卖点；模型会照抄范例，结果所有商品都在讲显瘦。
+        # 现在：范例优先用本轮真实解析出的焦点；没有焦点时用占位符，不再点名任何卖点。
+        _example_focus_primary = (
+            _manual_focus_label
+            or (_automatic_focus_labels[0] if _automatic_focus_labels else "")
+            or "<本片段的卖点角度>"
+        )
+        _example_focus_placeholder = _example_focus_primary.startswith("<")
+        _example_reason_primary = (
+            "<该角度成立的具体理由>"
+            if _example_focus_placeholder
+            else f"{_example_focus_primary}的具体证据"
+        )
         _priority_line = (
             "- 自动主题优先级只遵从本次勾选的主卖点；其他卖点只用于补全完整介绍"
             if _automatic_focus_labels and not _skip_focus
-            else "- 优先选受众群体广的卖点(显瘦>面料>颜色>场景)"
+            else "- 未指定卖点：按素材本身能独立成立的结果类卖点排序，再补机制与证据；"
+                 "不要预设任何卖点优先（例如显瘦、面料），也不要把某个类目的卖点套到其他类目"
         )
         _close_priority_line = '- 对于Close片段,优先选自然总结、选择理由或场景收束；禁止尺码拍法、价格、链接、关注和强CTA'
-        _coverage_examples = "版型/面料/显瘦/穿搭/品质/场景"
+        _coverage_examples = "结果/机制/细节/体验/信任/场景"
         _example_hook_focus = "痛点提问"
         _example_hook_reason = "开场爆点"
-        _example_product_focus_1 = "版型显瘦"
-        _example_product_reason_1 = "显瘦卖点突出"
-        _example_product_focus_2 = "面料触感"
-        _example_product_reason_2 = "面料描述细腻"
+        _example_product_focus_1 = _example_focus_primary
+        _example_product_reason_1 = _example_reason_primary
+        _example_product_focus_2 = "细节证据"
+        _example_product_reason_2 = "细节描述具体"
         _example_close_focus = "信任强化"
         _example_close_reason = "推荐合辑"
 

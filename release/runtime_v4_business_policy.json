@@ -63,7 +63,11 @@
     "web_client/desktop.py",
     "web_client/*.spec",
     "web_client/native_file_drop_bridge.cs",
-    "web_client/native_file_drop_bridge.dll"
+    "web_client/native_file_drop_bridge.dll",
+    "app/*.pre_*.py",
+    "web_client/frontend/__*.html",
+    "**/*.bak*",
+    "_*_render_test/**"
   ],
   "max_file_size": 20971520
 }

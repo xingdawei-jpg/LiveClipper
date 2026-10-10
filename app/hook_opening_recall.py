@@ -137,23 +137,45 @@ def build_hook_recall_batches(
 
 def build_hook_recall_prompt(*, batch: Mapping[str, Any], total_batch_count: int, opening_promise: str) -> str:
     """Hook-only semantic source scan; no ordinary Actor Inventory is emitted."""
-    source_rows = []
     primary_ids = set(_as_int_tuple(batch.get("primary_subtitle_ids")))
+    # 紧凑传输：一行一条字幕 "[ID nnn][W 词级编号][时长][primary/ctx] 文本"。
+    # 逐行 8 字段 JSON 会把约 95% 的输入花在字段名与标点上（实测每行 204 字符里
+    # 正文只占 9.3 字符），而 story/casting 阶段早已使用同样紧凑的 [ID] 文本行。
+    # 这是纯传输格式变化：AI 看到的字幕文本、ID、时长一条未减，词级编号仍可精确引用。
+    source_lines: list[str] = []
     for row in batch.get("source_rows") or ():
         if not isinstance(row, Mapping):
             continue
         lineage = row.get("word_lineage") if isinstance(row.get("word_lineage"), Mapping) else {}
-        source_rows.append({
-            "subtitle_id": row.get("subtitle_id"), "is_primary_window": int(row.get("subtitle_id") or 0) in primary_ids,
-            "start": row.get("start"), "end": row.get("end"),
-            "hard_safe": bool(row.get("hard_safe")), "materializable": bool(row.get("materializable")),
-            "text": _text(row.get("text")),
-            "word_id_range": [lineage.get("word_start_index"), lineage.get("word_end_index")],
-            "words": [{"word_id": int(lineage.get("word_start_index") or 0) + int(token.get("offset") or 0), "text": _text(token.get("text"))}
-                      for token in row.get("word_tokens") or () if isinstance(token, Mapping)],
-        })
+        base_start = _safe_int(lineage.get("word_start_index"))
+        offsets = [
+            _safe_int(token.get("offset"))
+            for token in (row.get("word_tokens") or ()) if isinstance(token, Mapping)
+        ]
+        offsets = [value for value in offsets if value is not None]
+        if base_start is None or not offsets:
+            continue
+        word_end = base_start + max(offsets)
+        text = _text(row.get("text"))
+        subtitle_id = _safe_int(row.get("subtitle_id"))
+        if not text or subtitle_id is None:
+            continue
+        try:
+            start_seconds = float(row.get("start") or 0.0)
+            end_seconds = float(row.get("end") or start_seconds)
+        except (TypeError, ValueError):
+            start_seconds = end_seconds = 0.0
+        duration = max(0.0, end_seconds - start_seconds)
+        marks = "primary" if subtitle_id in primary_ids else "ctx"
+        if not bool(row.get("hard_safe")) or not bool(row.get("materializable")):
+            marks += ",unsafe"
+        word_label = str(base_start) if word_end == base_start else f"{base_start}-{word_end}"
+        source_lines.append(
+            f"[ID {subtitle_id}][W {word_label}][{duration:.2f}s][{marks}] {text}"
+        )
     schema = {
         "hook_candidates": [{
+            "hook_rank": 1,
             "hook_id": "local id", "start_word_id": 0, "end_word_id": 0, "final_text": "",
             "hook_type": "strong_result/strong_judgment/pain_point/contrast/experience/surprise",
             "hook_evidence_function": "result/mechanism/proof/experience/risk_remove/styling/scene/trust",
@@ -172,12 +194,12 @@ def build_hook_recall_prompt(*, batch: Mapping[str, Any], total_batch_count: int
         f"你只做 P0.5A.4 Hook 专项召回，当前是完整焦糖 SRT 的来源窗口 {batch.get('batch_id')}/{total_batch_count}。不做普通正文 Beat Inventory、不做 Director Journey、不做候选排序或最终视频。",
         "目标是找可独立作为短视频开场的真实主播原话。Hook 必须干净、独立、具体、商品相关、有明确停留理由，并能被后续真实素材立刻兑现。优先2–5秒，允许2–8秒；不要把两个或三个句子拼成一段长开场。",
         "当前冻结 Director Opening Promise：" + _text(opening_promise) + "。**召回阶段从宽**：直接服务该承诺的句子优先；此外，凡能独立成立、能停人的强 Hook（强结果、痛点、结果反差、强体验、具体意外）即使与当前承诺不完全一致，也请一并放进 hook_candidates 并注明它与承诺的关系，由后续 Hook Gate 判定取舍。只有明显平淡、只讲舒适/材质/尺码/搭配且本身不抓人的句子，才进 hook_rejects 或留给正文。",
-        "只可选择 hard_safe=true 且 materializable=true 的连续原词范围。每个选择必须覆盖至少一条 is_primary_window=true 字幕；相邻最多两条 context 字幕只用于补齐自然边界。严禁改写、虚构、跳词、合并不连续字幕。final_text 必须逐字等于所选原词，可保留原有标点。",
-        "Hook 不是普通信息正确：它必须让陌生观众愿意继续看。可找强结果、带购买依据的强判断、自然的痛点命中、结果反差、强体验或具体意外点。**尽可能覆盖不同 hook_type**：只要素材里存在，请至少各给出一个 strong_result / pain_point / contrast / experience 类型的候选，不要让候选全部落在同一类（例如全是尺码或规格对照）；同一类型最多给 6 个。‘你看/真的/我跟你说’不是机械禁词，若整句独立自然可保留。",
+        "只可选择未标 unsafe 的连续原词范围（W 即词级编号，回答时 start_word_id/end_word_id 必须填 W 里的编号）。每个选择必须覆盖至少一条 [primary] 字幕；相邻最多两条 [ctx] 字幕只用于补齐自然边界。严禁改写、虚构、跳词、合并不连续字幕。final_text 必须逐字等于所选原词，可保留原有标点。",
+        "Hook 不是普通信息正确：它必须让陌生观众愿意继续看。可找强结果、带购买依据的强判断、自然的痛点命中、结果反差、强体验或具体意外点。**尽可能覆盖不同 hook_type**：只要素材里存在，请至少各给出一个 strong_result / pain_point / contrast / experience 类型的候选，不要让候选全部落在同一类（例如全是尺码或规格对照）；同一类型最多给 3 个。‘你看/真的/我跟你说’不是机械禁词，若整句独立自然可保留。",
         "严禁选直播互动、姐妹们、用户昵称、个人身高体重或尺码回应、价格、催单、CTA、售后、无商品指向泛夸、真正残句、ASR异常、只靠手势才能理解的句子。visual_dependency 必须为 none；任何 visual-only 句都只能进 reject audit。",
-        "eligible_for_opening=true 只限 publishable_clean、visual_dependency=none、2–8秒、hook_strength至少4、完整独立的句子。若看似有价值但不适合开场，放入 hook_rejects。**每窗口最多输出 20 个 Hook**（比之前放宽，以便后续 gate 有得挑）与 6 个最有代表性的拒绝例子；仍然宁缺毋滥，**不要为了数量硬凑**——但如果一个窗口里确实有 15 个以上合格候选，请全部给出，不要自行压到 3 个。",
+        "eligible_for_opening=true 只限 publishable_clean、visual_dependency=none、2–8秒、hook_strength至少4、完整独立的句子。若看似有价值但不适合开场，放入 hook_rejects。**每窗口最多输出 8 个 Hook**，并用 hook_rank 1..8 按停人力从强到弱排序（最强排第 1）；**最多 3 个**最有代表性的拒绝例子。仍然宁缺毋滥，**不要为了数量硬凑**；也要覆盖素材里真实存在的不同类型。理由字段（core_purchase_value / stop_reason / standalone_reason / specificity_reason）每个不超过 10 个汉字，只写要点，不要写长句。",
         "返回严格 JSON，不要 Markdown。结构：\n" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
-        "完整来源窗口（is_primary_window=false 仅可作±2行边界上下文）：\n" + json.dumps(source_rows, ensure_ascii=False, separators=(",", ":")),
+        "完整来源窗口（每行格式 [ID 字幕号][W 词级编号][时长s][primary/ctx] 文本；回答时 start_word_id/end_word_id 用 W 里的编号）：\n" + "\n".join(source_lines),
     ))
 
 
@@ -217,6 +239,71 @@ def _known_unplayable_hook_surface_reason(text: str) -> str:
     return ""
 
 
+def _locate_word_range_for_text(
+    source_words: Sequence[Mapping[str, Any]],
+    final_text: Any,
+) -> tuple[int, int] | None:
+    """Reverse-look-up a spoken sentence inside one frozen source window.
+
+    The AI is asked for the sentence *and* its global word IDs.  Measured
+    behaviour shows the sentence is often right while the IDs are wrong, which
+    used to reject every usable Hook of a window.  When a sentence maps to
+    exactly one contiguous word span here, that span is the lineage the AI
+    meant; ambiguous or absent matches change nothing.
+    """
+    target = _normalize_spoken_source_text(final_text)
+    if not target:
+        return None
+    words = [
+        dict(item) for item in source_words
+        if isinstance(item, Mapping)
+        and _safe_int(item.get("word_id")) is not None
+        and _text(item.get("text"))
+    ]
+    if not words:
+        return None
+    words.sort(key=lambda item: int(item["word_id"]))
+    tokens = [_normalize_spoken_source_text(item.get("text")) for item in words]
+    matches: list[tuple[int, int]] = []
+    for start in range(len(words)):
+        built = ""
+        for end in range(start, len(words)):
+            built += tokens[end]
+            if len(built) > len(target):
+                break
+            if built == target:
+                matches.append((start, end))
+                break
+            if len(matches) > 1:
+                return None
+    if len(matches) != 1:
+        return None
+    start, end = matches[0]
+    return int(words[start]["word_id"]), int(words[end]["word_id"])
+
+
+def _hook_declared_word_range_usable(
+    *, start_id: int | None, end_id: int | None, final_text: Any,
+    context_words: Sequence[Mapping[str, Any]], context_word_ids: set[int],
+    source_rows_by_id: Mapping[int, Mapping[str, Any]],
+) -> bool:
+    """True only when the AI's own word IDs already reproduce its own sentence."""
+    if start_id is None or end_id is None:
+        return False
+    if start_id not in context_word_ids or end_id not in context_word_ids:
+        return False
+    segment = _boundary_segment_source(
+        source_words=context_words, source_rows_by_id=source_rows_by_id,
+        start_word_id=start_id, end_word_id=end_id,
+    )
+    if segment is None:
+        return False
+    return (
+        _normalize_spoken_source_text(final_text)
+        == _normalize_spoken_source_text(segment[0])
+    )
+
+
 def parse_hook_recall(
     *, responses: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]], source_rows: Sequence[Mapping[str, Any]],
     allowed_opening_answer_roles: Sequence[str] = (),
@@ -237,6 +324,22 @@ def parse_hook_recall(
             start_id = _safe_int(raw.get("start_word_id"))
             end_id = _safe_int(raw.get("end_word_id"))
             reason = ""
+            word_range_corrected = False
+            declared_range = (
+                None if start_id is None or end_id is None else [start_id, end_id]
+            )
+            # 血缘自愈：AI 既要写句子、又要同时给出全局词级编号，实测经常发生
+            # 「句子没错、编号填错」。此时用句子本身在本窗口反查唯一连续原词区间：
+            # 唯一命中就采用命中区间，命中不了或多个候选就维持原有驳回理由。
+            if not _hook_declared_word_range_usable(
+                start_id=start_id, end_id=end_id, final_text=raw.get("final_text"),
+                context_words=context_words, context_word_ids=context_word_ids,
+                source_rows_by_id=by_id,
+            ):
+                located = _locate_word_range_for_text(context_words, raw.get("final_text"))
+                if located is not None:
+                    start_id, end_id = located
+                    word_range_corrected = True
             if start_id is None or end_id is None:
                 reason = "hook_word_lineage_missing"
             elif start_id not in context_word_ids or end_id not in context_word_ids:
@@ -293,6 +396,7 @@ def parse_hook_recall(
                 "start": round(start, 3), "end": round(end, 3), "duration": round(end - start, 3), "text": text,
                 "source_subtitle_ids": [int(item["subtitle_id"]) for item in lineage], "word_lineage": lineage,
                 "start_word_id": start_id, "end_word_id": end_id,
+                "hook_rank": _safe_int(raw.get("hook_rank")) or 0,
                 "hook_type": _text(raw.get("hook_type")),
                 "hook_evidence_function": _text(raw.get("hook_evidence_function")),
                 "core_purchase_value": _text(raw.get("core_purchase_value")),
@@ -302,6 +406,8 @@ def parse_hook_recall(
                 "publishable_state": _HOOK_PUBLISHABLE_STATE, "visual_dependency": "none",
                 "eligible_for_opening": True, "reject_reason": "",
                 "selection_authority": "AI_P0_5A4_hook_specific_recall",
+                "word_range_corrected_from_text": word_range_corrected,
+                "declared_word_range": declared_range,
             }
             seen_ranges.add((start_id, end_id))
             candidates.append(candidate)
@@ -320,6 +426,9 @@ def parse_hook_recall(
             "hook_gate_lowered": False,
             "program_authority": "source_safety_word_lineage_duration_visual_and_schema_only",
             "semantic_hook_authority": "AI",
+            "hook_word_range_text_corrections": sum(
+                1 for item in candidates if item.get("word_range_corrected_from_text")
+            ),
             "m3_modified": False,
         },
     }

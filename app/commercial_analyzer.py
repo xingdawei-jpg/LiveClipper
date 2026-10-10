@@ -35,6 +35,7 @@ from ssl_context import create_ssl_context
 from director_product_contract import (
     build_product_target, scope_errors, audit_product_selection, compatible, foreign_product_ranges, PRODUCT_TYPES,
 )
+from selection_safety import live_interaction_or_size_response_reason, pitch_talk_reason
 
 
 EVIDENCE_ROLES = (
@@ -238,6 +239,33 @@ def director_opening_input_issue(text: str) -> str:
     return ""
 
 
+def _optional_word_offset(value: Any) -> int | None:
+    """解析一个可选的词偏移。
+
+    只接受非负整数（bool 不算）。其它任何输入（含负数、浮点、字符串垃圾、
+    ``None``、空串）都返回 ``None`` —— 即"整条候选"。
+
+    这是刻意的**安全降级方向**：偏移不合法时退回内容更多的整条候选，
+    而不是猜一个更小的跨度。切片后仍会过播放闸门，不会因此放进半句话。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value >= 0 and float(value).is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
 @dataclass(frozen=True)
 class DirectorBeat:
     """One AI-authored source beat in the final director packet.
@@ -274,6 +302,22 @@ class DirectorBeat:
     # exposed only to the human preview workbench and is never flattened into
     # ``director_sequence`` or auto-inserted by the program.
     replaces_beat_id: str = ""
+    # ── 子跨度（可选）────────────────────────────────────────────────────
+    # 允许导演在已选源跨度内**再收窄首/末边界**：只取某行的中间一段，
+    # 用于「整句开头结尾都不好、只有中间好」的情况。
+    #
+    # 语义与 P0.5A 的词偏移一致（micro_beat_inventory.py），不发明新概念：
+    #   start_word_offset -> 相对 span 的**首行**，从第几个词开始（0-based，含）
+    #   end_word_offset   -> 相对 span 的**末行**，到第几个词结束（0-based，含）
+    # 单行 span 时两者作用于同一行。
+    #
+    # **两者都为 None 时完全等于既有行为**（整条候选），因此历史报文与
+    # 所有不填偏移的调用方逐字节不变。
+    #
+    # 程序只做两件事：按词切片（词级 exact，不改写文字）+ 用播放闸门校验
+    # 切出来的跨度能否独立播放。校验不过就**退回整条候选**，不静默修补。
+    start_word_offset: int | None = None
+    end_word_offset: int | None = None
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any], index: int) -> "DirectorBeat":
@@ -332,6 +376,14 @@ class DirectorBeat:
             replaces_beat_id=str(
                 raw.get("replaces_beat_id") or raw.get("replacement_for_beat_id") or ""
             ).strip(),
+            # 子跨度偏移。非法值一律降级为 None（= 整条候选），因为那是**内容更多**的
+            # 安全方向；播放闸门仍会校验整条候选，不会因降级而放进半句话。
+            start_word_offset=_optional_word_offset(
+                raw.get("start_word_offset", raw.get("head_word_offset"))
+            ),
+            end_word_offset=_optional_word_offset(
+                raw.get("end_word_offset", raw.get("tail_word_offset"))
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -339,7 +391,7 @@ class DirectorBeat:
             {"start_id": self.subtitle_ids[0], "end_id": self.subtitle_ids[-1]}
             if self.subtitle_ids else {}
         )
-        return {
+        payload = {
             "beat_id": self.beat_id,
             "role": self.role,
             "goal": self.goal,
@@ -356,6 +408,13 @@ class DirectorBeat:
             "verbatim": self.verbatim,
             "replaces_beat_id": self.replaces_beat_id,
         }
+        # 只在真的设置了偏移时才写出这两个键：未设置时序列化结果与改动前逐字节一致，
+        # 历史报文、审计产物与既有测试都不受影响。
+        if self.start_word_offset is not None:
+            payload["start_word_offset"] = int(self.start_word_offset)
+        if self.end_word_offset is not None:
+            payload["end_word_offset"] = int(self.end_word_offset)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -1264,6 +1323,8 @@ def director_duration_depth_contract(target_duration: float) -> dict[str, Any]:
         },
         "expected_total_beats": {"low": beat_low, "high": beat_high},
         "beats_per_chapter": {"low": 1, "high": per_chapter_high},
+        # 章节数上限：⌈目标秒数 ÷ 10⌉。宁可少一章把话说透，也不要多一章碎块。
+        "chapters_max": max(3, int(math.ceil(requested / 10.0))),
         "chapter_depth_targets": chapter_depth_targets,
         "allowed_beat_functions": [
             "promise", "result", "mechanism", "detail", "proof", "scope_expand",
@@ -1654,7 +1715,7 @@ def build_analyzer_user_prompt(
         '          {"beat_id":"C1B1","beat_function":"result","window_id":"W001",',
         '           "beat_advance":"<这句原话独立新增的购买认知>",',
         '           "source_span":{"start_id":101,"end_id":102},',
-        '           "verbatim":"<逐字复制整个W001的完整原话>"},',
+        '           "verbatim":"<逐字复制你最终保留的原话：可以是整个窗口，也可以只是其中一部分>"},',
         '          {"beat_id":"C1B2","beat_function":"proof","window_id":"W002",',
         '           "beat_advance":"<与上一句不同的新证明或细节>",',
         '           "source_span":{"start_id":103,"end_id":104},',
@@ -1668,7 +1729,17 @@ def build_analyzer_user_prompt(
         "  ]",
         "}",
         "chapter_kind 每种最多一次；不要输出 purchase_question_id、answer_role，程序会按 chapter_kind 机械映射旧合同。",
-        "每个 Beat 必须完整选择一个 surface=clean 的 spoken window；source_span 等于该窗口包含首尾的 IDs，不能截取窗口内单行。",
+        "每个 Beat 选择一个 surface=clean 的 spoken window；source_span 等于该窗口包含首尾的 IDs。",
+        (
+            "【verbatim 写你最终想保留的那段原话】默认保留整个窗口；"
+            "如果窗口的**开头或结尾**有不好听的碎片（残句、ASR 怪句、直播接话、悬空的「呃/嗯/哦」等），"
+            "你可以**只保留中间那段完整的话**，把 `verbatim` 写成你实际要保留的原话。"
+            "例如窗口是「19呃，马甲的话应该也挺快的哦。」，若开头「19呃」是碎片，"
+            "verbatim 就写「马甲的话应该也挺快的哦。」。"
+            "要求：**必须逐字复制、不得改写任何字、不得新增内容**；保留的那段必须能独立听懂；"
+            "source_span 仍然写完整窗口的 IDs。程序会在窗口的词级时间轴上定位你保留的那段原文，"
+            "定位不到（例如改写过了）或保留部分不能独立成句时，会自动退回整窗，不会失败。"
+        ),
         (
             "Opening 是 C1 的完整开场小故事，不是一条高分句。先在全文内部比较可用的开场组合，只输出最好的一组："
             "第一 Beat 优先且在存在候选时必须选择 opening=clean + surface=clean、陌生观众无需上文就能理解、"
@@ -1716,17 +1787,237 @@ TWO_PASS_STORY_SYSTEM_PROMPT = """你是直播女装短视频的故事导演。�
 10. 用户只要求1版时，备选方向只写标题、核心欲望和开场承诺，不设计完整章节、更不能选句。用户明确要求2-3版时，每个方案都必须成为同一商品下可独立执行的完整故事合同，拥有不同购买切入点、开场和前段章节路径；仍然不能在本阶段选句。差异不要求证据互斥，后段可共享必要的购买证明。每个方向必须有支撑本次目标时长的叙事深度，不要把一条完整购买故事拆成只讲颜色、只讲剪裁等证据不足的短版。
 11. 先比较‘为什么想要’与‘已经有同类为什么还选这一件’等购买问题。选择能被干净短句和具体证据连续兑现的中心，不选择听起来宏大却需要拼凑跨商品证据的中心。不要为凑七章把同一细节改名重复讲。
 12. required 章节只能承诺后来可由安全可选原话逐项兑现的内容；若只是 context 中看见、被内容合同排除、或没有可执行短句支持，应删去该承诺或明确标为 source_limited，不能把它写成完整章节。
-13. 返回中的标题、职责、购买理由必须针对本素材实际填写，不得照抄 schema 的‘主视频标题’等占位文案。只返回合法、紧凑 JSON，不输出思考过程。"""
+13. 返回中的标题、职责、购买理由必须针对本素材实际填写，不得照抄 schema 的‘主视频标题’等占位文案。
+14. 章节总数不得超过输入给你的章节数上限（⌈目标秒数 ÷ 10⌉，60 秒目标最多 6 章）。宁可少一章把话讲透，不要多一章碎块；
+    章节数已经到上限时，只能把现有章节讲充分，不得再拆新章。
+15. 每一章都必须能由源时间上相邻的口播连续兑现：不得把相隔很远的窗口安排进同一章，
+    也不得设计一个只能靠跨时间拼句才能兑现的购买问题。相邻章节要用因果、追问、扩大证明或顾虑解除真正接上；
+    接不上就合并或删掉，不要留一个孤立的小章节。
+只返回合法 JSON，不输出思考过程。
+【换行要求】每个字段、每个数组元素各占一行（不必缩进对齐，但必须有换行）；禁止把整个 JSON 挤在一行——单行超长 JSON 极易漏掉或多出括号，会让整轮结果作废。"""
 
 
 TWO_PASS_CAST_SYSTEM_PROMPT = """你是直播女装短视频的 Beat Casting 导演。上游已冻结故事，本轮只从完整安全字幕池一次选出最终真实口播。
 
-保持购买判断和商品边界；先选完整语义单元、联合编排开场与正文，再按章节调整规则归章计时；逐句选择真实原话，不改写、不跨商品、同一 ID 不重复。每个方案以真实原声时长为准，选够且不超长；逐句连读，保留必要上下句，删除重复和残句。开头须立即抓人并兑现：在同一次调用中先比较 2–3 个真实短句开场组合。每个标记 complete 的章节都必须逐项给出仅含本章已选 ID 的 completion_receipts；没有可执行证据就写 needs_context/source_limited，context ID 不能充当证据。只返回用户指定的紧凑 JSON，不输出思考过程。"""
+保持购买判断和商品边界；先选完整语义单元、联合编排开场与正文，再按章节调整规则归章计时；逐句选择真实原话，不改写、不跨商品、同一 ID 不重复。每个方案以真实原声时长为准，选够且不超长；逐句连读，保留必要上下句，删除重复和残句。开头须立即抓人并兑现：在同一次调用中先比较 2–3 个真实短句开场组合。每个标记 complete 的章节都必须逐项给出仅含本章已选 ID 的 completion_receipts；没有可执行证据就写 needs_context/source_limited，context ID 不能充当证据。
+
+同章连续性硬规则（违反即视为选句失败）：
+1. 同一章内的多个 Beat 必须来自同一个口播窗，或源时间相隔不超过 3 秒的相邻窗口；相隔超过 5 秒的两句不得留在同一章。
+2. 若某句确实有价值但与本章源时间不相邻，必须把它放进时间上真正相邻的那一章；没有这样的章就不要选它。
+   不得为了凑章、凑时长或凑深度，从相隔很远的两个窗口各取一句拼成一章。
+3. 每一章必须自成一个能听懂的小段落：要么『结论 + 依据』，要么『问题 + 回答』。
+   只有半句、源时长不足 1.2 秒、明显残句或 ASR 怪句的窗口，不得作为一章里的 Beat。第一章是开场，允许短，但不能是残句。
+4. 同一章内不得出现两句在说同一件事（同义重复、换词重复、同一次结果重复证明）；只保留信息更具体的那一句。
+5. 章节总数不得超过输入给你的章节数上限；已到上限时只把现有章节讲充分。
+只返回用户指定的 JSON 字段，不输出思考过程。
+【换行要求】每个字段、每个数组元素各占一行（不必缩进对齐，但必须有换行）；禁止把整个 JSON 挤在一行——单行超长 JSON 极易漏掉或多出括号，会让整轮结果作废。"""
 
 
 DIRECTOR_PREFERRED_BEAT_MIN_SECONDS = 1.0
 DIRECTOR_PREFERRED_BEAT_MAX_SECONDS = 5.0
 DIRECTOR_LONG_COMPLETE_BEAT_MAX_SECONDS = 8.0
+
+# ── 连续窗切分（方案 B，2026-09-25）──────────────────────────────
+# 候选池从「逐句」改成「连续口播窗」：相邻 SRT 行（ID 连续、间隔不超过
+# CAST_WINDOW_MAX_GAP_SECONDS、跨度不超过 CAST_WINDOW_MAX_SECONDS，或在
+# 一句话收口时提前闭合）聚成一个 2-8 秒的窗。窗是本次选片的最小单位：
+# 窗里每一行都必须按原顺序连续进入同一章的 beats，不得只取窗内一部分。
+# 不足 CAST_WINDOW_MIN_SECONDS 秒的过短/碎片窗禁选：能并入邻窗就并，并不了的只作上下文。
+# 单行但只要够长（2-8 秒完整口播，如 5-8 秒长完整句）仍可选。
+# 把 CAST_WINDOW_POOL_ENABLED 设为 False 即逐字节回到旧的逐句池。
+CAST_WINDOW_POOL_ENABLED = True
+CAST_WINDOW_MIN_SECONDS = 2.0
+CAST_WINDOW_MAX_SECONDS = 8.0
+CAST_WINDOW_MAX_GAP_SECONDS = 1.0
+CAST_WINDOW_CLOSE_SECONDS = 6.5
+CAST_WINDOW_CLOSE_AT_SENTENCE_END_SECONDS = 2.2
+CAST_WINDOW_MIN_ROWS = 1
+# [v9.8] 收句边界：窗只允许在「已收句」的行后断开（减少半截话）；
+# 为不断在句子中间，允许窗略超 CAST_WINDOW_MAX_SECONDS，但不超过硬上限。
+# 置 False 即逐字节回到旧的「按跨度/时长无条件断窗」行为。
+CAST_WINDOW_SENTENCE_SAFE_BREAK_ENABLED = True
+CAST_WINDOW_HARD_MAX_SECONDS = 9.5
+CAST_WINDOW_ABSOLUTE_MAX_SECONDS = 11.0
+
+# ── 窗内坏行剔除（方案 2，2026-09-29）────────────────────────────
+# 动机：窗内混着重复/尺码/水词时，AI 会把窗拆开只取窗内一部分，落盘就成了半句。
+# 这里在切窗阶段用「确定性」规则把这些行标成只作上下文（不可选），窗内因此天然干净。
+# 只做无需语义判断的排除（尺码问答/身高体重/直播互动/ASR畸形/主播口令/收尾废话/近似重复）；
+# 不做语义改写、不动时间戳。置 False 即回到旧行为（窗内所有行都可选）。
+CAST_WINDOW_ROW_PRUNE_ENABLED = True
+CAST_WINDOW_ROW_PRUNE_DUP_RATIO = 0.60
+CAST_WINDOW_ROW_PRUNE_DUP_MIN_LCS = 7
+CAST_WINDOW_ROW_PRUNE_DUP_MIN_CHARS = 8
+CAST_WINDOW_ROW_PRUNE_FILLER_MAX_CHARS = 12
+CAST_WINDOW_ROW_PRUNE_COMMANDS = (
+    "过掉吧", "过掉", "过一下", "往小排", "往大排",
+    "没啥点解", "没点解的", "点解的", "下一位", "上一位",
+)
+CAST_WINDOW_ROW_PRUNE_FILLERS = (
+    "没有了", "没啦", "没了", "真没了", "就没了", "断码了",
+    "抓紧", "好快", "冲榜", "早拍早发", "我觉得你们",
+)
+CAST_WINDOW_ROW_PRUNE_VOCAL_CHARS = "嗯呃啊哦噢喔唉诶欸唔对是不好的行吧呀呢吗"
+
+# ── 现场动作指令剔除（止血A，2026-10-06）────────────────────────────────
+# 动机：末章收尾被「帮我翻一下 / 领子帽子往后翻」这类对着镜头做的动作指令占据 ——
+# 它们是主播招呼镜头的口令，不是商品卖点，却因为词表缺口混进了片单。
+# 做法：给「坏行」判据补上这一类；命中即不可选、不可补。置 False 即回旧行为。
+CAST_WINDOW_LIVE_ACTION_GUARD_ENABLED = True
+# 承接补全同样要过既有坏行判据（否则「已被判为语气词/口令的行」会从补句这条路绕进来）。
+# 置 False 即回旧行为。
+CAST_CONTINUATION_ROW_GUARD_ENABLED = True
+_CAST_LIVE_ACTION_COMMANDS = (
+    "翻一下", "往后翻", "往前翻", "放下来给你看", "拿起来给你看",
+    "转一圈", "站近一点", "靠近一点", "往这看", "看镜头",
+    # [止血D-2 2026-10-06] 借物 / 取物：与上面同类，都是「不看画面就读不通」的现场
+    # 口令。跨 71 份素材穷举校准（拿过来 115 次 / 给我拿 53 次 / 拿一件 9 次 /
+    # 再给我来、再给我一下 —— 逐条都是取物或现场演示）。
+    # 故意不收「来外套」「再给我」：前者在「连两百都不用来外套」、后者在
+    # 「不可以再给我讨价还价」这类正常口播里也出现，宁紧勿松。
+    "拿过来", "给我拿", "拿一件", "再给我来", "再给我一下",
+)
+# 当众穿脱 / 搭配演示：允许「再 / 个」插入 —— 实测有「我再给你套一下这个外套」
+# 「我给你再穿一下」这类带插入词的实句，写成固定子串会漏掉。
+# 跨 71 份素材穷举：给你套 45 / 给你搭 41 / 给你穿 42 / 给你戴 2 / 给你搓 4 /
+# 给你比 6，逐条都是现场演示；故不收「给你拿」（有 1 例「人家上门给你拿走了」是售后）。
+_CAST_LIVE_ACTION_PATTERNS = (
+    re.compile(r"给你[再个]?[套叠搭戴搓穿比]"),
+)
+
+# ── 口播话术 / 跨商品串场剔除（P0-1 + P0-2，2026-09-30）──────────────
+# 动机：直播叫卖（确定要拍 / 我都讲了 / 专门给你们定的）、互动确认（看到没有 /
+# 对不对）以及「马上要开下一款」这类串场句会被选进正文。
+# 做法：在「导演前的候选池过滤」阶段把命中行整行标成只作上下文（不可选）；
+# 不动正文行、不改时间戳、不新增任何 AI 调用。
+# P0-1 是商品正确性问题，不受用户内容开关影响，永远生效；
+# P0-2 跟随 live_interaction 开关（用户关掉时才拦）。置 False 即回到旧行为。
+CAST_LIVE_PITCH_GUARD_ENABLED = True
+CAST_OTHER_PRODUCT_SWITCH_GUARD_ENABLED = True
+
+# ── 跨窗补齐 / 切口对齐 / 章尾半句门禁（P0-7 + P0-8 + P0-9，2026-10-01）────
+# 动机：成片里「半句」的根因不是 AI 选句，而是窗的边界 —— 缺的那半句常常就在
+# 隔壁窗里，而补齐只在本窗内找；「窗内剔坏行」又是用硬切窗实现的，切口会落在
+# 句子中间（实测 G04 的 69 处切口里 41 处断在话没说完的地方）。
+# P0-7：补齐范围放宽到相邻窗相邻的 1~2 行（其余约束一条不变）。
+# P0-8：切开后的子段两端对齐到收句行；露出来的半句头/尾不再可选。
+# P0-9：章尾停在半句、续句确实拿不到时收口（默认丢掉该行，不落半句）。
+# 三者都是确定性动作：不改写、不重排、不新增 AI 调用。置 False 即回旧行为。
+CAST_WINDOW_CROSS_FILL_ENABLED = False
+# [止血C 2026-10-06] 补齐只在本窗内找，不再伸到邻窗（邻窗可能已换话题/是现场
+# 指令，实测会把「帽子→颜色→又讲帽子」这类回跳补进片单）。置 True 即回旧行为。
+# 补齐链条必须「走到收句行」才算补上：走不到就整条不补（否则只是把半句往后挪一行）。
+CAST_WINDOW_SPLIT_REPAIR_CLOSED_ONLY_ENABLED = True
+# 实测（G04，634 行源 / 568 行可执行池）：切口对齐对「窗边界落在句中」几乎没有
+# 改善（缺头 34%→32%、缺尾 26%→26%），却把最终片单拖差（半句尾 5→10 处、可用素
+# 材少 36 秒）—— 因为它把切口旁的半句头/尾变成「不在任何窗里」，AI 已经选中的
+# 那几行再也补不回来。故默认关闭，代码与开关保留，需要时一行打开再评估。
+CAST_WINDOW_ALIGNED_SPLIT_ENABLED = False
+CAST_WINDOW_ALIGN_MAX_DROP_ROWS = 2
+CAST_HALF_SENTENCE_TAIL_GUARD_ENABLED = True
+# "drop" = 丢掉这个半句尾巴（默认：宁可少一句，也不落半句）；"keep" = 只报告。
+CAST_HALF_SENTENCE_TAIL_MODE = "drop"
+
+# ── 拆窗修补（P0-1，2026-09-30）────────────────────────────────
+# 动机：AI 有时只取一个连续口播窗的一部分（拆窗），落盘就从半句开始或停在半句。
+# 这里在选句之后做「确定性」补齐：只按原顺序把窗内缺的那几行补回，
+# 不改写、不重排、不追加任何 AI 调用。补不动就如实记审计，不静默。
+# 置 False 即回到旧行为（拆窗只报告、不补）。
+CAST_WINDOW_SPLIT_REPAIR_ENABLED = True
+# 上限从 2 行 / 4 秒放宽到 3 行 / 6 秒：补齐必须「走到收句行」才算补上，2 行基本
+# 走不到收句行（G04 有 11 条链条因此作废）。实测放宽后最终片单的半句尾 8→5 处，
+# 同时段数更多（源秒 233.6→244.2）—— 是「补完一句话」而不是「多拉几行」。
+CAST_WINDOW_SPLIT_REPAIR_MAX_ROWS = 3
+CAST_WINDOW_SPLIT_REPAIR_MAX_SECONDS = 6.0
+# 补齐绝不越过内容策略：候选行只要是价格 / 链接 / CTA / 来源主张这类会被下游
+# 屏蔽的内容，就整处放弃补齐（记 skipped），而不是把屏蔽内容又拉回片单。
+CAST_WINDOW_SPLIT_REPAIR_MIN_ROW_SECONDS = 0.5
+CAST_WINDOW_SPLIT_REPAIR_BLOCK_PATTERN = re.compile(
+    r"[0-9零一二三四五六七八九十百千万两]+\s*(?:多|来|几)?\s*(?:块钱|块|元)"
+    r"|价格|原价|现价|多少钱|涨价|降价|优惠|折扣|券|包邮|下单|拍下|购物车|链接"
+    r"|官旗|官网|旗舰店|到手价|同款|老贵|大几千|百块|便宜|划算"
+)
+
+
+# ── 整窗整取（2026-09-30）──────────────────────────────────────────────
+# 动机：AI 常常只取一个连续口播窗的一部分。实测（混剪计划 12:04）：42 句只来自
+# 17 个窗，命中窗共 66 行却只取走 41 行 —— 白丢 25 行（38%），而丢掉的恰好是
+# 承接句（Hook 的兑现句、回答上一句的那一句）。落盘就成了格言集，读着跳。
+# 做法：AI 选中的窗，把窗内剩下的行按原顺序补回来。确定性；零 AI 调用；
+# 不改写、不重排；绝不删改 AI 原本选中的行 —— 整取只是加分项。
+# 补进来的行受时长契约上界（source_max）约束，超了就按「离已选行远 → 近」少补。
+# 不越过内容策略：价格/CTA 与坏行一律不补。
+# 置 False 即回到旧行为（只做 P0-1 拆窗修补）。
+CAST_WINDOW_WHOLE_KEEP_ENABLED = True
+# 补进来的行不足这么多秒、且本身不是收句时，不补（免得补成水词）。
+CAST_WINDOW_WHOLE_KEEP_MIN_ROW_SECONDS = 0.5
+# 整取预算 = 契约目标源时长 × 这个系数（1.0 = 收到目标时长；上调可放更多内容，
+# 但不得超过 source_max，否则方案会掉出时长区间）。
+CAST_WINDOW_WHOLE_KEEP_BUDGET_RATIO = 1.0
+# 首尾门禁用它判断「收尾章有没有收尾动作」；只做提示，不做硬判、不改句。
+CAST_WHOLE_KEEP_CLOSE_ACTION_PATTERN = re.compile(
+    r"关注|点关注|下单|拍下|加购|购物车|小黄车|尺码|选码|库存|活动|优惠|斤|几号|多大"
+)
+
+# [止血D 2026-10-06] 整窗补齐不得跨章抢句：同一方案里已被别的章选中的行，不算本章
+# 窗内「缺的行」。实测（紫星云 11:25 轮）：M2 把 W157 的 617/618 放在 C3，程序整窗
+# 补齐又把 W157 的尾巴整段（615-618）补进 C1 —— 程序自己造出跨章重复，随后去重按
+# 「首次出现」保留 C1、把 C3 清空成 0 句空壳章。补进来的行只保证字面相邻、不保证
+# 属于本章。这里按「归属章唯一」收回程序的越界动作。置 False 即回旧行为。
+CAST_WHOLE_KEEP_CHAPTER_EXCLUSIVE_ENABLED = True
+# [止血D 2026-10-06] 去重不得把整章删空：若某章的 beat 全部是前章重复，保底保留该章
+# 第一拍（宁可这一章短，也不留一个 0 句的空壳章）。置 False 即回旧行为。
+CAST_DEDUP_CHAPTER_FLOOR_ENABLED = True
+
+
+# ── 首尾门禁（2026-09-30 P0-A / P0-B）──────────────────────────────────
+# 动机（实测 14:07 混剪跑批）：AI 明明把开场 Hook 声明成 #26，程序却因为
+# 「同窗连续」把 AI 自己判为偏弱的备选句 #25「好看吧，」补到了全片第一句；
+# 系统检测到了「开场回执与实际首章不一致」，但按设计只警告、不替换。
+# 开头是唯一有 AI 明确声明的位置 —— 程序补行只有让连读前缀仍与声明一致，
+# 才允许排在第一位；否则整句不补（记审计）。
+CAST_OPENING_PREFIX_GUARD_ENABLED = True
+# 章首/章尾收口：章尾停在半句时，优先在同一口播窗内补到「收句行」为止；
+# 补不动、又只是一句 ≤1.2s 的水词/残句时，从章内移出，让边界回退到上一个
+# 完整句。只动章首/章尾，不改写、不重排、不动章内中间。置 False 回到旧行为。
+CAST_CHAPTER_EDGE_GUARD_ENABLED = True
+CAST_CHAPTER_EDGE_STUB_SECONDS = 1.2
+# 去标点后不超过这么多字才算是「纯语气词残句」（避免误伤有实义的短句）。
+CAST_CHAPTER_EDGE_STUB_MAX_CHARS = 3
+# 章首缺上文补齐（P0-10）：某一章的第一句是以「因为 / 然后 / 再加上 …」这类接续
+# 连词起头的从句，而它的上一句没被任何章选中时 —— 观众从章首听到的就是半截话。
+# 处理：把上一句（有界 1 行；仍需「可执行、未被别章用掉、不是坏行」）补到章首；
+# 补不到就如实报告，绝不移出、不删句、不改写、不重排。
+# 第一章（开场）不参与 —— 它由 AI 的开场声明 + 开场独立成段负责。
+# 置 False 与落地前逐字节等价。
+CAST_CHAPTER_HEAD_FILL_ENABLED = True
+CAST_CHAPTER_HEAD_FILL_MAX_ROWS = 1
+# 只在「几乎一定是承接上一句」的连词上触发，避免把能独立站的短句误判。
+CAST_CHAPTER_HEAD_DEPENDENT_PREFIXES = (
+    "因为", "所以", "然后", "再加上", "加上", "再有", "而且", "但是", "比如说", "还是",
+)
+
+
+# [乙-bis · 2026-10-04] 开场「半截话」确定性硬门。
+# 现象：AI 选中的开场钩子句以承接连词开头（因为/所以/然后/而且/但是…），而它的
+#      上一句并不在可选池里 → 观众从第一秒听到的就是半截话。
+# 做法：从 AI 同一次返回的 compared_packages 里挑第一个「干净」候选（钩子句不以
+#      承接连词开头、句 id 在可选池里、且全片没被别处用过），只替换首章第一拍
+#      的钩子句；兑现拍、章节次序、其余章节一律不动。
+#      0 新增 AI 调用；不改写任何原文；不删章节。
+# 置 False 与落地前逐字节等价。
+OPENING_LEADIN_VETO_ENABLED = True
+# 复用「章首补行」的同一组承接连词，再并入「开场自带口水铺垫/口头禅」。
+# [A · 2026-10-05] 原先只认承接连词（半截话），抓不到「你会发现你看…」这类
+# 首字即噪声的句子。「依赖上文的半截话」和「自带口水铺垫」都不适合当开场第一句，
+# 所以共用同一张触发表。
+OPENING_LEADIN_VETO_PREFIXES = CAST_CHAPTER_HEAD_DEPENDENT_PREFIXES + (
+    "你会发现", "你看", "咱们就是", "就是", "我跟你讲", "我跟你说", "说实话",
+    "就是说", "所以说", "其实", "那么", "呃", "嗯",
+)
+# 替换候选只用「承接连词」这张更严的表：候选即使带一层口头禅，也好过原来的
+# 半截话/纯口水铺垫，且它来自池内、AI 已判为可用开场，不该因为口头禅被否掉。
+OPENING_REPLACEMENT_BLOCKED_PREFIXES = CAST_CHAPTER_HEAD_DEPENDENT_PREFIXES
 
 
 def _post_two_pass_director_request_with_retry(*, max_tokens: int, **kwargs: Any) -> str:
@@ -1792,6 +2083,505 @@ def director_casting_request_timeout(model: str, requested_timeout: int | float 
     if "seed" in str(model or "").lower():
         return max(360, timeout)
     return timeout
+
+
+def _cast_row_closes_thought(row: Mapping[str, Any]) -> bool:
+    """这一行是否已经「收句」（以句末标点结尾）。
+
+    窗的边界只允许落在收句的行之后，否则就会把一句话断在中间（半截话）。
+    """
+    return bool(re.search(r"[。！？!?…]$", str(row.get("text") or "").strip()))
+
+
+def _cast_window_partition(rows: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]]:
+    """把逐句候选行聚成连续口播窗（确定性；不做任何语义选择）。
+
+    只做一件事：把「ID 连续、间隔很小」的相邻口播行合成一个能被整段听懂的
+    单位，用于让导演按「窗」而不是按「单句」做取舍。
+
+    [v9.8 收句边界] CAST_WINDOW_SENTENCE_SAFE_BREAK_ENABLED=True 时，窗的边界
+    只允许落在「已经收句」的行之后：一旦跨度/时长把窗逼到要断，就先回退到窗内
+    最后一个收句行，把它后面的行留给下一个窗继续攒 —— 绝不把一句话断在中间。
+    半截话几乎都来自「断在句中的窗」，这是根治点。
+    """
+    windows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for row in rows:
+        if current:
+            try:
+                gap = float(row["start"]) - float(current[-1]["end"])
+                projected = float(row["end"]) - float(current[0]["start"])
+            except (KeyError, TypeError, ValueError):
+                gap, projected = 0.0, 0.0
+            ceiling = (CAST_WINDOW_HARD_MAX_SECONDS if CAST_WINDOW_SENTENCE_SAFE_BREAK_ENABLED
+                       else CAST_WINDOW_MAX_SECONDS)
+            forced = (int(row["id"]) != int(current[-1]["id"]) + 1
+                      or gap > CAST_WINDOW_MAX_GAP_SECONDS
+                      or projected > ceiling)
+            if forced:
+                if (CAST_WINDOW_SENTENCE_SAFE_BREAK_ENABLED
+                        and projected <= CAST_WINDOW_ABSOLUTE_MAX_SECONDS):
+                    cut = 0
+                    for index in range(len(current) - 1, 0, -1):
+                        if _cast_row_closes_thought(current[index - 1]):
+                            cut = index
+                            break
+                    if cut:
+                        windows.append(current[:cut])
+                        current = current[cut:]
+                else:
+                    windows.append(current)
+                    current = []
+        current.append(row)
+        try:
+            duration = float(current[-1]["end"]) - float(current[0]["start"])
+        except (KeyError, TypeError, ValueError):
+            duration = 0.0
+        closes_thought = _cast_row_closes_thought(current[-1])
+        if CAST_WINDOW_SENTENCE_SAFE_BREAK_ENABLED:
+            if closes_thought and (duration >= CAST_WINDOW_CLOSE_SECONDS
+                                   or duration >= CAST_WINDOW_CLOSE_AT_SENTENCE_END_SECONDS):
+                windows.append(current)
+                current = []
+        elif (duration >= CAST_WINDOW_CLOSE_SECONDS
+                or (duration >= CAST_WINDOW_CLOSE_AT_SENTENCE_END_SECONDS and closes_thought)):
+            windows.append(current)
+            current = []
+    if current:
+        windows.append(current)
+    return windows
+
+
+def _cast_window_is_undersized(window: Sequence[Mapping[str, Any]]) -> bool:
+    """只按「够不够长」判定：不足 CAST_WINDOW_MIN_SECONDS 的窗（多为半句/碎片）禁选。
+
+    单独的完整长句（2-8 秒，例如 5-8 秒的长完整口播）保留可选——那是既有产品规则
+    “long_complete_exception”；被禁的是真正讲不完整、只能靠拼句成立的那种窗。
+    """
+    try:
+        duration = float(window[-1]["end"]) - float(window[0]["start"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return duration < float(CAST_WINDOW_MIN_SECONDS)
+
+
+def _merge_undersized_windows(
+    windows: Sequence[Sequence[Mapping[str, Any]]],
+) -> list[list[dict[str, Any]]]:
+    """把单句窗/过短窗并入相邻窗（合并后不超过 CAST_WINDOW_MAX_SECONDS）。"""
+    acc: list[list[dict[str, Any]]] = []
+    for window in windows:
+        item = [dict(row) for row in window]
+        if _cast_window_is_undersized(item) and acc:
+            previous = acc[-1]
+            try:
+                merged_seconds = float(item[-1]["end"]) - float(previous[0]["start"])
+            except (KeyError, TypeError, ValueError):
+                merged_seconds = float(CAST_WINDOW_MAX_SECONDS) + 1.0
+            if (int(item[0]["id"]) == int(previous[-1]["id"]) + 1
+                    and merged_seconds <= float(CAST_WINDOW_MAX_SECONDS)):
+                previous.extend(item)
+                continue
+        acc.append(item)
+    out: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(acc):
+        window = acc[index]
+        if _cast_window_is_undersized(window) and index + 1 < len(acc):
+            following = acc[index + 1]
+            try:
+                merged_seconds = float(following[-1]["end"]) - float(window[0]["start"])
+            except (KeyError, TypeError, ValueError):
+                merged_seconds = float(CAST_WINDOW_MAX_SECONDS) + 1.0
+            if (int(following[0]["id"]) == int(window[0]["id"]) + 1
+                    and merged_seconds <= float(CAST_WINDOW_MAX_SECONDS)):
+                following.insert(0, window[0])
+                index += 1
+                continue
+        out.append(window)
+        index += 1
+    return out
+
+
+_CAST_ROW_PRUNE_PUNCT = frozenset("，。！？、；：,.!?;:…~～—-－‘’“”\"'()（）")
+
+
+def _cast_row_prune_compact(text: str) -> str:
+    """去掉标点/空白，便于按字符做确定性比较。"""
+    return "".join(
+        ch for ch in str(text or "")
+        if ch not in _CAST_ROW_PRUNE_PUNCT and not ch.isspace()
+    )
+
+
+_CAST_OTHER_PRODUCT_SWITCH_PATTERNS = (
+    # 切场口播多半出现在行首几个字里
+    re.compile(r"^.{0,6}(?:马上要开|马上就要开|下一个|下一款|换一款|换个款|接下来)"),
+    re.compile(r"(?:这|那)(?:件|款|个)(?:讲完|讲过了)"),
+)
+
+
+def other_product_switch_reason(text: Any) -> str:
+    """Return why a row is a "cut to the next item" live-room line.
+
+    这不是内容偏好，是商品正确性问题：句子指向的是别的商品，不能进正文。
+    只做确定性判定，不改写文本、不动时间戳。
+    """
+
+    value = _cast_row_prune_compact(str(text or ""))
+    if not value:
+        return ""
+    for pattern in _CAST_OTHER_PRODUCT_SWITCH_PATTERNS:
+        if pattern.search(value):
+            return "跨商品串场"
+    return ""
+
+
+def _cast_row_prune_reason(row: Mapping[str, Any]) -> str:
+    """确定性判定：这一行是否属于「只作上下文」的废行。
+
+    复用现成硬分类器，不做任何语义判断：尺码问答 / 个人身高体重 / 直播互动
+    （selection_safety）、ASR 畸形句（final_utterance_surface_issue）、
+    主播口令、整行很短时的收尾废话、纯语气词。
+    """
+    text = str(row.get("text") or "").strip()
+    if not text:
+        return "空行"
+    reason = live_interaction_or_size_response_reason(text)
+    if reason:
+        return reason
+    reason = final_utterance_surface_issue(text)
+    if reason:
+        return reason
+    for command in CAST_WINDOW_ROW_PRUNE_COMMANDS:
+        if command in text:
+            return "主播口令"
+    if CAST_WINDOW_LIVE_ACTION_GUARD_ENABLED:
+        for command in _CAST_LIVE_ACTION_COMMANDS:
+            if command in text:
+                return "现场动作指令"
+        for pattern in _CAST_LIVE_ACTION_PATTERNS:
+            if pattern.search(text):
+                return "现场动作指令"
+    compact = _cast_row_prune_compact(text)
+    if len(compact) <= int(CAST_WINDOW_ROW_PRUNE_FILLER_MAX_CHARS):
+        for filler in CAST_WINDOW_ROW_PRUNE_FILLERS:
+            if filler in text:
+                return "收尾废话"
+        if compact and all(ch in CAST_WINDOW_ROW_PRUNE_VOCAL_CHARS for ch in compact):
+            return "纯语气词"
+    return ""
+
+
+def _cast_row_shingles(text: str, size: int = 3) -> frozenset:
+    """字符 n-gram 集合：只用来快速跳过不相似的配对，避免 O(n^2) 全量算 LCS。"""
+    compact = _cast_row_prune_compact(text)
+    if len(compact) < size:
+        return frozenset()
+    return frozenset(compact[index:index + size] for index in range(len(compact) - size + 1))
+
+
+def _cast_row_longest_common_span(left: str, right: str) -> int:
+    """最长公共子串长度。"""
+    first, second = left, right
+    if len(first) > len(second):
+        first, second = second, first
+    best = 0
+    previous = [0] * (len(second) + 1)
+    for index in range(1, len(first) + 1):
+        current = [0] * (len(second) + 1)
+        head = first[index - 1]
+        for position in range(1, len(second) + 1):
+            if head == second[position - 1]:
+                value = previous[position - 1] + 1
+                current[position] = value
+                if value > best:
+                    best = value
+        previous = current
+    return best
+
+
+def _cast_row_duplicate_pair(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """两行是否近似重复：较长公共子串几乎覆盖较短那一行。
+
+    刻意不用「字符集重合/Jaccard」—中文口播里不同内容共享大量用字，那样会误杀。
+    这里要求：两行都要够长、公共子串本身够长、且占较短行的比例够高。
+    """
+    first = _cast_row_prune_compact(str(left.get("text") or ""))
+    second = _cast_row_prune_compact(str(right.get("text") or ""))
+    if len(first) > len(second):
+        first, second = second, first
+    if len(first) < int(CAST_WINDOW_ROW_PRUNE_DUP_MIN_CHARS):
+        return False
+    span = _cast_row_longest_common_span(first, second)
+    if span < int(CAST_WINDOW_ROW_PRUNE_DUP_MIN_LCS):
+        return False
+    return span / float(len(first)) >= float(CAST_WINDOW_ROW_PRUNE_DUP_RATIO)
+
+
+def _cast_row_keep_priority(row: Mapping[str, Any]) -> tuple:
+    """近似重复里留谁：先收句、再更长、最后取更靠前（保证确定性）。"""
+    text = str(row.get("text") or "").strip()
+    closes = 1 if re.search(r"[。！？!?…]$", text) else 0
+    try:
+        sid = int(row["id"])
+    except (KeyError, TypeError, ValueError):
+        sid = 0
+    return (closes, len(_cast_row_prune_compact(text)), -sid)
+
+
+def _prune_cast_window_rows(rows: Sequence[Mapping[str, Any]]) -> list[int]:
+    """返回「只作上下文」的行 ID：废行 + 近似重复里较弱的那一行。
+
+    近似重复在整份候选池上判（不限窗内），这样跨窗重复也会收敛到更完整的那一行，
+    AI 不再有「拆窗取其一」的动机。
+    """
+    pruned: set[int] = set()
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            sid = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _cast_row_prune_reason(row):
+            pruned.add(sid)
+        else:
+            kept.append(dict(row))
+    if not kept:
+        return []
+    shingles = {int(row["id"]): _cast_row_shingles(str(row.get("text") or "")) for row in kept}
+    survivors: list[dict[str, Any]] = []
+    for row in kept:
+        rid = int(row["id"])
+        grams = shingles.get(rid) or frozenset()
+        replaced = False
+        for position, other in enumerate(survivors):
+            oid = int(other["id"])
+            if not grams or not (grams & (shingles.get(oid) or frozenset())):
+                continue
+            if not _cast_row_duplicate_pair(row, other):
+                continue
+            if _cast_row_keep_priority(row) > _cast_row_keep_priority(other):
+                pruned.add(oid)
+                survivors[position] = row
+            else:
+                pruned.add(rid)
+            replaced = True
+            break
+        if not replaced:
+            survivors.append(row)
+    return sorted(pruned)
+
+
+def _split_windows_around_blocked(
+    windows: Sequence[Sequence[Mapping[str, Any]]],
+    blocked: set[int],
+) -> list[list[dict[str, Any]]]:
+    """摘掉窗内被剔除的行；剩余按 ID 连续切成子段（各成一个小窗）。
+
+    这样「窗内 ID 必须连续」这个 Prompt 契约始终成立（剔行可能把窗打通一个洞）。
+
+    [P0-8 切口对齐] CAST_WINDOW_ALIGNED_SPLIT_ENABLED=True 时，切口额外对齐到
+    「已经收句」的行：切开后露出来的半句头/半句尾不再可选（那几行单独出现本来
+    也讲不完整）。实测坏行切口正是「窗边界落在句中」的主要制造者。
+    """
+    out: list[list[dict[str, Any]]] = []
+    for window in windows:
+        for run in _cast_window_runs(window, blocked):
+            if CAST_WINDOW_ALIGNED_SPLIT_ENABLED:
+                run = _align_cast_window_run(window, run)
+            if run:
+                out.append(run)
+    return out
+
+
+def _cast_window_runs(
+    window: Sequence[Mapping[str, Any]],
+    blocked: set[int],
+) -> list[list[dict[str, Any]]]:
+    """把一个窗按「被剔除的行 / ID 断点」切成若干连续子段（尚未对齐）。"""
+    runs: list[list[dict[str, Any]]] = []
+    run: list[dict[str, Any]] = []
+    for row in window:
+        try:
+            sid = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            sid = None
+        if sid in blocked:
+            if run:
+                runs.append(run)
+                run = []
+            continue
+        if run and sid is not None and sid != int(run[-1]["id"]) + 1:
+            runs.append(run)
+            run = []
+        run.append(dict(row))
+    if run:
+        runs.append(run)
+    return runs
+
+
+def _align_cast_window_run(
+    window: Sequence[Mapping[str, Any]],
+    run: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把切开后的子段两端对齐到「已收句」的行。
+
+    左边：子段第一行在原窗里的前一行话没说完 → 这段是从半句开始的，丢掉开头几行；
+    右边：子段最后一行话没说完 → 停在半句上，丢到最近一个收句行。
+    每侧最多丢 CAST_WINDOW_ALIGN_MAX_DROP_ROWS 行，且至少留 1 行 —— 只处理贴着
+    切口的那几行，不做任何语义判断，也不会为了对齐把整段砍光。
+    """
+    limit = max(0, int(CAST_WINDOW_ALIGN_MAX_DROP_ROWS))
+    if not run or limit == 0:
+        return run
+    index_by_id: dict[int, int] = {}
+    for position, row in enumerate(window):
+        try:
+            index_by_id[int(row["id"])] = position
+        except (KeyError, TypeError, ValueError):
+            continue
+    head_drop = 0
+    while head_drop < limit and len(run) - head_drop > 1:
+        try:
+            position = index_by_id[int(run[head_drop]["id"])]
+        except (KeyError, TypeError, ValueError):
+            break
+        if position <= 0 or not _cast_row_looks_unfinished(window[position - 1]):
+            break
+        head_drop += 1
+    tail_drop = 0
+    while tail_drop < limit and len(run) - head_drop - tail_drop > 1:
+        if _cast_row_closes_thought(run[-1 - tail_drop]):
+            break
+        tail_drop += 1
+    aligned = run
+    if tail_drop:
+        aligned = aligned[:len(aligned) - tail_drop]
+    if head_drop:
+        aligned = aligned[head_drop:]
+    # 对齐不许把窗砍到过小：对齐后若反而变成「不足下限的碎片」，这个碎片会被整体
+    # 丢弃（整段内容变成不可选）—— 那比留一个半句更亏。此时放弃对齐，保留原样。
+    if aligned and _cast_window_is_undersized(aligned) and not _cast_window_is_undersized(run):
+        return run
+    return aligned
+
+
+def _cast_windows_for_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """返回（窗统计行, 因禁选而只作上下文的 ID）。
+
+    窗统计行每行代表一个可选的完整口播窗，字段沿用行结构（id/start/end/text），
+    额外带 window_id / window_ids / window_row_count，供候选池渲染与秒数统计共用。
+    """
+    windows = _cast_window_partition(rows)
+    if int(CAST_WINDOW_MIN_ROWS) > 1 or float(CAST_WINDOW_MIN_SECONDS) > 0:
+        windows = _merge_undersized_windows(windows)
+    # 方案 2：切窗阶段确定性剔除「只作上下文」的行（尺码/互动/口令/畸形 + 近似重复）。
+    # 窗内因此天然干净，AI 不再有「拆窗取其一」的动机（拆窗落盘会变成半句）。
+    context_only_ids: list[int] = []
+    if CAST_WINDOW_ROW_PRUNE_ENABLED and rows:
+        context_only_ids = _prune_cast_window_rows(rows)
+        if context_only_ids:
+            windows = _split_windows_around_blocked(windows, set(context_only_ids))
+    window_rows: list[dict[str, Any]] = []
+    dropped_ids: list[int] = list(context_only_ids)
+    for window in windows:
+        if _cast_window_is_undersized(window):
+            dropped_ids.extend(int(row["id"]) for row in window)
+            continue
+        text = " ".join(str(row.get("text") or "").strip() for row in window).strip()
+        try:
+            start = float(window[0]["start"])
+            end = float(window[-1]["end"])
+        except (KeyError, TypeError, ValueError):
+            start = end = 0.0
+        window_rows.append({
+            "id": int(window[0]["id"]),
+            "start": start,
+            "end": end,
+            "text": text,
+            "window_id": "W%03d" % (len(window_rows) + 1),
+            "window_ids": [int(row["id"]) for row in window],
+            "window_row_count": len(window),
+            "window_rows": [dict(row) for row in window],
+        })
+    return window_rows, dropped_ids
+
+
+def _format_cast_window_line(window: Mapping[str, Any]) -> str:
+    """一个窗一行：窗号 + 完整 ID 段 + 时长（+ 非 clean 标记）+ 全窗原话。"""
+    ids = [int(value) for value in (window.get("window_ids") or ())]
+    id_label = str(ids[0]) if len(ids) <= 1 else f"{ids[0]}-{ids[-1]}"
+    try:
+        duration = float(window["end"]) - float(window["start"])
+    except (KeyError, TypeError, ValueError):
+        duration = 0.0
+    grain = "[long_complete_exception]" if duration > float(DIRECTOR_PREFERRED_BEAT_MAX_SECONDS) else ""
+    text = str(window.get("text") or "").strip()
+    flags = ""
+    surface = final_utterance_surface_issue(text) or "clean"
+    if surface != "clean":
+        flags += f"[!surface={surface}]"
+    try:
+        opening = director_opening_input_issue(text) or "clean"
+    except Exception:  # noqa: BLE001 - 开场标记失败不得影响候选池
+        opening = "clean"
+    if opening != "clean":
+        flags += f"[!opening={opening}]"
+    detail = _director_casting_transcript(window.get("window_rows") or ())
+    detail_inline = " ｜".join(part for part in detail.split("\n") if part.strip())
+    return (
+        f"[{window.get('window_id') or 'W???'}][IDs {id_label}][{duration:.2f}s]{grain}{flags} "
+        f"｜{detail_inline}"
+    )
+
+
+def _director_window_pool_lines(
+    subtitles: Sequence[Mapping[str, Any]],
+    window_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """按原片顺序渲染窗池；未入选的行（禁选/不可执行）只作上下文。"""
+    by_first_id = {int(row["id"]): row for row in window_rows}
+    member_ids = {sid for row in window_rows for sid in (row.get("window_ids") or ())}
+    lines: list[str] = []
+    for row in subtitles:
+        if not str(row.get("id", "")).isdigit() or not row.get("text"):
+            continue
+        sid = int(row["id"])
+        window = by_first_id.get(sid)
+        if window is not None:
+            lines.append(_format_cast_window_line(window))
+        elif sid in member_ids:
+            continue
+        else:
+            lines.append(
+                f"[context ID {sid:03d}][不可选，仅核对商品指代] {row.get('text', '')}"
+            )
+    return "\n".join(lines)
+
+
+def _windows_total_seconds(window_rows: Sequence[Mapping[str, Any]]) -> float:
+    return round(sum(max(0.0, float(row["end"]) - float(row["start"])) for row in window_rows), 3)
+
+
+def _windows_seconds_for_ids(
+    window_rows: Sequence[Mapping[str, Any]],
+    subtitle_ids: Sequence[Any],
+) -> float:
+    wanted = set()
+    for value in subtitle_ids or ():
+        try:
+            wanted.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    total = 0.0
+    for row in window_rows:
+        members = {int(value) for value in (row.get("window_ids") or ())}
+        if members & wanted:
+            total += max(0.0, float(row["end"]) - float(row["start"]))
+    return round(total, 3)
 
 
 def _director_casting_rows(
@@ -2217,6 +3007,37 @@ def _body_only_kinds(content_contract: Mapping[str, Any] | None) -> set[str]:
     return result
 
 
+def _director_extra_guard_names() -> list[str]:
+    """本次生效的确定性守卫名，写进 audit 便于从落盘产物追溯。"""
+
+    return [
+        name for name, enabled in (
+            ("other_product_switch", CAST_OTHER_PRODUCT_SWITCH_GUARD_ENABLED),
+            ("live_pitch_talk", CAST_LIVE_PITCH_GUARD_ENABLED),
+        )
+        if enabled
+    ]
+
+
+def _director_extra_content_hits(text: Any, blocked_kinds: set[str]) -> list[str]:
+    """按本次新增守卫返回命中的伪 kind（不属于 content_policy 的 kind 枚举）。
+
+    other_product_switch：商品正确性，永远生效。
+    live_pitch_talk：只有用户把 live_interaction 关掉时才拦。
+    """
+
+    hits: list[str] = []
+    if CAST_OTHER_PRODUCT_SWITCH_GUARD_ENABLED and other_product_switch_reason(text):
+        hits.append("other_product_switch")
+    if (
+        CAST_LIVE_PITCH_GUARD_ENABLED
+        and "live_interaction" in blocked_kinds
+        and pitch_talk_reason(text)
+    ):
+        hits.append("live_pitch_talk")
+    return hits
+
+
 def filter_director_executable_ids_for_content_policy(
     subtitles: Sequence[Mapping[str, Any]],
     executable_subtitle_ids: Sequence[int] | None,
@@ -2241,12 +3062,19 @@ def filter_director_executable_ids_for_content_policy(
         "excluded": [],
         "safe_pool_count": len(rows),
         "status": "consistent",
+        "guard_rules": _director_extra_guard_names(),
     }
-    if not excluded_kinds:
+    extra_guards_active = bool(
+        CAST_OTHER_PRODUCT_SWITCH_GUARD_ENABLED or CAST_LIVE_PITCH_GUARD_ENABLED
+    )
+    if not excluded_kinds and not extra_guards_active:
         return [int(row["id"]) for row in rows], audit
     safe_ids: list[int] = []
     for row in rows:
         hits = _story_policy_hits(row.get("text"), excluded_kinds)
+        for extra_hit in _director_extra_content_hits(row.get("text"), blocked_kinds):
+            if extra_hit not in hits:
+                hits.append(extra_hit)
         if hits:
             audit["excluded"].append({
                 "subtitle_id": int(row["id"]),
@@ -2260,6 +3088,34 @@ def filter_director_executable_ids_for_content_policy(
     if not safe_ids:
         audit["status"] = "no_safe_candidates"
     return safe_ids, audit
+
+
+_POLICY_CLAUSE_SPLIT_RE = re.compile(r"[^，。；！？,;!?\n]+[，。；！？,;!?]?")
+
+
+def _scrub_blocked_clauses(text: Any, blocked_kinds: set[str]) -> tuple[str, list[str]]:
+    """按分句剥离被禁内容，保留同一字段里干净的其余分句。
+
+    只删除命中分句，不改写、不新增、不排序。命中分句一律不保留；若每个分句
+    都命中则返回空串（与旧的整条清空一致）。
+    """
+
+    source = str(text or "").strip()
+    if not source or not blocked_kinds:
+        return source, []
+    kept: list[str] = []
+    removed: list[str] = []
+    for clause in _POLICY_CLAUSE_SPLIT_RE.findall(source):
+        piece = clause.strip()
+        if not piece:
+            continue
+        if _story_policy_hits(piece, blocked_kinds):
+            removed.append(piece)
+            continue
+        kept.append(piece)
+    if not removed:
+        return source, []
+    return "".join(kept), removed
 
 
 def sanitize_two_pass_story_for_content_policy(
@@ -2294,11 +3150,20 @@ def sanitize_two_pass_story_for_content_policy(
         strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
         for field in story_fields:
             hits = _story_policy_hits(strategy.get(field), blocked_kinds)
-            if hits:
-                strategy[field] = ""
-                audit["cleared_story_fields"].append({
-                    "strategy_id": strategy_id, "field": field, "blocked_kinds": hits,
-                })
+            if not hits:
+                continue
+            # 2026-10-05：命中即整条清空会把「观众担心什么」这类合法导演状态一起抹掉
+            # （audience_tension 写了“便宜”就整条消失，判定通道随即回落）。改为按分句
+            # 剥离：只删命中分句，绝不保留任何命中词，全部命中时才与旧行为一致。
+            scrubbed, removed_clauses = _scrub_blocked_clauses(strategy.get(field), blocked_kinds)
+            strategy[field] = scrubbed
+            entry = {
+                "strategy_id": strategy_id, "field": field, "blocked_kinds": hits,
+                "mode": "clause_scrub" if scrubbed else "cleared",
+            }
+            if removed_clauses:
+                entry["removed_clauses"] = removed_clauses
+            audit["cleared_story_fields"].append(entry)
         # M1's opening evidence is not a final clip list, but its short
         # explanation still becomes input to M2.  Do not let a blocked claim
         # re-enter the second request through that metadata.
@@ -2615,6 +3480,82 @@ def _expand_cast_sentence_groups(payload: dict[str, Any], subtitles: Sequence[Ma
 
 
 
+# P0-2（2026-10-03 David 定）：续句补齐必须"补到收口为止，否则不补"。
+# 背景（重启后预览审计实测）：补进来的 6 行（#279/#95/#290/#303/#181/#519）全部以
+# 逗号收尾、它们的续句都没被选中 —— 章尾悬空反而从 2/8 涨到 6/8（半句只是往后挪了
+# 一行），其中 #181「你玩买了买了买了，」还是语音识别乱码。
+# 规则：① 从待补行起沿原文顺序向后补，补到真正收口为止，上限
+# CAST_CONTINUATION_CLOSURE_MAX_ROWS 行；② 收不了口（下一行不可用 / 已被任何章
+# 选中 / 超上限）→ 放弃这次补，回退原样；③ 待补行命中乱码特征（同一 2-4 字片段连续
+# 重复三次以上）→ 放弃。宁可少补，也不许把半句或者乱码补进成片。
+CAST_CONTINUATION_CLOSURE_ENABLED = True
+CAST_CONTINUATION_CLOSURE_MAX_ROWS = 4
+CAST_CONTINUATION_PAUSE_CHARS = ("，", "、", ",", "；", ";", "：", ":")
+
+
+def _continuation_row_closes(text: str) -> bool:
+    """这一行是不是已经收口（句末标点，或压根没有停顿符）。"""
+    value = str(text or "").strip()
+    if not value:
+        return True
+    return value[-1] in ("。", "！", "？", "!", "?", "~") or value[-1] not in CAST_CONTINUATION_PAUSE_CHARS
+
+
+def _continuation_row_is_noise(text: str) -> bool:
+    """同一 2-4 字片段连着重三次以上 = 语音识别乱码（实测「你玩买了买了买了，」）。"""
+    return bool(re.search(r"(.{2,4})\1{2,}", str(text or "")))
+
+
+def _continuation_closure_chain(
+    add: Any,
+    rows: Mapping[int, Any],
+    next_source_id: Mapping[int, int],
+    allowed: set[int],
+    used: set[int],
+) -> tuple[list[int], bool, str]:
+    """从 ``add`` 起沿原文顺序向后走到真正收口。返回 ``(chain, ok, reason)``。"""
+    if not CAST_CONTINUATION_CLOSURE_ENABLED:
+        return [int(add)], True, "disabled"
+    chain: list[int] = []
+    cursor: Any = int(add)
+    for _ in range(max(1, int(CAST_CONTINUATION_CLOSURE_MAX_ROWS))):
+        if cursor is None or cursor not in rows or cursor not in allowed or cursor in used:
+            return [], False, "closure_unavailable"
+        text = str(rows[cursor].get("text") or "").strip()
+        if _continuation_row_is_noise(text):
+            return [], False, "closure_noise"
+        chain.append(int(cursor))
+        if _continuation_row_closes(text):
+            return chain, True, "closed"
+        cursor = next_source_id.get(cursor)
+    return [], False, "closure_too_long"
+
+
+def _continuation_used_ids(payload: Mapping[str, Any]) -> set[int]:
+    """整篇已经用到的字幕 ID（跨章、跨版本）。
+
+    续接链只查「本章用过没用过」不够：实测 #279→#280→#281→#282 一路都"没用过"，
+    但 #282 已经排在 C3 —— 只看本章就会把同一句补第二份，跨章重复。
+    """
+    used: set[int] = set()
+    for strategy in _strategy_refs(payload):
+        for chapter in _chapter_refs(strategy):
+            beats = chapter.get("beats") or []
+            if isinstance(beats, Mapping):
+                beats = [beats]
+            if not isinstance(beats, list):
+                continue
+            for beat in beats:
+                if not isinstance(beat, Mapping):
+                    continue
+                for value in (beat.get("subtitle_ids") or beat.get("ids") or []):
+                    try:
+                        used.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+    return used
+
+
 def _continuation_completion_pass(
     payload: dict[str, Any],
     subtitles: Sequence[Mapping[str, Any]],
@@ -2675,6 +3616,11 @@ def _continuation_completion_pass(
                     continue
                 if want not in allowed:
                     skipped.append({"reason": "continuation_not_selectable", "subtitle_id": want})
+                    continue
+                if (CAST_CONTINUATION_ROW_GUARD_ENABLED
+                        and (_cast_row_prune_reason(rows.get(want) or {})
+                             or _cast_row_repair_blocked(rows.get(want) or {}))):
+                    skipped.append({"reason": "continuation_bad_row", "subtitle_id": want})
                     continue
                 filler = {
                     "beat_function": str(beat.get("beat_function") or "continuation"),
@@ -2769,12 +3715,12 @@ def _enforce_opening_first(payload: Mapping[str, Any], opening_ids: Sequence[int
 
 def _script_continuity_prompt(script_lines: Sequence[str], pool_lines: Sequence[str]) -> str:
     """把整篇选片文案当一篇文章来读：找不通顺/截断处（优先每章最后一句），
-    再从整池里挑一条承接更好的句子补进去（不限于原始相邻行）。"""
+    [v9.8] 承接句只允许取原文紧邻的下一行（承接断裂时宁可少补，也不许跨句乱接）。"""
     return (
         "下面是本次成片的完整口播稿，按章节顺序排好（`|章末|` 标出每章最后一句）。请把它当成一篇文章通读。\n\n"
         "任务：找出**读起来不通顺、话没说完/半截**的地方——**优先检查每一章的章末**（章末截断最刺耳）。"
         "只看内容，不要依赖标点（标点是本地语音识别给的，不准）。\n\n"
-        "对每一处问题，从后面给出的【可选句池】里挑**一条**承接最好、语义能补全的句子（**不限于原文的下一句**，可以是池里任何位置）。"
+        "对每一处问题，从后面给出的【可选句池】里挑**一条**句子来补全，且**必须就是原文紧邻的下一行**（即 `add_id` 必须是 `after_id` 的下一行）；只有原文下一行确实不在池里时，才允许退一步选池内最接近的句子。"
         "要求：补进去之后，前后连读自然、意思完整；不要重复已在稿里的句子；不要改写任何原句。\n\n"
         "只输出 JSON，不要解释：{\"fixes\": [{\"after_id\": 在它后面补的句子ID, \"add_id\": 要补的句子ID, \"reason\": \"一句话说明\"}]}；没有问题就输出 {\"fixes\": []}。\n\n"
         "【本次口播稿】\n" + "\n".join(script_lines)
@@ -2791,6 +3737,12 @@ def review_continuations(
     rows = {int(row["id"]): row for row in subtitles}
     allowed = set(rows) if executable_ids is None else (set(executable_ids) & set(rows))
     script_lines: list[str] = []
+    # [v9.8] 原文顺序的「下一行」表：承接句只接受它，避免把承接接到源里远隔的句子上。
+    ordered_ids = [int(row["id"]) for row in subtitles]
+    next_source_id: dict[int, int] = {}
+    for position, sid in enumerate(ordered_ids):
+        if position + 1 < len(ordered_ids):
+            next_source_id[sid] = ordered_ids[position + 1]
     chapters: list[list[int]] = []
     for strategy in _strategy_refs(payload):
         for chapter in _chapter_refs(strategy):
@@ -2835,6 +3787,8 @@ def review_continuations(
         return {"fixes": [], "checked": len(flat), "error": f"{type(exc).__name__}"}
     used = set(flat)
     fixes: list[dict[str, Any]] = []
+    corrected = 0
+    dropped_remote = 0
     for item in (data.get("fixes") or []):
         if not isinstance(item, Mapping):
             continue
@@ -2843,10 +3797,24 @@ def review_continuations(
             add = int(item.get("add_id"))
         except (TypeError, ValueError):
             continue
-        if after in used and add in allowed and add not in used:
+        if after not in used:
+            continue
+        # [v9.8] 承接句只认原文紧邻的下一行；AI 挑了别处就纠正为原文下一行，
+        # 纠正不了（下一行不在池里/已用）就丢弃 —— 宁可少补，也不许跨句乱接。
+        expected = next_source_id.get(after)
+        if expected is None:
+            dropped_remote += 1
+            continue
+        if add != expected:
+            corrected += 1
+            add = expected
+        if add in allowed and add not in used:
             fixes.append({"after_id": after, "add_id": add, "reason": str(item.get("reason") or "")[:80]})
             used.add(add)
-    return {"fixes": fixes, "checked": len(flat)}
+        else:
+            dropped_remote += 1
+    return {"fixes": fixes, "checked": len(flat), "corrected": corrected,
+            "dropped_remote": dropped_remote}
 
 def apply_continuation_fill(
     payload: Mapping[str, Any],
@@ -2857,6 +3825,11 @@ def apply_continuation_fill(
     """按审查结果，把补全句插到指定句之后；不改写任何原话。"""
     rows = {int(row["id"]): row for row in subtitles}
     allowed = set(rows) if executable_ids is None else (set(executable_ids) & set(rows))
+    # P0-2：续接链要从这里沿原文顺序向后走（review_continuations 里的同名字典不共享）。
+    _ordered_ids = [int(row["id"]) for row in subtitles]
+    next_source_id: dict[int, int] = {
+        _ordered_ids[index]: _ordered_ids[index + 1] for index in range(len(_ordered_ids) - 1)
+    }
     want: dict[int, list[int]] = {}
     for item in fixes or ():
         try:
@@ -2867,6 +3840,7 @@ def apply_continuation_fill(
     skipped: list[dict[str, Any]] = []
     if not want:
         return {"inserted": inserted, "skipped": skipped}
+    global_used = _continuation_used_ids(payload)
     for strategy in _strategy_refs(payload):
         for chapter in _chapter_refs(strategy):
             beats = chapter.get("beats") or []
@@ -2891,17 +3865,1496 @@ def apply_continuation_fill(
                         skipped.append({"subtitle_id": add, "reason": "already_used"}); continue
                     if add not in allowed:
                         skipped.append({"subtitle_id": add, "reason": "not_selectable"}); continue
-                    out.append({
-                        "beat_function": str(beat.get("beat_function") or "continuation"),
-                        "subtitle_ids": [add],
-                        "utterance_complete": True,
-                        "continuation_of": last,
-                        "product_relation": beat.get("product_relation"),
-                    })
-                    used.add(add)
-                    inserted.append({"subtitle_id": add, "continuation_of": last})
+                    if (CAST_CONTINUATION_ROW_GUARD_ENABLED
+                            and (_cast_row_prune_reason(rows.get(add) or {})
+                                 or _cast_row_repair_blocked(rows.get(add) or {}))):
+                        skipped.append({"subtitle_id": add, "reason": "bad_row"}); continue
+                    # P0-2（2026-10-03 David 定）：补行必须"补到收口为止，否则不补"。
+                    chain, chain_ok, chain_reason = _continuation_closure_chain(
+                        add, rows, next_source_id, allowed, used | global_used,
+                    )
+                    if not chain_ok:
+                        skipped.append({"subtitle_id": add, "reason": chain_reason})
+                        continue
+                    previous = last
+                    for subtitle_id in chain:
+                        out.append({
+                            "beat_function": str(beat.get("beat_function") or "continuation"),
+                            "subtitle_ids": [subtitle_id],
+                            "utterance_complete": True,
+                            "continuation_of": previous,
+                            "product_relation": beat.get("product_relation"),
+                        })
+                        used.add(subtitle_id)
+                        inserted.append({"subtitle_id": subtitle_id, "continuation_of": previous})
+                        previous = subtitle_id
             chapter["beats"] = out
     return {"inserted": inserted, "skipped": skipped}
+
+CAST_CHAPTER_MAX_BEAT_GAP_SECONDS = 5.0
+CAST_CHAPTER_MAX_SPAN_SECONDS = 30.0
+CAST_CHAPTER_MIN_CLOSED_SECONDS = 3.0
+CAST_CHAPTER_MAX_TEXT_OVERLAP = 0.6
+CAST_BEAT_MIN_FRAGMENT_SECONDS = 1.2
+
+_CAST_CONTINUITY_LABELS = {
+    "chapter_not_closed": "半句章：整章不足两段，或整章源时长不足 3 秒，必须并回相邻章或删掉",
+    "chapter_span_too_wide": "跨时间拼接：整章首尾源时间跨度超过 30 秒",
+    "beat_too_short": "残句：单句源时长不足 1.2 秒，不得成 Beat",
+    "beat_window_far_gap": "跨窗拼接：同章相邻两句的源时间相隔超过 5 秒",
+    "chapter_repeat_evidence": "同义重复：同章两句在说同一件事（文本重合超过 60%）",
+    "beat_window_split": "拆窗：只取了连续口播窗的一部分，落盘会从半句开始或停在半句；已按原顺序补齐窗内缺行",
+}
+
+
+def _cast_rows_by_id(subtitles: Sequence[Mapping[str, Any]]) -> dict[int, Mapping[str, Any]]:
+    """Map subtitle id -> row without trusting the caller's ordering."""
+    rows: dict[int, Mapping[str, Any]] = {}
+    for row in subtitles or ():
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            rows[int(row["id"])] = row
+        except (TypeError, ValueError, KeyError):
+            continue
+    return rows
+
+
+def _cast_chapter_beat_spans(
+    chapter: Mapping[str, Any],
+    rows: Mapping[int, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Measure every Beat of one chapter on the real source timeline."""
+    raw_beats = chapter.get("beats") or ()
+    if isinstance(raw_beats, Mapping):
+        raw_beats = (raw_beats,)
+    spans: list[dict[str, Any]] = []
+    for beat_index, beat in enumerate(raw_beats, 1):
+        if not isinstance(beat, Mapping):
+            continue
+        raw_ids = beat.get("subtitle_ids", beat.get("ids", ()))
+        if isinstance(raw_ids, (str, int)) and not isinstance(raw_ids, bool):
+            raw_ids = (raw_ids,)
+        starts: list[float] = []
+        ends: list[float] = []
+        texts: list[str] = []
+        for value in raw_ids or ():
+            try:
+                subtitle_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            row = rows.get(subtitle_id)
+            if row is None:
+                continue
+            try:
+                starts.append(float(row["start"]))
+                ends.append(float(row["end"]))
+            except (TypeError, ValueError, KeyError):
+                continue
+            texts.append(str(row.get("text") or ""))
+        if not starts:
+            continue
+        spans.append({
+            "beat_index": beat_index,
+            "beat_id": str(beat.get("beat_id") or ""),
+            "start": min(starts),
+            "end": max(ends),
+            "text": " ".join(text for text in texts if text).strip(),
+        })
+    return spans
+
+
+_CAST_ROW_UNFINISHED_TAIL = "，、；：,;:…"
+
+
+def _cast_row_looks_unfinished(row: Mapping[str, Any]) -> bool:
+    """这一行是否「话没说完」：以逗号/顿号/分号这类句内标点结尾。
+
+    完全没有标点的行不算（那多半是残缺/空的 ASR 行，不是半句话），
+    避免对没有标点的素材做无意义的补齐。
+    """
+    text = str(row.get("text") or "").strip()
+    if not text:
+        return False
+    return text[-1] in _CAST_ROW_UNFINISHED_TAIL
+
+
+def _cast_row_repair_blocked(row: Mapping[str, Any]) -> bool:
+    """补齐用的内容护栏：会被内容策略屏蔽的行不参与补齐。"""
+    text = str(row.get("text") or "")
+    if not text:
+        return False
+    return bool(CAST_WINDOW_SPLIT_REPAIR_BLOCK_PATTERN.search(text))
+
+
+def _cast_window_member_index(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[int, str], dict[str, list[int]]]:
+    """把窗池摊成 (行ID -> 窗号) 与 (窗号 -> 成员行ID 列表)。"""
+    by_id: dict[int, str] = {}
+    members: dict[str, list[int]] = {}
+    try:
+        window_rows, _dropped = _cast_windows_for_rows(rows)
+    except Exception:  # noqa: BLE001 - 推算失败时按「没有窗」处理
+        return {}, {}
+    for window in window_rows:
+        window_id = str(window.get("window_id") or "")
+        ids = [int(value) for value in (window.get("window_ids") or ())]
+        if not window_id or not ids:
+            continue
+        members[window_id] = ids
+        for subtitle_id in ids:
+            by_id[subtitle_id] = window_id
+    return by_id, members
+
+
+def _cast_window_fill_scope(
+    window_id: str | None,
+    own_ids: Sequence[int],
+    members: Mapping[str, Sequence[int]],
+    max_rows: int,
+) -> list[int]:
+    """补齐用的搜索范围 = 本窗 + 相邻窗相邻的最多 max_rows 行（P0-7）。
+
+    缺的那半句常常就在隔壁窗里，只搜本窗永远补不上（实测 G04 的 47 处补不上里
+    37 处属这一类）。范围只向两侧各扩 max_rows 行，行数/秒数上限与「必须在可执行
+    池、未被用过、不是坏行」这些约束一条不变 —— 补行仍要能顺着原句连下去。
+    """
+    scope: list[int] = [int(value) for value in own_ids]
+    if not window_id or not members:
+        return scope
+    order = list(members.keys())
+    try:
+        position = order.index(str(window_id))
+    except ValueError:
+        return scope
+    take = max(1, int(max_rows))
+    if position > 0:
+        before = [int(value) for value in (members.get(order[position - 1]) or ())]
+        scope = before[-take:] + scope
+    if position + 1 < len(order):
+        after = [int(value) for value in (members.get(order[position + 1]) or ())]
+        scope = scope + after[:take]
+    return scope
+
+
+def _cast_window_neighbor_edges(
+    window_id: str | None,
+    members: Mapping[str, Sequence[int]],
+) -> tuple[int | None, int | None]:
+    """相邻窗的「贴边行」：(上一窗最后一行, 下一窗第一行)。
+
+    窗与窗之间常因剔行/间隙而 ID 不连续（`+1` 走不过去），所以跨窗补齐必须按
+    「窗序」找贴边行，而不是按 ID 加一 —— 只有这样才真的能补到隔壁窗那半句。
+    """
+    if not window_id or not members:
+        return None, None
+    order = list(members.keys())
+    try:
+        position = order.index(str(window_id))
+    except ValueError:
+        return None, None
+    previous_edge = next_edge = None
+    if position > 0:
+        before = [int(value) for value in (members.get(order[position - 1]) or ())]
+        previous_edge = before[-1] if before else None
+    if position + 1 < len(order):
+        after = [int(value) for value in (members.get(order[position + 1]) or ())]
+        next_edge = after[0] if after else None
+    return previous_edge, next_edge
+
+
+def _cast_chapter_selected_ids(chapter: Mapping[str, Any]) -> list[int]:
+    """按原顺序取出一章里被选中的字幕 ID（去重，保序）。"""
+    raw_beats = chapter.get("beats") or ()
+    if isinstance(raw_beats, Mapping):
+        raw_beats = (raw_beats,)
+    selected: list[int] = []
+    for beat in raw_beats:
+        if not isinstance(beat, Mapping):
+            continue
+        raw_ids = beat.get("subtitle_ids", beat.get("ids", ()))
+        if isinstance(raw_ids, (str, int)) and not isinstance(raw_ids, bool):
+            raw_ids = (raw_ids,)
+        for value in raw_ids or ():
+            try:
+                subtitle_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if subtitle_id not in selected:
+                selected.append(subtitle_id)
+    return selected
+
+
+def _cast_window_split_issues(
+    casting_payload: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """报告「只取了连续口播窗的一部分」的章：落盘会从半句开始或停在半句。
+
+    纯确定性、只读：不重写、不重排、不删行。
+    """
+    by_id, members = _cast_window_member_index(rows)
+    if not members:
+        return []
+    issues: list[dict[str, Any]] = []
+    for strategy_index, strategy in enumerate(_strategy_refs(casting_payload), 1):
+        strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("chapter_id") or f"C{chapter_index}")
+            picked_by_window: dict[str, list[int]] = {}
+            for subtitle_id in _cast_chapter_selected_ids(chapter):
+                window_id = by_id.get(subtitle_id)
+                if window_id:
+                    picked_by_window.setdefault(window_id, []).append(subtitle_id)
+            for window_id, picked in picked_by_window.items():
+                full = members.get(window_id) or []
+                if not full or set(picked) >= set(full):
+                    continue
+                picked_set = set(picked)
+                issues.append({
+                    "kind": "beat_window_split",
+                    "strategy_id": strategy_id,
+                    "chapter_id": chapter_id,
+                    "window_id": window_id,
+                    "window_ids": list(full),
+                    "picked_ids": list(picked),
+                    "missing_ids": [value for value in full if value not in picked_set],
+                    "text": "/".join(str(value) for value in picked)[:40],
+                })
+    return issues
+
+
+def _repair_cast_window_splits(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+    *,
+    log_fn: Any = None,
+) -> dict[str, Any]:
+    """把被拆开的连续口播窗按原顺序补回（确定性；不改写、不重排、不加 AI 调用）。
+
+    只补「同一窗里缺的那几行」，且必须：在可执行池内、尚未被别的 Beat 用过、
+    不在坏行名单里、不超行数/秒数上限。补不动就如实记进 skipped，不静默。
+    """
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    receipt: dict[str, Any] = {
+        "repaired": [], "skipped": [], "opening_prefix_locked": [], "incomplete": []}
+    if not CAST_WINDOW_SPLIT_REPAIR_ENABLED:
+        return receipt
+    declared_opening_ids = _cast_declared_opening_ids(payload)
+    try:
+        pool_rows = _director_casting_rows(subtitles, executable_ids)
+    except Exception as exc:  # noqa: BLE001 - 补齐绝不阻断导演
+        _log(f"拆窗补齐跳过（候选池构建失败）：{type(exc).__name__}: {exc}")
+        return receipt
+    by_id, members = _cast_window_member_index(pool_rows)
+    if not members:
+        return receipt
+    row_by_id = _cast_rows_by_id(subtitles)
+    allowed: set[int] = {int(value) for value in (executable_ids or ())} or set(row_by_id)
+    allowed &= set(row_by_id)
+    max_rows = max(1, int(CAST_WINDOW_SPLIT_REPAIR_MAX_ROWS))
+    max_seconds = max(0.0, float(CAST_WINDOW_SPLIT_REPAIR_MAX_SECONDS))
+
+    def _seconds(subtitle_id: int) -> float:
+        row = row_by_id.get(subtitle_id) or {}
+        try:
+            return max(0.0, float(row["end"]) - float(row["start"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    for strategy_index, strategy in enumerate(_strategy_refs(payload), 1):
+        strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("chapter_id") or f"C{chapter_index}")
+            raw_beats = chapter.get("beats") or []
+            if isinstance(raw_beats, Mapping):
+                raw_beats = [raw_beats]
+            if not isinstance(raw_beats, list) or not raw_beats:
+                continue
+            used = set(_cast_chapter_selected_ids(chapter))
+            rebuilt: list[Any] = []
+            for beat in raw_beats:
+                if not isinstance(beat, Mapping):
+                    rebuilt.append(beat)
+                    continue
+                beat_ids = _cast_chapter_selected_ids({"beats": [beat]})
+                if not beat_ids:
+                    rebuilt.append(beat)
+                    continue
+                window_id = by_id.get(beat_ids[0])
+                full = list(members.get(window_id) or []) if window_id else []
+                if not full:
+                    rebuilt.append(beat)
+                    continue
+                # P0-7：补齐范围放宽到相邻窗相邻的几行。
+                scope = (_cast_window_fill_scope(window_id, full, members, max_rows)
+                         if (CAST_WINDOW_CROSS_FILL_ENABLED and window_id) else full)
+                previous_edge, next_edge = (_cast_window_neighbor_edges(window_id, members)
+                                            if (CAST_WINDOW_CROSS_FILL_ENABLED and window_id)
+                                            else (None, None))
+
+                def _usable(candidate: int) -> bool:
+                    if candidate in used or candidate not in allowed:
+                        return False
+                    row = row_by_id.get(candidate)
+                    if not row or _cast_row_prune_reason(row):
+                        return False
+                    # 不足半秒又不收句的行补上也没意义（只会变成水词），不补。
+                    if (_seconds(candidate) < CAST_WINDOW_SPLIT_REPAIR_MIN_ROW_SECONDS
+                            and not _cast_row_closes_thought(row)):
+                        return False
+                    return True
+
+                # 头部：从上一行倒着走，走到「上一句刚收句」为止（不含那个收句行）
+                head_chain: list[int] = []
+                cursor = beat_ids[0] - 1
+                # P0-7 跨窗：这一窗的第一行就在用，缺口在「上一窗最后一行」上。
+                if (cursor not in scope and full and beat_ids[0] == full[0]
+                        and previous_edge is not None):
+                    cursor = previous_edge
+                if (cursor in scope and _usable(cursor)
+                        and _cast_row_looks_unfinished(row_by_id.get(cursor) or {})):
+                    while (cursor in scope and _usable(cursor) and len(head_chain) < max_rows):
+                        head_chain.insert(0, cursor)
+                        previous = cursor - 1
+                        if (previous not in scope
+                                or not _cast_row_looks_unfinished(row_by_id.get(previous) or {})):
+                            break
+                        cursor = previous
+                if sum(_seconds(value) for value in head_chain) > max_seconds:
+                    head_chain = []
+                # 补进来的头必须「从一句的开头起」：如果走到行数上限还没走到上一句的
+                # 收句行，那补上去只是把半句挪了个位置（会变成新的半句头），整条不补。
+                if (CAST_WINDOW_SPLIT_REPAIR_CLOSED_ONLY_ENABLED and head_chain
+                        and _cast_row_looks_unfinished(row_by_id.get(head_chain[0] - 1) or {})):
+                    receipt["incomplete"].append({
+                        "chapter_id": chapter_id, "side": "head",
+                        "subtitle_ids": list(head_chain), "reason": "chain_not_started",
+                    })
+                    head_chain = []
+                # P0-A 开场门禁：全片第一句的位置由 AI 的开场声明锁定。程序补行
+                # 只有让「补行 + 锚点」仍等于声明前缀时才允许排在第一位，否则整句
+                # 不补（记审计）—— 不把 AI 判为偏弱的备选句顶到开头。
+                if (head_chain and chapter_index == 1 and not rebuilt
+                        and not _cast_opening_prefix_allowed(
+                            head_chain, beat_ids, declared_opening_ids)):
+                    receipt["opening_prefix_locked"].append({
+                        "chapter_id": chapter_id, "window_id": window_id,
+                        "picked_ids": list(beat_ids), "subtitle_ids": list(head_chain),
+                        "text": "/".join(
+                            str((row_by_id.get(value) or {}).get("text") or "")[:12]
+                            for value in head_chain)[:40],
+                    })
+                    head_chain = []
+
+                # 尾部：从下一行顺着走，直到某一行收句（含该行）
+                tail_chain: list[int] = []
+                last_id = beat_ids[-1]
+                if _cast_row_looks_unfinished(row_by_id.get(last_id) or {}):
+                    cursor = last_id + 1
+                    # P0-7 跨窗：缺的续句在下一窗的第一行上。
+                    if (cursor not in scope and full and last_id == full[-1]
+                            and next_edge is not None):
+                        cursor = next_edge
+                    while (cursor in scope and _usable(cursor) and len(tail_chain) < max_rows):
+                        tail_chain.append(cursor)
+                        if _cast_row_closes_thought(row_by_id.get(cursor) or {}):
+                            break
+                        cursor += 1
+                if sum(_seconds(value) for value in tail_chain) > max_seconds:
+                    tail_chain = []
+                # 补回来的尾巴必须「走到收句行」：没走到就说明这句还没完（只是把半句
+                # 往后挪了一行），整条不补 —— 宁可如实报告，也不制造新的半句。
+                if (CAST_WINDOW_SPLIT_REPAIR_CLOSED_ONLY_ENABLED and tail_chain
+                        and not _cast_row_closes_thought(row_by_id.get(tail_chain[-1]) or {})):
+                    receipt["incomplete"].append({
+                        "chapter_id": chapter_id, "side": "tail",
+                        "subtitle_ids": list(tail_chain), "reason": "chain_not_closed",
+                    })
+                    tail_chain = []
+
+                blocked_rows = [
+                    value for value in (head_chain + tail_chain)
+                    if _cast_row_repair_blocked(row_by_id.get(value) or {})
+                ]
+                if blocked_rows:
+                    receipt["skipped"].append({
+                        "chapter_id": chapter_id, "window_id": window_id,
+                        "picked_ids": list(beat_ids), "subtitle_id": blocked_rows[0],
+                        "reason": "blocked_content",
+                    })
+                    head_chain = []
+                    tail_chain = []
+
+                if not head_chain and not tail_chain:
+                    if window_id and set(beat_ids) < set(full):
+                        receipt["skipped"].append({
+                            "chapter_id": chapter_id, "window_id": window_id,
+                            "picked_ids": list(beat_ids), "reason": "no_fillable_row",
+                        })
+                    rebuilt.append(beat)
+                    continue
+
+                for value in head_chain:
+                    rebuilt.append({
+                        "beat_function": str(beat.get("beat_function") or "continuation"),
+                        "subtitle_ids": [value],
+                        "utterance_complete": True,
+                        "continuation_of": value - 1,
+                        "window_split_repair": window_id,
+                    })
+                    used.add(value)
+                    receipt["repaired"].append({
+                        "subtitle_id": value, "window_id": window_id,
+                        "chapter_id": chapter_id, "side": "head",
+                        "cross_window": value not in full,
+                    })
+                rebuilt.append(beat)
+                for value in tail_chain:
+                    rebuilt.append({
+                        "beat_function": str(beat.get("beat_function") or "continuation"),
+                        "subtitle_ids": [value],
+                        "utterance_complete": True,
+                        "continuation_of": last_id,
+                        "window_split_repair": window_id,
+                    })
+                    used.add(value)
+                    receipt["repaired"].append({
+                        "subtitle_id": value, "window_id": window_id,
+                        "chapter_id": chapter_id, "side": "tail",
+                        "cross_window": value not in full,
+                    })
+            chapter["beats"] = rebuilt
+    return receipt
+
+
+def _cast_declared_opening_ids(payload: Mapping[str, Any]) -> list[int]:
+    """取 AI 声明的开场字幕 ID（opening_selection.selected_subtitle_ids）。
+
+    取不到就返回空列表 —— 调用方据此按「声明不可用」保守处理。
+    """
+    def _from(node: Any) -> list[int]:
+        if not isinstance(node, Mapping):
+            return []
+        selection = node.get("opening_selection")
+        if not isinstance(selection, Mapping):
+            return []
+        raw = selection.get("selected_subtitle_ids") or ()
+        if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+            raw = (raw,)
+        values: list[int] = []
+        for value in raw or ():
+            try:
+                subtitle_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if subtitle_id not in values:
+                values.append(subtitle_id)
+        return values
+
+    declared = _from(payload)
+    if declared:
+        return declared
+    try:
+        declared = _from(_two_pass_primary(payload))
+    except Exception:  # noqa: BLE001 - 取不到声明不是错误
+        declared = []
+    if declared:
+        return declared
+    try:
+        for strategy in _strategy_refs(payload):
+            declared = _from(strategy)
+            if declared:
+                return declared
+    except Exception:  # noqa: BLE001 - 取不到声明不是错误
+        return []
+    return declared
+
+
+def _cast_opening_prefix_allowed(
+    head_ids: Sequence[int],
+    anchor_ids: Sequence[int],
+    declared_ids: Sequence[int],
+) -> bool:
+    """补进来的头部行是否仍落在 AI 声明的开场前缀之内。
+
+    全片第一句必须来自 AI 的开场声明：程序补行只有让「补行 + 锚点」正好等于
+    声明前缀时才允许排在第一位，否则整句不补 —— 避免把 AI 判为偏弱的备选句
+    （实测：#25「好看吧，」）顶到开头。声明不可用时保守不补。
+    """
+    if not CAST_OPENING_PREFIX_GUARD_ENABLED:
+        return True
+    if not declared_ids:
+        return False
+    produced = [int(value) for value in list(head_ids) + list(anchor_ids)]
+    expected = [int(value) for value in declared_ids]
+    return produced == expected[:len(produced)]
+
+
+def _cast_row_needs_leadin(row: Mapping[str, Any]) -> bool:
+    """章首这句是不是「接着上一句说的」——以强接续连词起头。
+
+    只做字面判定，不看语义；词表刻意收窄到几乎必然是承接的连词，避免误伤
+    能独立成句的首句（「其实 / 就是 / 你看」这类不收）。
+    """
+    text = str(row.get("text") or "").strip()
+    if not text:
+        return False
+    return any(text.startswith(prefix) for prefix in CAST_CHAPTER_HEAD_DEPENDENT_PREFIXES)
+
+
+def _cast_row_is_edge_stub(row: Mapping[str, Any], seconds: float) -> bool:
+    """章首/章尾的「纯语气词残句」：≤1.2s、不收句，且去标点后不超过 3 个字。
+
+    实测 #95「是的，」0.36s / #191「哎呀，」0.68s / #606「真的，」1.07s 属于这类，
+    放在章首/章尾只会变成水词。有实义的前导句（如 #81「而且这件衣服有一个很牛
+    的点，」0.96s）不在此列 —— 它有内容，只是句子短，不该被判成残句。
+    """
+    if seconds >= CAST_CHAPTER_EDGE_STUB_SECONDS:
+        return False
+    if _cast_row_closes_thought(row):
+        return False
+    text = re.sub(r"[\s，,。.！!？?、：:；;…~～]", "", str(row.get("text") or ""))
+    return 0 < len(text) <= CAST_CHAPTER_EDGE_STUB_MAX_CHARS
+
+
+def _cast_chapter_drop_row(chapter: dict[str, Any], subtitle_id: int) -> bool:
+    """从章内移除一个字幕 ID（只移除该行本身；空 Beat 一并移除，不重写原话）。"""
+    raw_beats = chapter.get("beats") or []
+    if isinstance(raw_beats, Mapping):
+        raw_beats = [raw_beats]
+    if not isinstance(raw_beats, list):
+        return False
+    kept: list[Any] = []
+    removed = False
+    for beat in raw_beats:
+        if removed or not isinstance(beat, Mapping):
+            kept.append(beat)
+            continue
+        ids = _cast_chapter_selected_ids({"beats": [beat]})
+        if subtitle_id not in ids:
+            kept.append(beat)
+            continue
+        remaining = [value for value in ids if value != subtitle_id]
+        removed = True
+        if not remaining:
+            continue
+        item = dict(beat)
+        for key in ("source_span", "subtitle_span", "ids", "subtitle_ids"):
+            item.pop(key, None)
+        item["subtitle_ids"] = remaining
+        kept.append(item)
+    if not removed:
+        return False
+    chapter["beats"] = kept
+    return True
+
+
+def _guard_chapter_edges(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+    *,
+    log_fn: Any = None,
+) -> dict[str, Any]:
+    """章首/章尾收口（确定性、零 AI 调用；只动边界，不改写、不重排、不动中间）。
+
+    ① 章尾停在半句：同一口播窗内还有可用的后续原话、且能一路走到一个收句行时，
+       按原顺序补到章尾；走不到收句行就不补（绝不把断得更远的句子硬接上去）。
+    ② 补不动、又只是 ≤1.2s 的水词/残句：从章内移出，让边界回退到上一个完整句。
+    ③ 章首缺上文（以接续连词起头、上一句未被任何章选中）：补一行前导句（P0-10）。
+    ④ 其余情况如实报告，不改句。第一章章首由 AI 的开场声明保护，不参与移出。
+    """
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    receipt: dict[str, Any] = {
+        "tail_filled": [], "tail_stub_removed": [], "head_stub_removed": [],
+        "head_filled": [], "reported": [], "checked_chapters": 0,
+    }
+    if not CAST_CHAPTER_EDGE_GUARD_ENABLED:
+        return receipt
+    try:
+        pool_rows = _director_casting_rows(subtitles, executable_ids)
+    except Exception as exc:  # noqa: BLE001 - 收口绝不阻断导演
+        _log(f"章首章尾收口跳过（候选池构建失败）：{type(exc).__name__}: {exc}")
+        return receipt
+    by_id, members = _cast_window_member_index(pool_rows)
+    row_by_id = _cast_rows_by_id(subtitles)
+    allowed: set[int] = {int(value) for value in (executable_ids or ())} or set(row_by_id)
+    allowed &= set(row_by_id)
+    min_row_seconds = max(0.0, float(CAST_WINDOW_SPLIT_REPAIR_MIN_ROW_SECONDS))
+    max_rows = max(1, int(CAST_WINDOW_SPLIT_REPAIR_MAX_ROWS))
+    max_seconds = max(0.0, float(CAST_WINDOW_SPLIT_REPAIR_MAX_SECONDS))
+
+    def _seconds(subtitle_id: int) -> float:
+        row = row_by_id.get(subtitle_id) or {}
+        try:
+            return max(0.0, float(row["end"]) - float(row["start"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    def _fillable(candidate: int, strategy_used: set[int]) -> bool:
+        if candidate in strategy_used or candidate not in allowed:
+            return False
+        row = row_by_id.get(candidate)
+        if not row or _cast_row_prune_reason(row) or _cast_row_repair_blocked(row):
+            return False
+        if _seconds(candidate) < min_row_seconds and not _cast_row_closes_thought(row):
+            return False
+        return True
+
+    for strategy in _strategy_refs(payload):
+        strategy_used: set[int] = set()
+        for chapter in _chapter_refs(strategy):
+            if isinstance(chapter, Mapping):
+                for value in _cast_chapter_selected_ids(chapter):
+                    strategy_used.add(value)
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("chapter_id") or f"C{chapter_index}")
+            raw_beats = chapter.get("beats") or []
+            if isinstance(raw_beats, Mapping):
+                raw_beats = [raw_beats]
+            if not isinstance(raw_beats, list) or not raw_beats:
+                continue
+            receipt["checked_chapters"] += 1
+
+            # ①② 章尾
+            for _ in range(3):
+                ids = _cast_chapter_selected_ids(chapter)
+                if not ids:
+                    break
+                tail_id = ids[-1]
+                tail_row = row_by_id.get(tail_id) or {}
+                if not _cast_row_looks_unfinished(tail_row):
+                    break
+                window_id = by_id.get(tail_id)
+                filled: list[int] = []
+                if window_id:
+                    cursor = tail_id + 1
+                    chain: list[int] = []
+                    window_members = members.get(window_id) or ()
+                    next_edge = None
+                    # P0-7：章尾补齐同样允许跨到隔壁窗（缺的半句常在那里）。
+                    if CAST_WINDOW_CROSS_FILL_ENABLED:
+                        window_members = _cast_window_fill_scope(
+                            window_id, list(window_members), members, max_rows)
+                        _previous_edge, next_edge = _cast_window_neighbor_edges(
+                            window_id, members)
+                    own_window_ids = [int(value) for value in (members.get(window_id) or ())]
+                    # 章尾那一行已经是本窗最后一行时，续句在「下一窗的第一行」上。
+                    if (cursor not in window_members and own_window_ids
+                            and tail_id == own_window_ids[-1] and next_edge is not None):
+                        cursor = next_edge
+                    while (cursor in window_members and len(chain) < max_rows
+                           and _fillable(cursor, strategy_used)):
+                        chain.append(cursor)
+                        if _cast_row_closes_thought(row_by_id.get(cursor) or {}):
+                            filled = chain
+                            break
+                        cursor += 1
+                    if filled and sum(_seconds(value) for value in filled) > max_seconds:
+                        filled = []
+                if filled:
+                    beats_for_append = chapter.get("beats") or []
+                    if isinstance(beats_for_append, Mapping):
+                        beats_for_append = [beats_for_append]
+                    for value in filled:
+                        beats_for_append.append({
+                            "beat_function": "continuation",
+                            "subtitle_ids": [value],
+                            "utterance_complete": True,
+                            "continuation_of": tail_id,
+                            "chapter_edge_guard": "tail",
+                        })
+                        strategy_used.add(value)
+                        receipt["tail_filled"].append({
+                            "chapter_id": chapter_id, "subtitle_id": value,
+                            "window_id": window_id, "text": str(
+                                (row_by_id.get(value) or {}).get("text") or "")[:24],
+                        })
+                    chapter["beats"] = beats_for_append
+                    break
+                if _cast_row_is_edge_stub(tail_row, _seconds(tail_id)):
+                    if not _cast_chapter_drop_row(chapter, tail_id):
+                        break
+                    strategy_used.discard(tail_id)
+                    receipt["tail_stub_removed"].append({
+                        "chapter_id": chapter_id, "subtitle_id": tail_id,
+                        "text": str(tail_row.get("text") or "")[:24],
+                    })
+                    continue
+                receipt["reported"].append({
+                    "chapter_id": chapter_id, "edge": "tail", "subtitle_id": tail_id,
+                    "text": str(tail_row.get("text") or "")[:24],
+                    "reason": "dangling_tail_kept",
+                })
+                break
+
+            # ②.5 章首缺上文（P0-10）：只补一行前导句，不改写、不删句
+            if CAST_CHAPTER_HEAD_FILL_ENABLED and chapter_index > 1:
+                head_ids = _cast_chapter_selected_ids(chapter)
+                if head_ids:
+                    head_id = head_ids[0]
+                    head_row = row_by_id.get(head_id) or {}
+                    if _cast_row_needs_leadin(head_row):
+                        window_id = by_id.get(head_id)
+                        prev_id = head_id - 1
+                        if window_id and CAST_WINDOW_CROSS_FILL_ENABLED:
+                            own_ids = [int(value) for value in (members.get(window_id) or ())]
+                            prev_edge, _next_edge = _cast_window_neighbor_edges(
+                                window_id, members)
+                            if own_ids and head_id == own_ids[0] and prev_edge is not None:
+                                prev_id = prev_edge
+                        prev_row = row_by_id.get(prev_id)
+                        head_item = {
+                            "chapter_id": chapter_id, "edge": "head",
+                            "subtitle_id": head_id,
+                            "text": str(head_row.get("text") or "")[:24],
+                        }
+                        if not prev_row:
+                            head_item["reason"] = "head_dangling_leadin_no_previous"
+                            receipt["reported"].append(head_item)
+                        elif _cast_row_needs_leadin(prev_row):
+                            head_item["reason"] = "head_dangling_leadin_chain"
+                            receipt["reported"].append(head_item)
+                        elif not _fillable(prev_id, strategy_used):
+                            head_item["reason"] = "head_dangling_leadin_unfillable"
+                            head_item["prev_subtitle_id"] = prev_id
+                            receipt["reported"].append(head_item)
+                        else:
+                            beats_for_prepend = chapter.get("beats") or []
+                            if isinstance(beats_for_prepend, Mapping):
+                                beats_for_prepend = [beats_for_prepend]
+                            chapter["beats"] = [{
+                                "beat_function": "leadin",
+                                "subtitle_ids": [prev_id],
+                                "utterance_complete": True,
+                                "leadin_to": head_id,
+                                "chapter_edge_guard": "head",
+                            }] + list(beats_for_prepend)
+                            strategy_used.add(prev_id)
+                            head_item["prev_subtitle_id"] = prev_id
+                            head_item["window_id"] = window_id
+                            head_item["prev_text"] = str(
+                                (row_by_id.get(prev_id) or {}).get("text") or "")[:24]
+                            receipt["head_filled"].append(head_item)
+
+            # ③ 章首（第一章由 AI 的开场声明保护，不参与移出）
+            if chapter_index == 1:
+                continue
+            for _ in range(3):
+                ids = _cast_chapter_selected_ids(chapter)
+                if not ids:
+                    break
+                head_id = ids[0]
+                head_row = row_by_id.get(head_id) or {}
+                raw_first = chapter.get("beats") or []
+                first_beat = raw_first[0] if isinstance(raw_first, list) and raw_first else raw_first
+                if isinstance(first_beat, Mapping) and str(
+                        first_beat.get("chapter_edge_guard") or "") == "head":
+                    break  # 刚补进来的前导句，不再判移出
+                if not _cast_row_is_edge_stub(head_row, _seconds(head_id)):
+                    break
+                if not _cast_chapter_drop_row(chapter, head_id):
+                    break
+                strategy_used.discard(head_id)
+                receipt["head_stub_removed"].append({
+                    "chapter_id": chapter_id, "subtitle_id": head_id,
+                    "text": str(head_row.get("text") or "")[:24],
+                })
+    return receipt
+
+
+def _cast_half_sentence_tail_gate(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+    *,
+    log_fn: Any = None,
+) -> dict[str, Any]:
+    """章尾半句收口（P0-9；确定性、零 AI 调用；只动章尾，不改写、不重排）。
+
+    一章的最后一句「话没说完」（以逗号这类句内标点结尾），而它的续句确实存在、
+    但拿不到（已被别的章用掉 / 不可执行 / 被剔成坏行 / 不足半秒又不收句）时：
+      mode="drop"（默认）→ 把这半句从章内移出：宁可少一句，也不把半句交出去；
+      mode="keep"        → 只报告，不改句。
+    续句本来就不存在（素材到此为止）不算半句，不动；续句可补的交给拆窗补齐与
+    章尾收口去补，这里只记一条 completed_hint，不重复动手。
+    """
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    receipt: dict[str, Any] = {"dropped": [], "reported": [], "completed_hint": []}
+    if not CAST_HALF_SENTENCE_TAIL_GUARD_ENABLED:
+        return receipt
+    try:
+        _director_casting_rows(subtitles, executable_ids)
+    except Exception as exc:  # noqa: BLE001 - 收口绝不阻断导演
+        _log(f"章尾半句收口跳过（候选池构建失败）：{type(exc).__name__}: {exc}")
+        return receipt
+    row_by_id = _cast_rows_by_id(subtitles)
+    allowed: set[int] = {int(value) for value in (executable_ids or ())} or set(row_by_id)
+    allowed &= set(row_by_id)
+    min_row_seconds = max(0.0, float(CAST_WINDOW_SPLIT_REPAIR_MIN_ROW_SECONDS))
+    mode = str(CAST_HALF_SENTENCE_TAIL_MODE or "drop").strip().lower()
+
+    def _seconds(subtitle_id: int) -> float:
+        row = row_by_id.get(subtitle_id) or {}
+        try:
+            return max(0.0, float(row["end"]) - float(row["start"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    for strategy_index, strategy in enumerate(_strategy_refs(payload), 1):
+        strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
+        strategy_used: set[int] = set()
+        for chapter in _chapter_refs(strategy):
+            if isinstance(chapter, Mapping):
+                strategy_used |= set(_cast_chapter_selected_ids(chapter))
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("chapter_id") or f"C{chapter_index}")
+            for _ in range(3):
+                ids = _cast_chapter_selected_ids(chapter)
+                if not ids:
+                    break
+                tail_id = ids[-1]
+                tail_row = row_by_id.get(tail_id) or {}
+                if not _cast_row_looks_unfinished(tail_row):
+                    break
+                next_id = tail_id + 1
+                next_row = row_by_id.get(next_id)
+                if not next_row:
+                    break  # 素材到此为止：这不是半句
+                if next_id in strategy_used:
+                    reason = "continuation_used_elsewhere"
+                elif next_id not in allowed:
+                    reason = "continuation_not_executable"
+                elif _cast_row_prune_reason(next_row):
+                    reason = "continuation_pruned_row"
+                elif _cast_row_repair_blocked(next_row):
+                    reason = "continuation_blocked_content"
+                elif (_seconds(next_id) < min_row_seconds
+                      and not _cast_row_closes_thought(next_row)):
+                    reason = "continuation_too_short"
+                else:
+                    receipt["completed_hint"].append({
+                        "chapter_id": chapter_id, "subtitle_id": tail_id,
+                        "reason": "continuation_fillable",
+                    })
+                    break
+                item = {
+                    "chapter_id": chapter_id, "subtitle_id": tail_id,
+                    "next_subtitle_id": next_id, "reason": reason,
+                    "text": str(tail_row.get("text") or "")[:24],
+                    "next_text": str(next_row.get("text") or "")[:24],
+                }
+                if mode == "drop" and len(ids) > 1 and _cast_chapter_drop_row(chapter, tail_id):
+                    strategy_used.discard(tail_id)
+                    receipt["dropped"].append(item)
+                    continue
+                receipt["reported"].append(item)
+                break
+    return receipt
+
+
+def _apply_cast_deterministic_repairs(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+    *,
+    budget_seconds: float | None = None,
+    log_fn: Any = None,
+) -> dict[str, Any]:
+    """拆窗补齐 + 整窗整取 + 章首章尾收口：确定性、零 AI 调用、不改写、不重排。
+
+    校准修订版是一条全新片单，采纳之后同样要过这三道；否则「采纳修订」等于把
+    三处确定性补齐全部丢掉，交付的片单又回到未修补状态。
+    """
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    receipts: dict[str, Any] = {}
+    try:
+        receipts["split_repair"] = _repair_cast_window_splits(
+            payload, subtitles, executable_ids, log_fn=log_fn)
+    except Exception as exc:  # noqa: BLE001 - 补齐绝不阻断导演
+        receipts["split_repair"] = {"repaired": [], "skipped": []}
+        _log(f"拆窗补齐异常（已跳过）：{type(exc).__name__}: {exc}")
+    try:
+        receipts["whole_keep"] = _expand_cast_windows_whole(
+            payload, subtitles, executable_ids, budget_seconds=budget_seconds, log_fn=log_fn)
+    except Exception as exc:  # noqa: BLE001 - 整取绝不阻断导演
+        receipts["whole_keep"] = {}
+        _log(f"整窗整取异常（已跳过）：{type(exc).__name__}: {exc}")
+    try:
+        receipts["chapter_edges"] = _guard_chapter_edges(
+            payload, subtitles, executable_ids, log_fn=log_fn)
+    except Exception as exc:  # noqa: BLE001 - 收口绝不阻断导演
+        receipts["chapter_edges"] = {}
+        _log(f"章首章尾收口异常（已跳过）：{type(exc).__name__}: {exc}")
+    try:
+        receipts["half_sentence"] = _cast_half_sentence_tail_gate(
+            payload, subtitles, executable_ids, log_fn=log_fn)
+    except Exception as exc:  # noqa: BLE001 - 收口绝不阻断导演
+        receipts["half_sentence"] = {}
+        _log(f"章尾半句收口异常（已跳过）：{type(exc).__name__}: {exc}")
+    repaired = len((receipts.get("split_repair") or {}).get("repaired") or [])
+    kept = len((receipts.get("whole_keep") or {}).get("kept") or [])
+    edges = receipts.get("chapter_edges") or {}
+    edge_changes = (len(edges.get("tail_filled") or [])
+                    + len(edges.get("tail_stub_removed") or [])
+                    + len(edges.get("head_stub_removed") or [])
+                    + len(edges.get("head_filled") or []))
+    half_changes = len((receipts.get("half_sentence") or {}).get("dropped") or [])
+    if repaired or kept or edge_changes or half_changes:
+        _log(f"确定性补齐（修订版）：拆窗 {repaired} 句、整窗整取 {kept} 句、"
+             f"首尾收口 {edge_changes} 处、章尾半句收口 {half_changes} 处。")
+    return receipts
+
+
+def _whole_kept_beat(
+    beat: Mapping[str, Any],
+    subtitle_id: int,
+    window_id: str | None,
+) -> dict[str, Any]:
+    """整窗整取补进来的一行：沿用锚点 Beat 的角色字段，只换字幕 ID。"""
+    item = dict(beat)
+    for key in (
+        "ids", "subtitle_ids", "source_span", "subtitle_span", "sec",
+        "beat_id", "replaces_beat_id", "opening_fallback_subtitle_ids",
+        "opening_backup_subtitle_ids",
+    ):
+        item.pop(key, None)
+    item["subtitle_ids"] = [subtitle_id]
+    item["utterance_complete"] = True
+    item["window_whole_keep"] = window_id
+    return item
+
+
+def _cast_opening_closing_gate(
+    payload: Mapping[str, Any],
+    row_by_id: Mapping[int, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """首尾门禁（确定性、只读）：只报告，不改写、不重排、不删句。
+
+    开头看「第一句是不是残句 / 与前几句是否同义重复」；
+    收尾章看「最后一句是不是 <1.2s 残句 / 与前句是否同义重复 / 有没有收尾动作词」。
+    """
+    import difflib
+
+    opening: list[dict[str, Any]] = []
+    closing: list[dict[str, Any]] = []
+    try:
+        chapters = [
+            chapter
+            for strategy in _strategy_refs(payload)
+            for chapter in _chapter_refs(strategy)
+            if isinstance(chapter, Mapping)
+        ]
+    except Exception:  # noqa: BLE001 - 门禁绝不阻断导演
+        return opening, closing
+    if not chapters:
+        return opening, closing
+
+    def _text(subtitle_id: int) -> str:
+        return str((row_by_id.get(subtitle_id) or {}).get("text") or "").strip()
+
+    def _seconds(subtitle_id: int) -> float:
+        row = row_by_id.get(subtitle_id) or {}
+        try:
+            return max(0.0, float(row["end"]) - float(row["start"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    first_ids = _cast_chapter_selected_ids(chapters[0])
+    if first_ids:
+        head_text = _text(first_ids[0])
+        if _cast_row_looks_unfinished(row_by_id.get(first_ids[0]) or {}):
+            opening.append({"kind": "opening_unfinished", "text": head_text[:24]})
+        for other in first_ids[1:4]:
+            other_text = _text(other)
+            if not head_text or not other_text:
+                continue
+            if difflib.SequenceMatcher(None, head_text, other_text).ratio() > CAST_CHAPTER_MAX_TEXT_OVERLAP:
+                opening.append({"kind": "opening_repeat", "text": other_text[:24]})
+                break
+
+    last_ids = _cast_chapter_selected_ids(chapters[-1])
+    if last_ids:
+        tail_id = last_ids[-1]
+        tail_text = _text(tail_id)
+        if _seconds(tail_id) < CAST_BEAT_MIN_FRAGMENT_SECONDS and not _cast_row_closes_thought(row_by_id.get(tail_id) or {}):
+            closing.append({"kind": "closing_short_tail", "text": tail_text[:24]})
+        if len(last_ids) > 1:
+            previous_text = _text(last_ids[-2])
+            if tail_text and previous_text and difflib.SequenceMatcher(None, tail_text, previous_text).ratio() > CAST_CHAPTER_MAX_TEXT_OVERLAP:
+                closing.append({"kind": "closing_repeat", "text": tail_text[:24]})
+        chapter_text = "".join(_text(value) for value in last_ids)
+        if chapter_text and not CAST_WHOLE_KEEP_CLOSE_ACTION_PATTERN.search(chapter_text):
+            closing.append({"kind": "closing_no_close_action", "text": chapter_text[:24]})
+    return opening, closing
+
+
+def _expand_cast_windows_whole(
+    payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    executable_ids: Sequence[int] | None = None,
+    *,
+    budget_seconds: float | None = None,
+    log_fn: Any = None,
+) -> dict[str, Any]:
+    """整窗整取：AI 选中口播窗里剩下的行，按原顺序补回来。
+
+    确定性；零 AI 调用；不改写、不重排；绝不删改 AI 原本选中的行。
+    预算不够时按「离已选行远的先不补」少补，取舍如实记进 receipt。
+    """
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    receipt: dict[str, Any] = {
+        "kept": [], "dropped": [], "window_count": 0, "strategies": [],
+        "base_seconds": 0.0, "added_seconds": 0.0, "projected_seconds": 0.0,
+        "budget_seconds": budget_seconds, "opening_gate": [], "closing_gate": [],
+        "opening_prefix_locked": [],
+    }
+    if not CAST_WINDOW_WHOLE_KEEP_ENABLED:
+        return receipt
+    declared_opening_ids = _cast_declared_opening_ids(payload)
+    try:
+        pool_rows = _director_casting_rows(subtitles, executable_ids)
+    except Exception as exc:  # noqa: BLE001 - 整取绝不阻断导演
+        _log(f"整窗整取跳过（候选池构建失败）：{type(exc).__name__}: {exc}")
+        return receipt
+    by_id, members = _cast_window_member_index(pool_rows)
+    if not members:
+        return receipt
+    row_by_id = _cast_rows_by_id(subtitles)
+    allowed: set[int] = {int(value) for value in (executable_ids or ())} or set(row_by_id)
+    allowed &= set(row_by_id)
+    min_row_seconds = max(0.0, float(CAST_WINDOW_WHOLE_KEEP_MIN_ROW_SECONDS))
+
+    def _seconds(subtitle_id: int) -> float:
+        row = row_by_id.get(subtitle_id) or {}
+        try:
+            return max(0.0, float(row["end"]) - float(row["start"]))
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    def _fillable(subtitle_id: int) -> bool:
+        if subtitle_id not in allowed:
+            return False
+        row = row_by_id.get(subtitle_id)
+        if not row or _cast_row_repair_blocked(row) or _cast_row_prune_reason(row):
+            return False
+        if _seconds(subtitle_id) < min_row_seconds and not _cast_row_closes_thought(row):
+            return False
+        return True
+
+    # 第一遍：只算「要补哪些行」，不落盘 —— 先做预算取舍。
+    plan: list[dict[str, Any]] = []
+    for strategy_index, strategy in enumerate(_strategy_refs(payload), 1):
+        # 方案之间是并列备选方案，各自都可以用同一批原话；认领只在本方案内生效。
+        claimed: set[int] = set()
+        # [止血D 2026-10-06] 归属章唯一：本章之外的行一律不可补，绝不跨章抢句。
+        _chapter_owned: dict[int, str] = {}
+        if CAST_WHOLE_KEEP_CHAPTER_EXCLUSIVE_ENABLED:
+            for _owner in _chapter_refs(strategy):
+                if not isinstance(_owner, Mapping):
+                    continue
+                _owner_id = str(_owner.get("chapter_id") or "")
+                for _sid in _cast_chapter_selected_ids(_owner):
+                    _chapter_owned.setdefault(int(_sid), _owner_id)
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            raw_beats = chapter.get("beats") or []
+            if isinstance(raw_beats, Mapping):
+                raw_beats = [raw_beats]
+            if not isinstance(raw_beats, list) or not raw_beats:
+                continue
+            used = set(_cast_chapter_selected_ids(chapter))
+            picked_by_window: dict[str, list[int]] = {}
+            for beat in raw_beats:
+                beat_ids = _cast_chapter_selected_ids({"beats": [beat]})
+                if not beat_ids:
+                    continue
+                window_id = by_id.get(beat_ids[0])
+                if not window_id:
+                    continue
+                bucket = picked_by_window.setdefault(window_id, [])
+                for subtitle_id in beat_ids:
+                    if subtitle_id not in bucket:
+                        bucket.append(subtitle_id)
+            additions: list[dict[str, Any]] = []
+            for window_id, picked in picked_by_window.items():
+                lowest, highest = min(picked), max(picked)
+                for value in members.get(window_id) or ():
+                    subtitle_id = int(value)
+                    if subtitle_id in used or subtitle_id in claimed or not _fillable(subtitle_id):
+                        continue
+                    if (CAST_WHOLE_KEEP_CHAPTER_EXCLUSIVE_ENABLED
+                            and subtitle_id in _chapter_owned):
+                        continue
+                    additions.append({
+                        "subtitle_id": subtitle_id,
+                        "window_id": window_id,
+                        "seconds": _seconds(subtitle_id),
+                        # 越靠近已选行越可能是承接句；远的先不补。
+                        "distance": min(abs(subtitle_id - value) for value in picked),
+                        "before": subtitle_id < lowest,
+                        "after": subtitle_id > highest,
+                    })
+            claimed.update(item["subtitle_id"] for item in additions)
+            plan.append({
+                "chapter": chapter,
+                "chapter_id": str(chapter.get("chapter_id") or f"C{chapter_index}"),
+                "chapter_index": chapter_index,
+                "strategy_index": strategy_index,
+                "picked_by_window": picked_by_window,
+                "additions": additions,
+            })
+
+    # 预算按「方案」算：每个方案都是一条独立成片，各自要落在时长区间内。
+    strategy_ids: dict[int, list[int]] = {}
+    strategy_add: dict[int, float] = {}
+    for entry in plan:
+        index = int(entry["strategy_index"])
+        bucket = strategy_ids.setdefault(index, [])
+        for subtitle_id in _cast_chapter_selected_ids(entry["chapter"]):
+            if subtitle_id not in bucket:
+                bucket.append(subtitle_id)
+        strategy_add[index] = strategy_add.get(index, 0.0) + sum(
+            item["seconds"] for item in entry["additions"])
+    strategy_base = {index: sum(_seconds(value) for value in ids) for index, ids in strategy_ids.items()}
+    strategy_ratio: dict[int, float] = {}
+    for index, base in strategy_base.items():
+        ratio = 1.0
+        if budget_seconds is not None and float(budget_seconds) > 0:
+            room = float(budget_seconds) - base
+            added = strategy_add.get(index, 0.0)
+            if added > room:
+                ratio = max(0.0, room / added) if added > 0 else 0.0
+        strategy_ratio[index] = ratio
+    base_seconds = sum(strategy_base.values())
+
+    # 第二遍：按预算落盘。预算按「方案」整体分配，避免某一章被饿死。
+    added_total = 0.0
+    kept_by_strategy: dict[int, set[int]] = {}
+    for index in sorted(strategy_ids):
+        room = float("inf")
+        if budget_seconds is not None and float(budget_seconds) > 0:
+            room = max(0.0, float(budget_seconds) - strategy_base[index])
+        candidates = [
+            (entry, item)
+            for entry in plan if int(entry["strategy_index"]) == index
+            for item in entry["additions"]
+        ]
+        kept_ids: set[int] = set()
+        spent = 0.0
+        # 由近到远保留：离已选行越近，越可能是承接句；同距离优先长内容句。
+        for entry, item in sorted(candidates, key=lambda node: (node[1]["distance"], -node[1]["seconds"])):
+            if spent + item["seconds"] <= room + 1e-6:
+                kept_ids.add(item["subtitle_id"])
+                spent += item["seconds"]
+        kept_by_strategy[index] = kept_ids
+        for entry, item in candidates:
+            if item["subtitle_id"] not in kept_ids:
+                receipt["dropped"].append({
+                    "chapter_id": entry["chapter_id"], "window_id": item["window_id"],
+                    "subtitle_id": item["subtitle_id"], "reason": "budget",
+                })
+
+    for entry in plan:
+        chapter = entry["chapter"]
+        kept = [
+            item for item in entry["additions"]
+            if item["subtitle_id"] in kept_by_strategy.get(int(entry["strategy_index"]), set())
+        ]
+        if not kept:
+            continue
+        by_window: dict[str, list[int]] = {}
+        for item in kept:
+            by_window.setdefault(item["window_id"], []).append(item["subtitle_id"])
+        beats = chapter.get("beats") or []
+        if isinstance(beats, Mapping):
+            beats = [beats]
+        first_position: dict[str, int] = {}
+        last_position: dict[str, int] = {}
+        for position, beat in enumerate(beats):
+            beat_ids = _cast_chapter_selected_ids({"beats": [beat]})
+            if not beat_ids:
+                continue
+            window_id = by_id.get(beat_ids[0])
+            if not window_id:
+                continue
+            first_position.setdefault(window_id, position)
+            last_position[window_id] = position
+        rebuilt: list[Any] = []
+        inserted: set[int] = set()
+        for position, beat in enumerate(beats):
+            for window_id, first_at in first_position.items():
+                if first_at != position:
+                    continue
+                picked = entry["picked_by_window"].get(window_id) or []
+                if not picked:
+                    continue
+                lowest = min(picked)
+                head_values = sorted(v for v in by_window.get(window_id, []) if v < lowest)
+                # P0-A 开场门禁：全片第一句只能来自 AI 的开场声明。
+                if (head_values and int(entry.get("chapter_index") or 0) == 1 and not rebuilt
+                        and not _cast_opening_prefix_allowed(
+                            head_values, _cast_chapter_selected_ids({"beats": [beat]}),
+                            declared_opening_ids)):
+                    for value in head_values:
+                        receipt["opening_prefix_locked"].append({
+                            "chapter_id": entry["chapter_id"], "window_id": window_id,
+                            "subtitle_id": value,
+                            "text": str((row_by_id.get(value) or {}).get("text") or "")[:24],
+                        })
+                    head_values = []
+                for value in head_values:
+                    if value not in inserted:
+                        rebuilt.append(_whole_kept_beat(beat, value, window_id))
+                        inserted.add(value)
+            rebuilt.append(beat)
+            for window_id, last_at in last_position.items():
+                if last_at != position:
+                    continue
+                picked = entry["picked_by_window"].get(window_id) or []
+                if not picked:
+                    continue
+                highest = max(picked)
+                for value in sorted(v for v in by_window.get(window_id, []) if v > highest):
+                    if value not in inserted:
+                        rebuilt.append(_whole_kept_beat(beat, value, window_id))
+                        inserted.add(value)
+        chapter["beats"] = rebuilt
+        for item in kept:
+            if item["subtitle_id"] in inserted:
+                added_total += item["seconds"]
+                receipt["kept"].append({
+                    "chapter_id": entry["chapter_id"], "window_id": item["window_id"],
+                    "subtitle_id": item["subtitle_id"],
+                    "side": "head" if item["before"] else "tail",
+                })
+
+    receipt["window_count"] = len({item["window_id"] for item in receipt["kept"]})
+    receipt["strategies"] = [
+        {
+            "strategy_index": index,
+            "base_seconds": round(strategy_base[index], 3),
+            "addition_seconds": round(strategy_add.get(index, 0.0), 3),
+            "keep_ratio": round(strategy_ratio.get(index, 1.0), 4),
+            "projected_seconds": round(strategy_base[index] + strategy_add.get(index, 0.0)
+                                       * strategy_ratio.get(index, 1.0), 3),
+        }
+        for index in sorted(strategy_base)
+    ]
+    receipt["base_seconds"] = round(base_seconds, 3)
+    receipt["added_seconds"] = round(added_total, 3)
+    receipt["projected_seconds"] = round(base_seconds + added_total, 3)
+    receipt["opening_gate"], receipt["closing_gate"] = _cast_opening_closing_gate(payload, row_by_id)
+    return receipt
+
+
+def _cast_window_continuity_issues(
+    casting_payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Report chapters whose Beats are stitched from distant source windows.
+
+    Deterministic and read-only.  This checker never rewrites, reorders or drops
+    a line: the caller turns the report into at most one bounded repair request
+    so the AI keeps authorship of its own story.
+    """
+    import difflib
+
+    rows = _cast_rows_by_id(subtitles)
+    issues: list[dict[str, Any]] = []
+    for strategy_index, strategy in enumerate(_strategy_refs(casting_payload), 1):
+        strategy_id = str(strategy.get("strategy_id") or f"S{strategy_index}")
+        for chapter_index, chapter in enumerate(_chapter_refs(strategy), 1):
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("chapter_id") or f"C{chapter_index}")
+            spans = _cast_chapter_beat_spans(chapter, rows)
+            if not spans:
+                continue
+            chapter_start = min(item["start"] for item in spans)
+            chapter_end = max(item["end"] for item in spans)
+            span_seconds = round(chapter_end - chapter_start, 2)
+            is_opening = chapter_index == 1
+            if not is_opening and (
+                len(spans) < 2 or span_seconds < CAST_CHAPTER_MIN_CLOSED_SECONDS
+            ):
+                issues.append({
+                    "kind": "chapter_not_closed",
+                    "strategy_id": strategy_id,
+                    "chapter_id": chapter_id,
+                    "beat_index": len(spans),
+                    "span_seconds": span_seconds,
+                    "text": " / ".join(item["text"][:18] for item in spans)[:60],
+                })
+            if span_seconds > CAST_CHAPTER_MAX_SPAN_SECONDS:
+                issues.append({
+                    "kind": "chapter_span_too_wide",
+                    "strategy_id": strategy_id,
+                    "chapter_id": chapter_id,
+                    "span_seconds": span_seconds,
+                })
+            for position, span in enumerate(spans):
+                duration = round(span["end"] - span["start"], 2)
+                if duration < CAST_BEAT_MIN_FRAGMENT_SECONDS:
+                    issues.append({
+                        "kind": "beat_too_short",
+                        "strategy_id": strategy_id,
+                        "chapter_id": chapter_id,
+                        "beat_index": span["beat_index"],
+                        "duration_seconds": duration,
+                        "text": span["text"][:24],
+                    })
+                if position == 0:
+                    continue
+                gap = round(span["start"] - spans[position - 1]["end"], 2)
+                if gap > CAST_CHAPTER_MAX_BEAT_GAP_SECONDS:
+                    issues.append({
+                        "kind": "beat_window_far_gap",
+                        "strategy_id": strategy_id,
+                        "chapter_id": chapter_id,
+                        "beat_index": span["beat_index"],
+                        "gap_seconds": gap,
+                        "text": span["text"][:24],
+                    })
+            for left in range(len(spans)):
+                for right in range(left + 1, len(spans)):
+                    text_a = spans[left]["text"]
+                    text_b = spans[right]["text"]
+                    if not text_a or not text_b:
+                        continue
+                    ratio = difflib.SequenceMatcher(None, text_a, text_b).ratio()
+                    if ratio > CAST_CHAPTER_MAX_TEXT_OVERLAP:
+                        issues.append({
+                            "kind": "chapter_repeat_evidence",
+                            "strategy_id": strategy_id,
+                            "chapter_id": chapter_id,
+                            "beat_index": spans[right]["beat_index"],
+                            "overlap": round(ratio, 3),
+                            "text": text_b[:24],
+                        })
+    return issues
+
+
+def _format_cast_continuity_issues(issues: Sequence[Mapping[str, Any]]) -> str:
+    lines: list[str] = []
+    for item in issues or ():
+        label = _CAST_CONTINUITY_LABELS.get(
+            str(item.get("kind")), str(item.get("kind") or "未知问题"),
+        )
+        parts = [f"{item.get('chapter_id') or '?'} 章"]
+        if item.get("beat_index"):
+            parts.append(f"第 {item['beat_index']} 段")
+        for key, unit in (
+            ("gap_seconds", "间隔"), ("span_seconds", "跨度"), ("duration_seconds", "时长"),
+        ):
+            if item.get(key) is not None:
+                parts.append(f"{unit} {item[key]} 秒")
+        if item.get("text"):
+            parts.append("「" + str(item["text"])[:24] + "」")
+        lines.append("  - " + " · ".join(parts) + " → " + label)
+    return "\n".join(lines)
+
+
+def _audit_cast_window_continuity(
+    casting_payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]],
+    *,
+    executable_ids: Sequence[int] | None = None,
+    stage_response_hook: Any = None,
+    log_fn: Any = None,
+) -> list[dict[str, Any]]:
+    """Report chapter-continuity defects without spending a single extra call.
+
+    The Casting leg is contractually limited to one story call plus one casting
+    call, so this audit never asks the model again and never reorders, rewrites
+    or drops a line by itself.  It only surfaces the deterministic verdict into
+    the run log and the selection audit so the constraint can be judged on real
+    data first.
+    """
+
+    def _log(message: str) -> None:
+        if callable(log_fn):
+            try:
+                log_fn(message)
+            except Exception:  # noqa: BLE001 - 日志失败不阻断
+                pass
+
+    try:
+        issues = _cast_window_continuity_issues(casting_payload, subtitles)
+    except Exception as exc:  # noqa: BLE001 - 校验绝不阻断导演
+        _log(f"章内连续性校验异常（已跳过）：{type(exc).__name__}: {exc}")
+        return []
+    # P0-1：拆窗检测项（确定性、只读）。AI 只取了一个连续口播窗的一部分时报警，
+    # 交给随后的确定性补齐处理；这里不改变任何选句。
+    try:
+        issues.extend(_cast_window_split_issues(
+            casting_payload, _director_casting_rows(subtitles, executable_ids),
+        ))
+    except Exception as exc:  # noqa: BLE001 - 拆窗体检绝不影响主流程
+        _log(f"拆窗检测异常（已跳过）：{type(exc).__name__}: {exc}")
+    if not issues:
+        _log("章内连续性校验通过：没有跨时间拼接的章节。")
+        return []
+    kinds: dict[str, int] = {}
+    for item in issues:
+        key = str(item.get("kind") or "unknown")
+        kinds[key] = kinds.get(key, 0) + 1
+    _log(
+        f"章内连续性校验发现 {len(issues)} 处问题（本次只报告，不追加调用）："
+        + _format_cast_continuity_issues(issues)
+    )
+    if stage_response_hook:
+        try:
+            stage_response_hook("cast_window_continuity", json.dumps({
+                "issue_count": len(issues),
+                "kind_counts": kinds,
+                "issues": issues,
+            }, ensure_ascii=False, indent=2))
+        except Exception:  # noqa: BLE001
+            pass
+    return issues
 
 def _cast_beat_cardinality_issues(casting_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return non-one-ID final Beats without changing the AI sequence."""
@@ -2965,8 +5418,15 @@ def build_two_pass_draft_audit(
     executable_subtitle_ids: Sequence[int] | None = None,
     target_duration: float = 60.0,
     duration_tolerance: float | None = None,
+    output_speed_factor: float = 1.0,
 ) -> dict[str, Any]:
-    """Measure the first AI draft without changing any semantic decision."""
+    """Measure the first AI draft without changing any semantic decision.
+
+    ``output_speed_factor`` 必须传进来（2026-10-09 修复）：用户设的「变速 1.28x」
+    意味着 60 秒成片要选 76.8 秒**原声**。此前这里用的是不含变速的旧合同，
+    却拿**原声秒数**去比**成片秒数**阈值 —— 单位不一致，变速一开就判错。
+    现在统一用含变速的交付合同，原声秒数只和 source_min/source_max 比。
+    """
     pool = _director_casting_rows(subtitles, executable_subtitle_ids)
     pool_by_id = {int(row["id"]): row for row in pool}
     primary = _two_pass_primary(initial_draft)
@@ -3000,7 +5460,12 @@ def build_two_pass_draft_audit(
     valid_ids = [value for value in selected_ids if value in pool_by_id]
     duplicate_ids = sorted({value for value in valid_ids if valid_ids.count(value) > 1})
     actual_seconds = round(sum(pool_by_id[value]["end"] - pool_by_id[value]["start"] for value in valid_ids), 3)
-    duration_range = director_target_duration_range(target_duration, duration_tolerance)
+    # 含变速的交付合同：actual_seconds 是**原声**秒数，所以只能和 source_* 比。
+    duration_range = director_delivery_duration_range(
+        target_duration, duration_tolerance, output_speed_factor,
+    )
+    source_low = float(duration_range.get("source_min") or duration_range["preferred_low"])
+    source_high = float(duration_range.get("source_max") or duration_range["preferred_high"])
     warnings: list[str] = list(malformed_spans)
     if invalid_ids:
         warnings.append("unavailable_or_outside_1_to_8_second_ids:" + ",".join(map(str, invalid_ids)))
@@ -3013,14 +5478,10 @@ def build_two_pass_draft_audit(
             warnings.append(f"beat_{position}_surface:{surface_issue}")
         if re.match(r"^(?:的(?:这|那|个|款|种)?|然后|因为|所以|出来吗|哥[，,]?然后)", text):
             warnings.append(f"beat_{position}_possible_dangling_context:id={subtitle_id}")
-    if actual_seconds < float(duration_range["preferred_low"]):
-        warnings.append(
-            f"duration_shortfall:{float(duration_range['preferred_low']) - actual_seconds:.3f}s"
-        )
-    elif actual_seconds > float(duration_range["preferred_high"]):
-        warnings.append(
-            f"duration_overflow:{actual_seconds - float(duration_range['preferred_high']):.3f}s"
-        )
+    if actual_seconds < source_low:
+        warnings.append(f"duration_shortfall:{source_low - actual_seconds:.3f}s")
+    elif actual_seconds > source_high:
+        warnings.append(f"duration_overflow:{actual_seconds - source_high:.3f}s")
     unused_rows = [row for row in pool if int(row["id"]) not in set(valid_ids)]
     return {
         **duration_range,
@@ -3033,7 +5494,7 @@ def build_two_pass_draft_audit(
         "target_range_fulfilled": (
             not invalid_ids
             and not duplicate_ids
-            and float(duration_range["preferred_low"]) <= actual_seconds <= float(duration_range["preferred_high"])
+            and source_low <= actual_seconds <= source_high
         ),
         "complete_pool_count": len(pool),
         "complete_pool_seconds": round(sum(row["end"] - row["start"] for row in pool), 3),
@@ -3300,6 +5761,7 @@ def build_director_duration_audit(
         initial_draft=casting_payload, subtitles=subtitles,
         executable_subtitle_ids=executable_subtitle_ids,
         target_duration=target_duration, duration_tolerance=duration_tolerance,
+        output_speed_factor=output_speed_factor,
     )
     pool = {int(row["id"]): row for row in _director_casting_rows(subtitles, executable_subtitle_ids)}
     ids = measured["selected_subtitle_ids"]
@@ -3327,6 +5789,8 @@ def build_director_duration_audit(
         chapter_measure = build_two_pass_draft_audit(
             initial_draft={"primary": {"chapter_packets": [cast]}},
             subtitles=subtitles, executable_subtitle_ids=executable_subtitle_ids,
+            target_duration=target_duration, duration_tolerance=duration_tolerance,
+            output_speed_factor=output_speed_factor,
         )
         chapter_ids = chapter_measure["selected_subtitle_ids"]
         completion = _completion_receipt_audit(chapter, cast, chapter_ids)
@@ -3469,6 +5933,14 @@ def _main_product_pool_rows(
 
     This never casts a sentence. It prevents other-product seconds from being
     presented as available inventory for the frozen main story.
+
+    2026-10-09（方案 A，与 server.py 同口径）：**不再扣减 foreign_product_ranges**。
+    那个规则取「第一个锚点 → 最后一个锚点」的整段跨度
+    （director_product_contract.foreign_product_ranges：锚点间隔 ≤20 行并成一簇，
+    end_id = cluster[-1]），会整段吞掉中间的主商品内容。实测一次 35 分钟混剪：
+    它把 388 行里的 302 行判成外来商品，其中 20 行 / 72.9s 是 AI 明确判为主商品的；
+    主商品池因此从 229.5s 被压到 156.6s。判定权归 AI 的 source_product_sections。
+    规则层的意见仍然计算、只作旁证，不再参与筛选。
     """
     scope = dict(_two_pass_primary(story_contract).get("product_scope") or {})
     main_type = str(scope.get("product_type") or "unknown")
@@ -3483,9 +5955,8 @@ def _main_product_pool_rows(
         except (KeyError, TypeError, ValueError):
             continue
     rows = _director_casting_rows(subtitles, executable_subtitle_ids)
-    foreign_ids = {sid for item in foreign_product_ranges(main_type, subtitles)
-                   for sid in range(int(item["start_id"]), int(item["end_id"]) + 1)}
-    main_rows = [row for row in rows if int(row["id"]) in allowed and int(row["id"]) not in foreign_ids]
+    # 规则层意见保留为旁证（仅供诊断/追溯），不参与主商品池的构成。
+    main_rows = [row for row in rows if int(row["id"]) in allowed]
     return main_rows, bool(sections)
 
 
@@ -3548,11 +6019,20 @@ def _duration_calibration_structure_errors(
     original_primary = _two_pass_primary(original)
     opening = (original_primary.get("opening_selection") or {}).get("selected_subtitle_ids") or []
     beats = _two_pass_beat_rows(original_primary)
-    actual_ids = [i for beat in beats for i in (beat.get("subtitle_ids") or [])]
+    # P0-C 开场基准（2026-09-30）：程序补进来的行（拆窗补齐 / 整窗整取 /
+    # 首尾收口）不属于 AI 声明的开场。比较「开场有没有被改掉」时必须先把它们
+    # 剔掉，否则程序补行反过来会把 AI 的合规修订判成 changed_existing_opening
+    # —— 实测 14:07 跑批就是这个原因让明显更好的修订版被整份丢弃。
+    authored_beats = [
+        beat for beat in beats
+        if not (beat.get("window_split_repair") or beat.get("window_whole_keep")
+                or beat.get("chapter_edge_guard"))
+    ]
+    actual_ids = [i for beat in authored_beats for i in (beat.get("subtitle_ids") or [])]
     # An advisory opening receipt sometimes disagrees with executed beats.
     # Preserve the actual audible opening, not IDs that were never selected.
     if not opening or actual_ids[:len(opening)] != list(opening):
-        opening = list(beats[0].get("subtitle_ids") or []) if beats else []
+        opening = list(authored_beats[0].get("subtitle_ids") or []) if authored_beats else []
     if opening and list(audit["selected_subtitle_ids"][:len(opening)]) != list(opening):
         errors.append("changed_existing_opening")
     return errors
@@ -3744,7 +6224,8 @@ def _dedupe_repeated_beats(payload: Mapping[str, Any]) -> tuple[dict[str, Any], 
             beats = (beats,)
         beat_list = list(beats)
         new_beats: list[Any] = []
-        for beat in beat_list:
+        _first_beat_ids: list[int] = []
+        for _beat_ordinal, beat in enumerate(beat_list):
             if not isinstance(beat, Mapping):
                 new_beats.append(beat)
                 continue
@@ -3769,6 +6250,8 @@ def _dedupe_repeated_beats(payload: Mapping[str, Any]) -> tuple[dict[str, Any], 
                         continue
                     if candidate not in ids:
                         ids.append(candidate)
+            if _beat_ordinal == 0 and not _first_beat_ids:
+                _first_beat_ids = list(ids)
             fresh = [value for value in ids if value not in seen]
             if ids and not fresh:
                 removed.extend(ids)
@@ -3792,6 +6275,13 @@ def _dedupe_repeated_beats(payload: Mapping[str, Any]) -> tuple[dict[str, Any], 
                 changed = True
             seen.update(fresh)
             new_beats.append(beat)
+        if not new_beats and beat_list and CAST_DEDUP_CHAPTER_FLOOR_ENABLED:
+            # [止血D 2026-10-06] 保底：整章被判重复时留下第一拍，绝不留 0 句空壳章。
+            # 该拍会作为重复句被 duplicate_subtitle_ids 如实记进审计，不静默。
+            new_beats = [beat_list[0]]
+            for _floor_id in _first_beat_ids:
+                while _floor_id in removed:
+                    removed.remove(_floor_id)
         if len(new_beats) != len(beat_list):
             chapter = {**dict(chapter), "beats": new_beats}
             changed = True
@@ -3845,6 +6335,159 @@ def _compact_duration_calibration_feedback(audit: Mapping[str, Any]) -> dict[str
     }
 
 
+# 2026-10-05（David 定调）：删句前先看「这一章的章名还有没有依据」。
+# 实测：末章「全弹力无痕腰穿着不难受」唯一的两句腰内容被判「归属不明 / 邻近讲其他商品」
+# 删掉后，章名留在界面上、正文只剩面料弹力 —— 标题与内容彻底脱节。
+# 这里只做一件事：若某个章名的唯一字面依据就藏在待删句里（剩下的句子一条都不含），
+# 就把这些句子从待删集合里退回来（退回不删）并留痕。不改写、不重排、不动时间戳、
+# 不新增 AI 调用；置 False 与落地前逐字节等价。
+CHAPTER_TITLE_EVIDENCE_GUARD = True
+
+
+def _guard_chapters(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """兼容两种入参形态：落盘文档（strategies / packet）或单个 strategy 章包。"""
+
+    if payload.get("chapter_packets") or payload.get("chapters"):
+        return _chapter_refs(dict(payload))
+    return _chapter_refs(_two_pass_primary(payload))
+
+
+def _product_conflict_needs_attention(audit: Mapping[str, Any]) -> bool:
+    """举证方向（2026-10-05 David 定调）：只有硬证据（明确讲另一件商品）才需要动作。
+
+    「缺少依据 / 归属不明 / 不唯一」这类软疑点只进告警，不再要求 AI 重选、
+    不再算作结构错误、不再阻断修正稿采纳。
+    """
+
+    from director_product_contract import HARD_EVIDENCE_ONLY  # 随运行时开关生效
+
+    if not HARD_EVIDENCE_ONLY:
+        return audit.get("status") == "conflict"
+    return bool(audit.get("conflicting_subtitle_ids"))
+
+
+def _product_conflict_clear(audit: Mapping[str, Any]) -> bool:
+    """硬证据口径：只剩软疑点时视为可通过（举证不足不阻断采纳）。"""
+
+    from director_product_contract import HARD_EVIDENCE_ONLY
+
+    if not HARD_EVIDENCE_ONLY:
+        return audit.get("status") != "conflict"
+    return not (audit.get("conflicting_subtitle_ids") or audit.get("scope_errors"))
+_CHAPTER_TITLE_STOP_CHARS = set("的了是我你他她它这那就都也还很非常而和与个把被给在们啊吧呀呢哦嘛儿")
+
+
+def _chapter_title_grams(title: Any) -> set[str]:
+    chars = [
+        char for char in str(title or "")
+        if "\u4e00" <= char <= "\u9fff" and char not in _CHAPTER_TITLE_STOP_CHARS
+    ]
+    if len(chars) >= 2:
+        return {chars[index] + chars[index + 1] for index in range(len(chars) - 1)}
+    return set(chars)
+
+
+def _sentence_grams(text: Any) -> set[str]:
+    chars = [char for char in str(text or "") if "\u4e00" <= char <= "\u9fff"]
+    return {chars[index] + chars[index + 1] for index in range(len(chars) - 1)}
+
+
+def _chapter_title_evidence_guard(
+    cast_payload: Mapping[str, Any], story_payload: Mapping[str, Any],
+    subtitles: Sequence[Mapping[str, Any]], drop_ids: set[int],
+) -> dict[str, Any]:
+    """商品归属删句前，保护「章名的唯一字面依据」（2026-10-05 David 定调）。
+
+    只判确定性字面重合：章名去停用字后的 2 字串，若只出现在待删句里、章内剩下任何一句
+    都不含，则这些待删句退回不删。绝不改写文本、不重排、不动时间戳、不新增 AI 调用。
+    """
+
+    outcome: dict[str, Any] = {
+        "drop_ids": {int(value) for value in (drop_ids or ())},
+        "protected_ids": [],
+        "warnings": [],
+    }
+    if not CHAPTER_TITLE_EVIDENCE_GUARD or not outcome["drop_ids"]:
+        return outcome
+    text_by_id = {
+        int(row["id"]): str(row.get("text") or "")
+        for row in subtitles or ()
+        if str(row.get("id", "")).strip().isdigit()
+    }
+    titles: dict[str, str] = {}
+    for chapter in _guard_chapters(story_payload):
+        chapter_id = str(chapter.get("chapter_id") or "").strip()
+        title = str(chapter.get("title") or chapter.get("chapter_title") or "").strip()
+        if chapter_id and title:
+            titles[chapter_id] = title
+    # 界面/下游用的是 casting 章包里的 chapter_revision.title（观众真正看到的章名），
+    # 它优先于 M1 故事层章名；否则保护的是旧章名，等于没保护。
+    for chapter in _guard_chapters(cast_payload):
+        chapter_id = str(chapter.get("chapter_id") or "").strip()
+        revision = chapter.get("chapter_revision")
+        title = str(revision.get("title") or "").strip() if isinstance(revision, Mapping) else ""
+        if not title:
+            title = str(chapter.get("title") or chapter.get("chapter_title") or "").strip()
+        if chapter_id and title:
+            titles[chapter_id] = title
+    if not titles:
+        return outcome
+    protected: set[int] = set()
+    for chapter in _guard_chapters(cast_payload):
+        chapter_id = str(chapter.get("chapter_id") or "").strip()
+        grams = _chapter_title_grams(titles.get(chapter_id, ""))
+        if not grams:
+            continue
+        raw_beats = chapter.get("beats")
+        if raw_beats is None:
+            raw_beats = chapter.get("director_beats") or ()
+        chapter_ids: list[int] = []
+
+        def _collect(container: Mapping[str, Any]) -> None:
+            for value in container.get("subtitle_ids") or container.get("ids") or ():
+                try:
+                    chapter_ids.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            for span in container.get("semantic_units") or ():
+                if not isinstance(span, (list, tuple)) or len(span) != 2:
+                    continue
+                try:
+                    low, high = int(span[0]), int(span[1])
+                except (TypeError, ValueError):
+                    continue
+                chapter_ids.extend(
+                    sid for sid in range(min(low, high), max(low, high) + 1)
+                    if sid in text_by_id
+                )
+
+        _collect(chapter)
+        for beat in raw_beats or ():
+            if isinstance(beat, Mapping):
+                _collect(beat)
+        dropping = [sid for sid in dict.fromkeys(chapter_ids) if sid in outcome["drop_ids"]]
+        if not dropping:
+            continue
+        remaining = [sid for sid in chapter_ids if sid not in outcome["drop_ids"]]
+        kept_grams: set[str] = set()
+        for sid in remaining:
+            kept_grams |= _sentence_grams(text_by_id.get(sid, ""))
+        guards = [
+            sid for sid in dropping
+            if (_sentence_grams(text_by_id.get(sid, "")) & grams) - kept_grams
+        ]
+        if guards:
+            protected.update(guards)
+            outcome["warnings"].append(
+                "product_conflict_kept_title_evidence:%s:%s"
+                % (chapter_id, ",".join(str(value) for value in guards))
+            )
+    if protected:
+        outcome["drop_ids"] -= protected
+        outcome["protected_ids"] = sorted(protected)
+    return outcome
+
+
 def _compact_product_calibration_feedback(audit: Mapping[str, Any]) -> dict[str, Any]:
     """Send only actionable product conflicts to the optional correction."""
     return {
@@ -3855,6 +6498,69 @@ def _compact_product_calibration_feedback(audit: Mapping[str, Any]) -> dict[str,
         "alternative_conflicting_subtitle_ids": list(audit.get("alternative_conflicting_subtitle_ids") or []),
         "status": audit.get("status"),
     }
+
+
+# 2026-10-06（David 定调）：时长校准验收闸。
+# 第三遍 AI（时长校准）此前只要 needs_calibration 为真就发，回来又无条件采纳——
+# 实测出现过「首轮 61.68 秒本来达标 → 校准把它改成 95.93 秒」的路径。
+# 本闸只做两件确定性测量，不改 Prompt、不新增给 AI 的字段：
+#   入口：实测已落入可编辑区间时，不发第三遍 AI（章过薄等质量项只告警）。
+#   出口：修订版不得让「超出 source_max」比原稿更糟，否则整版拒收、保留上一版。
+# 开关置 False 时逐字节等价于旧行为。
+CALIBRATION_VERIFY_ENABLED = True
+
+
+def _calibration_entry_blocked(audit: Mapping[str, Any]) -> bool:
+    """True 表示验收闸拦下本次校准调用。
+
+    口径（2026-10-06，David 定调）：程序实测时长已经落在可编辑区间内时，
+    只有「章节没交 / 整章为空」这种结构漏洞还值得再叫一次 AI；
+    「章过薄、连续长口播、语义跨度、重复句」这些质量问题一律只保留告警，
+    不再单独买一次第三遍调用。时长偏短或偏长（未落区间）照旧允许校准。
+    """
+    if not CALIBRATION_VERIFY_ENABLED:
+        return False
+    if not audit.get("target_range_fulfilled"):
+        return False
+    if not audit.get("technical_valid", True):
+        return False
+    if audit.get("retryable_incomplete_chapter_ids") or audit.get("empty_chapter_ids"):
+        return False
+    return True
+
+
+def _calibration_revision_exceeds_max(
+    initial: Mapping[str, Any],
+    revised: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """修订版比原稿更超上限时返回证据；否则 None（允许采纳）。
+
+    只比较「超出上限的部分」：原稿就超时，只要修订把超量改轻，仍算改进。
+    """
+    if not CALIBRATION_VERIFY_ENABLED:
+        return None
+    contract = dict(revised.get("duration_contract") or initial.get("duration_contract") or {})
+    try:
+        source_max = float(contract.get("source_max") or 0.0)
+    except (TypeError, ValueError):
+        source_max = 0.0
+    if source_max <= 0.0:
+        return None
+    try:
+        revised_seconds = float(revised.get("source_seconds") or 0.0)
+        initial_seconds = float(initial.get("source_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    revised_excess = max(0.0, revised_seconds - source_max)
+    initial_excess = max(0.0, initial_seconds - source_max)
+    if revised_excess > initial_excess + 0.01:
+        return {
+            "revised_source_seconds": round(revised_seconds, 3),
+            "initial_source_seconds": round(initial_seconds, 3),
+            "source_max": round(source_max, 3),
+            "excess_seconds": round(revised_excess, 3),
+        }
+    return None
 
 
 def _duration_revision_improves(initial: Mapping[str, Any], revised: Mapping[str, Any]) -> bool:
@@ -4070,15 +6776,16 @@ def _opening_hook_pool_prompt(
     return "\n".join((
         "【独立开场候选池（已单独全文扫描，不属于正文池）】",
         "下面每一句都通过程序硬校验：干净、可独立成立、2-8秒、词级可回放、与已核实主商品相关。",
-        "选择规则：**先看停人力——能不能让人立刻停下**；同等停人力下，再挑与本案后续章节关联最紧、",
-        "且能被紧随其后的真实章节最直接兑现的那条。停人力是首要门槛，章节关联是比较时的第二门槛。",
+        "选择规则：**只看停人力——这条单独拎出来、没有前文、没有画面，能不能让陌生观众立刻停下**；",
+        "都算停人开场时，再挑与本案后续章节关联最紧、且能被紧随其后的真实章节最直接兑现的那条。停人力是首要门槛，章节关联是比较时的第二门槛。",
+        "操作演示（解扣子/扣上扣子/第几步怎么穿）、半句铺垫、依赖上文才能听懂的承接句，一律不算停人开场，只能进正文；开场必须自带结果或强判断，1-3 秒就能立住。",
         "也就是说：不要因为某条更好接章节，就放弃明显更能停住人的候选；也不要在几条停人力相当时只挑最强的，",
         "而要看它提出的承诺/问题能不能被后面的真实章节最直接地兑现、解释或推进。",
         "开场与后续章节是一体的：先让观众停下，再用后面的原话立刻给出答案。",
         "请在 opening_promise 里显式写出这个关联：这条开场承诺了什么，由后面哪一章（哪个证据 ID）兑现。",
         "若你选的开场后续没有直接兑现章节，也要说明它由哪一章承接，而不是改选更弱的候选。",
         "只允许使用池内给出的 subtitle_ids；不得改写、拼接或另取正文句充当开场。",
-        "若池内确实没任何候选能与本案后续章节形成兑现关系，才把 opening_promise 写成受限。",
+        "若池内只有操作演示句、没有任何停人型开场，把 opening_promise 写成受限（受限-素材无合格独立开场），不要拿演示句充当 Hook；若池内没有任何候选能与本案后续章节形成兑现关系，同样写受限。",
         "候选（hook_id / subtitle_ids / 起止秒 / 文本 / 类型 / 停人理由 / 强度参考）：",
         json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
     ))
@@ -4136,6 +6843,7 @@ def build_two_pass_story_prompt(
     )
     story_depth_guidance = {
         "深度档位": depth_contract["mode"],
+        "章节数上限": int(depth_contract["chapters_max"]),
         "本篇要点数量下限": _depth_floor_beats,
         "每章最多要点数": _per_chapter_cap,
         "建议推进章节数下限": _depth_floor_chapters,
@@ -4161,6 +6869,11 @@ def build_two_pass_story_prompt(
     full_strategy_schema = {
             "strategy_id": "S1",
             "director_plan_role": "primary",
+            "target_user": "这是谁：写到具体处境（买过什么、踩过什么坑、正卡在哪一步），不是人群标签",
+            "audience_tension": "他现在相信什么、担心什么（观众张力，也是开场能停人的理由）",
+            "story_trigger": "什么让他愿意继续看下去（触发他看下去的那个点）",
+            "transformation": "看完之后他的想法变成什么：从〔原状态〕到〔新状态〕，收尾落在这里",
+            "product_role": "商品在这个变化里扮演什么角色：证据、解决办法还是道具",
             "director_title": "主视频标题",
             "core_desire": "观众看完后形成的一句购买欲望",
             "central_promise": "整条视频只证明的一件事",
@@ -4189,10 +6902,10 @@ def build_two_pass_story_prompt(
                 "chapter_id": "C1",
                 "chapter_kind": "pain/result/mechanism/fit/comfort/risk/styling/scene/trust",
                 "title": "章节名",
-                "purchase_question_id": "Q1-Q7",
-                "buyer_advance": "这一章带来的新购买认知",
+                "purchase_question_id": "参考标签：Q1-Q7；本题不适用可留空，不要为凑标签硬套",
+                "buyer_advance": "观众从〔上一章的想法〕推进到〔这一章的新想法〕：写状态变化，不是写卖点",
                 "coverage": "required/recommended/optional",
-                "chapter_job": "这一章必须怎样把上一章推进到下一章",
+                "chapter_job": "这一章把观众从哪个状态推到哪个状态（承接上一章），简短写清",
                 "source_budget_seconds": "数字：本章预计原声秒数，不是成片秒数",
                 "completion_requirements": ["本章唯一、可由一组完整原话直接核验的购买判断；只写职责，不选原话"],
                 "evidence_locations": [1, 3],
@@ -4232,6 +6945,7 @@ def build_two_pass_story_prompt(
         transcript or "（没有满足 1-8 秒且可执行的字幕）",
         "",
         subject_line,
+        "本轮先讲清楚观众，五问必须最先答完，章节只是这五问的展开：target_user 是谁（写到具体处境）；audience_tension 他现在担心或相信什么；story_trigger 什么让他愿意继续看下去；transformation 看完之后他的想法变成什么；product_role 商品在这个变化里是什么角色。五问没答完不许开章节；每章都要在观众从什么状态变到什么状态这条线上推进。",
         _story_content_boundary_prompt(content_contract),
         *([_hook_pool_section] if _hook_pool_section else []),
         _director_controls_prompt(director_controls, stage="story"),
@@ -4247,7 +6961,7 @@ def build_two_pass_story_prompt(
         "按素材真实句长校准的规模参考（reference_only，不是硬性句数）：" + json.dumps(pacing_reference, ensure_ascii=False),
         "M1 输出必须紧凑：章节数量由完整故事决定，不设上限；最多 3 组 opening_evidence_packages。整个 JSON（含标点）控制在 6000 个中文字符以内，宁可让章节字段更短，也不能删掉一个真实且必要的故事章节。只返回 schema 中的键，不写选择过程、章节长说明、重复 product_scope 范围或备用证据。director_title、core_desire、central_promise、opening_promise、title、buyer_advance、chapter_job、stop_condition、purchase_value、payoff_basis 每项最多 24 个汉字；completion_requirements 只写一项、最多 30 个汉字。每章 evidence_locations 最多 2 个 ID。为每章填写 source_budget_seconds 和 completion_requirements：当安全素材可支撑时，各章预算合计必须覆盖 source_min，并以 source_target 为中心、不得超过 source_max；相邻两章若都只会重复同一教程、同一卖点或同一购买问题，必须在本轮合并、删去其一，或写清第二章新增的问题。预算要有完整字幕中的真实证据支持；不足时明确说明缺少哪类真实内容。",
         "章节数量的优先级：先保证叙事完整——同一个卖点、同一段教学、同一购买问题只讲一次，不为凑数量拆碎或重复。但本方案必须在第一遍就把章节规划足：若按当前章节数覆盖不了上面的“建议推进章节数下限”，必须继续增加能带来新购买认知的章节，直到覆盖下限；每一章仍必须有自己的新购买判断，禁止换标题重复讲。只有素材确实无法支撑新的购买判断时，才写 source_limited 或自然收束，不能用未提供内容补足。",
-        "本轮先决定观众为什么想买，再按观众自然追问安排章节。每章 buyer_advance 必须写出与上一章不同的新增购买认知；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
+        "本轮先定观众：他是谁、卡在哪、看完要变成什么（用上面五问的答案），再按这五问的自然追问安排章节。每章 buyer_advance 必须写出观众从上一章的状态推进到了哪个新状态；如果两个章节只能靠同一句原话或同一结论才能成立，就在本轮合并，而不是换标题重复讲。同一操作演示只能服务一个章节：它最多证明‘容易完成’或‘能形成某个结果’其中一个购买判断，不能把扣法、步骤、第一种/第二种/第三种穿法分别改名成连续章节。每章 completion_requirements 只能有一项：它是本章唯一不可缺的、可由一组完整短语义直接核验的购买判断。不要把颜色、材质、版型、搭配、物流等多个独立事实塞进同一章；它们各自只能在有独立推进时成为另一章。支持这个判断的补充证明不另写成 needs。evidence_locations 建议列1-3个本轮安全池代表ID，仅定位事实，不是最终片单；必要时可多列，没证据写空数组并说明缺口，不编造ID。先顺读证据及必要上下句，确认真实口播能完整讲出问题、解释和结论后再承诺章节；标题中的每个核心承诺都必须有完整证据链，例如承诺版本对比时必须同时存在版本身份、差异和最终结论。chapter_job 简短说明本章回答什么，以及怎样承接上一章；不强套固定问题顺序。",
         (
             f"用户本次要求 {plan_count} 个成片版本。请一次返回恰好 {plan_count} 个完整且明显不同的导演故事合同；"
             "每个方案都必须拥有自己的 core_desire、opening_promise、video_structure 和完整 chapter_packets，"
@@ -4256,9 +6970,12 @@ def build_two_pass_story_prompt(
             "本次只执行一个完整主方案；必须同时给出恰好 2 个仅有标题、核心购买理由和开场承诺的备选方向摘要（S2、S3）。"
             "不得为 S2/S3 生成 chapter_packets、选片、字幕或审计字段；用户确认选择后才会单独为所选方向生成完整方案。"
         ),
-        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先为主商品寻找最多 3 组不同切入的 Hook -> 紧接 payoff 的 opening_evidence_packages，再决定主故事；按实际开场质量排序，不为填满数量重复同一组句子。这些 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把这组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可不报；找不到可兑现的反差开场时，opening_promise 保守地写主商品最强结果或机制，不能用错误商品、泛情绪或无答案的质疑冒充。identity_evidence_ids 只列1-2个最直接依据；所有备选方向也必须是同一个主商品。",
+        "先核实 product_scope 再编故事：整体主讲时段、反复展示对象与用户指定商品优先；30分钟里两句裤子不能因为卖点强就成为主商品。先为主商品寻找最多 3 组不同切入的 Hook -> 紧接 payoff 的 opening_evidence_packages，再决定主故事；按实际开场质量排序，不为填满数量重复同一组句子。这些 opening_evidence_packages：hook_subtitle_ids 和 payoff_subtitle_ids 只能引用当前安全池真实 ID，分别证明停留理由和紧接的新增结果、机制、证明或穿法。先把这组连读为没有标题、没有前文、没有画面的前 6-10 秒：Hook 必须自己说清主商品及具体结果/顾虑，payoff 必须让该结果更可信或更有用；“又没什么特点”“放在这里就”“捏着这一根”这类依赖上文的半句不能作为 Hook 或 payoff。payoff 必须推进一个不同事实，不能只是把 Hook 的结论重说一次；例如“可拆”之后仍说“丝巾能拆”不是兑现。它只证明该故事方向有可行开场，不是最终片单，不锁定最终顺序，下一遍可基于完整池改选。没有足够强证据时宁可不报；找不到可兑现的停人型开场时（例如池内只有解开/扣上扣子这类操作演示），opening_promise 写成受限（受限-素材无合格独立开场）或按主商品最强的结果句安排开场，不能用操作演示句、半截话、泛情绪或无答案的质疑冒充。identity_evidence_ids 只列1-2个最直接依据；所有备选方向也必须是同一个主商品。",
         "identity_evidence_ids 只列 1-2 条最直接、能明确核实商品名或指代的代表依据，不要抄全片 ID。",
-        "先顺读全片，在 product_scope.source_product_sections 用连续 ID 范围简记换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。每个范围只写类型和不超过 12 个汉字的实际商品名，证据不足写 unknown，不解释原因；临时聊裤子、另一件羊毛衣、与商品无关的聊天都不能默认属于主商品。",
+        "先顺读全片，在 product_scope.source_product_sections 用连续 ID 范围简记换品：start_id/end_id 是原片归属边界，不是选片。覆盖全片且不重叠；重新回到同款要另开范围。",
+        "【分段粒度】按自然话题段切分，单个范围原则上不超过约 20 行；禁止把横跨多个话题的长时间片段合并成一个范围 —— 一个范围只挂一个类型，长段必然把整段归属带偏。",
+        "【混讲范围怎么判】一个范围里同时出现主商品卖点、搭配建议、别的商品或闲聊时，以「观众此刻正在被推销的那件商品」为准：只要该范围仍在为主商品推进购买理由（面料、版型、上身效果、搭配、尺码），就标主商品的类型与实际商品名，不要因为掺了别的商品或闲聊就整段划出去。",
+        "只有「明确在讲另一件商品」或「与商品无关的运营流程话术、纯闲聊」才标成那个商品的类型或 other；这类范围也要尽量切短、切准，不要用一个大范围把中间的带货内容一起盖掉。每个范围只写类型和不超过 12 个汉字的实际商品名，证据不足写 unknown，不解释原因。",
         "长目标通过探索更多真实存在的新购买章节来体现，禁止重复同一结果、同一机制或同义口号。",
         "chapter_packets 只能描述章节职责。opening_evidence_packages 是唯一允许出现的字幕 ID 字段：每个完整方案最多 3 组，必须同时填写非空 hook_subtitle_ids、payoff_subtitle_ids、purchase_value、payoff_basis，且 Hook 与 payoff 不得重复 ID。除此之外 JSON 中不得出现 beats、subtitle_ids、source_span、verbatim、时间戳或 final_readthrough。S2/S3 方向摘要不得带 opening_evidence_packages。",
         "可选视频结构仅供导演判断，不需要逐个覆盖：",
@@ -4266,7 +6983,7 @@ def build_two_pass_story_prompt(
         "返回结构：",
         json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
         "",
-        "返回前确认：core_desire 不是卖点清单；每章服务同一故事且有真实证据位置；章节之间存在明确说服关系；证据定位不代表已选择最终口播。只返回紧凑 JSON。",
+        "返回前确认：core_desire 不是卖点清单；每章服务同一故事且有真实证据位置；章节之间存在明确说服关系；证据定位不代表已选择最终口播。只返回 JSON，且每个字段、每个数组元素各占一行（不必缩进对齐，但必须有换行）；不要把整个 JSON 挤在一行。",
     ])
 
 
@@ -4445,6 +7162,25 @@ def _casting_execution_contract(
     }
 
 
+
+# [2026-10-06] 撤销「M1 证据可被无视」的豁免；关闭 = 逐字节回旧提示词。
+# 三句同义豁免（预算/开场/evidence_locations）必须一起撤销，只改一句等于没改。
+CAST_EVIDENCE_BINDING_ENABLED = True
+_CAST_BUDGET_EVIDENCE_LINE = (
+    "第一遍预算是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。"
+    if CAST_EVIDENCE_BINDING_ENABLED else
+    "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。"
+)
+_CAST_OPENING_EVIDENCE_LINE = (
+    "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，**并且当开场回执 quality=strong 时必须落地**：最终片单的第一句必须是它的 Hook，第二句起就要开始兑现 payoff，不得在前面插入铺垫；确实要改选，必须在 chapter_goal 里写明替代理由，否则视为不合规。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。"
+    if CAST_EVIDENCE_BINDING_ENABLED else
+    "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，**并且当开场回执 quality=strong 时必须落地**：最终片单的第一句必须是它的 Hook，第二句起就要开始兑现 payoff，不得在前面插入铺垫；确实要改选，必须在 chapter_goal 里写明替代理由，否则视为不合规。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。"
+)
+_CAST_EVIDENCE_LOCATION_LINE = (
+    "evidence_locations 是本章必须覆盖的证据依据：池中存在能兑现它的完整安全原话时，必须在本章落地；确无可用原话时，在本章如实标缺口（missing_content 写清缺哪条），不得用无关句冒充兑现、也不得静默略过。"
+    if CAST_EVIDENCE_BINDING_ENABLED else
+    "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。"
+)
 def build_two_pass_cast_prompt(
     *,
     story_contract: Mapping[str, Any],
@@ -4458,9 +7194,16 @@ def build_two_pass_cast_prompt(
     director_controls: Mapping[str, Any] | None = None,
     output_speed_factor: float = 1.0,
     source_context_subtitles: Sequence[Mapping[str, Any]] | None = None,
+    opening_hook_pool: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """Build the single exact-Beat casting call over the complete pool."""
     rows = _director_casting_rows(subtitles, executable_subtitle_ids)
+    # 连续窗切分（方案 B）：候选池从「逐句」改成「连续口播窗」。
+    cast_window_rows: list[dict[str, Any]] = []
+    cast_window_dropped_ids: list[int] = []
+    if CAST_WINDOW_POOL_ENABLED and rows:
+        cast_window_rows, cast_window_dropped_ids = _cast_windows_for_rows(rows)
+    pool_rows: list[dict[str, Any]] = cast_window_rows or rows
     duration_range = director_delivery_duration_range(target_duration, duration_tolerance, output_speed_factor)
     depth_contract = director_duration_depth_contract(target_duration)
     execution_contract = _casting_execution_contract(
@@ -4469,10 +7212,13 @@ def build_two_pass_cast_prompt(
         story_audit=story_audit or draft_audit,
     )
     safe_pool_seconds = round(
-        sum(float(row["end"] - row["start"]) for row in rows), 3,
+        sum(float(row["end"] - row["start"]) for row in pool_rows), 3,
     )
     execution_contract["duration"].update({
-        "safe_candidate_count": len(rows),
+        "safe_candidate_count": len(pool_rows),
+        "safe_candidate_unit": "window" if cast_window_rows else "sentence",
+        "safe_candidate_window_count": len(cast_window_rows) or None,
+        "safe_candidate_excluded_single_windows": len(cast_window_dropped_ids) or None,
         "safe_candidate_source_seconds": safe_pool_seconds,
         "safe_pool_can_reach_source_min": (
             safe_pool_seconds >= float(duration_range["source_min"])
@@ -4482,6 +7228,9 @@ def build_two_pass_cast_prompt(
     main_pool_rows, main_pool_has_sections = _main_product_pool_rows(
         story_contract, subtitles, executable_subtitle_ids)
     main_pool_seconds = round(
+        _windows_seconds_for_ids(
+            cast_window_rows, [int(row["id"]) for row in main_pool_rows])
+        if cast_window_rows else
         sum(float(row["end"]) - float(row["start"]) for row in main_pool_rows), 3)
     main_pool_can_reach_source_min = main_pool_seconds >= float(duration_range["source_min"])
     if main_pool_has_sections:
@@ -4489,7 +7238,13 @@ def build_two_pass_cast_prompt(
             "main_product_pool_seconds": main_pool_seconds,
             "main_product_pool_can_reach_source_min": main_pool_can_reach_source_min,
         })
-    story_cited_seconds = _story_cited_evidence_seconds(story_contract, subtitles, executable_subtitle_ids)
+    if cast_window_rows:
+        story_cited_seconds = _windows_seconds_for_ids(
+            cast_window_rows,
+            _story_cited_evidence_ids(story_contract, executable_subtitle_ids),
+        )
+    else:
+        story_cited_seconds = _story_cited_evidence_seconds(story_contract, subtitles, executable_subtitle_ids)
     unused_pool_seconds = round(max(0.0, safe_pool_seconds - story_cited_seconds), 3)
     execution_contract["duration"].update({
         "story_cited_source_seconds": story_cited_seconds,
@@ -4585,17 +7340,59 @@ def build_two_pass_cast_prompt(
         item["strategy_id"] = strategy_id
         item["director_plan_role"] = "primary" if index == 1 else "alternative"
         casting_schemas.append(item)
+    cast_window_pool_lines: list[str] = []
+    if cast_window_rows:
+        _window_seconds = _windows_total_seconds(cast_window_rows)
+        _window_mean = _window_seconds / len(cast_window_rows) if cast_window_rows else 0.0
+        try:
+            _target_windows = max(
+                1, int(round(float(duration_range["source_target"]) / _window_mean))
+            ) if _window_mean > 0 else 0
+        except (KeyError, TypeError, ValueError):
+            _target_windows = 0
+        cast_window_pool_lines = [
+            "本轮候选池按「连续口播窗」切分（方案 B）：每个 [Wnnn] 是一段 2-8 秒、能被整段听懂的原话，"
+            "[IDs a-b] 是它包含的全部 SRT 行号。",
+            "整窗选择硬规则（违反即视为选句失败）：窗是本次选片的最小单位。选定某个窗，就必须把该窗的"
+            "每一个 ID 都按原顺序连续放进同一章的 beats（每行一个 beat），不得截窗、不得跳行、不得把同一窗拆到两章。",
+            f"本轮已剔除只作上下文的行 {len(cast_window_dropped_ids)} 条（过短/碎片窗 + 重复/尺码/口令等废行），"
+            "窗内每一行都已经是可用内容，直接整窗选择即可。被剔除的行只作为 [context ID] 上下文出现，不得引用；"
+            "确实需要那句内容时，把它所在的邻窗整体选上。",
+            f"本轮可选窗共 {len(cast_window_rows)} 个、合计 {_window_seconds:.1f} 秒。"
+            + (
+                f"目标 {float(duration_range['source_target']):.0f} 秒约需要 {_target_windows} 个窗（允许 ±1），"
+                "低于这个窗数就等于没选满。"
+                if _target_windows else ""
+            ),
+            "口径提醒：execution_contract 里 approximate_beats / min_beats_for_source_min / "
+            "approximate_beats_for_target 的计数单位已统一为「窗数」，不是句数。",
+            "subtitle_ids / product_evidence_ids / completion_receipts 一律填 SRT 行号（如 167、168），不要填 W 编号。",
+        ]
     schema = compact_director_wire_payload({"strategies": casting_schemas})
+    _cast_hook_pool_section = _opening_hook_pool_prompt(opening_hook_pool)
     # The transcript remains complete and ordered.  The following contract is
     # deliberately a small execution receipt, not a second copy of M1 prose.
     return "\n".join([
         "安全候选字幕片段按原片顺序：可选不代表句意完整。不足1秒的片段只用于补全必要相邻语义；缺失ID不能视为上下句相邻，缺少必要上下文且无法补全的片段必须弃用。[context ID] 是不可选原片上下文，只用于核对商品切换、指代和否定事实；不得进入任何 beat、Hook 或 payoff，也不能把其中被禁的卖点换一种说法写进故事。1-5 秒优先，5-8 秒完整句仅作例外；没有 Strong Ranking、没有 TopK、没有卖点预分类。",
-        _director_product_context(
-            source_context_subtitles or subtitles,
-            rows,
-            include_nonselectable_context=True,
+        (
+            _director_window_pool_lines(
+                source_context_subtitles or subtitles,
+                cast_window_rows,
+            )
+            if cast_window_rows else
+            _director_product_context(
+                source_context_subtitles or subtitles,
+                rows,
+                include_nonselectable_context=True,
+            )
         )
         or "（没有满足 1-8 秒且可执行的字幕）",
+        "口播习惯词不得作为任何 beat 的句子：看到没有／对不对／是不是／好不好／"
+        "确定要拍／我都讲了／专门给你们定的／姐妹们 等。含这些词的行已在候选池里"
+        "标为 [context ID]；若某句以互动呼语开头或结尾（例如「你有没有发现…」"
+        "「…对不对？」），而相邻行有同一内容的干净版本，必须选干净的那一行。",
+        *cast_window_pool_lines,
+        *([_cast_hook_pool_section] if _cast_hook_pool_section else []),
         "",
         "第一遍的完整故事已保存在工作台，并冻结主商品、核心购买方向、整片承诺和章节推进方向。下面是本轮唯一需要执行的紧凑合同；product.ranges 是换品边界，chapters 的 advance/job/needs/budget 是第一遍的计划。你必须让最终真实口播成为可兑现的故事，不能机械执行冲突或空洞章节：",
         json.dumps(execution_contract, ensure_ascii=False, separators=(",", ":")),
@@ -4607,12 +7404,20 @@ def build_two_pass_cast_prompt(
         "budget 是本章原声目标，budget_ceiling 是本章超长预警；budget_end 是到本章结束的累计目标。budget_floor 和 budget_end_floor 是到该章为止的规划进度线：只要整片累计低于 source_min，它们就是「本章还可以继续补新价值」的提示，而整片达标仍是硬要求。逐章完成取舍，避免前几章耗尽全片预算；无需换算播放速度。",
         "时长门槛：若 duration.safe_pool_can_reach_source_min=true，source_min 是本次交付下限。先剔除残句、重复和无关内容；其后必须继续寻找服务当前故事的新机制、证明、体验、场景或顾虑解除，直到实测累计达到 source_min。不能因为首轮章节讲得简短、预计句数是参考或想保持精炼就提前交卷。只有逐章说明缺失的具体购买判断、且确实没有可选原话可补时，才允许 source_material_limited/natural_complete_below_target。",
         "本轮即最终选片：这一轮就要按 source_target/source_min 排出完整片单；预计句数、首轮章节估算或想保持精炼都不是提前收尾的理由。",
-        "片长按真实语速折算（硬要求）：这段素材平均每句约 "
-        f"{mean_seconds:.2f} 秒，整片要达到 source_min 至少需要 "
-        f"{pacing_reference['min_beats_for_source_min'] or 0} 条短句；低于这个条数时整片必然不达下限，必须继续选新的购买价值句子，而不是提前收尾。",
+        (
+            "片长按真实语速折算（硬要求）：这段素材平均每窗约 "
+            f"{_window_mean:.2f} 秒（窗是 2-8 秒的连续口播单位），整片要达到 source_min 至少需要 "
+            f"{math.ceil(float(duration_range['source_min']) / _window_mean) if _window_mean > 0 else 0} 个窗；目标 "
+            f"{float(duration_range['source_target']):.0f} 秒约需要 {_target_windows} 个窗（允许 ±1）。"
+            "低于这个窗数就等于没选满；每个被选中的窗，其 IDs 必须全部按原顺序出现，不得截窗。"
+            if cast_window_rows else
+            "片长按真实语速折算（硬要求）：这段素材平均每句约 "
+            f"{mean_seconds:.2f} 秒，整片要达到 source_min 至少需要 "
+            f"{pacing_reference['min_beats_for_source_min'] or 0} 条短句；低于这个条数时整片必然不达下限，必须继续选新的购买价值句子，而不是提前收尾。"
+        ),
         "ID 纪律（硬约束）：每个 subtitle_ids / product_evidence_ids / completion_receipts 只能填上面“安全候选字幕片段”里出现过的数字 ID；[context ID] 段里的数字一律禁止引用，任何越界 ID 都会被丢弃。",
         "执行顺序：先从安全池识别完整语义单元；再联合选择Hook、紧接兑现与正文，按播放顺序连读、去重；最后归章计时。章节职责服务已经连顺的口播，不能为了填章抽取半句；不能靠不同 role 标签把同义句分装进两章。整片最多保留一个以操作步骤为主的证明块，第一种/第二种/第三种穿法只作证据，不各自凑章。",
-        "第一遍预算与证据位置只是规划参考，内容边界删章后也由你在剩余故事内重新分配深度；不能为了守住原预算而只选半句话。自然顺滑与真实新价值优先，确实无法接近目标时报告具体素材缺口。",
+        _CAST_BUDGET_EVIDENCE_LINE,
         "",
         f"用户内容合同：{_contract_forbidden_lines(content_contract)}",
         _director_controls_prompt(director_controls, stage="cast"),
@@ -4628,12 +7433,12 @@ def build_two_pass_cast_prompt(
         "章节兑现只看最终口播：标题和 role 标签不算证据；介绍材质不等于说明不扎，鼓励尝试不等于教会搭配，说到网眼洞口不等于已经讲出做工结论，说到某一版不等于完成版本对比。每项 needs 用最短的一个完整语义单元直接说出问题、解释或证据和结论；只有补句不可或缺时才增加相邻句。alternative_beats 不参与兑现。不要把尚未选入的关键句只放在备选里。",
         "按原字幕前后核对口语依赖：‘没有这个点’必须保留所指结论，‘因为/所以/它/那种’必须有明确对象和完整谓语。先保留必要的前后短句再检查预算；不能为限制句数跳过结论或截掉句尾。开场不得保留‘又没什么特点’、‘刚刚讲过了’、‘放在这里就’、‘捏着这一根’等依赖直播现场或画面才能成立的铺垫/指令；正文也不能用它们替代一个完整购买判断。",
         "全片先建立 ID 归属：同一 ID 只能放入一个最终章节，重复播放不增加内容或时长。execution_contract.evidence_conflicts 中同一事实被第一遍多个章节引用时，必须只分配给其中一章；另一章选择新的必要原话，或在本次回复中合并/取消。按最终 ID 顺序逐对连读，并为每次衔接在内部确认一种真实关系：前句提出顾虑/结论而后句回答或证明；前句给机制而后句给结果；前句给结果而后句解释原因；前句结束一个完整判断而后句自然引入不同但相关的新购买价值。若两句只能靠章节标题、画面、被跳过的直播上下文或模型改写才能连上，必须删掉其中一句、补一条真正的连接句，或合并/取消章节。不能把“有三种穿法”接到“又没什么特点”这类无承接残句，也不能用连续操作指令代替购买判断。保留必要上下句来闭合“因为/但是/这个效果”等依赖，删掉残句、寒暄和全片同义重复。每章必须兑现自己的 advance；optional 无新增价值可删。",
-        "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。选定前先做纯文本盲读：隐藏章节标题和画面，只听前 6-10 秒仍须知道在讲什么商品、它带来什么具体好处、下一句新增了什么；任一答案缺失就换候选或 quality=limited。没有足够候选就如实少报。",
-        "execution_contract 中每个 strategy.opening_evidence 是第一遍找到的真实 Hook -> payoff 可行性证据，**并且当开场回执 quality=strong 时必须落地**：最终片单的第一句必须是它的 Hook，第二句起就要开始兑现 payoff，不得在前面插入铺垫；确实要改选，必须在 chapter_goal 里写明替代理由，否则视为不合规。把它与完整安全池中的候选一起比较：只有最终前缀实际保留 Hook 和紧接兑现、并且正文能继续回答该购买问题时才可采用；否则改选更强的安全组合，并用 chapter_revision 收窄、合并或删除不成立的首章。不得仅因为 M1 引用了某些 ID 就照抄它们。",
+        "开场召回：在完整安全池中寻找能服务当前购买方向的真实开头，不限于第一章 evidence_locations 或开头附近；opening_promise 是待原话兑现的意图，不是让你照拟定文案找近义句。把必要上下句作为完整候选，不能删除不利语气、拼出新判断或默改疑似 ASR 错词。选定前先做纯文本盲读：隐藏章节标题和画面，只听前 6-10 秒仍须知道在讲什么商品、它带来什么具体好处、下一句新增了什么；任一答案缺失就换候选或 quality=limited。没有足够候选就如实少报。开场句必须能独立成句：不得以「如果说/然后/因为/所以/那/你们只要」这类连接词或半截话开头，不得停在解开/扣上/第几步这类操作口令上；这类句子只能进正文。",
+        _CAST_OPENING_EVIDENCE_LINE,
         "开场联合选择Hook与紧接兑现。痛点型Hook之后，payoff必须开始回答本款怎样解决该顾虑，给出具体效果、机制或证明；继续吐槽普通款、把痛点讲得更具体、或宣称不用再买，都不算本款兑现。结果型Hook之后须增加解释或证据；可拆→还能拆这类同义重复不能算兑现。不能仅因两句内容不同就判定兑现；找不到完整组合时quality=limited。",
         "同品类不等于同一件商品：‘这件/那件/刚才那件’必须按原片指代核对。product.ranges 只是第一遍判断，不能替代真实身份依据；不得把另一件同类商品的效果移给主商品，也不能把缺失上下文当作身份已确认。商品证据不足的候选记 rejected；仅有画面才能成立的句子要在短评中说明，不能声称音频已自立。",
-        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向原片的实际指代依据（可引用 context ID，但绝不能将 context ID 剪进 Hook 或 payoff），并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。",
-        "evidence_locations 只是事实定位，先回查其上下文再从完整安全池选句；不得当作必选或唯一候选。若证据不支持 needs，在本次选片中如实标缺口，不用无关句冒充兑现。",
+        "opening_selection.compared_packages 保留本轮最有竞争力的至多3个不同真实开场及必要淘汰例，按AI综合判断从优到劣列出（不是关键词计分或召回 TopK）。每项用 subtitle_ids 标 Hook，用 payoff_subtitle_ids 标紧接的兑现句，用 product_evidence_ids 指向原片的实际指代依据（可引用 context ID，但绝不能将 context ID 剪进 Hook 或 payoff），并给一句可核对的结果短评。selected 的 reason 必须点明 payoff 新增的具体事实；若只能写成重复 Hook 的结论，该组合不得 selected。只将第一项写 selected，其余 alternative/rejected；缺 payoff 或身份依据的 rejected 可写空数组。selected_subtitle_ids 必须等于 selected 的 Hook+payoff，且逐项等于最终片单前缀；比较回执本身不会自动插句、替换或重排预览。三个候选必须是三个不同的开场角度（例如强结果 / 强判断 / 反差 / 痛点 / 情绪），不得是同一卖点或同一动作的换词变体。若本轮已注入【独立开场候选池】，selected 的 Hook 必须取自池内 subtitle_ids；池非空却没用池内句、或池为空仍硬凑开场，均视为选开场失败。",
+        _CAST_EVIDENCE_LOCATION_LINE,
         "字幕行不等于完整语义：仅当必要相邻原字幕跨多个 beats 时才输出 semantic_units；单行完整句省略。每组只列跨行依赖的 ID 数组，按原话顺序连续出现在本章最终 beats 中，不能引用其他章或未选句，并且总原声不超过 8 秒。程序只检查声明是否完整执行，不自动补句、拼句、截断或重排。",
         "严格按 product.ranges 回查‘它/这条/这套’。开场和非 styling 章节只能选择已核实的主商品范围；未知范围或其他商品的泛情绪不能承担主商品卖点。每条最终或备选 Beat 都填写关系、实际商品、类型和 1-2 条指代依据；搭配品只能作为 styling_support，不能把它自身效果归给主商品。",
         "正文只返回最终可执行 beats，不返回 alternative_beats；开场比较只保存在 opening_selection。每个标记 complete 的 chapter 的每项 needs 都用 completion_receipts 逐项列出 requirement_index（从 1 开始）和本章最短已选 semantic unit 的 subtitle_ids；回执只写数字，不写解释。答上 needs 只是本章的最低完成线：若本章累计原声低于本章 budget_floor（进度线）而整片又没到 source_min，本章即视为未完成，必须继续从安全池补新的购买理由（机制/证明/体验/场景/顾虑解除），不得用同义句凑数，也不得提前收尾。，不能引用 context 或其他章。只有全部有回执才写 complete；否则写 needs_context/source_limited，并用 missing_content 写一个具体缺口。",
@@ -5365,6 +8170,8 @@ def _parse_director_stage_json_with_recovery(
         repair_prompt = "\n\n".join([
             "你的上一条回复未能被严格 JSON 解析。请只做格式修复。",
             "必须只返回一个有效 JSON 对象，不要 Markdown、解释或代码围栏。",
+            "每个字段、每个数组元素各占一行（不必缩进对齐，但必须有换行）——"
+            "按行组织结构才不会漏括号或多括号。",
             "不得新增、删除、改写、重排任何事实、章节、商品、字幕 ID、数组项或字段值；"
             "仅修复引号、逗号、转义、括号等 JSON 语法。",
             "上一条原文如下：",
@@ -5407,6 +8214,88 @@ def _parse_director_stage_json_with_recovery(
         return parsed
 
 
+def _json_bracket_depths(text: str) -> tuple[int, int, bool]:
+    """扫描一遍，返回 (花括号净深, 方括号净深, 是否停在未闭合的字符串里)。
+
+    只看结构字符，字符串内部一律跳过（含转义）。
+    """
+    depth_brace = depth_bracket = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth_brace += 1
+        elif char == "}":
+            depth_brace -= 1
+        elif char == "[":
+            depth_bracket += 1
+        elif char == "]":
+            depth_bracket -= 1
+    return depth_brace, depth_bracket, in_string
+
+
+def _balance_json_bracket_candidates(text: str) -> list[str]:
+    """括号平衡候选（纯机械，不新增也不改写任何内容字符）。
+
+    实测（2026-10-08，43 份真实失败的导演响应）：本条之前的链路只救回 2 份（4.7%）。
+    失败形态很集中——15 份的报错位置距响应末尾仅 3 个字符、末尾形如 ``}]}}``（多出的
+    闭合括号），且括号计数普遍不平衡（165/167、150/153、92/95 是多闭合，8/5 是少闭合）。
+
+    这里只做两件机械的事：
+
+    ① **末尾多余的闭合括号去掉**：只有当末尾一段确实只由闭合括号与空白组成时才剥，
+       绝不切掉任何内容字符（这是与"盲目截断末尾 N 字符"的关键区别）。
+    ② **缺失的闭合括号补齐**：尾部被截断时，按两种顺序各试一次。
+
+    停在未闭合字符串里、或结构错在中途（末尾不是括号却有多余闭合）时返回空列表——
+    那种情况机械办法救不了，照旧走付费修复。
+    """
+    candidate = str(text or "").strip()
+    if not candidate:
+        return []
+    depth_brace, depth_bracket, in_string = _json_bracket_depths(candidate)
+    if in_string:
+        return []
+    if depth_brace == 0 and depth_bracket == 0:
+        # 本来就平衡：严格解析失败另有原因（例如校验不通过），括号平衡帮不上忙。
+        return []
+    out: list[str] = []
+    work = candidate
+    if depth_brace < 0 or depth_bracket < 0:
+        # ① 末尾多出闭合括号：从后往前逐个剥，直到净深都非负。
+        #    只有末尾确实是闭合括号/空白时才剥，绝不切掉内容字符。
+        while work and (depth_brace < 0 or depth_bracket < 0):
+            last = work[-1]
+            if last in "}]" or last.isspace():
+                work = work[:-1]
+            else:
+                return []
+            depth_brace, depth_bracket, in_string = _json_bracket_depths(work)
+            if in_string:
+                return []
+        if depth_brace == 0 and depth_bracket == 0:
+            out.append(work)
+            return out
+        # 剥完之后可能反而变成「缺闭合」——所以下面要继续补，两者组合才是完整修复。
+    if depth_brace >= 0 and depth_bracket >= 0:
+        # ② 缺闭合括号：两种补齐顺序都试（数组通常嵌在对象里，先 ] 后 } 更常见）。
+        out.append(work + ("]" * depth_bracket) + ("}" * depth_brace))
+        if depth_brace and depth_bracket:
+            out.append(work + ("}" * depth_brace) + ("]" * depth_bracket))
+    return out
+
+
 def _relaxed_json_repair(raw: Any) -> Any | None:
     """本地宽松修复 JSON（免费）：去代码围栏、截取最外层对象、修尾逗号与中文引号。
 
@@ -5445,6 +8334,19 @@ def _relaxed_json_repair(raw: Any) -> Any | None:
             continue
         if isinstance(obj, dict):
             return obj
+    # 最后兜底：括号平衡（见 _balance_json_bracket_candidates 的实测说明）。
+    # 解析不出来就照旧返回 None 走付费修复，绝不返回半成品。
+    # 要求结果是非空对象：否则像 "{"/"{{" 这种碎片会被补成 "{}" 并当成成功结果静默返回，
+    # 那比直接报格式错更糟。
+    for candidate in candidates:
+        for balanced in _balance_json_bracket_candidates(candidate):
+            for variant in (balanced, re.sub(r",\s*([}\]])", r"\1", balanced)):
+                try:
+                    obj = json.loads(variant, strict=False)
+                except Exception:  # noqa: BLE001 - 逐个变体尝试
+                    continue
+                if isinstance(obj, dict) and obj:
+                    return obj
     return None
 
 def _subtitle_duration_map(subtitles: Sequence[Mapping[str, Any]]) -> dict[int, float]:
@@ -5734,6 +8636,9 @@ def _apply_casting_chapter_revisions(
         revisions: list[tuple[dict[str, Any], dict[str, Any], str, list[str], dict[str, Any]]] = []
         revision_packets: list[dict[str, Any]] = []
         errors: list[str] = []
+        # P0-A（2026-10-01 David 定）：被自动纠偏过的修订（原 action 语义成立、
+        # 只是标签写错）。只做留痕，不改任何判定标准。
+        coerced_actions: list[dict[str, Any]] = []
         claimed_sources: set[str] = set()
         seen_revision_chapters: set[str] = set()
         for cast_index, cast_chapter in enumerate(cast_chapters, 1):
@@ -5765,6 +8670,30 @@ def _apply_casting_chapter_revisions(
             if semantic_errors:
                 errors.extend(f"{label}:{error}" for error in semantic_errors)
                 continue
+            # P0-A（2026-10-01 David 定）：修订 action 自动纠偏。
+            # 背景（重启后预览审计实测）：AI 把「合并相邻章后重做」写成
+            # action=refine + source_chapter_ids=["C1","C2"]，原实现只认 refine 的
+            # 单章形态 → 整条判无效丢弃，需要重建的章失去唯一自救机会
+            # （实测混剪 B 的 C1 只剩 1 拍 0.96s）。这里只在语义完整、且 source 是
+            # 「以本章为首的连续多章」时按 merge 处理：确定性纠偏，零新增 AI 调用。
+            # 纠偏后仍要过后续全部校验（如 merged_source_has_beats），不放宽任何闸门。
+            if action == "refine" and source_ids != [chapter_id] and semantic_values:
+                _coerce_positions = [chapter_index[value] for value in source_ids]
+                if (
+                    len(source_ids) >= 2
+                    and source_ids[0] == chapter_id
+                    and _coerce_positions == list(range(
+                        _coerce_positions[0], _coerce_positions[0] + len(_coerce_positions)
+                    ))
+                ):
+                    coerced_actions.append({
+                        "chapter_id": chapter_id,
+                        "from_action": "refine",
+                        "to_action": "merge",
+                        "source_chapter_ids": list(source_ids),
+                    })
+                    action = "merge"
+
             if action == "drop":
                 if source_ids != [chapter_id] or _chapter_has_selected_beats(cast_chapter):
                     errors.append(f"{label}:chapter_revision_drop_invalid")
@@ -5811,7 +8740,10 @@ def _apply_casting_chapter_revisions(
         if errors:
             for cast_chapter in revision_packets:
                 cast_chapter.pop("chapter_revision", None)
-            audits.append({"strategy_id": strategy_id, "status": "ignored_invalid", "issues": errors})
+            audits.append({
+                "strategy_id": strategy_id, "status": "ignored_invalid",
+                "issues": errors, "coerced": coerced_actions,
+            })
             continue
         if not revisions:
             audits.append({"strategy_id": strategy_id, "status": "unchanged", "applied": []})
@@ -5846,6 +8778,7 @@ def _apply_casting_chapter_revisions(
         audits.append({
             "strategy_id": strategy_id,
             "status": "applied",
+            "coerced": coerced_actions,
             "applied": [
                 {
                     "chapter_id": source_ids[0], "action": action,
@@ -5858,12 +8791,239 @@ def _apply_casting_chapter_revisions(
     return effective_story, effective_cast, {"strategies": audits}
 
 
+def _opening_leadin_veto(
+    opening: Any,
+    chapter_beats: Sequence[Mapping[str, Any]] | None,
+    casting_rows: Sequence[Mapping[str, Any]] = (),
+    used_ids: set[int] | None = None,
+    hook_pool: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Deterministically replace a dangling-lead-in opening Hook (receipt only).
+
+    Every one of these must hold, otherwise nothing at all changes:
+      * the AI-selected package's Hook is one sentence that starts with a
+        dependency conjunction (the same list the chapter-head fill uses);
+      * the sentence right before it being present in the pool does NOT make
+        this gate back off: the chapter-head fill only runs for chapters after
+        the first (``chapter_index > 1``), and this gate is only ever called on
+        chapter 1 / the opening, so nobody else would repair it;
+      * a replacement Hook exists that is unused elsewhere in the plan and of
+        sane spoken length.  Sources, in order: first any ``alternative`` package
+        the same AI response returned; if none qualifies, the recall-pool Hook
+        that the pool itself ranks *ahead* of the current Hook (``hook_pool``
+        arrives strength-desc / rank-asc, i.e. the pool's own preference order),
+        and never one the pool ranks below or level with it.  Whenever a
+        ``hook_pool`` is supplied, the same bar holds for the ``alternative``
+        source too: the replacement must itself be a pool candidate ranked
+        *ahead* of the current Hook.
+    Only the first beat of the first chapter (the Hook beat) is swapped. The
+    payoff beat, the chapter order and every other chapter stay byte-identical.
+    """
+    receipt: dict[str, Any] = {
+        "enabled": bool(OPENING_LEADIN_VETO_ENABLED),
+        "applied": False,
+        "status": "skipped",
+        "old_hook_ids": [],
+        "new_hook_ids": [],
+        "promoted_package_rank": 0,
+        "promoted_from": "",
+    }
+    if not OPENING_LEADIN_VETO_ENABLED or not isinstance(opening, Mapping) or not chapter_beats:
+        return receipt
+    try:
+        packages = opening.get("compared_packages")
+        if not isinstance(packages, (list, tuple)) or not packages:
+            return receipt
+        by_id: dict[int, Mapping[str, Any]] = {}
+        for row in casting_rows or ():
+            if not isinstance(row, Mapping):
+                continue
+            try:
+                row_id = int(row.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if row_id > 0:
+                by_id[row_id] = row
+
+        def _hook_ids(package: Any) -> list[int]:
+            values = package.get("subtitle_ids") if isinstance(package, Mapping) else ()
+            ids: list[int] = []
+            for value in values or ():
+                try:
+                    subtitle_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if subtitle_id > 0 and subtitle_id not in ids:
+                    ids.append(subtitle_id)
+            return ids
+
+        def _text(subtitle_id: int) -> str:
+            row = by_id.get(subtitle_id)
+            return str(row.get("text") or "").strip() if isinstance(row, Mapping) else ""
+
+        def _starts_with_prefix(text: str, prefixes: tuple) -> bool:
+            return bool(text) and any(text.startswith(prefix) for prefix in prefixes)
+
+        def _dangling(subtitle_id: int) -> bool:
+            return _starts_with_prefix(_text(subtitle_id), OPENING_LEADIN_VETO_PREFIXES)
+
+        def _replacement_blocked(subtitle_id: int) -> bool:
+            return _starts_with_prefix(_text(subtitle_id), OPENING_REPLACEMENT_BLOCKED_PREFIXES)
+
+        def _pool_hook_order(rows: Sequence[Mapping[str, Any]] | None) -> list[int]:
+            # 池行（hook_pool_prompt_rows）已按「强度降序、排名升序」排好，
+            # 这个顺序就是池自己的偏好顺序 —— B 只认它，不重新排序。
+            order: list[int] = []
+            for row in rows or ():
+                if not isinstance(row, Mapping):
+                    continue
+                ids_in_row = _hook_ids(row)
+                if len(ids_in_row) == 1:
+                    order.append(ids_in_row[0])
+            return order
+
+        def _sane_seconds(subtitle_id: int) -> bool:
+            row = by_id.get(subtitle_id)
+            if not isinstance(row, Mapping):
+                return False
+            try:
+                start = float(row.get("start"))
+                end = float(row.get("end"))
+            except (TypeError, ValueError):
+                return True  # 池里没有时长信息时不拦
+            return 1.0 <= (end - start) <= 10.0
+
+        selected = None
+        for package in packages:
+            if isinstance(package, Mapping) and str(package.get("decision") or "").strip() == "selected":
+                selected = package
+                break
+        if selected is None:
+            return receipt
+        hook_ids = _hook_ids(selected)
+        if len(hook_ids) != 1 or hook_ids[0] not in by_id or not _dangling(hook_ids[0]):
+            return receipt
+        receipt["status"] = "hook_is_dangling_leadin"
+        receipt["old_hook_ids"] = list(hook_ids)
+        if hook_ids[0] - 1 in by_id:
+            # [A · 2026-10-05] 上文在池里，但**不再因此放手**：章首补行只作用于
+            # 第 2 章及以后（见 CAST_CHAPTER_HEAD_FILL_ENABLED 分支的
+            # chapter_index > 1），而本硬门只被第 1 章（开场）调用 —— 开场没人来补，
+            # 放手的唯一结果就是这条开场永远不修。继续往下走，交给换包。
+            receipt["status"] = "leadin_fillable_not_applicable_to_opening"
+        used = set(int(value) for value in (used_ids or ()))
+        used.discard(hook_ids[0])
+        # [O1 · 2026-10-05] 把 B 的「信池排名」护栏也接到 AI 备选这条路上：
+        # 只要这次带了召回池，备选就必须同为池内候选、且池把它排在当前钩子前面。
+        pool_order = _pool_hook_order(hook_pool) if hook_pool else []
+        current_pool_index: int | None = None
+        if pool_order:
+            try:
+                current_pool_index = pool_order.index(hook_ids[0])
+            except ValueError:
+                current_pool_index = None
+        candidate = None
+        for rank, package in enumerate(packages, 1):
+            if package is selected or not isinstance(package, Mapping):
+                continue
+            if str(package.get("decision") or "").strip() != "alternative":
+                continue
+            ids = _hook_ids(package)
+            if len(ids) != 1:
+                continue
+            if ids[0] in used or ids[0] not in by_id:
+                continue
+            if _replacement_blocked(ids[0]) or not _sane_seconds(ids[0]):
+                continue
+            if pool_order:
+                if ids[0] not in pool_order:
+                    continue
+                if current_pool_index is not None and pool_order.index(ids[0]) >= current_pool_index:
+                    # 池自己把当前钩子排在这个备选前面 —— 不越级。
+                    continue
+            candidate = package
+            receipt["promoted_package_rank"] = rank
+            receipt["promoted_from"] = "ai_alternative"
+            break
+        if candidate is None and pool_order:
+            # [B · 2026-10-05] AI 的备选包没有可用的，就按池自己的偏好顺序找。
+            for pool_index, pool_hook_id in enumerate(pool_order):
+                if current_pool_index is not None and pool_index >= current_pool_index:
+                    # 池自己把当前钩子排在这个候选前面 —— 「信池排名」就不该越级顶替。
+                    break
+                if pool_hook_id == hook_ids[0] or pool_hook_id in used or pool_hook_id not in by_id:
+                    continue
+                if _replacement_blocked(pool_hook_id) or not _sane_seconds(pool_hook_id):
+                    continue
+                candidate = {
+                    "subtitle_ids": [pool_hook_id],
+                    "decision": "alternative",
+                    "reason": "recall_pool_promotion",
+                }
+                receipt["promoted_package_rank"] = pool_index + 1
+                receipt["promoted_from"] = "recall_pool"
+                break
+        if candidate is None:
+            receipt["status"] = "no_clean_alternative"
+            return receipt
+        new_hook = _hook_ids(candidate)[0]
+        first_beat = chapter_beats[0]
+        if not isinstance(first_beat, dict):
+            receipt["status"] = "first_beat_not_mutable"
+            return receipt
+        first_beat["subtitle_ids"] = [new_hook]
+        first_beat.pop("source_span", None)
+        first_beat.pop("subtitle_span", None)
+        promoted = dict(candidate)
+        promoted["decision"] = "selected"
+        if "product_evidence_ids" not in promoted and isinstance(selected, Mapping):
+            # 池晋升的包本来不在 compared_packages 里，产品证据沿用原选中包的记录，
+            # 章节其余部分未动，不重新发明证据。
+            promoted["product_evidence_ids"] = list(selected.get("product_evidence_ids") or [])
+        demoted = dict(selected)
+        demoted["decision"] = "alternative"
+        # 只把「选中包」与「备用包」对调位置，其余包相对次序一个不动。
+        reordered: list[Any] = []
+        placed_demoted = False
+        for package in packages:
+            if package is selected:
+                reordered.append(promoted)
+            elif package is candidate:
+                reordered.append(demoted)
+                placed_demoted = True
+            else:
+                reordered.append(dict(package) if isinstance(package, Mapping) else package)
+        if not placed_demoted:
+            # 候选来自召回池、本来不在 compared_packages 里：把原选中包留档在末尾。
+            reordered.append(demoted)
+        payoff_ids: list[int] = []
+        if len(chapter_beats) > 1 and isinstance(chapter_beats[1], Mapping):
+            payoff_ids = [int(value) for value in DirectorBeat.from_dict(chapter_beats[1], 2).subtitle_ids]
+        promoted["payoff_subtitle_ids"] = payoff_ids
+        promoted["program_note"] = (
+            "opening_leadin_veto: 钩子由 %s 换成 %s（来源=%s）；兑现拍保持原章开头，未改写任何原文"
+            % (hook_ids, [new_hook], receipt.get("promoted_from") or "ai_alternative")
+        )
+        opening["compared_packages"] = reordered
+        opening["selected_subtitle_ids"] = [new_hook] + payoff_ids
+        receipt.update({
+            "applied": True,
+            "status": "swapped",
+            "new_hook_ids": [new_hook],
+        })
+    except Exception as exc:  # noqa: BLE001 - 硬门自身绝不能拖垮预览
+        receipt["applied"] = False
+        receipt["status"] = "veto_error:%s" % type(exc).__name__
+    return receipt
+
+
 def _normalize_two_pass_director_payload(
     story_payload: Mapping[str, Any],
     casting_payload: Mapping[str, Any],
     *,
     casting_rows: Sequence[Mapping[str, Any]] = (),
     product_context_rows: Sequence[Mapping[str, Any]] = (),
+    opening_hook_pool: Sequence[Mapping[str, Any]] | None = None,
     _single_strategy: bool = False,
 ) -> dict[str, Any]:
     """Hydrate the compact Casting receipt without making semantic choices.
@@ -5903,6 +9063,7 @@ def _normalize_two_pass_director_payload(
                     {"strategies": [cast_item]},
                     casting_rows=casting_rows,
                     product_context_rows=product_context_rows,
+                    opening_hook_pool=opening_hook_pool,
                     _single_strategy=True,
                 )["strategies"][0]
                 normalized["strategy_id"] = strategy_id
@@ -6035,7 +9196,41 @@ def _normalize_two_pass_director_payload(
     primary["chapter_packets"] = hydrated_chapters
     primary["final_readthrough"] = "｜".join(readthroughs)
 
-    # Check the AI's receipt against its actual edit, not against a program's
+    # [乙-bis] 开场「半截话」确定性硬门（0 新增 AI 调用）
+    _leadin_receipt = _opening_leadin_veto(
+        primary.get("opening_selection"),
+        hydrated_chapters[0].get("beats") if hydrated_chapters else None,
+        casting_rows,
+        used_ids={
+            int(subtitle_id)
+            for chapter in hydrated_chapters
+            for beat in (chapter.get("beats") or ())
+            for subtitle_id in DirectorBeat.from_dict(beat, 1).subtitle_ids
+        },
+        hook_pool=opening_hook_pool,
+    )
+    if _leadin_receipt.get("status") != "skipped":
+        # 只在硬门「看过」这条开场时留回执：关掉开关或钩子本就干净时不写，
+        # 保证置 False 与落地前逐字节等价。
+        _leadin_audit = dict(primary.get("whole_video_audit") or {})
+        _leadin_audit["opening_leadin_veto"] = _leadin_receipt
+        primary["whole_video_audit"] = _leadin_audit
+    if _leadin_receipt.get("applied"):
+        _leadin_parts: list[str] = []
+        for _beat_index, _beat in enumerate(hydrated_chapters[0].get("beats") or (), 1):
+            for _sid in DirectorBeat.from_dict(_beat, _beat_index).subtitle_ids:
+                _leadin_text = text_by_id.get(int(_sid), "")
+                if _leadin_text:
+                    _leadin_parts.append(_leadin_text)
+        hydrated_chapters[0]["chapter_readthrough"] = "｜".join(_leadin_parts)
+        primary["chapter_packets"] = hydrated_chapters
+        primary["final_readthrough"] = "｜".join(
+            str(chapter.get("chapter_readthrough") or "")
+            for chapter in hydrated_chapters
+            if str(chapter.get("chapter_readthrough") or "")
+        )
+
+# Check the AI's receipt against its actual edit, not against a program's
     # preferred Hook. These checks are advisory and never change Beat order.
     opening = primary.get("opening_selection")
     if isinstance(opening, Mapping):
@@ -6071,9 +9266,10 @@ def _normalize_two_pass_director_payload(
         opening["candidate_audit"] = audit_opening_candidates(
             opening, source_rows=casting_rows, executed_ids=selected_ids,
             product_context_rows=product_context_rows,
+            hook_pool=opening_hook_pool,
         )
         if opening["candidate_audit"]["status"] == "warning":
-            warnings.append("开场候选回执的来源或实际承接不一致，请复核；未自动换句。")
+            warnings.append("开场候选回执的来源、独立候选池归属或实际承接不一致，请复核；未自动换句。")
         audit = dict(primary.get("whole_video_audit") or {})
         links = audit.get("continuity_links") or ()
         if not isinstance(links, (list, tuple)):
@@ -6103,7 +9299,15 @@ def _normalize_two_pass_director_payload(
     if central_promise:
         primary["thesis"] = central_promise
         primary["core_commercial_idea"] = central_promise
-    primary["story_premise"] = central_promise
+    story_premise = str(primary.get("story_premise") or "").strip()
+    if not story_premise:
+        story_premise = "；".join(
+            part for part in (
+                str(primary.get("audience_tension") or "").strip(),
+                str(primary.get("transformation") or "").strip(),
+            ) if part
+        )
+    primary["story_premise"] = story_premise or central_promise
     primary["payoff"] = str(primary.get("opening_promise") or central_promise).strip()
     primary["story_contract"] = story
 
@@ -6522,6 +9726,7 @@ def analyze_commercial_story(
             director_controls=director_controls,
             output_speed_factor=output_speed_factor,
             source_context_subtitles=source_context_subtitles,
+            opening_hook_pool=opening_hook_prompt_rows,
         )
         if identity_errors:
             cast_prompt += "\n" + "\n".join([
@@ -6563,6 +9768,16 @@ def analyze_commercial_story(
         )
         if stage_progress_hook:
             stage_progress_hook("beat_casting_completed")
+        # 章内连续性校验（确定性，只读，不增加任何 AI 调用）：
+        # 同一章不得由相隔很远的口播窗拼成；残句/半句不得成章。
+        # 选片链路固定「故事一遍 + 选句一遍」，这里只报告，不改写、不重排、不追加调用。
+        _audit_cast_window_continuity(
+            cast_payload,
+            subtitles,
+            executable_ids=format_executable_ids,
+            stage_response_hook=stage_response_hook,
+            log_fn=log,
+        )
         # New Director replies must keep one source ID in each Beat.  Capture
         # legacy grouped replies before normalizing them for editable preview;
         # the normalizer preserves every AI-selected line but the audit must
@@ -6572,6 +9787,107 @@ def analyze_commercial_story(
         for issue in grouped_beat_issues:
             grouped_beat_issues_by_strategy.setdefault(str(issue.get("strategy_id") or "S1"), []).append(issue)
         format_receipt = _expand_cast_sentence_groups(cast_payload, subtitles, format_executable_ids)
+        # P0-1 拆窗补齐（确定性，不增加 AI 调用、不改写、不重排）：
+        # 只把「同一连续口播窗里缺的那几行」按原顺序补回，避免落盘成半句。
+        try:
+            split_repair_receipt = _repair_cast_window_splits(
+                cast_payload, subtitles, format_executable_ids, log_fn=log,
+            )
+        except Exception as split_exc:  # noqa: BLE001 - 补齐失败绝不阻断导演
+            split_repair_receipt = {"repaired": [], "skipped": []}
+            log(f"拆窗补齐异常（已跳过）：{type(split_exc).__name__}: {split_exc}")
+        if split_repair_receipt["repaired"]:
+            log(
+                f"拆窗补齐 {len(split_repair_receipt['repaired'])} 句"
+                "（只补回同一窗内缺的行，按原顺序，未改写原话）："
+                + "、".join(
+                    f"#{item['subtitle_id']}({item['side']})"
+                    for item in split_repair_receipt["repaired"][:12]
+                )
+            )
+        if split_repair_receipt["skipped"]:
+            log(f"有 {len(split_repair_receipt['skipped'])} 处拆窗无法补齐（窗外/已被使用/超上限），已记录审计。")
+        if stage_response_hook and (split_repair_receipt["repaired"] or split_repair_receipt["skipped"]):
+            stage_response_hook(
+                "cast_window_split_repair",
+                json.dumps(split_repair_receipt, ensure_ascii=False, indent=2),
+            )
+        # 整窗整取（确定性；零 AI 调用、不改写、不重排、不删改 AI 已选行）：
+        # AI 常只取一个连续口播窗的一部分，落盘就把窗内承接句丢掉（实测丢 38%）。
+        # 这里把窗内剩下的行按原顺序补回来，并受时长契约上界（source_max）约束。
+        try:
+            from selection_contracts import DurationContract as _WholeKeepContract
+            _whole_keep_contract = _WholeKeepContract.create(
+                target_duration, output_speed_factor, tolerance=duration_tolerance,
+            )
+            _whole_keep_budget = min(
+                _whole_keep_contract.source_max,
+                _whole_keep_contract.source_target * max(0.0, float(CAST_WINDOW_WHOLE_KEEP_BUDGET_RATIO)),
+            )
+        except Exception:  # noqa: BLE001 - 取不到契约就不设预算
+            _whole_keep_budget = None
+        try:
+            whole_keep_receipt = _expand_cast_windows_whole(
+                cast_payload, subtitles, format_executable_ids,
+                budget_seconds=_whole_keep_budget, log_fn=log,
+            )
+        except Exception as whole_exc:  # noqa: BLE001 - 整取失败绝不阻断导演
+            whole_keep_receipt = {"kept": [], "dropped": [], "opening_gate": [], "closing_gate": []}
+            log(f"整窗整取异常（已跳过）：{type(whole_exc).__name__}: {whole_exc}")
+        if whole_keep_receipt.get("kept"):
+            log(
+                f"整窗整取补回 {len(whole_keep_receipt['kept'])} 句（窗内剩余行按原顺序补齐，未改写原话）；"
+                f"契约上界 {whole_keep_receipt.get('budget_seconds')}s，各方案："
+                + "、".join(
+                    f"S{node['strategy_index']} {node['base_seconds']}s→{node['projected_seconds']}s"
+                    f"(保留比 {node['keep_ratio']})"
+                    for node in whole_keep_receipt.get("strategies") or []
+                )
+            )
+        if whole_keep_receipt.get("dropped"):
+            log(f"整窗整取有 {len(whole_keep_receipt['dropped'])} 句因时长预算未补入（已记录审计）。")
+        # 章首/章尾收口（确定性；零 AI 调用、不改写、不重排、只动边界）：
+        # 章尾停在半句就补到收句行；补不动且只是 ≤1.2s 水词就从章内移出；
+        # 其余如实报告。第一章章首由 AI 的开场声明保护，不参与移出。
+        try:
+            chapter_edge_receipt = _guard_chapter_edges(
+                cast_payload, subtitles, format_executable_ids, log_fn=log,
+            )
+        except Exception as edge_exc:  # noqa: BLE001 - 收口失败绝不阻断导演
+            chapter_edge_receipt = {}
+            log(f"章首章尾收口异常（已跳过）：{type(edge_exc).__name__}: {edge_exc}")
+        if chapter_edge_receipt.get("tail_filled"):
+            log("章尾补完整：" + "、".join(
+                f"{item['chapter_id']}→#{item['subtitle_id']}"
+                for item in chapter_edge_receipt["tail_filled"][:12]))
+        if chapter_edge_receipt.get("tail_stub_removed") or chapter_edge_receipt.get("head_stub_removed"):
+            log("章首/章尾残句已移出（≤%.1fs 且不收句）：%s" % (
+                CAST_CHAPTER_EDGE_STUB_SECONDS,
+                "、".join(
+                    "%s#%d" % (item["chapter_id"], item["subtitle_id"])
+                    for item in (chapter_edge_receipt.get("tail_stub_removed") or [])
+                    + (chapter_edge_receipt.get("head_stub_removed") or [])),
+            ))
+        if chapter_edge_receipt.get("reported"):
+            log(f"有 {len(chapter_edge_receipt['reported'])} 处章尾仍停在半句（窗内没有可用的收句行），已记录审计、未改句。")
+        if stage_response_hook and (chapter_edge_receipt.get("tail_filled")
+                                    or chapter_edge_receipt.get("tail_stub_removed")
+                                    or chapter_edge_receipt.get("head_stub_removed")
+                                    or chapter_edge_receipt.get("reported")):
+            stage_response_hook(
+                "cast_chapter_edge_guard",
+                json.dumps(chapter_edge_receipt, ensure_ascii=False, indent=2),
+            )
+        if whole_keep_receipt.get("opening_gate") or whole_keep_receipt.get("closing_gate"):
+            log("首尾门禁提示：" + json.dumps({
+                "opening": whole_keep_receipt.get("opening_gate"),
+                "closing": whole_keep_receipt.get("closing_gate"),
+            }, ensure_ascii=False))
+        if stage_response_hook and (whole_keep_receipt.get("kept") or whole_keep_receipt.get("dropped")):
+            stage_response_hook(
+                "cast_window_whole_keep",
+                json.dumps(whole_keep_receipt, ensure_ascii=False, indent=2),
+            )
         # 承接审查（按内容，一次极小调用）+ 确定性补入缺失的承接句。
         try:
             continuation_review = review_continuations(
@@ -6638,8 +9954,23 @@ def analyze_commercial_story(
                 log("导演已按真实口播调整章节：" + json.dumps(
                     revision_row.get("applied") or [], ensure_ascii=False, separators=(",", ":"),
                 ))
+                if revision_row.get("coerced"):
+                    log(
+                        "其中 "
+                        + str(len(revision_row["coerced"]))
+                        + " 条修订的 action 由 refine 自动纠偏为 merge（语义成立）："
+                        + json.dumps(revision_row["coerced"], ensure_ascii=False, separators=(",", ":"))
+                    )
             elif revision_row.get("status") == "ignored_invalid":
                 log("导演章节调整格式无效，保留第一轮章节合同并显示原选片。")
+                if revision_row.get("coerced"):
+                    log(
+                        "其中 "
+                        + str(len(revision_row["coerced"]))
+                        + " 条修订语义成立、只是 action 标签写成 refine（应为 merge），"
+                        + "已按 merge 纠偏但仍未通过整体校验："
+                        + json.dumps(revision_row["coerced"], ensure_ascii=False, separators=(",", ":"))
+                    )
         audit_args = {
             "story_contract": story_payload, "subtitles": subtitles,
             "executable_subtitle_ids": executable_subtitle_ids,
@@ -6710,7 +10041,18 @@ def analyze_commercial_story(
         if final_audit["needs_calibration"] and not enable_duration_calibration:
             calibration["skipped_reason"] = "single_casting_delivery"
             log("本次一次选片未达目标，已保留可编辑方案并显示实测时长；不后补、不追加第三轮AI。")
-        if final_audit["needs_calibration"] and enable_duration_calibration:
+        if _calibration_entry_blocked(final_audit):
+            calibration["skipped_reason"] = "already_in_range"
+            log(
+                "时长校准验收闸：程序实测已落入可编辑区间（原声 "
+                f"{float(final_audit.get('source_seconds') or 0.0):.1f} 秒），"
+                "本次不发第三遍 AI；章过薄/长连句/语义跨度等质量项仅保留告警。"
+            )
+        if (
+            final_audit["needs_calibration"]
+            and enable_duration_calibration
+            and not _calibration_entry_blocked(final_audit)
+        ):
             calibration["attempted"] = True
             if check_product:
                 if bool(final_audit.get("main_product_pool_cannot_reach_minimum")):
@@ -6778,7 +10120,7 @@ def analyze_commercial_story(
                     + "。这些章节要么一句都没交、要么连本章进度线的一半都没到；"
                     "不许留空章、不许只改停止理由或加两三句就交卷，必须逐章用主商品原话补齐到位。"
                 )
-            if product_audit.get("status") == "conflict":
+            if _product_conflict_needs_attention(product_audit):
                 correction_prompt += "\n商品归属核对（优先修复，不为时长保留错误商品）：" + json.dumps(_compact_product_calibration_feedback(product_audit), ensure_ascii=False, separators=(",", ":"))
                 correction_prompt += "\n由你从同一完整池重新选符合主商品的原话；程序不删不换句。若开场本身属于错误商品，本次允许由你重选开场。其他正确故事职责和顺序保持。所有已选句必须有真实商品指代依据。"
             try:
@@ -6825,10 +10167,20 @@ def analyze_commercial_story(
                     opening_ids = list((_two_pass_primary(cast_payload).get("opening_selection") or {}).get("selected_subtitle_ids") or (first_beats[0].get("subtitle_ids") if first_beats else []) or [])
                     if set(opening_ids) & set(product_audit["conflicting_subtitle_ids"]):
                         structure_errors = [e for e in structure_errors if e != "changed_existing_opening"]
-                if revised_product_audit.get("status") == "conflict":
+                if _product_conflict_needs_attention(revised_product_audit):
                     structure_errors.append("product_scope_conflict")
                 if not _duration_revision_improves(final_audit, revised_audit):
                     structure_errors.append("duration_revision_not_improved")
+                _over_max = _calibration_revision_exceeds_max(final_audit, revised_audit)
+                if _over_max:
+                    structure_errors.append("calibration_exceeds_source_max")
+                    calibration["rejected_over_max"] = _over_max
+                    log(
+                        "时长校准验收闸：修订版实测原声 "
+                        f"{_over_max['revised_source_seconds']:.1f} 秒，超过合同上限 "
+                        f"{_over_max['source_max']:.1f} 秒（原稿 {_over_max['initial_source_seconds']:.1f} 秒），"
+                        "整版拒收，保留上一版可编辑方案。"
+                    )
                 # A longer revision that only trips over a few unusable ids or a
                 # few other-product sentences must not be discarded whole: drop
                 # exactly those sentences, re-measure, and keep the revision when
@@ -6838,6 +10190,12 @@ def analyze_commercial_story(
                 if structure_errors and set(structure_errors) <= _sanitizable:
                     sanitize_drops = set(revised_audit.get("invalid_subtitle_ids") or ())
                     sanitize_drops.update(revised_product_audit.get("conflicting_subtitle_ids") or ())
+                    # 2026-10-05（David 定调）：章名的唯一字面依据不许被清洗删掉。
+                    _title_guard = _chapter_title_evidence_guard(
+                        revised, revised_story, subtitles, sanitize_drops)
+                    sanitize_drops = _title_guard["drop_ids"]
+                    for _title_warning in _title_guard["warnings"]:
+                        log("章名依据保护：" + _title_warning)
                     sanitized_payload, sanitize_tally = _sanitize_duration_revision(
                         revised, drop_ids=sorted(sanitize_drops))
                     if sanitize_tally["dropped_ids"] or sanitize_tally["split_beats"]:
@@ -6853,7 +10211,7 @@ def analyze_commercial_story(
                                 _two_pass_primary(revised_story), _two_pass_primary(sanitized_payload),
                                 target=product_target, subtitles=identity_source)
                         if (sanitized_audit.get("technical_valid")
-                                and sanitized_product_audit.get("status") != "conflict"
+                                and _product_conflict_clear(sanitized_product_audit)
                                 and _duration_revision_improves(final_audit, sanitized_audit)):
                             revised = sanitized_payload
                             revised_audit = sanitized_audit
@@ -6872,6 +10230,27 @@ def analyze_commercial_story(
                     cast_payload, final_audit = revised, revised_audit
                     story_payload, product_audit = revised_story, revised_product_audit
                     calibration["accepted_revision"] = True
+                    # 修订版是一条全新片单：采纳后也必须过一遍确定性补齐/门禁，
+                    # 否则「采纳修订」等于把拆窗补齐、整窗整取、首尾收口全丢掉。
+                    try:
+                        calibration["adopted_repairs"] = _apply_cast_deterministic_repairs(
+                            cast_payload, subtitles, format_executable_ids,
+                            budget_seconds=_whole_keep_budget, log_fn=log,
+                        )
+                        final_audit = build_director_duration_audit(
+                            casting_payload=cast_payload,
+                            **{**audit_args, "story_contract": story_payload})
+                        if check_product:
+                            _attach_main_product_pool_audit(
+                                final_audit, story_contract=story_payload, subtitles=subtitles,
+                                executable_subtitle_ids=executable_subtitle_ids,
+                                output_speed_factor=output_speed_factor)
+                            product_audit = audit_product_selection(
+                                _two_pass_primary(story_payload), _two_pass_primary(cast_payload),
+                                target=product_target, subtitles=identity_source)
+                        calibration["revision_audit"] = final_audit
+                    except Exception as _adopt_exc:  # noqa: BLE001 - 绝不阻断导演
+                        log(f"修订版确定性补齐异常（已跳过）：{type(_adopt_exc).__name__}: {_adopt_exc}")
             except (AnalyzerError, ValueError, TypeError, KeyError) as error:
                 # Keep an editable first draft on an optional correction failure.
                 # Avoid storing provider text, which can contain request details.
@@ -6911,6 +10290,84 @@ def analyze_commercial_story(
             log(
                 f"程序去重：删除了 {len(set(_dedup_removed_ids))} 个重复句（只保留首次出现），"
                 f"重新实测后不同原句 {float(final_audit.get('unique_source_seconds') or 0.0):.1f} 秒。")
+        # 2026-10-05（David 定调）：商品归属未核实的句子——程序自己已经把判决算出来
+        # 了（audit_product_selection 的 conflicting_subtitle_ids），但此前只写成一条
+        # warning，句子照样进成片。这里把判决接成执行：逐句剔除 → 按同一口径重新实测；
+        # 只在「技术有效 + 不产生空章 + 仍达 source_min」时采纳，否则保留原样并照旧出
+        # 警告——绝不用删句去换取时长不达下限。同一素材实测：主方案 30 拍 75.2s →
+        # 26 拍 65.2s，七章全部保留，仍高于下限 38.4s。
+        product_conflict_removed: dict[str, Any] = {}
+        _title_kept_ids: list[int] = []
+        if check_product and product_audit.get("status") == "conflict":
+            _conflict_ids = sorted({
+                int(value) for value in (product_audit.get("conflicting_subtitle_ids") or ())
+                if str(value).strip().lstrip("-").isdigit()
+            })
+            if _conflict_ids:
+                # 2026-10-05（David 定调）：章名的唯一字面依据不许被硬门删掉。
+                _title_guard = _chapter_title_evidence_guard(
+                    cast_payload, story_payload, subtitles, set(_conflict_ids))
+                _conflict_ids = sorted(_title_guard["drop_ids"])
+                _title_kept_ids = list(_title_guard["protected_ids"])
+                for _title_warning in _title_guard["warnings"]:
+                    log("章名依据保护：" + _title_warning)
+            if _conflict_ids:
+                _gate_payload, _gate_tally = _sanitize_duration_revision(
+                    cast_payload, drop_ids=_conflict_ids)
+                _gate_drop_ids = sorted({int(v) for v in _gate_tally.get("dropped_ids") or ()})
+                if _gate_drop_ids:
+                    _gate_audit = build_director_duration_audit(
+                        casting_payload=_gate_payload,
+                        **{**audit_args, "story_contract": story_payload})
+                    _attach_main_product_pool_audit(
+                        _gate_audit, story_contract=story_payload, subtitles=subtitles,
+                        executable_subtitle_ids=executable_subtitle_ids,
+                        output_speed_factor=output_speed_factor)
+                    _gate_product_audit = audit_product_selection(
+                        _two_pass_primary(story_payload), _two_pass_primary(_gate_payload),
+                        target=product_target, subtitles=identity_source)
+                    _gate_source_min = float(
+                        dict(_gate_audit.get("duration_contract") or {}).get("source_min") or 0.0)
+                    _gate_seconds = float(_gate_audit.get("unique_source_seconds") or 0.0)
+                    _gate_ok = (
+                        bool(_gate_audit.get("technical_valid"))
+                        and not (_gate_audit.get("empty_chapter_ids") or ())
+                        and (_gate_source_min <= 0.0 or _gate_seconds >= _gate_source_min)
+                    )
+                    product_conflict_removed = {
+                        "removed_subtitle_ids": _gate_drop_ids,
+                        "removed_beats": int(_gate_tally.get("removed_beats") or 0),
+                        "kept": bool(_gate_ok),
+                        "seconds_before": float(final_audit.get("unique_source_seconds") or 0.0),
+                        "seconds_after": _gate_seconds,
+                        "source_min": _gate_source_min,
+                        "empty_chapter_ids": list(_gate_audit.get("empty_chapter_ids") or ()),
+                    }
+                    if _gate_ok:
+                        cast_payload = _gate_payload
+                        final_audit = _gate_audit
+                        product_audit = _gate_product_audit
+                        duration_control["final"] = final_audit
+                        duration_control["status"] = (
+                            "target_range_fulfilled" if final_audit["target_range_fulfilled"]
+                            else "target_not_met_editable")
+                        duration_control["main_product_pool_gate"] = (
+                            _main_product_pool_gate(final_audit) if check_product else {})
+                        log(
+                            "商品归属硬门：剔除 "
+                            f"{len(_gate_drop_ids)} 个程序判为归属未核实的句子（"
+                            + ", ".join(str(value) for value in _gate_drop_ids[:12])
+                            + f"），重新实测后不同原句 {_gate_seconds:.1f} 秒。")
+                    else:
+                        product_conflict_removed["kept_reason"] = "warn_only_would_break_delivery"
+                        log(
+                            "商品归属硬门：剔除 "
+                            f"{len(_gate_drop_ids)} 句会（技术无效/空章/低于下限）破坏交付，"
+                            "保留原句并照旧列出归属警告。")
+        if _title_kept_ids:
+            product_conflict_removed["title_evidence_kept_ids"] = list(_title_kept_ids)
+        if product_conflict_removed:
+            duration_control["product_conflict_gate"] = product_conflict_removed
         if stage_response_hook:
             stage_response_hook("duration_control", json.dumps(duration_control, ensure_ascii=False, indent=2))
         if check_product:
@@ -6924,7 +10381,11 @@ def analyze_commercial_story(
                     if product_audit.get("status") == "conflict" else "preview_ready"
                 ),
             }
+            if product_conflict_removed:
+                product_control["conflict_hard_gate"] = product_conflict_removed
             if product_audit.get("status") == "conflict":
+                _unverified_ids = list(product_audit.get("conflicting_subtitle_ids") or ()) + list(
+                    product_audit.get("soft_flagged_subtitle_ids") or ())
                 details = "；".join(product_audit.get("scope_errors") or []) or f"字幕 {product_audit.get('conflicting_subtitle_ids')} 的商品归属未核实"
                 product_control["warnings"] = [details]
                 log(f"主商品核对有疑点，已保留完整可编辑方案：{details}")
@@ -6943,6 +10404,7 @@ def analyze_commercial_story(
             cast_payload,
             casting_rows=casting_rows,
             product_context_rows=identity_source,
+            opening_hook_pool=opening_hook_prompt_rows,
         )
         normalized_primary = normalized_payload["strategies"][0]
         normalized_primary.setdefault("whole_video_audit", {})["duration_control"] = duration_control

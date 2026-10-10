@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN" data-theme="system">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LiveClipper</title>
   <link rel="icon" href="/assets/liveclipper.ico?v=20260620-logo">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260905-director-compact-v2">
+  <link rel="stylesheet" href="/assets/styles.css?v=20261010-material14">
 </head>
 <body>
   <div class="app-shell">
@@ -26,6 +26,7 @@
         <button class="nav-item" data-page="video-split"><span>视频分割</span></button>
         <button class="nav-item" data-page="dedup"><span>创作辅助</span></button>
         <button class="nav-item" data-page="live-rec"><span>录屏</span></button>
+        <button class="nav-item" data-page="material"><span>素材库</span></button>
         <button class="nav-item" data-page="settings"><span>设置</span></button>
       </nav>
 
@@ -79,7 +80,7 @@
         <div class="content-grid smart-grid">
           <section class="panel panel-large material-panel">
             <div class="panel-header">
-              <h2>视频 <span class="video-count-chip" data-video-count-for="video-paths">0个</span></h2>
+              <h2>视频素材 <span class="video-count-chip" data-video-count-for="video-paths">0个</span></h2>
               <div class="log-header-actions">
                 <button class="button button-secondary button-small" data-action="pick-videos" data-target="video-paths">添加视频</button>
                 <button class="button button-muted button-small" data-action="clear-video-list" data-target="video-paths">清空</button>
@@ -90,43 +91,41 @@
                 <strong>点击“添加视频”选择素材</strong>
                 <span>自动检测同名 SRT 字幕。</span>
               </div>
+              <div class="material-video-list-head" aria-hidden="true">
+                <span></span>
+                <span>#</span>
+                <span></span>
+                <span>视频素材</span>
+                <span>操作</span>
+              </div>
               <div class="video-list video-list-compact" data-list-for="video-paths"></div>
             </div>
             <textarea id="video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
             <input id="srt-path" type="hidden" value="">
-            <div class="field-row">
-              <label for="output-dir">输出目录</label>
-              <div class="input-with-button">
-                <input id="output-dir" type="text" placeholder="可留空，默认输出到视频目录">
-                <button class="button button-secondary" data-action="pick-directory" data-target="output-dir">浏览</button>
-                <button class="button button-muted" data-action="open-path" data-target="output-dir">打开</button>
+            <div class="material-footer">
+              <div class="material-footer-settings">
+                <div class="material-footer-field material-footer-main-product">
+                  <label for="sc-main-product-quick">主商品</label>
+                  <input id="sc-main-product-quick" type="text" maxlength="120" list="sc-main-product-quick-list" placeholder="留空由 AI 识别；多商品素材填商品名可指定剪哪个">
+                  <datalist id="sc-main-product-quick-list"></datalist>
+                </div>
+                <div class="material-footer-field material-footer-output">
+                  <label for="output-dir">输出目录</label>
+                  <div class="input-with-button">
+                  <input id="output-dir" type="text" placeholder="可留空，默认输出到视频目录">
+                  <button class="button button-secondary" data-action="pick-directory" data-target="output-dir">浏览</button>
+                  <button class="button button-muted" data-action="open-path" data-target="output-dir">打开</button>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div class="field-row">
-              <label for="sc-primary-category">一级类目</label>
-                <select id="sc-primary-category" data-primary-category="sc">
-                  <option selected>服饰内衣</option>
-                  <option>生鲜</option>
-                  <option>食品饮料</option>
-                  <option>美妆</option>
-                  <option>个护家清</option>
-                  <option>鞋靴箱包</option>
-                  <option>钟表配饰</option>
-                  <option>母婴宠物</option>
-                  <option>图书教育</option>
-                  <option>智能家居</option>
-                  <option>3C数码家电</option>
-                  <option>运动户外</option>
-                  <option>鲜花园艺</option>
-                </select>
-            </div>
-            <div class="panel-actions">
-              <button class="button button-danger" data-action="stop-scope" data-scope="smart-cut">停止</button>
-              <button class="button button-secondary" data-action="start-smart-preview" title="先生成一个可逐句删改的 AI 导演方案">AI导演预览</button>
-              <button class="button button-primary" data-action="start-smart-cut" title="不等待预览，直接按当前参数批量成片">
+              <div class="panel-actions">
+                <button class="button button-secondary" data-action="start-smart-preview" title="先生成一个可逐句删改的 AI 导演方案">AI导演预览</button>
+                <button class="button button-primary" data-action="start-smart-cut" title="不等待预览，直接按当前参数批量成片">
                 <span class="button-icon">▶</span>
                 直接成片
-              </button>
+                </button>
+                <button class="button button-danger" data-action="stop-scope" data-scope="smart-cut">停止</button>
+              </div>
             </div>
           </section>
 
@@ -226,7 +225,7 @@
             <div class="check-grid advanced-param">
               <label class="check-item"><input id="sc-mirror" type="checkbox" checked> 镜像翻转</label>
               <label class="check-item"><input id="sc-subtitle" type="checkbox" checked> 字幕叠加</label>
-              <label class="check-item"><input id="sc-crop" type="checkbox" checked> 智能裁切</label>
+              <label class="check-item"><input id="sc-crop" type="checkbox"> 智能裁切</label>
               <label class="check-item"><input id="sc-kenburns" type="checkbox" checked> 动态缩放</label>
             </div>
             <div class="field-pair">
@@ -241,8 +240,8 @@
               <div class="field-row compact">
                 <label for="sc-kb-intensity">缩放强度</label>
                 <select id="sc-kb-intensity">
-                  <option value="轻">轻</option>
-                  <option value="中" selected>中</option>
+                  <option value="轻" selected>轻</option>
+                  <option value="中">中</option>
                   <option value="重">重</option>
                 </select>
               </div>
@@ -382,12 +381,23 @@
                   <small>告诉 AI 这次剪的是什么，识别不准时再修改</small>
                 </summary>
                 <div class="director-section-body director-identity-grid">
-                  <div class="director-field director-readonly-field">
-                    <span class="director-field-label">一级类目</span>
-                    <div class="director-readonly-value">
-                      <strong id="sc-director-primary-value">服饰内衣</strong>
-                      <span>跟随项目</span>
-                    </div>
+                  <div class="director-field">
+                    <label for="sc-primary-category">一级类目</label>
+                    <select id="sc-primary-category" data-primary-category="sc">
+                    <option selected>服饰内衣</option>
+                    <option>生鲜</option>
+                    <option>食品饮料</option>
+                    <option>美妆</option>
+                    <option>个护家清</option>
+                    <option>鞋靴箱包</option>
+                    <option>钟表配饰</option>
+                    <option>母婴宠物</option>
+                    <option>图书教育</option>
+                    <option>智能家居</option>
+                    <option>3C数码家电</option>
+                    <option>运动户外</option>
+                    <option>鲜花园艺</option>
+                    </select>
                   </div>
                   <div class="director-field">
                     <label for="sc-secondary-category">二级类目</label>
@@ -571,7 +581,7 @@
                       <strong>点击“添加视频”选择素材</strong>
                       <span>支持多素材混剪，自动检测同名 SRT 字幕。</span>
                     </div>
-                    <div class="mix-video-list-head" aria-hidden="true">
+                    <div class="material-video-list-head" aria-hidden="true">
                       <span></span>
                       <span>#</span>
                       <span></span>
@@ -582,27 +592,14 @@
                   </div>
                 </div>              </div>
               <textarea id="mix-video-paths" class="path-box path-box-hidden" spellcheck="false" placeholder="每行一个视频路径"></textarea>
-              <div class="mix-material-footer">
-                <div class="mix-footer-settings">
-                  <div class="mix-footer-field mix-footer-category">
-                    <label for="mix-primary-category">一级类目</label>
-                    <select id="mix-primary-category" data-primary-category="mix">
-                      <option selected>服饰内衣</option>
-                      <option>生鲜</option>
-                      <option>食品饮料</option>
-                      <option>美妆</option>
-                      <option>个护家清</option>
-                      <option>鞋靴箱包</option>
-                      <option>钟表配饰</option>
-                      <option>母婴宠物</option>
-                      <option>图书教育</option>
-                      <option>智能家居</option>
-                      <option>3C数码家电</option>
-                      <option>运动户外</option>
-                      <option>鲜花园艺</option>
-                    </select>
+              <div class="material-footer">
+                <div class="material-footer-settings">
+                  <div class="material-footer-field material-footer-main-product">
+                    <label for="mix-main-product-quick">主商品</label>
+                    <input id="mix-main-product-quick" type="text" maxlength="120" list="mix-main-product-quick-list" placeholder="留空由 AI 识别；多商品素材填商品名可指定剪哪个">
+                    <datalist id="mix-main-product-quick-list"></datalist>
                   </div>
-                  <div class="mix-footer-field mix-footer-output">
+                  <div class="material-footer-field material-footer-output">
                     <label for="mix-output-dir">输出目录</label>
                     <div class="input-with-button">
                       <input id="mix-output-dir" type="text" placeholder="可留空，默认输出到第一个视频目录">
@@ -716,7 +713,7 @@
             <div class="check-grid advanced-param">
               <label class="check-item"><input id="mix-mirror" type="checkbox" checked> 镜像翻转</label>
               <label class="check-item"><input id="mix-subtitle" type="checkbox" checked> 字幕叠加</label>
-              <label class="check-item"><input id="mix-crop" type="checkbox" checked> 智能裁切</label>
+              <label class="check-item"><input id="mix-crop" type="checkbox"> 智能裁切</label>
               <label class="check-item"><input id="mix-kenburns" type="checkbox" checked> 动态缩放</label>
             </div>
             <div class="field-pair advanced-param">
@@ -731,8 +728,8 @@
               <div class="field-row compact">
                 <label for="mix-kb-intensity">缩放强度</label>
                 <select id="mix-kb-intensity">
-                  <option value="轻">轻</option>
-                  <option value="中" selected>中</option>
+                  <option value="轻" selected>轻</option>
+                  <option value="中">中</option>
                   <option value="重">重</option>
                 </select>
               </div>
@@ -872,12 +869,23 @@
                   <small>告诉 AI 这次剪的是什么，识别不准时再修改</small>
                 </summary>
                 <div class="director-section-body director-identity-grid">
-                  <div class="director-field director-readonly-field">
-                    <span class="director-field-label">一级类目</span>
-                    <div class="director-readonly-value">
-                      <strong id="mix-director-primary-value">服饰内衣</strong>
-                      <span>跟随项目</span>
-                    </div>
+                  <div class="director-field">
+                    <label for="mix-primary-category">一级类目</label>
+                    <select id="mix-primary-category" data-primary-category="mix">
+                      <option selected>服饰内衣</option>
+                      <option>生鲜</option>
+                      <option>食品饮料</option>
+                      <option>美妆</option>
+                      <option>个护家清</option>
+                      <option>鞋靴箱包</option>
+                      <option>钟表配饰</option>
+                      <option>母婴宠物</option>
+                      <option>图书教育</option>
+                      <option>智能家居</option>
+                      <option>3C数码家电</option>
+                      <option>运动户外</option>
+                      <option>鲜花园艺</option>
+                    </select>
                   </div>
                   <div class="director-field">
                     <label for="mix-secondary-category">二级类目</label>
@@ -1470,40 +1478,72 @@
         <header class="page-header">
           <div>
             <h1>录屏</h1>
-            <p class="page-subtitle">录制直播流并管理本地素材。</p>
+            <p class="page-subtitle">粘贴直播间链接，开播后自动录制并识别单品。</p>
+          </div>
+          <div class="page-actions">
+            <span class="live-rec-summary" id="live-rec-summary"><span class="live-status-dot"></span>暂无监测</span>
+            <button class="button button-secondary" data-action="open-live-save-dir"><span class="button-icon" aria-hidden="true">▸</span><span>打开录制目录</span></button>
           </div>
         </header>
 
-        <div class="live-disclaimer" role="note">
-          <strong>免责声明</strong>
-          <span>本功能仅用于录制您拥有版权或已获授权的直播内容。请遵守抖音等平台的服务条款及相关法律法规；录制内容的存储、传播、发布所产生的法律责任由用户自行承担。本功能免费提供，请勿用于任何侵权或违规用途。</span>
-        </div>
+        <details class="live-disclaimer" role="note">
+          <summary>免责声明</summary>
+          <p>本功能仅用于录制您拥有版权或已获授权的直播内容。请遵守抖音等平台的服务条款及相关法律法规；录制内容的存储、传播、发布所产生的法律责任由用户自行承担。本功能免费提供，请勿用于任何侵权或违法用途。</p>
+        </details>
 
-        <div class="live-rec-workbench">
-          <div class="live-rec-tabs" role="tablist" aria-label="录屏">
-            <button class="live-rec-tab is-active" type="button" data-live-rec-tab="rooms">主播列表</button>
-            <button class="live-rec-tab" type="button" data-live-rec-tab="add">添加直播间</button>
-            <button class="live-rec-tab" type="button" data-live-rec-tab="settings">录制设置</button>
-          </div>
-
-          <section class="live-rec-page is-active" id="live-rec-rooms">
-            <section class="panel panel-wide live-room-board">
+        <div class="live-rec-workbench live-rec-layout" id="live-rec-workbench" data-live-tab="rooms">
+          <div class="live-rec-head">
+            <div class="live-rec-head-row">
+                        <div class="live-rec-tabs" role="tablist" aria-label="录屏">
+                <button class="live-rec-tab is-active" type="button" data-live-rec-tab="rooms">录制列表<span class="live-room-count" id="live-room-count"></span></button>
+                <button class="live-rec-tab" type="button" data-live-rec-tab="products">单品识别</button>
+                <button class="live-rec-tab" type="button" data-live-rec-tab="settings">默认设置</button>
+              </div>
               <div class="live-board-toolbar">
-                <h2>录制列表</h2>
                 <div class="live-toolbar-actions">
                   <div class="live-search">
                     <span class="button-icon" aria-hidden="true">⌕</span>
-                    <input id="live-room-search" type="search" placeholder="搜索主播或直播地址">
+                    <input id="live-room-search" type="search" placeholder="搜索达人名称或链接">
                   </div>
-                  <button class="button button-primary button-small" data-action="live-switch-tab" data-tab="add"><span class="button-icon" aria-hidden="true">+</span><span>新增录制</span></button>
-                  <button class="button button-secondary button-small" data-action="refresh-live-rooms"><span class="button-icon" aria-hidden="true">↻</span><span>刷新</span></button>
-                  <button class="button button-primary button-small" data-action="feature-submit" data-feature="live-rec-monitor"><span class="button-icon" aria-hidden="true">▶</span><span>批量开启监控</span></button>
-                  <button class="button button-muted button-small" data-action="feature-submit" data-feature="live-rec-delete-all"><span class="button-icon" aria-hidden="true">■</span><span>批量停止监控</span></button>
-                  <button class="button button-danger button-small" data-action="clear-live-rooms"><span class="button-icon" aria-hidden="true">⌫</span><span>批量删除</span></button>
+                  <button class="button button-secondary button-small" data-action="live-filter-toggle"><span class="button-icon" aria-hidden="true">≡</span><span>筛选</span></button>
+                  <button class="button button-secondary button-small" data-action="feature-submit" data-feature="live-rec-marker" title="主播开始讲新品时按一下：以此刻为边界切出新的单品片段。用于「讲完品才弹小黄车」的直播间。"><span class="button-icon" aria-hidden="true">⚑</span><span>换品标记</span></button>
+                  <button class="button button-primary button-small" data-action="feature-submit" data-feature="live-rec-monitor"><span class="button-icon" aria-hidden="true">▶</span><span>全部开始监测</span></button>
+                  <button class="button button-muted button-small" data-action="feature-submit" data-feature="live-rec-delete-all"><span class="button-icon" aria-hidden="true">■</span><span>全部停止</span></button>
+                  <button class="button button-muted button-small" data-action="live-more-toggle" title="更多操作"><span class="button-icon" aria-hidden="true">⋯</span></button>
                 </div>
               </div>
-
-              <div class="live-filter-bar">
+            </div>
+              <div class="live-more-menu" id="live-more-menu" hidden>
+                <button class="button button-muted button-small" data-action="refresh-live-rooms"><span class="button-icon" aria-hidden="true">↻</span><span>刷新状态</span></button>
+                <button class="button button-muted button-small" data-action="open-live-save-dir"><span class="button-icon" aria-hidden="true">▸</span><span>打开录制目录</span></button>
+                <button class="button button-danger button-small" data-action="clear-live-rooms"><span class="button-icon" aria-hidden="true">×</span><span>批量删除</span></button>
+              </div>
+            <p class="live-defaults-banner">本页是所有达人的默认值，新达人自动继承；单个达人的覆盖在「录制列表」页右栏「本直播间生效值」里改。</p>
+            <div class="live-rec-head-body">
+              <section class="panel live-add-panel live-add-inline">
+                <div class="live-add-grid">
+                  <div class="field-row">
+                    <label for="live-room-url">达人链接</label>
+                    <input id="live-room-url" type="text" placeholder="粘贴达人主页或直播间链接，回车直接开始监测">
+                  </div>
+                  <div class="field-row">
+                    <label for="live-room-name">房间名称</label>
+                    <input id="live-room-name" type="text" placeholder="可留空，自动取直播间名称">
+                  </div>
+                  <div class="live-add-actions">
+                    <button class="button button-secondary" data-action="feature-submit" data-feature="live-rec-detect">检测流地址</button>
+                    <button class="button button-secondary" data-action="live-refresh-all-room-names" title="逐个重抓一次直播间名称，把「待命名·数字直播间号」换成真实名称">按直播间名称重命名全部</button>
+                    <button class="button button-primary" data-action="add-live-room"><span class="button-icon" aria-hidden="true">+</span><span>添加</span></button>
+                  </div>
+                </div>
+                <select id="live-platform" class="visually-hidden" tabindex="-1" aria-hidden="true">
+                  <option selected>抖音</option>
+                  <option>快手</option>
+                  <option>B站</option>
+                  <option>自定义RTMP</option>
+                </select>
+              </section>
+              <div class="live-filter-bar is-collapsed" id="live-filter-bar">
                 <div class="live-filter-group" aria-label="状态筛选">
                   <span>状态筛选：</span>
                   <button class="live-filter-chip is-active" type="button" data-action="live-status-filter" data-status="all">全部</button>
@@ -1511,7 +1551,7 @@
                   <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="live">直播中</button>
                   <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="not_started">未开播</button>
                   <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="error">录制错误</button>
-                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="unmonitored">未监控</button>
+                  <button class="live-filter-chip" type="button" data-action="live-status-filter" data-status="unmonitored">未监测</button>
                 </div>
                 <label class="live-platform-filter">平台筛选：
                   <select id="live-platform-filter">
@@ -1523,146 +1563,206 @@
                   </select>
                 </label>
               </div>
-
-              <div class="live-room-grid" id="live-room-grid">
-                <div class="live-room-empty">暂无直播间</div>
-              </div>
-            </section>
-          </section>
-
-          <section class="live-rec-page" id="live-rec-add">
-            <section class="panel live-add-panel">
-              <div class="panel-header">
-                <h2>添加直播间</h2>
-              </div>
-              <div class="field-row">
-                <label for="live-room-name">名称</label>
-                <input id="live-room-name" type="text" placeholder="主播或直播间名称">
-              </div>
-              <div class="field-row">
-                <label for="live-room-url">地址</label>
-                <input id="live-room-url" type="text" placeholder="直播间链接或分享文案">
-              </div>
-              <div class="field-row">
-                <label for="live-platform">平台</label>
-                <select id="live-platform">
-                  <option selected>抖音</option>
-                  <option>快手</option>
-                  <option>B站</option>
-                  <option>自定义RTMP</option>
-                </select>
-              </div>
-              <div class="system-actions">
-                <button class="button button-secondary" data-action="feature-submit" data-feature="live-rec-detect">检测流地址</button>
-                <button class="button button-primary" data-action="add-live-room">添加</button>
-              </div>
-            </section>
-          </section>
-
-          <section class="live-rec-page" id="live-rec-settings">
-            <section class="panel live-settings-panel">
-              <div class="panel-header">
-                <h2>基本设置</h2>
-              </div>
-              <div class="field-row">
-                <label for="live-save-dir">保存目录</label>
-                <div class="input-with-button">
-                  <input id="live-save-dir" type="text" placeholder="录制视频保存目录">
-                  <button class="button button-secondary" data-action="pick-directory" data-target="live-save-dir">浏览</button>
-                  <button class="button button-muted" data-action="open-path" data-target="live-save-dir">打开</button>
+            </div>
+          </div>
+          <div class="live-rec-columns">
+            <div class="live-rec-main">
+              <section class="live-rec-page is-active" id="live-rec-rooms">
+                <div class="live-room-grid" id="live-room-grid">
+                  <div class="live-room-empty">还没有达人：粘贴达人主页或直播间链接，点「添加」就能开始</div>
                 </div>
-              </div>
-              <div class="field-pair">
-                <div class="field-row compact">
-                  <label for="live-segment">分段</label>
-                  <select id="live-segment">
-                    <option selected>不限</option>
-                    <option>10分钟</option>
-                    <option>15分钟</option>
-                    <option>30分钟</option>
-                    <option>60分钟</option>
-                    <option>120分钟</option>
-                  </select>
+                <p class="live-board-note">应用运行期间自动监测 · 结束后自动生成 MP4 · 原始录制保留</p>
+              </section>
+              <section class="live-rec-page" id="live-rec-products">
+                <div class="product-panel-tabbar">
+                  <button class="button button-secondary button-small" data-paction="export"><span>导出时间表</span></button>
+                  <button class="button button-muted button-small" data-paction="refresh"><span>刷新</span></button>
+                  <button class="button button-muted button-small" data-paction="open-export-dir"><span>打开导出目录</span></button>
+                  <span class="product-panel-hint">预览播放的是原始单品片段；点行看该段，勾选后可加入剪辑或一键成片。</span>
                 </div>
-                <div class="field-row compact">
-                  <label for="live-check-interval">检测</label>
-                  <input id="live-check-interval" type="number" value="30" min="5" max="300">
+                <div class="product-panel-root" id="product-panel-root">
+                  <p class="product-panel-empty">正在读取单品识别记录…</p>
                 </div>
-              </div>
-              <div class="field-row compact">
-                <label for="live-min-stream-quality">最低画质</label>
-                <select id="live-min-stream-quality">
-                  <option value="" selected>自动最高</option>
-                  <option value="1080p">至少1080p</option>
-                  <option value="720p">至少720p</option>
-                  <option value="480p">至少480p</option>
-                  <option value="low">允许低清</option>
-                </select>
-              </div>
-            </section>
-
-            <section class="panel live-settings-panel">
-              <div class="panel-header">
-                <h2>录制模式</h2>
-              </div>
-              <div class="field-row">
-                <label for="live-record-mode">模式</label>
-                <select id="live-record-mode">
-                  <option value="product" selected>识别单品并切片</option>
-                  <option value="duration">只按时长分段</option>
-                  <option value="single">单文件不分段</option>
-                </select>
-              </div>
-              <p class="page-subtitle">识别单品并切片仅支持抖音直播间，会同时生成商品时间线；只按时长分段与单文件不分段不做商品识别，更稳定。</p>
-            </section>
-
-            <section class="panel live-settings-panel" id="live-product-panel">
-              <div class="panel-header">
-                <h2>商品分段</h2>
-              </div>
-              <div class="field-row">
-                <label>识别</label>
-                <div class="rule-grid">
-                  <label class="check-item"><input id="live-product-split-enabled" type="checkbox" checked> 生成商品时间线</label>
-                  <label class="check-item"><input id="live-product-auto-cut" type="checkbox" checked> 录后自动切出候选段</label>
+              </section>
+              <section class="live-rec-page" id="live-rec-settings">
+                <section class="panel live-settings-panel">
+                  <div class="panel-header">
+                    <h2>录制方式 · 默认</h2>
+                    <span class="live-scope-badge">新达人继承 · 可在右栏按达人覆盖</span>
+                  </div>
+                  <div class="field-row">
+                    <label for="live-record-mode">录制方式</label>
+                    <select id="live-record-mode">
+                      <option value="product" selected>单品扫描</option>
+                      <option value="duration">整场录制</option>
+                      <option value="single">单文件不分段</option>
+                    </select>
+                  </div>
+                  <div class="field-pair">
+                    <div class="field-row compact">
+                      <label for="live-segment">分段时间</label>
+                      <select id="live-segment">
+                        <option selected>不限</option>
+                        <option>10分钟</option>
+                        <option>15分钟</option>
+                        <option>30分钟</option>
+                        <option>60分钟</option>
+                        <option>120分钟</option>
+                      </select>
+                    </div>
+                    <div class="field-row compact">
+                      <label for="live-naming-mode">文件命名</label>
+                      <select id="live-naming-mode">
+                        <option value="product_name" selected>商品名称命名</option>
+                        <option value="product_id">商品ID命名</option>
+                        <option value="room_timestamp">直播间名+时间戳</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p class="page-subtitle">单品扫描仅支持抖音直播间，会同时生成商品时间线；整场录制与单文件不分段不做商品识别，更稳定。</p>
+                  <p class="page-subtitle">「文件命名」只对单品扫描生效；整场录制与单文件不分段固定用「直播间名+时间戳」。</p>
+                </section>
+                <section class="panel live-settings-panel" id="live-product-panel">
+                  <div class="panel-header">
+                    <h2>单品切片 · 默认</h2>
+                    <span class="live-scope-badge">新达人继承 · 可在右栏按达人覆盖</span>
+                  </div>
+                  <div class="field-row">
+                    <label>识别<span class="live-scope-badge is-global">仅全局</span></label>
+                    <div class="rule-grid">
+                      <label class="check-item"><input id="live-product-split-enabled" type="checkbox" checked> 生成商品时间线</label>
+                      <label class="check-item"><input id="live-product-auto-cut" type="checkbox" checked> 录后自动切出候选片段</label>
+                    </div>
+                  </div>
+                  <div class="field-pair">
+                    <div class="field-row compact">
+                      <label for="live-product-default-minutes">单品片段时长</label>
+                      <select id="live-product-default-minutes">
+                        <option value="3">3分钟</option>
+                        <option value="5">5分钟</option>
+                        <option value="10" selected>10分钟</option>
+                        <option value="15">15分钟</option>
+                      </select>
+                    </div>
+                    <div class="field-row compact">
+                      <label for="live-product-switch-confirm">换品确认（秒）</label>
+                      <input id="live-product-switch-confirm" type="number" value="8" min="0" max="120" step="1">
+                    </div>
+                  </div>
+                  <div class="field-pair">
+                    <div class="field-row compact">
+                      <label for="live-product-min-minutes">最短单品时长（分钟）</label>
+                      <input id="live-product-min-minutes" type="number" value="3" min="0.5" max="15" step="0.5">
+                    </div>
+                    <div class="field-row compact">
+                      <label for="live-product-max-minutes">最长单品时长（分钟）</label>
+                      <input id="live-product-max-minutes" type="number" value="15" min="1" max="15" step="0.5">
+                    </div>
+                  </div>
+                  <div class="field-pair">
+                    <div class="field-row compact">
+                      <label for="live-product-head-seconds">片头缓冲上限（秒）</label>
+                      <input id="live-product-head-seconds" type="number" value="10" min="0" max="300" step="1">
+                    </div>
+                    <div class="field-row compact">
+                      <label for="live-product-tail-seconds">片尾缓冲上限（秒）</label>
+                      <input id="live-product-tail-seconds" type="number" value="20" min="0" max="300" step="1">
+                    </div>
+                  </div>
+                  <p class="page-subtitle">片头/片尾填的是缓冲上限；实际按片段长度的 15% / 20% 自动收紧。</p>
+                  <p class="page-subtitle">上面「识别」两个开关只在本页设置，按达人没有对应覆盖项。</p>
+                </section>
+                <section class="panel live-settings-panel" id="live-storage-panel">
+                  <div class="panel-header">
+                    <h2>录制与存储 · 全局</h2>
+                    <span class="live-scope-badge is-global">仅全局</span>
+                  </div>
+                  <div class="field-row">
+                    <label for="live-save-dir">保存目录</label>
+                    <div class="input-with-button">
+                      <input id="live-save-dir" type="text" placeholder="录制视频保存目录">
+                      <button class="button button-secondary" data-action="pick-directory" data-target="live-save-dir">浏览</button>
+                      <button class="button button-muted" data-action="open-path" data-target="live-save-dir">打开</button>
+                    </div>
+                  </div>
+                  <div class="field-pair">
+                    <div class="field-row compact">
+                      <label for="live-check-interval">检测间隔</label>
+                      <input id="live-check-interval" type="number" value="30" min="5" max="300">
+                    </div>
+                    <div class="field-row compact">
+                      <label for="live-min-stream-quality">最低画质</label>
+                      <select id="live-min-stream-quality">
+                        <option value="" selected>自动最高</option>
+                        <option value="1080p">至少1080p</option>
+                        <option value="720p">至少720p</option>
+                        <option value="480p">至少480p</option>
+                        <option value="low">允许低清</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+              </section>
+            </div>
+            <aside class="live-rec-inspector" id="live-rec-inspector">
+            <div class="live-inspector-current-bar" id="live-inspector-current">
+              <span class="live-inspector-empty">从左侧列表选一个达人</span>
+            </div>
+                            <details class="panel live-inspector-card" data-fold="live-card-preview" open>                <summary class="live-inspector-head">
+                  <h2>实时画面</h2>
+                  <span class="live-inspector-digest" id="live-digest-preview"></span>
+                  <span class="live-inspector-state" id="live-inspector-preview-state"></span>
+                  <span class="live-inspector-chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="live-inspector-body">
+                  <div class="live-preview-box">
+                    <img id="live-inspector-preview" alt="直播间实时画面">
+                  </div>
+                  <div class="live-preview-actions">
+                    <button class="button button-muted button-small" data-action="live-preview-reload">重新连接</button>
+                  </div>
+                  <p class="live-inspector-hint" id="live-inspector-preview-tip">选中左栏达人后显示画面（未开播时不显示）。</p>
                 </div>
-              </div>
-              <div class="field-pair">
-                <div class="field-row compact">
-                  <label for="live-product-default-minutes">单品默认分钟</label>
-                  <select id="live-product-default-minutes">
-                    <option value="10" selected>10分钟</option>
-                    <option value="15">15分钟</option>
-                  </select>
+              </details>
+                            <details class="panel live-inspector-card" data-fold="live-card-mode" open>                <summary class="live-inspector-head">
+                  <h2>录制方式</h2>
+                  <span class="live-inspector-digest" id="live-digest-mode"></span>
+                  <span class="live-inspector-chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="live-inspector-body" id="live-inspector-settings">
+                  <p class="live-inspector-empty">选中达人后可改这个直播间的录制方式</p>
                 </div>
-                <div class="field-row compact">
-                  <label for="live-product-switch-confirm">换品确认秒</label>
-                  <input id="live-product-switch-confirm" type="number" value="8" min="0" max="120" step="1">
+              </details>
+                            <details class="panel live-inspector-card" id="live-inspector-product-slice" data-fold="live-card-slice" open>                <summary class="live-inspector-head">
+                  <h2>单品切片</h2>
+                  <span class="live-inspector-digest" id="live-digest-slice"></span>
+                  <span class="live-inspector-chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="live-inspector-body" id="live-inspector-product-settings">
+                  <p class="live-inspector-empty">选中达人后显示单品参数</p>
                 </div>
-              </div>
-              <div class="field-pair">
-                <div class="field-row compact">
-                  <label for="live-product-min-minutes">最短分钟</label>
-                  <input id="live-product-min-minutes" type="number" value="3" min="0.5" max="15" step="0.5">
+              </details>
+                            <details class="panel live-inspector-card" data-fold="live-card-detail">                <summary class="live-inspector-head">
+                  <h2>本直播间生效值</h2>
+                  <span class="live-inspector-digest" id="live-digest-detail"></span>
+                  <span class="live-inspector-chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="live-inspector-body" id="live-inspector-detail">
+                  <p class="live-inspector-empty">选中达人后显示生效值</p>
                 </div>
-                <div class="field-row compact">
-                  <label for="live-product-max-minutes">最长分钟</label>
-                  <input id="live-product-max-minutes" type="number" value="15" min="1" max="15" step="0.5">
+              </details>
+                            <details class="panel live-inspector-card" data-fold="live-card-product">                <summary class="live-inspector-head">
+                  <h2>单品识别</h2>
+                  <span class="live-inspector-digest" id="live-digest-product"></span>
+                  <span class="live-inspector-state" id="live-inspector-product-count"></span>
+                  <span class="live-inspector-chevron" aria-hidden="true"></span>
+                </summary>
+                <div class="live-inspector-body" id="live-inspector-product">
+                  <p class="live-inspector-empty">开始监测后显示单品时间线</p>
                 </div>
-              </div>
-              <div class="field-pair">
-                <div class="field-row compact">
-                  <label for="live-product-head-seconds">片头保留秒</label>
-                  <input id="live-product-head-seconds" type="number" value="10" min="0" max="300" step="1">
-                </div>
-                <div class="field-row compact">
-                  <label for="live-product-tail-seconds">片尾保留秒</label>
-                  <input id="live-product-tail-seconds" type="number" value="20" min="0" max="300" step="1">
-                </div>
-              </div>
-            </section>
-          </section>
-
+              </details>
+            </aside>
+          </div>
           <section class="panel log-panel live-log-panel">
             <div class="panel-header">
               <h2>运行日志</h2>
@@ -1674,6 +1774,189 @@
             <div class="log-view" id="log-live-rec"></div>
           </section>
         </div>
+      </section>
+
+      <section class="page" id="page-material">
+        <header class="page-header material-header">
+          <div>
+            <h1>素材库</h1>
+            <p class="page-subtitle">搜索只查索引，不读素材目录：索引里存的是"哪句话、谁说的、第几秒"，视频文件在你自己硬盘上。</p>
+          </div>
+          <div class="page-actions">
+            <span class="live-rec-summary" id="material-status-chip">读取中…</span>
+            <button class="button button-secondary" type="button" data-action="material-import" title="导入同事分享的索引包（可多选），不需要本机有视频文件">导入索引</button>
+          </div>
+        </header>
+
+        <!-- 三条链路说明：搜索读的是索引；素材目录只用于建索引/播放 -->
+        <div class="material-flow">
+          <div class="material-flow-step">
+            <span class="material-flow-no">1</span>
+            <div>
+              <strong>素材目录（你的硬盘）</strong>
+              <p>放视频文件的地方。只在「建立/更新索引」和「打开视频」时用，<b>搜索时不读它</b>。</p>
+            </div>
+          </div>
+          <span class="material-flow-arrow" aria-hidden="true">→</span>
+          <div class="material-flow-step">
+            <span class="material-flow-no">2</span>
+            <div>
+              <strong>索引（可导入/导出）</strong>
+              <p>存字幕文案 + 时间点 + 文件名 + 主播。<b>搜索只查这里</b>，所以没有视频文件也能搜。</p>
+            </div>
+          </div>
+          <span class="material-flow-arrow" aria-hidden="true">→</span>
+          <div class="material-flow-step">
+            <span class="material-flow-no">3</span>
+            <div>
+              <strong>检索结果</strong>
+              <p>告诉你是哪个主播的哪个视频、第几秒。本地有视频就能直接播放，没有就按文件名去网盘找。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 材质目录 + 索引列表：一个素材目录 = 一个索引 -->
+        <div class="material-top">
+          <div class="material-top-left">
+            <section class="panel material-source-panel">
+              <div class="material-block-head">
+                <strong>素材目录</strong>
+                <span class="material-block-hint">选好目录后点「建立索引」；同一目录再建 = 更新它自己的索引</span>
+              </div>
+              <div class="material-source-row">
+                <input id="material-root" type="text" placeholder="例如 E:\切片\录屏（下面按主播分文件夹）">
+                <button class="button button-secondary" type="button" data-action="material-pick-dir">选择文件夹</button>
+              </div>
+              <div class="material-source-options">
+                <label class="switch-row switch-row-inline">
+                  <input id="material-recursive" type="checkbox" checked>
+                  <span>包含子文件夹</span>
+                </label>
+                <label class="switch-row switch-row-inline">
+                  <input id="material-generate-srt" type="checkbox" checked>
+                  <span>缺字幕自动语音识别</span>
+                </label>
+                <button class="button button-secondary button-small" type="button" data-action="material-probe" title="先看看有多少视频、多少要新增、多少缺字幕（不写索引）">试扫目录</button>
+                <button class="button button-primary button-small" type="button" data-action="material-index">建立/更新这个目录的索引</button>
+              </div>
+              <p class="material-source-note" id="material-source-note"></p>
+              <div class="material-publisher-chips" id="material-publisher-chips" hidden></div>
+            </section>
+
+            <section class="panel material-search-panel">
+              <div class="material-scope-row">
+                <span class="material-scope-label">搜索范围</span>
+                <div class="material-scope-select-wrap">
+                  <button class="material-scope-select" type="button" data-action="material-scope-menu" aria-expanded="false">
+                    <span id="material-scope-text">全部索引</span>
+                    <span class="material-scope-caret" aria-hidden="true">▾</span>
+                  </button>
+                  <div class="material-scope-menu" id="material-scope-menu" hidden></div>
+                </div>
+                <span class="material-scope-note-inline" id="material-scope-inline"></span>
+              </div>
+              <div class="material-search-box">
+                <span class="button-icon" aria-hidden="true">⌕</span>
+                <input id="material-query" type="search" autocomplete="off" placeholder="输入关键词或一整句话，例如：微胖的姐妹放心拍">
+                <button class="button button-primary" type="button" data-action="material-search">检索</button>
+              </div>
+              <div class="material-search-bar">
+                <label class="material-option">
+                  <span>匹配</span>
+                  <select id="material-mode">
+                    <option value="smart">智能（先整句，再分词）</option>
+                    <option value="exact">整句精确</option>
+                    <option value="terms">分词匹配（空格分隔多个词）</option>
+                  </select>
+                </label>
+                <label class="material-option">
+                  <span>上下文</span>
+                  <select id="material-context">
+                    <option value="0">只看命中句</option>
+                    <option value="1">前后 1 句</option>
+                    <option value="2" selected>前后 2 句</option>
+                    <option value="3">前后 3 句</option>
+                    <option value="5">前后 5 句</option>
+                  </select>
+                </label>
+                <span class="material-search-hint" id="material-search-hint"></span>
+              </div>
+              <div class="material-suggest" id="material-suggest" hidden></div>
+            </section>
+          </div>
+
+          <aside class="panel material-index-panel">
+            <div class="material-block-head">
+              <strong>索引列表</strong>
+              <div class="material-index-head-actions">
+                <button class="button button-secondary button-small" type="button" data-action="material-import" title="导入同事分享的索引包，会作为一个独立索引加进来">导入索引</button>
+                <button class="button button-secondary button-small" type="button" data-action="material-export" title="导出选中的索引发给同事（不含视频文件）">导出选中</button>
+              </div>
+            </div>
+            <p class="material-index-tip">一个素材目录 = 一个索引，互相独立。点一个索引就开始"只搜它"。</p>
+            <div class="material-library-list" id="material-library-list"></div>
+            <div class="material-index-path">
+              <span>数据库文件（所有索引都在里面）</span>
+              <div class="material-index-path-row">
+                <input id="material-index-path" type="text" readonly>
+                <button class="button button-secondary button-small" type="button" data-action="open-path" data-target="material-index-path">打开</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <!-- 第三行：结果 + 筛选 -->
+        <div class="material-layout">
+          <section class="panel material-results-panel">
+            <div class="panel-header">
+              <h2>检索结果 <span class="video-count-chip" id="material-result-count">未检索</span></h2>
+              <div class="material-results-actions">
+                <button class="button button-muted button-small" type="button" data-action="material-copy-all">复制全部时间点</button>
+              </div>
+            </div>
+            <div class="material-scope-note" id="material-scope-note"></div>
+            <div class="material-truncated-note" id="material-truncated-note" hidden></div>
+            <div class="material-results" id="material-results">
+              <div class="material-empty">
+                <p><strong>搜索只查索引，不读素材目录。</strong>索引里存的是"哪句话、谁说的、第几秒"。</p>
+                <p>两种把索引准备好的方式（选一种即可）：</p>
+                <div class="material-empty-actions">
+                  <button class="button button-primary button-small" type="button" data-action="material-open-index">扫描素材目录，建立索引</button>
+                  <button class="button button-secondary button-small" type="button" data-action="material-open-import">导入同事分享的索引包</button>
+                </div>
+                <p class="material-empty-hint">导入的索引包不需要本机有视频文件，就能搜出"哪个视频有这句话"。</p>
+              </div>
+            </div>
+          </section>
+
+          <aside class="panel material-side-panel">
+            <div class="material-side-block">
+              <div class="material-side-head"><strong>按主播筛选</strong></div>
+              <select id="material-publisher"><option value="">全部主播</option></select>
+            </div>
+            <div class="material-side-block material-side-grow">
+              <div class="material-side-head">
+                <strong>只看某个视频</strong>
+                <button class="button button-muted button-small" type="button" data-action="material-clear-video">清除</button>
+              </div>
+              <select id="material-video" size="8" class="material-video-list"><option value="">全部视频</option></select>
+            </div>
+            <div class="material-side-block material-side-grow">
+              <div class="material-side-head"><strong>热门文案</strong><small>双击直接检索</small></div>
+              <div class="material-suggest-list" id="material-top-phrases"></div>
+            </div>
+          </aside>
+        </div>
+
+        <section class="panel log-panel material-log-panel">
+          <div class="panel-header">
+            <h2>素材库日志</h2>
+            <div class="log-header-actions">
+              <button class="button button-muted button-small" data-action="clear-log" data-log="material">清除日志</button>
+            </div>
+          </div>
+          <div class="log-view" id="log-material"></div>
+        </section>
       </section>
 
       <section class="page" id="page-settings">
@@ -1894,8 +2177,11 @@
                 </label>
                 <input id="s-asr-provider" type="hidden" value="火山引擎">
                 <div class="field-row">
-                  <label>本地备用识别</label>
-                  <span>SenseVoice（带时间对齐）</span>
+                  <label for="s-local-asr-engine">本地识别引擎</label>
+                  <select id="s-local-asr-engine">
+                    <option value="sensevoice" selected>SenseVoice（默认，识别快）</option>
+                    <option value="paraformer">Paraformer-large（带标点，首次需联网下载模型）</option>
+                  </select>
                 </div>
                 <div class="field-row">
                   <label for="s-local-asr-device">本地识别加速</label>
@@ -1913,7 +2199,16 @@
                     <option value="8">8 线程</option>
                   </select>
                 </div>
-                <p class="panel-note">GPU 初始化或识别异常会自动回退 CPU；短视频分段与词级时间轴保持不变。</p>
+                <div class="field-row gpu-accel-row">
+                  <label>GPU 加速组件</label>
+                  <div class="gpu-accel-box">
+                    <span class="gpu-accel-badge" id="gpu-accel-badge">检测中…</span>
+                    <span class="gpu-accel-text" id="gpu-accel-text">正在检测本机显卡…</span>
+                  </div>
+                  <p class="gpu-accel-detail" id="gpu-accel-detail"></p>
+                  <button type="button" class="gpu-accel-btn" id="gpu-accel-btn" disabled>下载组件包（P2 开放）</button>
+                </div>
+                <p class="panel-note">GPU 初始化或识别异常会自动回退 CPU；短视频分段与词级时间轴保持不变。切到 Paraformer-large 首次会联网下载模型（约 1GB）；若模型加载或识别失败，会自动改用 SenseVoice 重跑一次并在日志里写明原因。</p>
               </div>
 
               <div class="panel">
@@ -2113,6 +2408,6 @@
   </div>
 
   <div class="toast-stack" id="toast-stack"></div>
-  <script src="/assets/app.js?v=20260905-director-compact-v2" defer></script>
+  <script src="/assets/app.js?v=20261010-material14" defer></script>
 </body>
 </html>

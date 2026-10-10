@@ -69,6 +69,64 @@ def _try_direct_page(douyin_url, _log, timeout=12.0):
     return best
 
 
+def _extract_room_display_name(body):
+    """从直播间页面 HTML 里取一个可当房间名用的名字：主播昵称 → 直播间标题。"""
+    if not body:
+        return ""
+    normalized = body.replace("\\u0026", "&").replace("\\/", "/")
+
+    def _clean(value):
+        text = str(value or "").strip()
+        if not text or text == "$undefined" or text.startswith("$"):
+            return ""
+        return text
+
+    for pattern in (r'nickname\\?"\s*:\s*\\?"([^"\\]{1,80})',
+                    r"nickname&quot;:&quot;([^&]{1,80})&quot;"):
+        for hit in re.findall(pattern, normalized):
+            name = _clean(hit)
+            if name:
+                return name
+    match = re.search(r'"room"\s*:\s*\{[^{}]{0,400}?"title"\s*:\s*"([^"]{1,80})"', normalized)
+    if match:
+        name = _clean(match.group(1))
+        if name:
+            return name
+    return ""
+
+
+def resolve_room_display_name(douyin_url, log_fn=None, timeout=12.0):
+    """只解析「直播间名称」（不取流地址）。成功返回名称，失败返回空串。"""
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    text = str(douyin_url or "").strip()
+    if not text.lower().startswith(("http://", "https://")):
+        _log("链接不完整，无法解析直播间名称")
+        return ""
+    request = urllib.request.Request(
+        text,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "ignore")
+    except Exception as exc:
+        _log("直播间名称解析失败: " + str(exc))
+        return ""
+    name = _extract_room_display_name(body)
+    if name:
+        _log("已解析直播间名称: " + name)
+    else:
+        _log("页面里没找到直播间名称")
+    return name
+
+
 def extract_live_url(douyin_url, log_fn=None):
     """从抖音直播间获取真实推流地址（m3u8/flv）
 

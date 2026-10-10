@@ -412,7 +412,10 @@ PAGE_STATE_JS = r"""
     muted: video.muted,
     autoplay: video.autoplay,
     width: video.videoWidth,
-    height: video.videoHeight
+    height: video.videoHeight,
+    currentTime: Number(video.currentTime || 0),
+    duration: Number.isFinite(video.duration) ? Number(video.duration) : -1,
+    bufferedEnd: video.buffered && video.buffered.length ? Number(video.buffered.end(video.buffered.length - 1)) : -1
   }));
   return {
     href: location.href,
@@ -421,6 +424,9 @@ PAGE_STATE_JS = r"""
     liveEnded: /直播已结束|直播结束|暂未开播|未开播/.test(bodyText),
     maybeLoginRequired: /登录|扫码|验证码|请先登录/.test(bodyText),
     bodyTextSample: bodyText.slice(0, 500),
+    resourceCount: (window.performance && performance.getEntriesByType) ? performance.getEntriesByType('resource').length : -1,
+    visibilityState: String(document.visibilityState || ''),
+    stateCollectedAtMs: Date.now(),
     videos
   };
 })()
@@ -695,6 +701,15 @@ def find_ffprobe() -> str:
 def launch_chrome(port: int, url: str, profile_dir: Path) -> subprocess.Popen[Any]:
     chrome = find_chrome()
     profile_dir.mkdir(parents=True, exist_ok=True)
+    # 记下「这个配置目录里的 Chrome 是用第几版启动参数打开的」。
+    # 复用已在运行的 Chrome 时 launch_chrome 不会被调用，所以必须靠这个标记
+    # 才能知道要不要重启它（否则新参数永远不生效，见 chrome_flags_current）。
+    try:
+        chrome_flags_marker_path(profile_dir).write_text(
+            str(CHROME_LAUNCH_FLAGS_VERSION), encoding="utf-8"
+        )
+    except Exception:
+        pass
     cmd = [
         chrome,
         f"--remote-debugging-port={port}",
@@ -702,11 +717,24 @@ def launch_chrome(port: int, url: str, profile_dir: Path) -> subprocess.Popen[An
         "--disk-cache-size=134217728",
         "--media-cache-size=67108864",
         (
+            # CalculateNativeWinOcclusion 必须关掉：Windows 上 Chrome 一旦判定自己的
+            # 窗口被其它窗口遮挡，就会把页面当成 hidden 来节流——视频暂停、定时器降频，
+            # 页面自身的轮询随之停摆。实测（2026-10-08 小贤直播间）：探针页面 59/59 次
+            # 采样 visibility=hidden、video_paused=True、视频时间 328.1s 恒定不变，
+            # 结果整场只抓到开机时那一个商品，之后 12 分钟 0 个换品信号，
+            # 所有片段都被命名为第一个商品（复用同一份 Chrome 的推流探测同样受益）。
             "--disable-features="
+            "CalculateNativeWinOcclusion,"
             "OptimizationGuideOnDeviceModel,OptimizationGuideModelExecution,"
             "OptimizationGuideModelDownloading,OptimizationTargetPrediction,"
             "OptimizationHints,TextSafetyClassifier"
         ),
+        # 以下几条同样是防后台节流：即使窗口不可见也要保持正常渲染与计时。
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        # 直播页自动播放，避免因缺少用户手势而停在暂停状态。
+        "--autoplay-policy=no-user-gesture-required",
         "--no-first-run",
         "--new-window",
         url,
@@ -718,6 +746,56 @@ def launch_chrome(port: int, url: str, profile_dir: Path) -> subprocess.Popen[An
         stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+
+
+# 启动参数版本号：只要 launch_chrome 的参数有实质变化（尤其是防节流那几条）就 +1，
+# 这样复用的旧 Chrome 会被识别出来并重启，新参数才会真正生效。
+CHROME_LAUNCH_FLAGS_VERSION = 2
+CHROME_FLAGS_MARKER_NAME = ".lc-chrome-flags"
+
+
+def chrome_flags_marker_path(profile_dir: Path) -> Path:
+    return Path(profile_dir) / CHROME_FLAGS_MARKER_NAME
+
+
+def chrome_flags_current(profile_dir: Path) -> bool:
+    """复用的 Chrome 是不是**带当前防节流参数**启动的。
+
+    复用已在运行的 Chrome 时 ``launch_chrome`` 根本不会被调用，于是新加的启动参数
+    永远不会生效。实测（2026-10-08 小贤直播间）：08:55 启动的旧 Chrome 被反复复用，
+    即使补上了 ``CalculateNativeWinOcclusion``，页面照样被判 hidden、换品信号全丢。
+    因此复用前先核对标记文件。
+    """
+    try:
+        return (
+            chrome_flags_marker_path(profile_dir).read_text(encoding="utf-8").strip()
+            == str(CHROME_LAUNCH_FLAGS_VERSION)
+        )
+    except Exception:
+        return False
+
+
+def close_chrome(port: int) -> bool:
+    """通过 CDP 关掉整个 Chrome（复用实例的启动参数过期时用）。"""
+    try:
+        version = http_json(f"{chrome_base(port)}/json/version", timeout=3.0) or {}
+        ws_url = str(version.get("webSocketDebuggerUrl") or "")
+        if not ws_url:
+            return False
+        client = CDPClient(ws_url)
+        try:
+            client.call("Browser.close", timeout=3.0)
+        except Exception:
+            pass  # Browser.close 会直接断开连接，抛异常属正常
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return True
+    except Exception as exc:  # noqa: BLE001 - 关不掉就照旧用现有实例
+        log(f"Could not close Chrome on port {port}: {exc}")
+        return False
 
 
 def wait_for_devtools(port: int, timeout: float) -> dict[str, Any]:
@@ -913,9 +991,17 @@ class CDPClient:
         self.ws = MiniWebSocket(ws_url)
         self.next_id = 1
         self.events: list[dict[str, Any]] = []
+        # 事件计数（按方法名累计）：页面活性判据取 Network.webSocketFrame* / requestWillBeSent。
+        # 计数点必须覆盖全部消费路径（call() 内部缓冲 + recv_event() 直读），否则会漏统计。
+        self.method_counts: dict[str, int] = {}
 
     def close(self) -> None:
         self.ws.close()
+
+    def _count_method(self, message: dict[str, Any]) -> None:
+        method = message.get("method") if isinstance(message, dict) else None
+        if method:
+            self.method_counts[method] = self.method_counts.get(method, 0) + 1
 
     def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 8.0) -> dict[str, Any]:
         message_id = self.next_id
@@ -933,6 +1019,7 @@ class CDPClient:
                 if "error" in message:
                     raise RuntimeError(f"CDP {method} failed: {message['error']}")
                 return message.get("result") or {}
+            self._count_method(message)
             self.events.append(message)
         raise TimeoutError(f"CDP {method} timed out.")
 
@@ -940,9 +1027,11 @@ class CDPClient:
         if self.events:
             return self.events.pop(0)
         try:
-            return json.loads(self.ws.recv_text(timeout=timeout))
+            message = json.loads(self.ws.recv_text(timeout=timeout))
         except socket.timeout:
             return None
+        self._count_method(message)
+        return message
 
     def evaluate(self, expression: str, timeout: float = 8.0, await_promise: bool = False) -> Any:
         result = self.call(

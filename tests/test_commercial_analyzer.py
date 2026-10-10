@@ -560,7 +560,9 @@ class PromptTests(unittest.TestCase):
         self.assertIn("第一句， 第二句讲完整。", prompt)
         self.assertNotIn("大身材也能穿出利落感", prompt)
         self.assertNotIn("让怕显胖的人相信这件能修饰身形且日常好穿", prompt)
-        self.assertIn("不能截取窗口内单行", prompt)
+        # 合同已变更（2026-10-07）：窗口内可以只保留中间那段完整的话，
+        # 由 verbatim 逐字表达保留部分，因此不再有「不能截取窗口内单行」的禁令。
+        self.assertIn("verbatim 写你最终想保留的那段原话", prompt)
         self.assertIn("pain+result+mechanism 合计最多3章", ANALYZER_SYSTEM_PROMPT)
         self.assertIn("final_readthrough", prompt)
 
@@ -1542,7 +1544,11 @@ class JsonRecoveryTests(unittest.TestCase):
     def test_stage_format_recovery_retries_only_the_malformed_stage(self):
         events = []
         logs = []
-        original = '{"strategies":[{"strategy_id":"S1"}]'
+        # 注意：这里**不能**用「缺闭合括号」当畸形输入 —— 2026-10-08 起
+        # _relaxed_json_repair 会免费补平衡括号，那种输入不再触发付费修复。
+        # 用「括号平衡、但数组成员之间缺逗号」的输入：本地宽松修复确实修不了，
+        # 才能验到付费修复这条路径。
+        original = '{"strategies":[{"strategy_id":"S1"} {"x":1}]}'
         repaired = '{"strategies":[{"strategy_id":"S1"}]}'
         with mock.patch(
             "commercial_analyzer._post_two_pass_director_request",
@@ -1573,7 +1579,9 @@ class JsonRecoveryTests(unittest.TestCase):
         self.assertEqual(events[-1][0], "Director_beat_casting_format_recovered")
 
     def test_stage_format_recovery_exposes_only_safe_diagnostics_on_second_failure(self):
-        original = '{"private_source_text":"不要泄露这段原文"'
+        # 同上：用「括号平衡、成员间缺逗号」的输入，确保本地宽松修复修不了、
+        # 必须走付费修复并且第二次仍失败，才能验到诊断不外泄私有原文。
+        original = '{"private_source_text":"不要泄露这段原文" "x":1}'
         with mock.patch(
             "commercial_analyzer._post_two_pass_director_request",
             return_value='{"still":"broken"',

@@ -92,3 +92,13 @@ app/license_feishu_backend.py
 app/license_stats_store.py
 app/feishu_scheduler.py
 tools/internal_license_generator.py
+
+# 并行工作流 / 开发残留（2026-09-25 加固）
+_backup_recordpage_*/
+__*.html
+*.pre_*.py
+_merge_render_test/
+_debris_*/
+
+# 开发残留：整份商业分析器变体副本，无任何引用（2026-10-10）
+app/*.new_wholekeep

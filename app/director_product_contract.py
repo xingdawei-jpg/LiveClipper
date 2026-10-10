@@ -56,6 +56,69 @@ _EXPLICIT_PRODUCT_TERMS = {
 }
 
 
+# 2026-10-05（David 定调）：举证方向反过来 —— 只有「明确讲了另一件商品」才算硬证据。
+# 「缺少依据 / 归属不明 / 不唯一」属于举证不足，只能进告警，绝不能作为删句依据
+# （实测：套装里的裤子腰句 686/687 被判「归属不明 + 邻近持续讲其他商品」删掉后，
+# 末章章名「全弹力无痕腰」失去唯一依据，只留下一句讲面料弹力的空壳）。
+HARD_EVIDENCE_ONLY = True
+# 只认三类硬证据：说出别的商品名 / 落在别的商品讲解段 / 明文排除的搭配。
+_HARD_PRODUCT_ISSUES = frozenset({
+    "讲述对象名称与声明品类矛盾",
+    "选句位于其他商品的讲解范围",
+    "本次已排除其他商品搭配",
+})
+# 关系字段写「不确定 / 未知 / 含糊」= 举证不足，不是硬证据。
+_SOFT_RELATIONS = frozenset({"", "uncertain", "unknown", "ambiguous", "unclear", "unsure"})
+# 2026-10-06（David 定调）：素材标题写明「套装」时，裤 / 裙 这类组成件的话头
+# 不算「另一件商品」——它属于这套商品自身。只放宽硬证据判据，不改商品类型、
+# 不改章节判定、不新增 AI 字段；开关关闭逐字节回到落地前。
+SET_TITLE_SCOPE_ENABLED = True
+_SET_COMPONENT_KINDS = frozenset({"pants", "skirt"})
+_SET_TITLE_PATTERN = re.compile(r"套装|两件套|三件套")
+
+
+def _explicit_foreign_subject(beat: Mapping[str, Any], main_type: str, named: set[str], *,
+                              set_scope: bool = False) -> bool:
+    """是否点明了另一件商品的品类（而不是「没写清楚」）。
+
+    set_scope=True 表示素材标题写明是套装：裤 / 裙 属于这套商品自身，不算别的商品。
+    """
+
+    def foreign(kind: str) -> bool:
+        return not compatible(kind, main_type) and not (set_scope and kind in _SET_COMPONENT_KINDS)
+
+    subject_type = str(beat.get("subject_product_type") or "unknown")
+    if subject_type not in {"", "unknown", "other"} and foreign(subject_type):
+        return True
+    return any(foreign(kind) for kind in named)
+
+
+def _issue_is_hard_evidence(issue: str, *, beat: Mapping[str, Any], main_type: str,
+                            named: set[str], set_scope: bool = False) -> bool:
+    """这条 issue 是否属于「明确讲了另一件商品」的硬证据。"""
+
+    if issue == "其他商品或归属不明":
+        relation = str(beat.get("product_relation") or "").strip().lower()
+        return relation not in _SOFT_RELATIONS
+    if issue == "将其他单品的效果归给主商品":
+        return _explicit_foreign_subject(beat, main_type, named, set_scope=set_scope)
+    return issue in _HARD_PRODUCT_ISSUES
+
+
+def _explicit_foreign_reference(text: Any, main_type: str, *, set_scope: bool = False) -> bool:
+    """这句话本身是否写出了另一件商品的名字（明确指代，而非「邻近」推断）。"""
+
+    value = str(text or "")
+    for kind, patterns in _EXPLICIT_PRODUCT_TERMS.items():
+        if compatible(main_type, kind):
+            continue
+        if set_scope and kind in _SET_COMPONENT_KINDS:
+            continue
+        if any(re.search(pattern, value) for pattern in patterns):
+            return True
+    return False
+
+
 def foreign_product_ranges(main_type: str, subtitles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Find sustained explicit foreign-product talk, never score semantics.
 
@@ -113,6 +176,9 @@ def build_product_target(controls: Mapping[str, Any] | None) -> dict[str, Any]:
     use_title = bool(title_type and not main and not leaf)
     if use_title:
         kinds = {title_type}
+    # 素材标题写明套装 = 这套商品的组成件（裤 / 裙）不算外来商品。
+    set_title_hint = any(_SET_TITLE_PATTERN.search(clean(hint))
+                         for hint in controls.get("source_product_hints") or [] if clean(hint))
     return {
         "version": VERSION, "mode": "locked" if specific or leaf or use_title else "auto",
         "main_product": main, "leaf_category": leaf,
@@ -121,6 +187,7 @@ def build_product_target(controls: Mapping[str, Any] | None) -> dict[str, Any]:
         "needs_specific_category": bool(main in BROAD and not leaf),
         "sales_scope": "explicit_set" if kinds == {"set"} else "single_product" if specific or leaf or use_title else "auto_single_product",
         "supporting_products": "block" if controls.get("supporting_products") == "block" else "allow",
+        "set_title_hint": bool(set_title_hint),
     }
 
 
@@ -170,6 +237,8 @@ def audit_product_selection(story: Mapping[str, Any], cast: Mapping[str, Any], *
     if not evidence_ok(scope.get("identity_evidence_ids")):
         errors.append("主商品身份证据未指向真实字幕")
     main_type = str(scope.get("product_type") or "unknown")
+    # 素材标题写明套装时，裤 / 裙 的硬证据判据放宽（其余判据一律不动）。
+    set_scope = bool(target.get("set_title_hint")) if SET_TITLE_SCOPE_ENABLED else False
     foreign_ranges = foreign_product_ranges(main_type, subtitles)
     sections = [dict(s) for s in scope.get("source_product_sections") or [] if isinstance(s, Mapping)]
     source_span_issues = []
@@ -189,8 +258,12 @@ def audit_product_selection(story: Mapping[str, Any], cast: Mapping[str, Any], *
                 relation = beat.get("product_relation")
                 subject_type = str(beat.get("subject_product_type") or "unknown")
                 issues = []
+                hard_issues = []
                 if relation not in {"main_product", "styling_support"}:
                     issues.append("其他商品或归属不明")
+                    # 关系字段显式写了别的值 = 明确声明「这不是主商品」→ 硬证据；
+                    # 字段缺失 / 空 / 不确定 = 归属「待核」→ 只告警。
+                    # （由 _issue_is_hard_evidence 统一裁决，见下方）
                 if not clean(beat.get("subject_product")) or subject_type in {"", "unknown"} or subject_type not in PRODUCT_TYPES:
                     issues.append("缺少明确讲述对象")
                 named = named_types(beat.get("subject_product")) - {"other", "unknown"}
@@ -239,16 +312,37 @@ def audit_product_selection(story: Mapping[str, Any], cast: Mapping[str, Any], *
                     )
                     if main_type != "set" and not (relation == "styling_support" and explicit_main_in_same_sentence) and any(int(item["start_id"]) <= sid <= int(item["end_id"]) for item in foreign_ranges):
                         issues.append("选句邻近字幕持续明确讲其他商品")
+                        # 「邻近持续讲其他商品」只是范围推断：只有这句话自己写出了
+                        # 另一件商品的名字，才算硬证据，否则退回告警。
+                        if _explicit_foreign_reference(source_text.get(sid, ""), main_type,
+                                                       set_scope=set_scope):
+                            hard_issues.append("选句邻近字幕持续明确讲其他商品")
+                for issue in issues:
+                    if issue not in hard_issues and _issue_is_hard_evidence(
+                            issue, beat=beat, main_type=main_type, named=named,
+                            set_scope=set_scope):
+                        hard_issues.append(issue)
                 checks.append({"subtitle_ids": list(beat.get("subtitle_ids") or []), "group": group,
                                "product_relation": relation, "subject_product": beat.get("subject_product"),
                                "subject_product_type": subject_type, "source_section": beat_owners[0] if len(beat_ids) == 1 and len(beat_owners) == 1 else {},
-                               "issues": list(dict.fromkeys(issues))})
+                               "issues": list(dict.fromkeys(issues)),
+                               "hard_issues": list(dict.fromkeys(hard_issues))})
     conflicts = [item for item in checks if item["issues"]]
     selected_conflicts = [item for item in conflicts if item["group"] == "beats"]
+    # 硬证据（明确讲另一件商品）才允许驱动删句；软疑点只进软名单（告警）。
+    hard_conflicts = (
+        [item for item in checks if item.get("hard_issues") and item["group"] == "beats"]
+        if HARD_EVIDENCE_ONLY else selected_conflicts
+    )
+    soft_only_conflicts = (
+        [item for item in selected_conflicts if not item.get("hard_issues")]
+        if HARD_EVIDENCE_ONLY else []
+    )
     return {"version": VERSION, "target": dict(target), "resolved_scope": scope,
             "scope_errors": list(dict.fromkeys(errors)), "beats": checks,
-            "conflicting_subtitle_ids": [i for b in selected_conflicts for i in b["subtitle_ids"]],
-            "alternative_conflicting_subtitle_ids": [i for b in conflicts if b["group"] == "alternative_beats" for i in b["subtitle_ids"]],
+            "conflicting_subtitle_ids": [i for b in hard_conflicts for i in b["subtitle_ids"]],
+            "soft_flagged_subtitle_ids": [i for b in soft_only_conflicts for i in b["subtitle_ids"]],
+            "alternative_conflicting_subtitle_ids": [i for b in hard_conflicts if b["group"] == "alternative_beats" for i in b["subtitle_ids"]],
             "foreign_product_ranges": foreign_ranges,
             "status": "conflict" if errors or selected_conflicts else "consistent",
             "semantic_selection_owner": "AI", "program_deleted_beats": False}

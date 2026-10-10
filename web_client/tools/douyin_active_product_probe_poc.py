@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -29,18 +32,21 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
-PROBE_VERSION = "active_product_probe_v1.1"
-PROBE_BUILD = "2026-07-01"
+PROBE_VERSION = "active_product_probe_v1.2"
+PROBE_BUILD = "2026-09-26"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from douyin_chrome_live_poc import (  # noqa: E402
     CDPClient,
+    chrome_flags_current,
+    close_chrome,
     close_ffmpeg_log,
     close_target,
     collect_stream_candidates,
     describe_stream_candidates,
     effective_stream_quality_label,
+    ensure_product_list,
     find_ffmpeg,
     find_live_target,
     get_targets,
@@ -61,9 +67,42 @@ from douyin_chrome_live_poc import (  # noqa: E402
 
 
 DEFAULT_PORT = 9222
+# 诊断用：--dump-ws-frames 时把收到的 WebSocket 帧原样落盘（JSONL）。
+# 为什么需要它：实测 172 段里 websocket_frame 信号恒为 0，而帧数高达 3782 ——
+# 说明帧内容里没有 has_signal_text 能认出的可读文本（大概率是 protobuf/gzip 二进制）。
+# 要判断「正在讲解」状态能不能从帧里解出来，必须先把真实帧内容抓下来看。
+_WS_DUMP_HANDLE: Any = None
+
+
+def _ws_dump_frame(elapsed: float, response: Any) -> None:
+    if _WS_DUMP_HANDLE is None:
+        return
+    try:
+        payload = str((response or {}).get("payloadData") or "")
+        _WS_DUMP_HANDLE.write(json.dumps({
+            "elapsed": round(float(elapsed or 0.0), 3),
+            "opcode": (response or {}).get("opcode"),
+            "length": len(payload),
+            "payload": payload[:4000],
+        }, ensure_ascii=False) + "\n")
+        _WS_DUMP_HANDLE.flush()
+    except Exception:
+        pass
+
 DEFAULT_SECONDS = 300.0
 DEFAULT_PROBE_INTERVAL = 5.0
 DEFAULT_STREAM_WAIT_SECONDS = 75.0
+DEFAULT_LIVENESS_INTERVAL = 15.0
+# 页面活性判据（F2）：整段业务 WebSocket 帧数低于此值 → 可疑「页面僵死」。
+# 阈值刻意保守：健康页面一场 600 秒会收到成百上千帧，"少于 5 帧" 等同几乎没收到。
+LIVENESS_WS_FRAMES_MIN = 5
+# 视频推进下限：低于此秒数视为播放器没有在走。
+LIVENESS_VIDEO_PROGRESS_MIN_SEC = 30.0
+# 每场（多段）最多自愈次数，防抖动。
+LIVENESS_MAX_RELOADS_PER_RUN = 2
+# 页面不可见时的自救次数上限（超过就只报警，不再反复折腾窗口）。
+LIVENESS_MAX_UNHIDE_ATTEMPTS = 3
+WS_FRAME_METHODS = ("Network.webSocketFrameReceived", "Network.webSocketFrameSent")
 STRONG_THRESHOLD = 80
 ACTIVE_CANDIDATE_CONFIDENCE = 70
 ACTIVE_CANDIDATE_CONFIRM_WINDOW_SEC = 10.0
@@ -707,27 +746,330 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seconds", type=float, default=DEFAULT_SECONDS, help="Probe/record duration. 0 means until Ctrl+C.")
     parser.add_argument("--output-dir", default="", help="Default: ~/Videos/LiveClipperActiveProbe")
     parser.add_argument("--room-name", default="", help="Optional room name for output files.")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Chrome DevTools port.")
+    parser.add_argument("--port", type=int, default=None, help="Chrome DevTools port. 省略=按直播间自动分配独立端口（推荐）。显式指定则用共享配置目录。")
     parser.add_argument("--probe-interval", type=float, default=DEFAULT_PROBE_INTERVAL, help="Runtime probe interval in seconds.")
     parser.add_argument("--stream-wait-seconds", type=float, default=DEFAULT_STREAM_WAIT_SECONDS, help="How long to wait for stream URL.")
     parser.add_argument("--min-stream-quality", default="", help="Minimum accepted stream quality: 1080p, 720p, 480p, low, or auto.")
     parser.add_argument("--capture-catalog", action="store_true", help="Optionally write catalog snapshots for metadata only.")
     parser.add_argument("--open-catalog", action="store_true", help="Open product list for catalog capture. Never used as active-product evidence.")
     parser.add_argument("--no-record", action="store_true", help="Probe only; do not start ffmpeg.")
+    parser.add_argument("--dump-ws-frames", default="", help="诊断用：把收到的 WebSocket 帧原样写到这个文件（JSONL），用于判断讲解/商品状态能否从帧里解析。")
     parser.add_argument("--manual-markers", action="store_true", help="Enable console manual switch markers even if stdin is not interactive.")
     parser.add_argument("--no-manual-markers", action="store_true", help="Disable console manual switch markers.")
     parser.add_argument("--manual-match-window", type=float, default=10.0, help="Seconds around a manual marker used to match active_product_change.")
+    parser.add_argument("--liveness-interval", type=float, default=DEFAULT_LIVENESS_INTERVAL, help="Page liveness sampling interval in seconds.")
+    parser.add_argument("--no-liveness-guard", action="store_true", help="Disable the page-liveness guard (no sampling, no self-heal).")
     return parser.parse_args()
 
 
-def prepare_chrome(port: int, url: str) -> dict[str, Any]:
+# ---------- 每直播间独立 Chrome 配置目录 + 独立调试端口 ----------
+#
+# 背景（2026-10-07 实测）：原先所有探针都用默认端口 9222 和同一个 chrome-live-poc
+# 配置目录，而 prepare_chrome 会先试 wait_for_devtools(port) —— 于是
+# 【第一路探针启动 Chrome，后面每一路都直接接管它】。5 路探针挤在一个 Chrome 里
+# 抢 34 个标签页，谁都可能认领到别的直播间的页面：该段 source_counts 全空、
+# 商品信号为 0、整段只剩一个「待确认」候选。
+#
+# 现在的规则：一个直播间 = 一套独立配置目录 + 一个独立调试端口。
+#   · 配置目录：chrome-live-poc/room-<房间标识>
+#   · 端口    ：**由房间独占**。端口按房间标识确定一个起点，并用共享注册表
+#               （chrome-live-poc/.lc-port-registry.json）保证不被别的房间占用。
+#               只用"找第一个空闲端口"是不够的：前一个房间的 Chrome 退出后它的
+#               端口就变空闲，后来者会占用同一个端口，前一个房间再启动时就会
+#               wait_for_devtools 到别人的 Chrome —— 又回到互相干扰。
+# 显式传 --port 时保持旧行为（共享目录 + 指定端口），便于手动排障。
+PROFILE_ROOT_DIRNAME = "chrome-live-poc"
+PORT_MARKER_NAME = ".lc-debug-port"
+PORT_REGISTRY_NAME = ".lc-port-registry.json"
+PROFILE_SEED_MARKER_NAME = ".lc-profile-seeded"
+# 播种版本：改了这个数字，所有已有房间配置会在下次启动时重新播种一次。
+# v2：整组复制 Cookies（含 -wal/-shm/-journal），修复缺 .amemv.com/.webcast.amemv.com
+#     导致直播商品消息收不到的问题。
+PROFILE_SEED_VERSION = 2
+PORT_SEARCH_SPAN = 2000
+# 从共享配置复制时跳过的东西：缓存、遥测、扩展、以及会话/标签页记录。
+# 只保留真正承载登录态的部分（Local State + Default 下的 Cookies/网络/存储/偏好）。
+# 跳过 Sessions/Current Tabs/Last Tabs 还有个额外好处：新配置的 Chrome 不会一启动
+# 就把共享配置里那几十个旧标签页恢复出来（那正是互相干扰的来源之一）。
+PROFILE_SEED_SKIP_NAMES = frozenset({
+    "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache",
+    "DawnWebGPUCache", "ShaderCache", "GrShaderCache", "GraphiteDawnCache",
+    "CacheStorage", "ScriptCache", "Crashpad", "component_crx_cache",
+    "extensions_crx_cache", "optimization_guide_model_store",
+    "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile",
+    "History", "History-journal", "Visited Links", "Top Sites",
+    "Favicons", "Favicons-journal", "Media Cache", "Application Cache",
+    # 与登录无关的体积大头
+    "WasmTtsEngine", "Safe Browsing", "Safe Browsing Network", "BrowserMetrics",
+    "BrowserMetrics-spare.pma", "Extensions", "Extension State",
+    "Extension Rules", "Extension Scripts", "Service Worker", "Sync Data",
+    "Sync App Settings", "Platform Notifications", "Segmentation Platform",
+    "optimization_guide_hint_cache_store",
+    # 会话/标签页记录：不要让新配置继承旧的标签页群
+    "Sessions", "Sessions_Encrypted", "Current Session", "Current Tabs",
+    "Last Session", "Last Tabs",
+})
+
+
+def chrome_profile_root() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / PROFILE_ROOT_DIRNAME
+
+
+def room_key_from_url(url: str) -> str:
+    """房间标识：优先用抖音数字直播间号，否则用 URL 哈希。
+
+    注意不能用 room_id_from_url 的兜底值 —— 它对非数字链接会返回同一个固定字符串
+    （实测 "abc" 和 "xyz" 都变成 douyin_live），那样不同直播间会共用一套配置目录，
+    隔离就失效了。
+    """
+    rid = str(room_id_from_url(url) or "").strip()
+    if rid.isdigit():
+        return rid
+    return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()[:12]
+
+
+def room_profile_dir(url: str) -> Path:
+    return chrome_profile_root() / f"room-{room_key_from_url(url)}"
+
+
+def _port_has_devtools(port: int) -> bool:
     try:
-        return wait_for_devtools(port, timeout=1.5)
+        wait_for_devtools(port, timeout=0.8)
+        return True
     except Exception:
-        profile_root = Path(os.environ.get("APPDATA", Path.home())) / "LiveClipper" / "chrome-live-poc"
-        launch_chrome(port, url, profile_root)
+        return False
+
+
+def _port_is_free(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+
+
+def _read_port_registry() -> dict[str, str]:
+    try:
+        data = json.loads((chrome_profile_root() / PORT_REGISTRY_NAME).read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _write_port_registry(registry: dict[str, str]) -> None:
+    try:
+        root = chrome_profile_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / PORT_REGISTRY_NAME).write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def allocate_room_port(room_key: str) -> int:
+    """给房间分配一个【只属于它】的端口（见文件上方说明）。"""
+    registry = _read_port_registry()
+    recorded = str(registry.get(room_key) or "").strip()
+    if recorded.isdigit():
+        return int(recorded)
+    taken = {int(v) for v in registry.values() if str(v).strip().isdigit()}
+    base = DEFAULT_PORT + (int(hashlib.sha256(room_key.encode("utf-8")).hexdigest()[:6], 16) % PORT_SEARCH_SPAN)
+    # 第一轮：优先「没被别的房间登记 且 当前空闲」
+    port = base
+    for _ in range(PORT_SEARCH_SPAN):
+        if port not in taken and _port_is_free(port):
+            registry[room_key] = str(port)
+            _write_port_registry(registry)
+            return port
+        port = DEFAULT_PORT + ((port - DEFAULT_PORT + 1) % PORT_SEARCH_SPAN)
+    # 第二轮：退一步，只要没被别的房间登记就用
+    port = base
+    for _ in range(PORT_SEARCH_SPAN):
+        if port not in taken:
+            registry[room_key] = str(port)
+            _write_port_registry(registry)
+            return port
+        port = DEFAULT_PORT + ((port - DEFAULT_PORT + 1) % PORT_SEARCH_SPAN)
+    registry[room_key] = str(DEFAULT_PORT)
+    _write_port_registry(registry)
+    return DEFAULT_PORT
+
+
+def _profile_seed_skip(name: str) -> bool:
+    return name in PROFILE_SEED_SKIP_NAMES or name.startswith("Singleton")
+
+
+def _copy_file_sharing(src: Path, dst: Path) -> bool:
+    """复制一个可能正被别的进程打开的文件。
+
+    为什么必须这样：Chrome 正在运行时，shutil.copy2 会在 Cookies 这类文件上撞
+    WinError 32（共享冲突）—— 而 Cookies 恰恰就是承载抖音登录态的那个文件。
+    实测（2026-10-07）：copytree 因为这一个文件失败而整体作废，导致每房间的
+    新配置是「全新未登录」，抖音不再推商品消息，整段 source_counts 里 network=0。
+
+    Windows 下退一步用带 FILE_SHARE_READ|WRITE|DELETE 的 CreateFileW 打开源文件
+    ——只读、不改源文件，可以照常读出内容。
+    """
+    try:
+        shutil.copy2(src, dst)
+        return True
+    except Exception:
+        pass
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        GENERIC_READ = 0x80000000
+        OPEN_EXISTING = 3
+        FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+        INVALID_HANDLE = ctypes.c_void_p(-1).value
+        kernel32 = ctypes.windll.kernel32
+        create_file = kernel32.CreateFileW
+        create_file.restype = wintypes.HANDLE
+        create_file.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        handle = create_file(str(src), GENERIC_READ, FILE_SHARE_ALL, None, OPEN_EXISTING, 0, None)
+        if handle == INVALID_HANDLE:
+            return False
+        try:
+            buffer = ctypes.create_string_buffer(1024 * 1024)
+            read = wintypes.DWORD()
+            with open(dst, "wb") as out:
+                while kernel32.ReadFile(handle, buffer, len(buffer), ctypes.byref(read), None):
+                    if read.value == 0:
+                        break
+                    out.write(buffer.raw[: read.value])
+        finally:
+            kernel32.CloseHandle(handle)
+        return True
+    except Exception:
+        return False
+
+
+def seed_profile_from_shared(profile: Path, log_fn=None) -> bool:
+    """首次为某房间建配置目录时，从共享配置复制一份，继承抖音登录态。
+
+    **逐文件复制**：一个文件复制不了（例如正被共享配置的 Chrome 占用）不能拖垮整次
+    播种。复制不到的锁文件再用共享模式读一次。只复制登录相关的部分，跳过缓存/遥测/
+    扩展/会话记录。任何失败都退回全新配置，绝不阻断录制。
+
+    为什么必须整组复制 Cookies：Chrome 的 Cookies 是 SQLite，且跑在 WAL 模式。
+    只拷主库文件会丢掉还在 `-wal` 里的记录 —— 实测（2026-10-07）这样拷出来的
+    Cookies 只有 28~30 条 / 3 个抖音域，而源有 61 条 / 7 个域，**缺的正是
+    `.amemv.com` 与 `.webcast.amemv.com`**；直播商品消息走的就是
+    webcast.amemv.com，于是整段 `source_counts` 里 network=0、扫不出单品。
+    所以 `Cookies` 与 `Cookies-wal` / `Cookies-shm` / `Cookies-journal` 必须一起拷。
+    """
+    marker = profile / PROFILE_SEED_MARKER_NAME
+    if marker.is_file():
+        try:
+            if marker.read_text(encoding="utf-8").strip() == str(PROFILE_SEED_VERSION):
+                return False
+        except Exception:
+            pass
+    source = chrome_profile_root()
+    if not source.is_dir():
+        return False
+    copied = 0
+    cookies_copied = False
+    failed: list[str] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(source):
+            here = Path(dirpath)
+            if here == source:
+                # 关键：不要把目标目录自己（或别的房间目录）复制进去，否则无限递归。
+                dirnames[:] = [d for d in dirnames
+                               if not _profile_seed_skip(d) and d != profile.name and not d.startswith("room-")]
+            else:
+                dirnames[:] = [d for d in dirnames if not _profile_seed_skip(d)]
+            relative = here.relative_to(source)
+            (profile / relative).mkdir(parents=True, exist_ok=True)
+            for name in filenames:
+                if _profile_seed_skip(name):
+                    continue
+                if _copy_file_sharing(here / name, profile / relative / name):
+                    copied += 1
+                    if name == "Cookies" and relative == Path("Default") / "Network":
+                        cookies_copied = True
+                else:
+                    failed.append(str(relative / name))
+        # 只有【这次真的拷到了 Cookies】才算播种成功。不能只看文件是否存在：
+        # 空白配置的 Chrome 启动后会自己造一个空 Cookies，那样会误判成已继承登录态。
+        if cookies_copied:
+            marker.write_text(str(PROFILE_SEED_VERSION), encoding="utf-8")
+        if log_fn:
+            if cookies_copied:
+                log_fn(f"Chrome 配置已从共享目录复制 {copied} 个文件（已继承抖音登录态）"
+                       f"{'，跳过 ' + str(len(failed)) + ' 个被占用的文件' if failed else ''}")
+            else:
+                # 实测（2026-10-07）：Chrome 对 Cookies 持独占锁，用户态没有任何读取途径
+                # （CreateFileW 各种共享模式、普通 open、sqlite3 在线备份、robocopy /B、
+                #  esentutl 全部失败）。所以这一条必须说清怎么办，不能静默。
+                log_fn(
+                    f"【重要】没能复制到共享配置的 Cookies（{len(failed)} 个文件被占用）——"
+                    "本房间的 Chrome 将【没有抖音登录态】，很可能扫不出单品。"
+                    "原因：共享配置 chrome-live-poc 的 Chrome 还在运行，它对 Cookies 持有独占锁。"
+                    "处理：先【停止所有监测】让那个 Chrome 完全退出，再删除本房间配置目录后重新开始监测。"
+                )
+        return cookies_copied
+    except Exception as exc:  # noqa: BLE001 - 复制失败必须能退回全新配置
+        if log_fn:
+            log_fn(f"复制共享 Chrome 配置失败（{type(exc).__name__}），本房间改用全新配置。")
+        return False
+
+
+def resolve_chrome_endpoint(url: str, requested_port: int | None, log_fn=None) -> tuple[Path, int]:
+    """算出这个直播间该用哪套 Chrome 配置目录 + 哪个调试端口。"""
+    if requested_port:
+        # 显式指定端口 -> 保持旧行为（共享配置），便于手动排障。
+        return chrome_profile_root(), int(requested_port)
+    room_key = room_key_from_url(url)
+    profile = chrome_profile_root() / f"room-{room_key}"
+    port = allocate_room_port(room_key)
+    profile.mkdir(parents=True, exist_ok=True)
+    seed_profile_from_shared(profile, log_fn)
+    (profile / PORT_MARKER_NAME).write_text(str(port), encoding="utf-8")
+    if log_fn:
+        log_fn(f"本直播间使用独立 Chrome：配置 {profile}，调试端口 {port}")
+    return profile, port
+
+
+def prepare_chrome(port: int, url: str, profile_root: Path | None = None) -> dict[str, Any]:
+    root = profile_root or chrome_profile_root()
+    try:
+        info = wait_for_devtools(port, timeout=1.5)
+    except Exception:
+        launch_chrome(port, url, root)
         log("If Douyin asks for login, finish login in the Chrome window. This script will keep polling.")
         return wait_for_devtools(port, timeout=25.0)
+    # 已经有一个 Chrome 在跑：确认它是带当前防节流参数启动的，否则重启它。
+    # 不这么做的话，新加的 --disable-features=CalculateNativeWinOcclusion 永远不会
+    # 生效 —— 复用路径根本不会调用 launch_chrome（实测 2026-10-08 就是这个坑）。
+    if chrome_flags_current(root):
+        return info
+    log(
+        "Reused Chrome was launched without the current anti-throttle flags; "
+        "restarting it so the occlusion fix takes effect. "
+        "（被遮挡的页面会被 Chrome 节流，视频暂停、换品信号消失——必须套用新参数。）"
+    )
+    if close_chrome(port):
+        time.sleep(2.0)
+        launch_chrome(port, url, root)
+        log("If Douyin asks for login, finish login in the Chrome window. This script will keep polling.")
+        return wait_for_devtools(port, timeout=25.0)
+    log(
+        "Could not restart the reused Chrome; continuing with it. "
+        "自动救活（unhide）仍会生效，但建议手动关掉该 Chrome 后再开始监测。"
+    )
+    return info
 
 
 def wait_for_opened_tab_navigation(port: int, opened: dict[str, Any], expected_room_id: str, timeout: float = 25.0) -> dict[str, Any] | None:
@@ -1287,7 +1629,9 @@ def process_network_event(
                     pass
 
     elif method == "Network.webSocketFrameReceived":
-        frame = (params.get("response") or {}).get("payloadData") or ""
+        response = params.get("response") or {}
+        frame = response.get("payloadData") or ""
+        _ws_dump_frame(elapsed, response)
         if has_signal_text(str(frame)[:5000]):
             candidate = candidate_from_text(
                 "websocket_frame",
@@ -1313,6 +1657,370 @@ def process_network_event(
                 }
             )
     return out
+
+
+# 账号被踢下线时的自救。抖音一个账号只允许一个活跃互动会话：同一个账号在别处
+# （最常见的是用户自己的浏览器）进入直播间，探针这个 Chrome 就会变成
+# 「账号已在其他地方进入直播间 … 已退出直播间」的状态 —— 视频还能看，
+# 但互动会话失效：小黄车按钮消失、商品 UI 完全不渲染，于是 DOM/runtime 类信号全灭，
+# 只剩弱网络信号，换品再也确认不了。
+# 实测（2026-10-08 小贤）：
+#   被踢时  页面正文只剩 89 字、reactRootsScanned=2、候选信号 0 条、282 次 unresolved
+#   点「继续看播」后 正文 1542 字、货架 9 个商品回到 DOM、reactRootsScanned 恢复 88、
+#                    候选信号 0 → 1120（dom_mutation_react 558 + runtime_react_poll 477）
+# 所以这里定期检查并自动点一次「继续看播」。
+SESSION_RESTORE_MIN_INTERVAL_SEC = 30.0
+_SESSION_RESTORE_STATE: dict[str, Any] = {"last_attempt": 0.0, "restored": 0}
+
+_SESSION_RESTORE_JS = r"""
+(() => {
+  const body = document.body ? (document.body.innerText || '') : '';
+  const kicked = body.indexOf('账号已在其他地方进入直播间') >= 0
+              || body.indexOf('已退出直播间') >= 0;
+  if (!kicked) return { kicked: false, clicked: '' };
+  const want = ['继续看播', '继续观看'];
+  const nodes = document.querySelectorAll('button, div, span, a');
+  for (const w of want) {
+    for (const el of nodes) {
+      if ((el.innerText || '').trim() !== w) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) { el.click(); return { kicked: true, clicked: w }; }
+    }
+  }
+  return { kicked: true, clicked: '' };
+})()
+"""
+
+
+def restore_interactive_session(client: CDPClient) -> dict[str, Any]:
+    """检测「账号已在其他地方进入直播间」并点「继续看播」；限频。无事返回 {}。"""
+    now = time.time()
+    if now - float(_SESSION_RESTORE_STATE.get("last_attempt") or 0.0) < SESSION_RESTORE_MIN_INTERVAL_SEC:
+        return {}
+    _SESSION_RESTORE_STATE["last_attempt"] = now
+    try:
+        result = client.evaluate(_SESSION_RESTORE_JS, timeout=8)
+    except Exception:  # noqa: BLE001 - 自救失败绝不能影响录制
+        return {}
+    if not isinstance(result, dict) or not result.get("kicked"):
+        return {}
+    if result.get("clicked"):
+        _SESSION_RESTORE_STATE["restored"] = int(_SESSION_RESTORE_STATE.get("restored") or 0) + 1
+    return result
+
+
+# 小黄车抽屉会被页面自己收起；收起后商品节点从 DOM 消失，DOM 类信号随之归零。
+# ensure_product_list 是幂等的（已开则不点），所以定期重试即可。
+CATALOG_REENSURE_INTERVAL_SEC = 60.0
+
+
+def unhide_probe_page(client: "CDPClient") -> str:
+    """页面被 Chrome 判定为 hidden 时，把它真正救回可见并继续播放。
+
+    被遮挡/最小化的窗口会被 Chrome 节流——视频暂停、页面自身的商品轮询停摆，
+    于是换品信号彻底消失（2026-10-08 小贤直播间事故：59/59 采样 hidden、
+    视频时间恒定 328.1s，整场只抓到开机那一个商品，所有片段都错命名成第一个商品）。
+
+    ⚠️ 实测（2026-10-08 12:2x，正在录的小贤直播间）：
+      - 只做「窗口恢复 normal」+「Page.bringToFront」**不够** —— 窗口已是 normal、
+        已置前台，页面仍报 hidden、视频仍 paused。
+      - 加上下面 ①②③ 之后页面立刻变成 visible、video 继续推进（328.1s → 396.1s），
+        Network.requestWillBeSent 从 17 涨到 94，说明页面重新开始主动取数据。
+    所以四条都要做，顺序也按下列来。
+    """
+    results: list[str] = []
+    # ① 解除 Chrome 对隐藏页面施加的冻结生命周期（这是最关键的一步）
+    try:
+        client.call("Page.setWebLifecycleState", {"state": "active"}, timeout=5)
+        results.append("lifecycle=active")
+    except Exception as exc:  # noqa: BLE001 - 自救失败绝不能影响录制
+        results.append(f"lifecycle_failed:{type(exc).__name__}")
+    # ② 让页面被当作聚焦页面处理，避免按「不可见」降频
+    try:
+        client.call("Emulation.setFocusEmulationEnabled", {"enabled": True}, timeout=5)
+        results.append("focus_emulated")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"focus_failed:{type(exc).__name__}")
+    # ③ 窗口若不是 normal 就恢复；已经是 normal 也无害
+    try:
+        info = client.call("Browser.getWindowForTarget", timeout=5)
+        window_id = (info or {}).get("windowId")
+        if window_id is not None:
+            client.call(
+                "Browser.setWindowBounds",
+                {"windowId": window_id, "bounds": {"windowState": "normal"}},
+                timeout=5,
+            )
+            results.append("window=normal")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"window_failed:{type(exc).__name__}")
+    # ④ 把标签页置前
+    try:
+        client.call("Page.bringToFront", timeout=5)
+        results.append("front")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"front_failed:{type(exc).__name__}")
+    # ⑤ 被 Chrome 暂停过的 video 不会自己恢复，必须显式播一下（静音规避自动播放限制）
+    try:
+        res = client.call(
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => { const v = document.querySelector('video');"
+                    " if (!v) return 'no-video';"
+                    " try { v.muted = true; } catch (e) {}"
+                    " const p = v.play();"
+                    " return 'play:' + (v.paused ? 'still-paused' : 'playing'); })()"
+                ),
+                "returnByValue": True,
+            },
+            timeout=5,
+        )
+        played = str(((res or {}).get("result") or {}).get("value") or "")
+        results.append(played or "play=unknown")
+    except Exception as exc:  # noqa: BLE001
+        results.append(f"play_failed:{type(exc).__name__}")
+    return ",".join(results) or "noop"
+
+
+class LivenessTracker:
+    """页面活性采样（F2）：只观测，不改变任何录制与判定行为。
+
+    三路信号：
+      ① 业务 WebSocket 帧数（CDP Network.webSocketFrame* 累计，主判据）
+      ② 视频 currentTime 推进量
+      ③ 资源条目增长与网络请求数
+      ④ 页面可见性（visibilityState）——被遮挡/最小化时 Chrome 会节流页面，
+         视频暂停、页面自身的商品轮询停摆，此时 WebSocket 帧仍在流入，
+         单看 ①②③ 会误判为 alive。
+    """
+
+    def __init__(self, liveness_path: Path, interval: float) -> None:
+        self.path = liveness_path
+        self.interval = max(5.0, float(interval or DEFAULT_LIVENESS_INTERVAL))
+        self.samples = 0
+        self.first_video_time: float | None = None
+        self.max_video_time: float | None = None
+        self.first_resource_count: int | None = None
+        self.last_resource_count: int | None = None
+        self.last_error = ""
+        self.verdict_at_start = ""
+        self.reload_attempted = False
+        self.reload_total = 0
+        # ④ 可见性与「视频冻住」的独立计数（2026-10-08 小贤直播间事故）：
+        # 那次 59/59 采样 visibility=hidden、video_paused=True、视频时间 328.1s 恒定，
+        # 但 ws_frames 涨到 340，旧判定直接跳过僵死检查、报 alive，
+        # 结果整场只抓到开机那一个商品，所有片段都错命名成第一个商品。
+        self.hidden_samples = 0
+        self.frozen_video_samples = 0
+        self._last_video_time: float | None = None
+        self.unhide_attempts = 0
+        self.unhide_last_result = ""
+
+    def sample(self, client: "CDPClient", elapsed: float) -> dict[str, Any]:
+        state = get_page_state(client)
+        videos = [item for item in (state.get("videos") or []) if isinstance(item, dict)]
+        current = 0.0
+        paused = True
+        for item in videos:
+            try:
+                value = float(item.get("currentTime") or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > current:
+                current = value
+            if not item.get("paused"):
+                paused = False
+        if self.first_video_time is None or current < self.first_video_time:
+            self.first_video_time = current
+        if self.max_video_time is None or current > self.max_video_time:
+            self.max_video_time = current
+        try:
+            resource_count = int(state.get("resourceCount"))
+        except (TypeError, ValueError):
+            resource_count = -1
+        if resource_count >= 0:
+            if self.first_resource_count is None:
+                self.first_resource_count = resource_count
+            self.last_resource_count = resource_count
+        counts = getattr(client, "method_counts", {}) or {}
+        row = {
+            "type": "liveness_sample",
+            "ts": now_iso(),
+            "elapsed": round(elapsed, 3),
+            "video_current_time": round(current, 3),
+            "video_paused": paused,
+            "video_count": len(videos),
+            "resource_count": resource_count,
+            "ws_frames": sum(int(counts.get(name) or 0) for name in WS_FRAME_METHODS),
+            "request_events": int(counts.get("Network.requestWillBeSent") or 0),
+            "cdp_events": sum(int(value or 0) for value in counts.values()),
+            "page_href": state.get("href") or "",
+            "ready_state": state.get("readyState") or "",
+            "visibility": state.get("visibilityState") or "",
+            "live_ended": bool(state.get("liveEnded")),
+            "error": state.get("error") or "",
+        }
+        if row["error"]:
+            self.last_error = str(row["error"])
+        # ④ 独立记录「页面不可见」与「视频冻住」：这两件事是商品信号消失的直接原因，
+        # 不能被 ws_frames 的上涨掩盖。
+        if str(row["visibility"]).lower() == "hidden":
+            self.hidden_samples += 1
+        if self._last_video_time is not None and abs(current - self._last_video_time) < 0.01:
+            self.frozen_video_samples += 1
+        self._last_video_time = current
+        self.samples += 1
+        jsonl_write(self.path, row)
+        return row
+
+    def video_progress(self) -> float:
+        if self.first_video_time is None or self.max_video_time is None:
+            return 0.0
+        return max(0.0, self.max_video_time - self.first_video_time)
+
+    def resource_growth(self) -> int:
+        if self.first_resource_count is None or self.last_resource_count is None:
+            return 0
+        return max(0, self.last_resource_count - self.first_resource_count)
+
+    def verdict(self, client: "CDPClient") -> dict[str, Any]:
+        counts = getattr(client, "method_counts", {}) or {}
+        ws_frames = sum(int(counts.get(name) or 0) for name in WS_FRAME_METHODS)
+        request_events = int(counts.get("Network.requestWillBeSent") or 0)
+        progress = self.video_progress()
+        reasons: list[str] = []
+        # ④ 页面不可见：Chrome 会节流被遮挡/最小化的页面（视频暂停、页面自身的商品
+        # 轮询停摆），而 WebSocket 帧仍在流入。所以这一条必须**独立**判定，
+        # 不能像旧写法那样挂在 ws_frames < 5 之下 —— 那样正好被掩盖（事故现场
+        # ws_frames=340 → 整块跳过 → 误报 alive）。
+        # 但也不能「只要出现过一次 hidden 就判僵死」：实测 12:30/12:45 两段
+        # video_progress 高达 894s（视频全程正常播放）却因为个别采样偶然 hidden
+        # 被报成 stalled，属于误报。所以按**占比**判定（与视频冻结同一口径）。
+        _hidden_ratio = (self.hidden_samples / self.samples) if self.samples else 0.0
+        if self.samples >= 3 and self.hidden_samples and _hidden_ratio >= 0.5:
+            reasons.append(
+                "visibility=hidden x%d/%d" % (self.hidden_samples, self.samples)
+            )
+        # 视频时间在绝大多数采样里纹丝不动 = 页面真的冻住了。
+        # 用「占比」而不是绝对秒数，避免把正常的短片段窗口误判为僵死。
+        if self.samples >= 3 and self.frozen_video_samples >= max(2, int(self.samples * 0.8)):
+            reasons.append("video_frozen x%d/%d" % (self.frozen_video_samples, self.samples))
+        if ws_frames < LIVENESS_WS_FRAMES_MIN:
+            reasons.append("ws_frames=%d" % ws_frames)
+            if progress < LIVENESS_VIDEO_PROGRESS_MIN_SEC:
+                reasons.append("video_progress=%.0fs" % progress)
+            elif request_events == 0:
+                reasons.append("request_events=0")
+        return {
+            "verdict": "stalled" if reasons else ("alive" if self.samples else "unknown"),
+            "stalled_reasons": reasons,
+            "hidden_samples": self.hidden_samples,
+            "frozen_video_samples": self.frozen_video_samples,
+            "unhide_attempts": self.unhide_attempts,
+            "unhide_last_result": self.unhide_last_result,
+            "ws_frames": ws_frames,
+            "ws_frames_by_method": {name: int(counts.get(name) or 0) for name in WS_FRAME_METHODS},
+            "request_events": request_events,
+            "cdp_events": sum(int(value or 0) for value in counts.values()),
+            "video_progress_sec": round(progress, 3),
+            "resource_growth": self.resource_growth(),
+            "samples": self.samples,
+            "interval_sec": self.interval,
+            "last_error": self.last_error,
+            "verdict_at_start": self.verdict_at_start,
+            "reload_attempted": self.reload_attempted,
+            "reload_total": self.reload_total,
+        }
+
+
+def read_previous_liveness(out_dir: Path, exclude: Path | None = None, max_age_sec: float = 7200.0) -> dict[str, Any]:
+    """读同目录里最新一份 probe_summary.json 的 liveness 块（跨段状态靠 summary 链传递，不新增状态文件）。"""
+    now = time.time()
+    candidates: list[tuple[float, Path]] = []
+    for path in out_dir.glob("*.probe_summary.json"):
+        try:
+            if exclude is not None and path.resolve() == exclude.resolve():
+                continue
+            mtime = path.stat().st_mtime
+        except Exception:  # noqa: BLE001 - 单个文件不可读不影响判定
+            continue
+        if now - mtime > max_age_sec:
+            continue
+        candidates.append((mtime, path))
+    if not candidates:
+        return {}
+    candidates.sort()
+    try:
+        data = json.loads(candidates[-1][1].read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    block = data.get("liveness")
+    return block if isinstance(block, dict) else {}
+
+
+def liveness_stall_reasons(prev: dict[str, Any]) -> list[str]:
+    """判断「上一段」是否僵死。阈值与 LivenessTracker.verdict 完全一致。"""
+    if not isinstance(prev, dict) or not prev:
+        return []
+    try:
+        samples = int(prev.get("samples") or 0)
+    except (TypeError, ValueError):
+        samples = 0
+    if samples <= 0:
+        # 没有采到任何样本 = 未知，默认不动手（宁可放过，不可误伤）。
+        return []
+    try:
+        ws_frames = int(prev.get("ws_frames") or 0)
+    except (TypeError, ValueError):
+        return []
+    if ws_frames >= LIVENESS_WS_FRAMES_MIN:
+        return []
+    reasons = ["ws_frames=%d" % ws_frames]
+    try:
+        progress = float(prev.get("video_progress_sec") or 0)
+    except (TypeError, ValueError):
+        progress = 0.0
+    try:
+        request_events = int(prev.get("request_events") or 0)
+    except (TypeError, ValueError):
+        request_events = 0
+    if progress < LIVENESS_VIDEO_PROGRESS_MIN_SEC:
+        reasons.append("video_progress=%.0fs" % progress)
+        return reasons
+    if request_events == 0:
+        reasons.append("request_events=0")
+        return reasons
+    return []
+
+
+def liveness_reload_decision(prev: dict[str, Any], reload_total: int) -> dict[str, Any]:
+    """段起点决策：none（不动手） / reload（重载当前页） / new_tab（换新标签页）。
+
+    闸门：每场最多 LIVENESS_MAX_RELOADS_PER_RUN 次；连续两段僵死才升级为换页。
+    """
+    try:
+        total = int(reload_total or 0)
+    except (TypeError, ValueError):
+        total = 0
+    reasons = liveness_stall_reasons(prev)
+    if not reasons:
+        return {"action": "none", "reasons": [], "reload_total": total}
+    if total >= LIVENESS_MAX_RELOADS_PER_RUN:
+        return {"action": "none", "reasons": reasons + ["reload_budget_exhausted"], "reload_total": total}
+    if str(prev.get("verdict_at_start") or "") == "stalled":
+        return {"action": "new_tab", "reasons": reasons + ["two_consecutive_stalls"], "reload_total": total}
+    return {"action": "reload", "reasons": reasons, "reload_total": total}
+
+
+def reload_live_tab(client: "CDPClient", log_fn: Any = None, settle_seconds: float = 4.0) -> bool:
+    """段间自愈：重载当前标签页 → 等待稳定 → 重装探针补丁。失败抛异常由调用方兜。"""
+    client.call("Page.reload", {"ignoreCache": False}, timeout=5)
+    time.sleep(max(1.0, float(settle_seconds)))
+    client.evaluate(PROBE_INSTALL_JS, timeout=20)
+    if log_fn:
+        log_fn("Liveness: tab reloaded, probe patches reinstalled.")
+    return True
 
 
 class ProbeRecorder:
@@ -1819,6 +2527,29 @@ class ProbeRecorder:
         jsonl_write(self.timeline_path, review_event)
         self.write_product_evidence(review_event, product)
 
+    def _best_known_product(self, elapsed: float) -> dict[str, Any]:
+        """标记时刻已知的最佳商品。
+
+        人工标记常常发生在「车还没弹、所以探针还不知道商品」的时候，因此这里**允许返回空**。
+        返回空时下游会把这一段命名成「单品候选_NN」—— 但**切点仍然生效**，因为切点是
+        人工给的、必须保留（这正是「讲完品才弹小黄车」这类直播间唯一能用的办法）。
+        """
+        for event in reversed(self.active_change_events):
+            try:
+                at = float(event.get("elapsed") or 0)
+            except (TypeError, ValueError):
+                continue
+            if at > float(elapsed) + 0.001:
+                continue
+            product = event.get("product")
+            if isinstance(product, dict) and (product.get("title") or product.get("product_id")):
+                return dict(product)
+        for cache in (self.product_cache_by_promotion, self.product_cache_by_product):
+            for product in reversed(list(cache.values())):
+                if isinstance(product, dict) and (product.get("title") or product.get("product_id")):
+                    return dict(product)
+        return {}
+
     def write_manual_marker(self, elapsed: float, note: str) -> None:
         wall_time = now_iso()
         marker = {
@@ -1829,7 +2560,16 @@ class ProbeRecorder:
             "ts_ms": int(elapsed * 1000),
             "elapsed": round(elapsed, 3),
             "note": note.strip() or "manual observed product switch",
+            # 人工标记是一条**权威换品边界**（source=manual_marker）。
+            # 服务端 _active_probe_segments_from_timeline 会专门接纳这个类型，
+            # 并且不走「短片段吸收」——那套去噪逻辑会把人工边界当噪声吞掉。
+            "source": "manual_marker",
+            "reason": "manual_switch_marker",
+            "confidence": "manual",
         }
+        product = self._best_known_product(elapsed)
+        if product:
+            marker["product"] = product
         self.manual_markers.append(marker)
         jsonl_write(self.probe_path, marker)
         jsonl_write(
@@ -1851,6 +2591,50 @@ class ProbeRecorder:
                 "note": note,
             },
         )
+
+
+# 注入丢失后的自动补装。PROBE_INSTALL_JS 原本只在启动时和「自愈重载标签页」时各注入一次，
+# 页面一旦重载 / Chrome 重启 / 发生导航，装进页面的东西就没了，而探针毫不知情。
+# 实测 2026-10-08 13:44 小贤：探针 13:43:59 启动、它自己的 Chrome 13:44:02 才重启，
+# 注入装进了即将被替换的旧页面，之后 150+ 秒每次轮询都 {"missing": true}，
+# DOM/runtime 类信号全死，只剩 CDP 侧的 network_json 弱信号（conf 35），
+# 于是整段一路 active_product_unresolved、抓不到换品。
+# 这里在轮询发现注入丢失时自动补装，并限频，避免每轮都花 20 秒去注入。
+PROBE_REINSTALL_MIN_INTERVAL_SEC = 15.0
+_PROBE_REINSTALL_STATE: dict[str, Any] = {"last_attempt": 0.0, "attempts": 0, "restored": 0}
+
+
+def ensure_probe_injected(client: CDPClient, elapsed: float) -> dict[str, Any] | None:
+    """轮询发现注入丢失时补装；限频。返回一条事件用于记录，不需要补装时返回 None。"""
+    now = time.time()
+    last = float(_PROBE_REINSTALL_STATE.get("last_attempt") or 0.0)
+    if now - last < PROBE_REINSTALL_MIN_INTERVAL_SEC:
+        return None
+    _PROBE_REINSTALL_STATE["last_attempt"] = now
+    attempts = int(_PROBE_REINSTALL_STATE.get("attempts") or 0) + 1
+    _PROBE_REINSTALL_STATE["attempts"] = attempts
+    try:
+        result = client.evaluate(PROBE_INSTALL_JS, timeout=20)
+    except Exception as exc:  # noqa: BLE001 - 补装失败绝不影响录制
+        return {
+            "type": "probe_reinstall",
+            "ts": now_iso(),
+            "elapsed": round(elapsed, 3),
+            "source": "runtime_reinstall",
+            "ok": False,
+            "attempts": attempts,
+            "error": str(exc),
+        }
+    _PROBE_REINSTALL_STATE["restored"] = int(_PROBE_REINSTALL_STATE.get("restored") or 0) + 1
+    return {
+        "type": "probe_reinstall",
+        "ts": now_iso(),
+        "elapsed": round(elapsed, 3),
+        "source": "runtime_reinstall",
+        "ok": True,
+        "attempts": attempts,
+        "result": result if isinstance(result, dict) else {},
+    }
 
 
 def drain_runtime_events(client: CDPClient, elapsed: float) -> list[dict[str, Any]]:
@@ -1890,6 +2674,19 @@ def poll_runtime(client: CDPClient, elapsed: float) -> list[dict[str, Any]]:
                 "result": result if isinstance(result, dict) else {},
             }
         )
+        # 注入丢了就补装（页面重载 / Chrome 重启 / 导航都会导致）。
+        # 不补的话 DOM 与 runtime 信号会整段死亡，只剩弱网络信号，换品再也确认不了。
+        if isinstance(result, dict) and result.get("missing"):
+            restored = ensure_probe_injected(client, elapsed)
+            if restored is not None:
+                events.append(restored)
+                if restored.get("ok"):
+                    log(
+                        "probe injection was missing (page reloaded or Chrome restarted); "
+                        "reinstalled patches so DOM/runtime signals resume."
+                    )
+                else:
+                    log(f"probe injection missing and reinstall failed: {restored.get('error')}")
     except Exception as exc:
         events.append(
             {
@@ -2216,6 +3013,17 @@ def write_probe_report(
     lines.extend(
         [
             "",
+        "## Page Liveness",
+        "",
+        f"- Verdict: {(summary.get('liveness') or {}).get('verdict') or 'N/A'}",
+        f"- Business WebSocket frames: {(summary.get('liveness') or {}).get('ws_frames')}",
+        f"- Network requests: {(summary.get('liveness') or {}).get('request_events')}",
+        f"- Video progress sec: {(summary.get('liveness') or {}).get('video_progress_sec')}",
+        f"- Resource growth: {(summary.get('liveness') or {}).get('resource_growth')}",
+        f"- Samples: {(summary.get('liveness') or {}).get('samples')}",
+        f"- Reload attempted: {(summary.get('liveness') or {}).get('reload_attempted')}",
+        f"- Reload total: {(summary.get('liveness') or {}).get('reload_total')}",
+        "",
         "## Product Rule",
         "",
         "- Catalog is metadata only and was not used as active-product evidence.",
@@ -2356,7 +3164,17 @@ def write_probe_report(
 
 
 def run() -> int:
+    global _WS_DUMP_HANDLE
     args = parse_args()
+    if args.dump_ws_frames:
+        try:
+            dump_path = Path(args.dump_ws_frames).expanduser()
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            _WS_DUMP_HANDLE = dump_path.open("w", encoding="utf-8")
+            log(f"WebSocket 帧转储已开启（诊断用）: {dump_path}")
+        except Exception as exc:  # noqa: BLE001 - 纯诊断，绝不能影响录制
+            _WS_DUMP_HANDLE = None
+            log(f"WebSocket 帧转储开启失败（忽略）: {exc}")
     original_url = args.url
     try:
         resolved_url = resolve_douyin_short_url(args.url)
@@ -2376,9 +3194,13 @@ def run() -> int:
     summary_path = base.with_suffix(".probe_summary.json")
     review_segments_path = base.with_suffix(".review_segments.json")
     catalog_path = base.with_suffix(".catalog.jsonl")
+    liveness_path = base.with_suffix(".liveness.jsonl")
     report_path = base.with_suffix(".active_product_probe_report.md")
 
-    version = prepare_chrome(args.port, args.url)
+    # 每直播间一套独立 Chrome 配置目录 + 独立调试端口（见文件上方说明）。
+    chrome_profile, chrome_port = resolve_chrome_endpoint(args.url, args.port, log)
+    args.port = chrome_port
+    version = prepare_chrome(args.port, args.url, chrome_profile)
     target, opened_tab_for_probe = ensure_live_tab(args.port, args.url)
     live_room_id = room_id_from_url(args.url) or room_id_from_url(str(target.get("url") or ""))
     log(f"Probe version: {PROBE_VERSION} ({PROBE_BUILD})")
@@ -2397,6 +3219,11 @@ def run() -> int:
         evidence_path=evidence_path,
         page_url=args.url,
         live_room_id=live_room_id,
+    )
+    liveness = (
+        LivenessTracker(liveness_path=liveness_path, interval=args.liveness_interval)
+        if not args.no_liveness_guard
+        else None
     )
     started_at = time.time()
     run_started_at = started_at
@@ -2468,6 +3295,7 @@ def run() -> int:
         "confirmed_by_ocr_count": 0,
         "detail_candidate_count": 0,
         "catalog_only_count": 0,
+        "liveness": {},
         "active_product_candidates": [],
         "active_product_rule_reviews": [],
         "active_product_changes": [],
@@ -2500,16 +3328,71 @@ def run() -> int:
             },
         )
 
+        if liveness is not None:
+            prev_liveness = read_previous_liveness(out_dir, summary_path)
+            prev_total = int(prev_liveness.get("reload_total") or 0)
+            decision = liveness_reload_decision(prev_liveness, prev_total)
+            liveness.reload_total = prev_total
+            if decision.get("reasons"):
+                log(
+                    "Liveness: previous segment looked stalled (%s) → %s"
+                    % (", ".join(decision["reasons"]), decision.get("action"))
+                )
+            if decision.get("action") in ("reload", "new_tab"):
+                liveness.verdict_at_start = "stalled"
+                liveness.reload_attempted = True
+                liveness.reload_total = prev_total + 1
+                jsonl_write(
+                    liveness_path,
+                    {
+                        "type": "liveness_action",
+                        "ts": now_iso(),
+                        "elapsed": 0,
+                        "action": decision.get("action"),
+                        "reasons": decision.get("reasons"),
+                        "prev_verdict": prev_liveness.get("verdict") or "",
+                        "prev_reload_total": prev_total,
+                    },
+                )
+                healed = False
+                if decision.get("action") == "new_tab":
+                    try:
+                        opened_tab = open_new_tab(args.port, args.url)
+                        candidate_tab = wait_for_opened_tab_navigation(args.port, opened_tab, live_room_id) or opened_tab
+                        ws_url = str((candidate_tab or {}).get("webSocketDebuggerUrl") or "")
+                        if ws_url:
+                            client = CDPClient(ws_url)
+                            client.call("Runtime.enable", timeout=5)
+                            client.call("Page.enable", timeout=5)
+                            client.call("Network.enable", timeout=5)
+                            client.evaluate(PROBE_INSTALL_JS, timeout=20)
+                            target = candidate_tab
+                            opened_tab_for_probe = True
+                            summary["liveness_switched_tab"] = True
+                            healed = True
+                            log("Liveness: switched to a fresh Chrome tab.")
+                    except Exception as exc:  # noqa: BLE001 - 自愈失败必须退回原页，绝不中断录制
+                        log(f"Liveness: opening a fresh tab failed: {exc}")
+                if not healed:
+                    try:
+                        reload_live_tab(client, log_fn=log)
+                        healed = True
+                    except Exception as exc:  # noqa: BLE001
+                        log(f"Liveness: reload failed: {exc}")
+                if not healed:
+                    liveness.reload_attempted = False
+                    liveness.reload_total = prev_total
+                summary["liveness_action"] = decision.get("action") if healed else "failed"
+
         if args.open_catalog:
             # Catalog is optional metadata only. This script never turns it into active_product.
+            # ensure_product_list 是幂等的（抽屉已开则不点），否则复用同一标签页时
+            # 每次录制都会把抽屉点成关闭状态。
             try:
-                client.evaluate(
-                    "(() => { const n = document.querySelector('[data-e2e=\"yellowCart-container\"]'); if (n) n.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,view:window})); return !!n; })()",
-                    timeout=5,
-                )
-                time.sleep(2.0)
-            except Exception:
-                pass
+                opened = ensure_product_list(client, timeout=8.0)
+                log(f"Catalog panel: {(opened or {}).get('reason') or 'unknown'}")
+            except Exception as exc:  # noqa: BLE001 - catalog capture is best-effort
+                log(f"Catalog panel skipped: {exc}")
 
         page_state = get_page_state(client)
         validate_target_room(target, args.url, page_state)
@@ -2539,9 +3422,7 @@ def run() -> int:
             if not stream_url and page_has_playing_video(page_state):
                 log("Page is already playing through a blob URL; reloading once to recapture stream request...")
                 try:
-                    client.call("Page.reload", {"ignoreCache": False}, timeout=5)
-                    time.sleep(4.0)
-                    client.evaluate(PROBE_INSTALL_JS, timeout=20)
+                    reload_live_tab(client)
                 except Exception as exc:
                     log(f"Reload skipped: {exc}")
                 page_state = get_page_state(client)
@@ -2674,6 +3555,7 @@ def run() -> int:
         next_active_card = 0.0
         next_unresolved = 0.0
         next_catalog = 0.0
+        next_liveness = 0.0
         deadline = time.time() if (not stream_url or recording_blocked_reason) else (time.time() + args.seconds if args.seconds > 0 else None)
         stop_requested = False
         while True:
@@ -2723,6 +3605,62 @@ def run() -> int:
                         ["runtime_global", "runtime_react", "dom_mutation", "im_onMessage", "network", "websocket"],
                     )
                 next_unresolved = time.time() + max(2.0, args.probe_interval)
+
+            if liveness is not None and time.time() >= next_liveness:
+                row: dict[str, Any] | None = None
+                try:
+                    row = liveness.sample(client, elapsed)
+                except Exception as exc:  # noqa: BLE001 - 采样失败绝不影响录制
+                    log(f"Liveness sample skipped: {exc}")
+                # 页面不可见 = Chrome 正在节流它 = 换品信号即将/已经消失。
+                # 立刻自救（恢复窗口并置前）+ 报警，绝不静默继续录。
+                if isinstance(row, dict) and str(row.get("visibility")).lower() == "hidden":
+                    if liveness.unhide_attempts < LIVENESS_MAX_UNHIDE_ATTEMPTS:
+                        liveness.unhide_attempts += 1
+                        liveness.unhide_last_result = unhide_probe_page(client)
+                        log(
+                            "Liveness: 探针页面处于 hidden 状态，Chrome 会节流它"
+                            "（视频暂停、商品轮询停摆），换品信号会消失。"
+                            f"已尝试恢复窗口并置前（{liveness.unhide_last_result}）。"
+                        )
+                    elif liveness.unhide_attempts == LIVENESS_MAX_UNHIDE_ATTEMPTS:
+                        liveness.unhide_attempts += 1
+                        log(
+                            "Liveness: 探针页面仍然是 hidden —— 请勿最小化或遮挡"
+                            "探针自己打开的那个 Chrome 窗口，否则整场抓不到换品，"
+                            "所有片段都会被命名成第一个商品。"
+                        )
+                next_liveness = time.time() + liveness.interval
+
+            # ① 账号被踢下线就点「继续看播」救回来（否则商品 UI 不渲染、DOM 信号全灭）。
+            session_state = restore_interactive_session(client)
+            if session_state.get("clicked"):
+                log(
+                    "Interactive session was kicked (账号已在其他地方进入直播间) —— "
+                    f"clicked 「{session_state['clicked']}」 to restore it. "
+                    "若频繁出现，说明同一个抖音账号同时在别处观看（例如你自己的浏览器），"
+                    "单账号单会话会导致探针反复被踢、抓不到换品。"
+                )
+            elif session_state.get("kicked"):
+                log(
+                    "Interactive session is kicked (账号已在其他地方进入直播间) and no "
+                    "「继续看播」按钮可用 —— 商品 UI 不会渲染，这一段抓不到换品。"
+                )
+
+            # ② 小黄车抽屉会自己收起，收起后商品节点从 DOM 消失。
+            #    它原本只在启动时确保打开过一次，所以中途收起就再也回不来。
+            if args.open_catalog and time.time() >= next_catalog:
+                next_catalog = time.time() + CATALOG_REENSURE_INTERVAL_SEC
+                try:
+                    catalog_state = ensure_product_list(client, timeout=8.0)
+                    if isinstance(catalog_state, dict) and not catalog_state.get("open"):
+                        log(
+                            "商品抽屉当前不在打开状态"
+                            f"（reason={catalog_state.get('reason') or 'unknown'}）—— "
+                            "DOM 商品信号会变弱，将在一分钟后重试。"
+                        )
+                except Exception as exc:  # noqa: BLE001 - 重开抽屉失败绝不中断录制
+                    log(f"ensure_product_list failed: {exc}")
 
         stop_requested = drain_manual_markers(manual_reader, recorder, started_at) or stop_requested
         recorder.expire_candidates(time.time() - started_at, force=True)
@@ -2828,6 +3766,21 @@ def run() -> int:
                 "stop_requested": bool(stop_requested),
             },
         )
+        if liveness is not None:
+            summary["liveness"] = liveness.verdict(client)
+            jsonl_write(
+                liveness_path,
+                {"type": "liveness_summary", "ts": now_iso(), "elapsed": round(elapsed_total, 3), **summary["liveness"]},
+            )
+            log(
+                "Liveness: %s (ws_frames=%s, video_progress=%ss, samples=%s)"
+                % (
+                    summary["liveness"].get("verdict"),
+                    summary["liveness"].get("ws_frames"),
+                    summary["liveness"].get("video_progress_sec"),
+                    summary["liveness"].get("samples"),
+                )
+            )
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         write_probe_report(
             report_path,

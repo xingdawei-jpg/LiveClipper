@@ -13,9 +13,11 @@ const state = {
   previewAssemblyOrders: {},
   settingsTab: "ai",
   liveRecTab: "rooms",
+  liveSelectedKey: "",
   smartPreview: null,
   mixPreview: null,
   diagnosticsVisible: false,
+  materialProducts: {},
   videoInfoByTarget: {},
   videoInfoRequestSeq: {},
   videoInfoRetryKeys: {},
@@ -101,6 +103,7 @@ const state = {
     "video-split": 0,
     dedup: 0,
     "live-rec": 0,
+    material: 0,
   },
   diagnosticLogs: {
     "smart-cut": 0,
@@ -111,6 +114,20 @@ const state = {
     "video-split": 0,
     dedup: 0,
     "live-rec": 0,
+    material: 0,
+  },
+  material: {
+    loaded: false,
+    busy: false,
+    indexTaskId: "",
+    result: null,
+    probe: null,
+    videos: [],
+    publishers: [],
+    suggestItems: [],
+    currentPublisher: "",
+    currentVideo: "",
+    videoFilterLabel: "",
   },
 };
 
@@ -883,6 +900,7 @@ const settingFields = {
   asr_enabled: "s-asr-enabled",
   local_asr_quality_retry_enabled: "s-local-asr-quality-retry-enabled",
   local_asr_device: "s-local-asr-device",
+  local_asr_engine: "s-local-asr-engine",
   local_asr_cpu_threads: "s-local-asr-cpu-threads",
   asr_provider: "s-asr-provider",
   volc_api_key: "s-volc-api-key",
@@ -950,7 +968,7 @@ const previewDraftStoragePrefix = "lc:preview-draft:";
 const validThemes = new Set(["system", "light", "dark"]);
 const compactVideoListTargetIds = new Set(["video-paths", "mix-video-paths", "ps-video-paths"]);
 
-const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "video-split", "dedup", "live-rec", "settings"];
+const progressScopes = ["smart-cut", "mix", "ai-scan", "product-scan", "video-split", "dedup", "live-rec", "material", "settings"];
 
 const progressStageRules = [
   { label: "准备素材", percent: 12, tokens: ["任务已启动", "启动", "目标时长", "读取", "上传"] },
@@ -1124,6 +1142,7 @@ const featurePreferenceGroups = {
       "live-check-interval",
       "live-min-stream-quality",
       "live-record-mode",
+      "live-naming-mode",
       "live-platform",
       "live-product-split-enabled",
       "live-product-auto-cut",
@@ -1375,11 +1394,13 @@ const aiPresets = {
 document.addEventListener("DOMContentLoaded", () => {
   startBackgroundRefreshLoops();
   bindNavigation();
+  bindProductPanel();
   bindSettingsTabs();
   bindAiProviderControls();
   bindAiSelectionAutoSave();
   bindSettingsAutoSave();
   bindLiveRecTabs();
+  bindMaterialPage();
   bindExitConfirm();
   bindLiveRoomFilters();
   bindActions();
@@ -1389,6 +1410,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupAdvancedParamToggles();
   bindAiPresetControls();
   bindCategoryControls();
+  bindMainProductQuickInputs();
   bindPreviewControls();
   bindFeaturePreferenceAutoSave();
   bindDedupCustomControls();
@@ -1726,7 +1748,7 @@ function renderProductScanInspector(groups, timeline = [], feedback = []) {
     <strong>已确认文件范围</strong>
     <p>各段独立定位 · 缺失时段不导出 · 跨文件分别输出。</p>
     <div class="alignment-summary-metrics"><span>${exportGroups} 个可导出商品</span><span class="is-selected">已选 ${selectedRangeCount}/${selectableRangeCount} 时段</span><span class="is-covered">完整 ${covered}</span><span class="is-partial">部分 ${partial}</span><span class="is-missing">未覆盖 ${missing}</span></div>
-    <details class="product-scan-source-details"><summary>已导入 ${timeline.length} 段视频，查看文件范围</summary><div class="product-scan-source-summary" aria-label="已导入视频范围">${sourceSummary}</div></details>
+    <details class="product-scan-source-details" data-fold="scan-source"><summary>已导入 ${timeline.length} 段视频，查看文件范围</summary><div class="product-scan-source-summary" aria-label="已导入视频范围">${sourceSummary}</div></details>
   `;
 }
 
@@ -1923,6 +1945,12 @@ function switchPage(page) {
     loadSettings();
     loadKeywords();
   }
+  // 每次切到素材库都刷新一次：索引可能刚更新过，顶部统计与热门文案要跟上
+  if (page === "material") {
+    loadMaterialPage();
+    // 从别的长页面切过来时，滚动位置可能停在半截，这里回到顶部
+    try { document.querySelector(".workspace")?.scrollTo({ top: 0 }); } catch (_) { /* 忽略 */ }
+  }
 }
 
 function bindSettingsTabs() {
@@ -1949,6 +1977,20 @@ function setLiveRecTab(tab) {
   document.querySelectorAll(".live-rec-page").forEach((page) => {
     page.classList.toggle("is-active", page.id === `live-rec-${targetTab}`);
   });
+  if (targetTab === "products") {
+    productPanelLoadRoomsWithData().then(() => loadProductPanel({ session: "" }));
+  } else {
+    const playing = document.getElementById("product-panel-video");
+    if (playing) {
+      try {
+        playing.pause();
+      } catch (error) {
+        /* 忽略 */
+      }
+    }
+  }
+  const workbench = document.querySelector("#live-rec-workbench");
+  if (workbench) workbench.dataset.liveTab = targetTab;
 }
 
 const MATERIAL_PATH_IDS = ["video-paths", "mix-video-paths", "scan-video-paths", "ps-video-paths", "vs-video-paths", "dedup-video-paths"];
@@ -1982,6 +2024,89 @@ function bindLiveRecTabs() {
     state.liveRoomsRenderPending = false;
     window.setTimeout(() => renderLiveRooms(), 0);
   });
+  const inspectorEl = document.querySelector("#live-rec-inspector");
+  inspectorEl?.addEventListener("focusout", () => {
+    if (!state.liveRoomsRenderPending) return;
+    state.liveRoomsRenderPending = false;
+    window.setTimeout(() => renderLiveRooms(), 0);
+  });
+  $("live-room-url")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addLiveRoom({ autoStart: true });
+  });
+  // 折叠状态记忆：周期性重绘会重建 DOM 并丢掉 <details> 的展开状态，这里统一记住并回填。
+  state.foldState = state.foldState || Object.create(null);
+  // 右栏卡片的折叠状态额外落 localStorage：刷新页面后保持。
+  const liveCardFoldPrefix = "live-card-";
+  const liveCardFoldsStorageKey = "lc:live-cards";
+  try {
+    const savedCardFolds = JSON.parse(localStorage.getItem(liveCardFoldsStorageKey) || "{}") || {};
+    Object.keys(savedCardFolds).forEach((foldKey) => {
+      if (foldKey.startsWith(liveCardFoldPrefix) && !(foldKey in state.foldState)) {
+        state.foldState[foldKey] = Boolean(savedCardFolds[foldKey]);
+      }
+    });
+  } catch {
+    // localStorage 不可用时忽略：只是折叠状态记不住，不影响功能。
+  }
+  const persistLiveCardFolds = () => {
+    try {
+      const payload = {};
+      Object.keys(state.foldState || {}).forEach((foldKey) => {
+        if (foldKey.startsWith(liveCardFoldPrefix)) payload[foldKey] = Boolean(state.foldState[foldKey]);
+      });
+      localStorage.setItem(liveCardFoldsStorageKey, JSON.stringify(payload));
+    } catch {
+      // 同上，忽略。
+    }
+  };
+  const foldStateOf = (el) => (el && el.dataset ? el.dataset.fold : "");
+  const rememberFold = (el) => {
+    const key = foldStateOf(el);
+    if (!key) return;
+    state.foldState[key] = Boolean(el.open);
+    if (key.startsWith(liveCardFoldPrefix)) persistLiveCardFolds();
+  };
+  const applyFoldStates = (root) => {
+    (root || document).querySelectorAll("details[data-fold]").forEach((el) => {
+      const key = foldStateOf(el);
+      if (!key || !(key in state.foldState)) return;
+      if (state.foldState[key] && !el.open) el.open = true;
+      else if (!state.foldState[key] && el.open) el.open = false;
+    });
+  };
+  state.applyFoldStates = applyFoldStates;
+  // 首次加载就按记住的状态回填一次：右栏卡片是静态 DOM，不会触发下面的 MutationObserver。
+  applyFoldStates(document);
+  document.addEventListener("toggle", (event) => {
+    const el = event.target;
+    if (el && el.tagName === "DETAILS") rememberFold(el);
+  }, true);
+  const foldObserver = new MutationObserver((records) => {
+    const touched = records.some((record) => Array.from(record.addedNodes || []).some((node) => {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.matches && node.matches("details[data-fold]")) return true;
+      return Boolean(node.querySelector && node.querySelector("details[data-fold]"));
+    }));
+    if (touched) applyFoldStates(document);
+  });
+  foldObserver.observe(document.body, { childList: true, subtree: true });
+
+  document.addEventListener("click", (event) => {
+    if (event.target.closest('[data-action="live-row-more"]')) return;
+    if (event.target.closest(".live-room-row-menu")) return;
+    document.querySelectorAll(".live-room-row-menu").forEach((menu) => {
+      if (!menu.hidden) menu.hidden = true;
+    });
+    if (state.liveOpenRowMenu !== null && state.liveOpenRowMenu !== undefined) state.liveOpenRowMenu = null;
+    const moreMenu = $("live-more-menu");
+    if (moreMenu && !moreMenu.hidden
+      && !event.target.closest('[data-action="live-more-toggle"]')
+      && !moreMenu.contains(event.target)) {
+      moreMenu.hidden = true;
+    }
+  });
   syncLiveRecordModeUi();
 }
 
@@ -1989,6 +2114,8 @@ function syncLiveRecordModeUi() {
   const mode = $("live-record-mode")?.value || "product";
   const panel = $("live-product-panel");
   if (panel) panel.style.display = mode === "product" ? "" : "none";
+  const namingField = $("live-naming-mode");
+  if (namingField) namingField.disabled = mode !== "product";
 }
 
 function bindLiveRoomFilters() {
@@ -2001,6 +2128,531 @@ function bindLiveRoomFilters() {
     renderLiveRooms();
   });
 }
+// ===== 单品识别工作台（2026-09-26）=====
+// 数据来自只读端点 /api/live-rec/product-schedule（服务端读诊断归档），成品视频走 /api/live-rec/product-video。
+const productPanelState = {
+  room: "",
+  session: "",
+  loading: false,
+  error: "",
+  data: null,
+  selectedSeq: -1,
+  checked: {},
+  roomsWithData: [],
+  notice: "",
+};
+
+function productPanelHms(value) {
+  const total = Math.max(0, Math.round(Number(value) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function productPanelRows() {
+  const rows = productPanelState.data && Array.isArray(productPanelState.data.rows) ? productPanelState.data.rows : [];
+  return rows;
+}
+
+function productPanelRowBySeq(seq) {
+  return productPanelRows().find((row) => Number(row.seqIndex) === Number(seq)) || null;
+}
+
+function productPanelRoomNames() {
+  const names = [];
+  (state.liveRooms || []).forEach((room) => {
+    const name = String(room && room.name ? room.name : "").trim();
+    if (name && !names.includes(name)) names.push(name);
+  });
+  (productPanelRows() || []).forEach(() => {});
+  const current = String(productPanelState.room || "").trim();
+  if (current && !names.includes(current)) names.unshift(current);
+  return names;
+}
+
+function productPanelDefaultRoom() {
+  const rooms = state.liveRooms || [];
+  const hit = rooms.find((room) => liveRoomKey(room) === state.liveSelectedKey);
+  if (hit && hit.name) return String(hit.name);
+  const active = productPanelActiveRoomName();
+  if (active) return active;
+  const withData = productPanelState.roomsWithData || [];
+  if (withData.length) return String(withData[0].room || "");
+  const first = rooms.find((room) => room && room.name);
+  return first ? String(first.name) : "";
+}
+
+// 正在录制 / 有活动任务的房间名（默认房间与回退都用它）。
+function productPanelActiveRoomName() {
+  const rooms = state.liveRooms || [];
+  let best = "";
+  let bestScore = 0;
+  rooms.forEach((room) => {
+    const name = String((room && room.name) || "").trim();
+    if (!name) return;
+    const activity = liveRoomActivity(room);
+    const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+    const statusText = `${activity.liveStatus || ""} ${activity.recordStatus || ""}`;
+    let score = 0;
+    if (/录制中|监控中/.test(statusText)) score += 4;
+    else if (/检测中|启动中|排队中|已开始监测/.test(statusText)) score += 2;
+    if (outputs.length || Number(activity.productOutputCount || 0)) score += 3;
+    if (Number(activity.productSegments || 0)) score += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  });
+  return best;
+}
+
+// 回退房间：优先「正在录 / 有活动」的房间，其次最近有归档的房间。
+function productPanelFallbackRoom(excludeName) {
+  const exclude = String(excludeName || "").trim();
+  const active = productPanelActiveRoomName();
+  if (active && active !== exclude) return active;
+  const hit = (productPanelState.roomsWithData || []).find((item) => String(item.room) !== exclude);
+  return hit ? String(hit.room) : "";
+}
+
+// 标签页当前房间在 state.liveRooms 里的下标（-1 = 不在列表里）。
+function productPanelLiveIndex() {
+  const name = String(productPanelState.room || "").trim();
+  if (!name) return -1;
+  return (state.liveRooms || []).findIndex((room) => String((room && room.name) || "").trim() === name);
+}
+
+// 标签页当前房间的实时活动数据（与右栏卡片同源）。
+function productPanelLiveActivity() {
+  const index = productPanelLiveIndex();
+  if (index < 0) return {};
+  return liveRoomActivity((state.liveRooms || [])[index]) || {};
+}
+
+// 这个房间现在有没有实时数据（正在监测 / 已出单品）。
+function productPanelLiveHasData() {
+  const activity = productPanelLiveActivity();
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  if (outputs.length || Number(activity.productOutputCount || 0)) return true;
+  if (Number(activity.productSegments || 0) || String(activity.productClipsDir || "").trim()) return true;
+  const statusText = `${activity.liveStatus || ""} ${activity.recordStatus || ""}`;
+  return /录制中|检测中|启动中|排队中|监控中/.test(statusText);
+}
+
+// 「本次监测」实时单品区块（右栏卡片同源数据：已提取单品 + 信号 + 单品列表）。
+function productPanelLiveBlock() {
+  const index = productPanelLiveIndex();
+  if (index < 0) return "";
+  const activity = productPanelLiveActivity();
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const outputCount = Number(activity.productOutputCount || outputs.length || 0);
+  const segmentCount = Number(activity.productSegments || 0);
+  const boundCount = Number(activity.productBoundSegments || 0);
+  const pendingCount = Number(activity.productPendingSegments || 0);
+  const candidateCount = Number(activity.productActiveCandidateCount || 0);
+  const signalCount = Number(activity.productCandidateSignals || 0);
+  const strongCount = Number(activity.productStrongSignalCount || 0);
+  const reviewCount = Number(activity.productRuleReviewCount || 0);
+  const clipsDir = String(activity.productClipsDir || "").trim();
+  if (!outputCount && !segmentCount && !clipsDir && !candidateCount && !signalCount) return "";
+  const statusText = `${activity.liveStatus || ""} ${activity.recordStatus || ""}`.trim();
+  const title = outputCount > 0
+    ? `本次监测 · 已提取 ${outputCount} 个单品`
+    : `本次监测 · 已生成 ${segmentCount || pendingCount || 0} 个候选段`;
+  const chips = [
+    /录制中/.test(statusText) ? '<span class="product-panel-chip is-live">录制中</span>' : "",
+    boundCount > 0 ? `<span class="product-panel-chip is-ok">已绑定 ${boundCount}</span>` : "",
+    pendingCount > 0 ? `<span class="product-panel-chip is-warn">待确认 ${pendingCount}</span>` : "",
+    candidateCount > 0 ? `<span class="product-panel-chip is-warn">商品候选 ${candidateCount}</span>` : "",
+    signalCount > 0 ? `<span class="product-panel-chip">候选信号 ${signalCount}</span>` : "",
+    strongCount > 0 ? `<span class="product-panel-chip is-ok">强信号 ${strongCount}</span>` : "",
+    reviewCount > 0 ? `<span class="product-panel-chip is-warn">需复核 ${reviewCount}</span>` : "",
+    segmentCount ? `<span class="product-panel-chip">时间线 ${segmentCount}</span>` : "",
+    activity.rollingCycleCount ? `<span class="product-panel-chip">录制段 ${Number(activity.rollingCycleCount)}</span>` : "",
+    activity.livenessText ? `<span class="product-panel-chip is-warn">${escapeHtml(activity.livenessText)}</span>` : "",
+  ].filter(Boolean).join("");
+  const list = renderLiveProductList(index, activity);
+  return `
+    <div class="product-panel-live-head">
+      <strong>${escapeHtml(title)}</strong>
+      <span class="product-panel-hint">${escapeHtml(statusText || "本次监测")}</span>
+      <button class="button button-muted button-small" data-action="live-open-product-dir" data-index="${index}" ${clipsDir ? "" : "disabled"}><span>单品目录</span></button>
+    </div>
+    ${chips ? `<div class="product-panel-live-chips">${chips}</div>` : ""}
+    ${list || ""}
+    <p class="product-panel-hint">这批单品已经落地到「单品目录」；这一场结束后会自动并入下方时间表。</p>
+  `;
+}
+
+// 只刷新实时区块，不动表格 / 预览 / 勾选状态。
+function renderProductPanelLive() {
+  const box = document.getElementById("product-panel-live");
+  if (!box) return;
+  box.innerHTML = productPanelLiveBlock();
+}
+
+async function productPanelLoadRoomsWithData() {
+  try {
+    const result = await api("/api/live-rec/product-rooms");
+    const rooms = (result && result.rooms) || [];
+    productPanelState.roomsWithData = rooms
+      .map((item) => Object.assign({}, item, { room: String(item.display_room || item.room || ""), archive_room: item.room }))
+      .filter((item) => item.room);
+  } catch (error) {
+    productPanelState.roomsWithData = productPanelState.roomsWithData || [];
+  }
+}
+
+function productPanelStatusText(row) {
+  if (row.status === "auto_bound") return "已绑定";
+  if (row.status === "pending_user_confirm") return "待确认";
+  return String(row.status || "未确认");
+}
+
+function productPanelVideoUrl(row) {
+  return `/api/live-rec/product-video?room=${encodeURIComponent(productPanelState.room)}&stamp=${encodeURIComponent(row.stamp || "")}&index=${encodeURIComponent(row.index || 0)}&t=${Number(row.file_mtime || 0)}`;
+}
+
+function productPanelRenderPreview() {
+  const row = productPanelRowBySeq(productPanelState.selectedSeq);
+  if (!row) return `<div class="product-panel-preview-empty">点左边任意一行，这里播放该时段的原始片段</div>`;
+  const clipsDir = String((productPanelState.data || {}).clips_dir || "");
+  const fileLine = row.file_exists
+    ? `${escapeHtml(livePathName(row.file))}（${(Number(row.file_size || 0) / 1024 / 1024).toFixed(1)} MB）`
+    : "成品视频未找到";
+  const detailUrl = String(row.detail_url || "").trim();
+  const fields = [
+    ["商品名", escapeHtml(row.title || "-")],
+    ["商品 ID", escapeHtml(row.product_id || "-")],
+    ["时间段", `${productPanelHms(row.abs_start)} - ${productPanelHms(row.abs_end)}（${productPanelHms(row.duration)}）`],
+    ["置信度", escapeHtml(String(row.confidence === "" || row.confidence === null ? "-" : row.confidence))],
+    ["命名来源", escapeHtml(row.naming_source || "-")],
+    ["识别依据", escapeHtml(row.reason || "-")],
+    ["来源", escapeHtml(row.source || "-")],
+    ["文件", fileLine],
+  ].map(([k, v]) => `<div class="product-panel-field"><span>${k}</span><span title="${v}">${v}</span></div>`).join("");
+  return `
+    ${row.file_exists ? `<video id="product-panel-video" controls preload="metadata" src="${productPanelVideoUrl(row)}"></video>` : `<div class="product-panel-preview-empty">该时段成品视频未找到</div>`}
+    <p class="product-panel-note">原始单品片段（未去重、未加字幕），仅用于确认“这一段是不是这个商品”。</p>
+    <div class="product-panel-fields">${fields}</div>
+    <div class="product-panel-actions">
+      <button class="button button-muted button-small" data-paction="add" data-kind="mix" data-seq="${row.seqIndex}">＋混剪素材</button>
+      <button class="button button-secondary button-small" data-paction="add" data-kind="smart" data-seq="${row.seqIndex}">＋成片素材</button>
+      ${detailUrl ? `<button class="button button-muted button-small" data-paction="open-url" data-url="${escapeHtml(detailUrl)}">打开商品页</button>` : ""}
+      <button class="button button-muted button-small" data-action="open-path" data-target="${escapeHtml(clipsDir)}">打开目录</button>
+    </div>`;
+}
+
+function productPanelRenderTable() {
+  const rows = productPanelRows();
+  if (!rows.length) {
+    const sessionList = (productPanelState.data || {}).sessions;
+    const hasSession = Array.isArray(sessionList) && sessionList.length > 0;
+    const liveCount = Number(productPanelLiveActivity().productOutputCount || 0);
+    const liveHint = liveCount > 0
+      ? `本次监测已提取 ${liveCount} 个单品（见上方），这一场结束后会自动写入下方时间表。`
+      : (productPanelLiveHasData() ? "本场正在监测中，识别到的单品会先出现在上方，这一场结束后自动写入时间表。" : "");
+    return `<p class="product-panel-empty">${hasSession
+      ? (liveHint || "这一场没有识别到单品时段。")
+      : (liveHint || "这个直播间还没有单品识别记录（用「单品扫描」录过一场后这里就有数据）。")}</p>`;
+  }
+  const body = rows.map((row) => {
+    const selected = Number(row.seqIndex) === Number(productPanelState.selectedSeq);
+    const checked = Boolean(productPanelState.checked[row.seqIndex]);
+    const badge = row.status === "auto_bound"
+      ? '<span class="product-panel-badge is-ok">已绑定</span>'
+      : '<span class="product-panel-badge is-warn">待确认</span>';
+    return `
+      <tr class="${selected ? "is-selected" : ""} ${row.file_exists ? "" : "is-missing"}" data-paction="select" data-seq="${row.seqIndex}">
+        <td><input type="checkbox" data-paction="check" data-seq="${row.seqIndex}" ${checked ? "checked" : ""}></td>
+        <td class="product-panel-mono">${Number(row.seqIndex) + 1}</td>
+        <td><div class="product-panel-title" title="${escapeHtml(row.title || "")}">${escapeHtml(row.title || "（无商品名）")}</div></td>
+        <td class="product-panel-mono">${productPanelHms(row.abs_start)}-${productPanelHms(row.abs_end)}</td>
+        <td class="product-panel-mono">${productPanelHms(row.duration)}</td>
+        <td class="product-panel-mono">${escapeHtml(String(row.confidence === "" || row.confidence === null ? "-" : row.confidence))}</td>
+        <td>${badge}</td>
+      </tr>`;
+  }).join("");
+  return `
+    <div class="product-panel-table-wrap">
+      <table class="product-panel-table">
+        <thead><tr><th></th><th>#</th><th>商品名</th><th>时间段</th><th>时长</th><th>置信度</th><th>状态</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+function productPanelRender() {
+  const root = $("product-panel-root");
+  if (!root) return;
+  const rooms = productPanelRoomNames();
+  const roomOptions = rooms.map((name) => `<option value="${escapeHtml(name)}" ${name === productPanelState.room ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
+  const data = productPanelState.data || {};
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  const sessionOptions = sessions.map((item) => {
+    const label = `${item.start_stamp} 起 · ${item.product_count} 个商品 / ${item.segment_count} 段`;
+    return `<option value="${item.index}" ${String(item.index) === String(data.session_index) ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  const summary = data.summary || {};
+  const chips = [
+    ["<span>本场时段 " + Number(summary.segment_count || 0) + " 段</span>", ""],
+    ["<span>商品 " + Number(summary.product_count || 0) + " 个</span>", ""],
+    ["<span>已绑定 " + Number(summary.bound_count || 0) + "</span>", "is-ok"],
+    ["<span>待确认 " + Number(summary.pending_count || 0) + "</span>", Number(summary.pending_count || 0) ? "is-warn" : ""],
+    ["<span>文件缺失 " + Number(summary.missing_file_count || 0) + "</span>", Number(summary.missing_file_count || 0) ? "is-warn" : ""],
+  ].map(([text, cls]) => `<span class="product-panel-chip ${cls}">${text}</span>`).join("");
+  const checkedCount = Object.values(productPanelState.checked).filter(Boolean).length;
+  const notice = productPanelState.error
+    ? `<p class="product-panel-empty">${escapeHtml(productPanelState.error)}</p>`
+    : (productPanelState.notice ? `<p class="product-panel-notice">${escapeHtml(productPanelState.notice)}</p>` : "");
+  root.innerHTML = `
+    <div class="product-panel-toolbar">
+      <label class="field-label">直播间
+        <select id="product-panel-room">${roomOptions || '<option value="">（暂无直播间）</option>'}</select>
+      </label>
+      <label class="field-label">场次
+        <select id="product-panel-session" ${sessions.length ? "" : "disabled"}>${sessionOptions || '<option value="">（暂无场次）</option>'}</select>
+      </label>
+      <div class="product-panel-metrics">${chips}</div>
+    </div>
+    ${notice}
+    <div class="product-panel-live" id="product-panel-live">${productPanelLiveBlock()}</div>
+    <div class="product-panel-columns">
+      <div>
+        ${productPanelRenderTable()}
+        <div class="product-panel-footer">
+          <span class="product-panel-count">已选 ${checkedCount} 段</span>
+          <button class="button button-muted button-small" data-paction="add-checked" data-kind="mix" ${checkedCount ? "" : "disabled"}>加入混剪素材</button>
+          <button class="button button-secondary button-small" data-paction="add-checked" data-kind="smart" ${checkedCount ? "" : "disabled"}>加入成片素材</button>
+          <button class="button button-primary button-small" data-paction="make" ${checkedCount ? "" : "disabled"}>立即成片</button>
+        </div>
+      </div>
+      <div class="product-panel-preview">${productPanelRenderPreview()}</div>
+    </div>`;
+  if (productPanelState.loading) {
+    root.querySelectorAll("select,button").forEach((el) => { el.disabled = true; });
+  }
+}
+
+async function loadProductPanel(options = {}) {
+  if (productPanelState.loading) return;
+  const explicitRoom = typeof options.room === "string" && options.room.trim() ? options.room.trim() : "";
+  if (explicitRoom) productPanelState.room = explicitRoom;
+  if (typeof options.session === "string" && options.session.trim()) productPanelState.session = options.session.trim();
+  if (!productPanelState.room) productPanelState.room = productPanelDefaultRoom();
+  if (!productPanelState.room) {
+    productPanelState.data = null;
+    productPanelState.error = "还没有直播间，请先到「录屏」页添加。";
+    productPanelRender();
+    return;
+  }
+  productPanelState.loading = true;
+  productPanelState.error = "";
+  if (!options.noFallback) productPanelState.notice = "";
+  productPanelRender();
+  let fallbackRoom = "";
+  try {
+    const query = `/api/live-rec/product-schedule?room=${encodeURIComponent(productPanelState.room)}${productPanelState.session ? `&session=${encodeURIComponent(productPanelState.session)}` : ""}`;
+    const result = await api(query);
+    productPanelState.data = result;
+    if (!result || !result.ok) {
+      const reason = (result && result.message) || "读取单品识别记录失败。";
+      if (productPanelLiveHasData()) {
+        productPanelState.notice = "本场正在监测中，识别到的单品先出现在上方；这一场结束后会自动写入下方时间表。";
+      } else {
+        let alt = "";
+        if (!options.noFallback) {
+          await productPanelLoadRoomsWithData();
+          alt = productPanelFallbackRoom(productPanelState.room);
+        }
+        if (alt) {
+          fallbackRoom = alt;
+          productPanelState.notice = `「${productPanelState.room}」还没有归档数据，已切到「${alt}」。`;
+        } else {
+          productPanelState.error = reason;
+        }
+      }
+    }
+    productPanelState.session = result && result.session_index !== undefined ? String(result.session_index) : productPanelState.session;
+    productPanelState.checked = {};
+    productPanelState.selectedSeq = -1;
+    if (result && result.ok && !options.noFallback && !productPanelLiveHasData() && !(result.rows || []).length) {
+      await productPanelLoadRoomsWithData();
+      const alt = productPanelFallbackRoom(productPanelState.room);
+      if (alt) {
+        fallbackRoom = alt;
+        productPanelState.notice = `「${productPanelState.room}」这一场还没有落地的单品，已切到「${alt}」。`;
+      }
+    }
+  } catch (error) {
+    const raw = error && error.message ? error.message : String(error);
+    productPanelState.error = /404|Not Found/i.test(raw)
+      ? "读取单品识别记录失败（接口未生效）：新接口需要重启应用后才会生效。"
+      : `读取单品识别记录失败：${raw}`;
+  } finally {
+    productPanelState.loading = false;
+    productPanelRender();
+  }
+  if (fallbackRoom) loadProductPanel({ room: fallbackRoom, noFallback: true });
+}
+
+function productPanelSelect(seq) {
+  productPanelState.selectedSeq = Number(seq);
+  productPanelRender();
+}
+
+function productPanelToggleCheck(seq, on) {
+  const key = Number(seq);
+  if (on) productPanelState.checked[key] = true;
+  else delete productPanelState.checked[key];
+  productPanelRender();
+}
+
+function productPanelCheckedRows() {
+  const keys = Object.keys(productPanelState.checked).filter((key) => productPanelState.checked[key]);
+  return keys.map((key) => productPanelRowBySeq(key)).filter(Boolean);
+}
+
+function productPanelConfirmPending(rows) {
+  const pending = rows.filter((row) => row.status !== "auto_bound");
+  if (!pending.length) return true;
+  const names = pending.map((row) => `· ${row.title || "（无商品名）"}（${productPanelStatusText(row)}）`).join("\n");
+  return window.confirm(`以下 ${pending.length} 段还没有确认商品名：\n${names}\n\n仍然加入剪辑吗？`);
+}
+
+function productPanelAddRows(kind, rows) {
+  const usable = rows.filter((row) => row.file_exists && row.file);
+  if (!usable.length) {
+    toast("没有可用的成品视频", "warning");
+    return;
+  }
+  if (!productPanelConfirmPending(usable)) return;
+  const target = kind === "mix" ? "mix-video-paths" : "video-paths";
+  const files = usable.map((row) => row.file);
+  rememberMaterialProducts(files, usable);
+  addVideoPaths(target, files);
+  const label = kind === "mix" ? "混剪" : "智能成片";
+  toast(`已加入${label}素材 ${usable.length} 段${usable.length < rows.length ? `（跳过 ${rows.length - usable.length} 段无成品）` : ""}`, "success");
+}
+
+async function productPanelMake() {
+  const rows = productPanelCheckedRows();
+  if (!rows.length) {
+    toast("请先勾选要成片的时段", "warning");
+    return;
+  }
+  const usable = rows.filter((row) => row.file_exists && row.file);
+  if (!usable.length) {
+    toast("勾选的时段都没有成品视频", "warning");
+    return;
+  }
+  if (!productPanelConfirmPending(usable)) return;
+  const files = usable.map((row) => row.file);
+  rememberMaterialProducts(files, usable);
+  addVideoPaths("video-paths", files);
+  try {
+    await startSmartCut();
+    toast(`已提交成片任务（${usable.length} 段），可在「智能成片」页看进度`, "success");
+  } catch (error) {
+    toast(`提交成片失败：${error && error.message ? error.message : error}`, "warning");
+  }
+}
+
+async function productPanelExport() {
+  if (!productPanelState.room) {
+    toast("请先选择直播间", "warning");
+    return;
+  }
+  const url = `/api/live-rec/product-schedule/export?room=${encodeURIComponent(productPanelState.room)}${productPanelState.session ? `&session=${encodeURIComponent(productPanelState.session)}` : ""}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body && body.detail) message = String(body.detail);
+      } catch (error) {}
+      throw new Error(message);
+    }
+    const savedHeader = String(response.headers.get("x-save-path") || "");
+    const savedPath = savedHeader ? decodeURIComponent(savedHeader) : "";
+    const blob = await response.blob();
+    const disposition = String(response.headers.get("content-disposition") || "");
+    let filename = `${productPanelState.room}直播时间点.xlsx`;
+    const star = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const plain = disposition.match(/filename="?([^";]+)"?/i);
+    if (star) filename = decodeURIComponent(star[1]);
+    else if (plain) filename = plain[1];
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 4000);
+    toast(savedPath ? `已导出到：${savedPath}` : `已导出 ${filename}`, "success");
+  } catch (error) {
+    toast(`导出失败：${error && error.message ? error.message : error}`, "warning");
+  }
+}
+
+async function productPanelOpenExportDir() {
+  if (!productPanelState.room) {
+    toast("请先选择直播间", "warning");
+    return;
+  }
+  const query = `/api/live-rec/product-schedule/open?room=${encodeURIComponent(productPanelState.room)}${productPanelState.session ? `&session=${encodeURIComponent(productPanelState.session)}` : ""}`;
+  try {
+    const result = await api(query);
+    toast((result && result.message) || "已打开导出目录", "success");
+  } catch (error) {
+    toast(`打开导出目录失败：${error && error.message ? error.message : error}`, "warning");
+  }
+}
+
+function openProductPanel(roomName) {
+  if (roomName) productPanelState.room = String(roomName);
+  switchPage("live-rec");
+  setLiveRecTab("products");
+}
+
+function bindProductPanel() {
+  document.body.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-paction]");
+    if (!target) return;
+    const action = target.dataset.paction;
+    const seq = target.dataset.seq;
+    if (action === "check") {
+      event.stopPropagation();
+      productPanelToggleCheck(seq, target.checked);
+      return;
+    }
+    event.preventDefault();
+    if (action === "select") productPanelSelect(seq);
+    else if (action === "refresh") loadProductPanel({ session: "" });
+    else if (action === "export") await productPanelExport();
+    else if (action === "open-export-dir") await productPanelOpenExportDir();
+    else if (action === "add") productPanelAddRows(target.dataset.kind, [productPanelRowBySeq(seq)].filter(Boolean));
+    else if (action === "add-checked") productPanelAddRows(target.dataset.kind, productPanelCheckedRows());
+    else if (action === "make") await productPanelMake();
+    else if (action === "open-url") {
+      const url = String(target.dataset.url || "");
+      if (url) window.open(url, "_blank");
+    } else if (action === "open-products-entry") {
+      openProductPanel(target.dataset.room || "");
+    }
+  });
+  productPanelLoadRoomsWithData();
+  document.body.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target || !target.id) return;
+    if (target.id === "product-panel-room") loadProductPanel({ room: target.value, session: "" });
+    else if (target.id === "product-panel-session") loadProductPanel({ session: target.value });
+  });
+}
+
 function bindActions() {
   document.body.addEventListener("click", async (event) => {
     const target = event.target.closest("[data-action]");
@@ -2020,6 +2672,8 @@ function bindActions() {
       if (action === "open-path") await openPath(target.dataset.target);
       if (action === "open-task-output") await openPathValue(target.dataset.path);
       if (action === "stop-scope") await stopScope(target.dataset.scope || state.page);
+      if (action === "show-failures") openFailureList(target.dataset.scope || "");
+      if (action === "close-failures") closeFailureList();
       if (action === "clear-video-list") clearVideoList(target.dataset.target);
       if (action === "remove-video") removeVideoPath(target.dataset.target, Number(target.dataset.index));
       if (action === "retry-video-inspection") retryVideoInspection(target.dataset.target, Number(target.dataset.index));
@@ -2040,6 +2694,7 @@ function bindActions() {
       if (action === "preview-triage-skip") skipPreviewTriageCandidate(target.dataset.previewScope || "smart");
       if (action === "preview-triage-undo") undoPreviewTriageAction(target.dataset.previewScope || "smart");
       if (action === "preview-workbench-inspect-clip") inspectPreviewWorkbenchClip(Number(target.dataset.previewIndex), target.dataset.previewScope || "smart");
+        if (action === "preview-recall-add") addPreviewRecallOpening(target.dataset.previewScope || "smart", Number(target.dataset.recallHookId), Number(target.dataset.recallPayoffId));
       if (action === "preview-assembly-move") movePreviewAssemblyClip(target.dataset.previewScope || "smart", Number(target.dataset.previewIndex), Number(target.dataset.direction));
       if (action === "preview-assembly-auto-arrange") autoArrangePreviewAssembly(target.dataset.previewScope || "smart");
       if (action === "preview-duration-fit") autoFitPreviewDuration(target.dataset.previewScope || "smart");
@@ -2135,8 +2790,34 @@ function bindActions() {
       if (action === "live-preview-room") await previewLiveRoom(Number(target.dataset.index));
       if (action === "live-detail-room") showLiveRoomDetail(Number(target.dataset.index));
       if (action === "close-live-detail") closeLiveDetailModal();
+      if (action === "live-refresh-room-name") await refreshLiveRoomName(Number(target.dataset.index));
+      if (action === "live-refresh-all-room-names") await refreshAllLiveRoomNames();
       if (action === "remove-live-room") removeLiveRoom(Number(target.dataset.index));
       if (action === "fill-live-room") fillLiveRoom(Number(target.dataset.index));
+      if (action === "live-select-room") selectLiveRoom(Number(target.dataset.index));
+      if (action === "live-product-add") addLiveProductTo(target.dataset.kind || "mix", Number(target.dataset.index), Number(target.dataset.seq));
+      if (action === "live-preview-reload") {
+        const previewIndex = liveSelectedIndex();
+        syncLiveInspectorPreview(previewIndex, previewIndex >= 0 ? (state.liveRooms || [])[previewIndex] : null, true);
+      }
+      if (action === "live-filter-toggle") {
+        const filterBar = $("live-filter-bar");
+        if (filterBar) filterBar.classList.toggle("is-collapsed");
+      }
+      if (action === "live-more-toggle") {
+        const moreMenu = $("live-more-menu");
+        if (moreMenu) moreMenu.hidden = !moreMenu.hidden;
+      }
+      if (action === "live-row-more") {
+        const rowMenu = target.closest(".live-room-row")?.querySelector(".live-room-row-menu");
+        if (rowMenu) {
+          rowMenu.hidden = !rowMenu.hidden;
+          state.liveOpenRowMenu = rowMenu.hidden ? null : Number(target.dataset.index);
+        }
+      }
+      if (action === "open-live-save-dir") {
+        await openPathValue($("live-save-dir")?.value.trim() || "");
+      }
       if (action === "toggle-secret") toggleSecret(target);
       if (action === "activate-license") await activateLicense();
       if (action === "unbind-device") await unbindDevice();
@@ -2147,6 +2828,78 @@ function bindActions() {
       if (action === "close-update-card") closeUpdateCard();
       if (action === "feedback") feedback();
       if (action === "apply-user-data-dir") await applyUserDataDir();
+      if (action === "material-pick-dir") await materialPickDirectory();
+      if (action === "material-probe") await materialProbe();
+      if (action === "material-index") await materialStartIndex({ probe: false });
+      if (action === "material-export") await materialExportIndex();
+      if (action === "material-import") await materialImportIndex();
+      if (action === "material-open-import") {
+        // 空结果页的"导入索引"：直接触发导入（不滚动，省一次点击）
+        await materialImportIndex();
+      }
+      if (action === "material-scope-menu") {
+        const menu = $("material-scope-menu");
+        const trigger = document.querySelector('[data-action="material-scope-menu"]');
+        if (menu) {
+          const willOpen = menu.hidden;
+          // 打开前重渲染一次，保证列表和规模是最新的
+          if (willOpen) renderMaterialScope(materialState().status || {});
+          menu.hidden = !willOpen;
+          if (trigger) trigger.setAttribute("aria-expanded", String(willOpen));
+        }
+      }
+      if (action === "material-scope-all") {
+        // 兼容旧入口：取消索引范围限定
+        const st = materialScopeState();
+        st.currentLibrary = 0;
+        renderMaterialLibraries(st.libraries || []);
+        renderMaterialScope(materialState().status || {});
+        if (query?.value.trim()) await materialSearch();
+      }
+      if (action === "material-library-pick") {
+        const libId = Number(event.target.closest("[data-library-id]")?.dataset.libraryId || 0);
+        const st = materialScopeState();
+        // 再点一次同一个 = 取消限定
+        st.currentLibrary = Number(st.currentLibrary) === libId ? 0 : libId;
+        renderMaterialLibraries(st.libraries || []);
+        renderMaterialScope(materialState().status || {});
+        const label = materialScopeLabel();
+        toast(
+          st.currentLibrary ? `搜索范围已切到索引「${label}」` : "搜索范围已切回「全部索引」",
+          "success",
+        );
+        if (query?.value.trim()) await materialSearch();
+      }
+      if (action === "material-library-rebuild") {
+        const libId = Number(event.target.closest("[data-library-id]")?.dataset.libraryId || 0);
+        await materialRebuildLibrary(libId);
+      }
+      if (action === "material-library-remove") {
+        const libId = Number(event.target.closest("[data-library-id]")?.dataset.libraryId || 0);
+        await materialRemoveLibrary(libId);
+      }
+      if (action === "material-library-export") {
+        const libId = Number(event.target.closest("[data-library-id]")?.dataset.libraryId || 0);
+        await materialExportIndex("", [libId]);
+      }
+      if (action === "material-open-index") {
+        // 空结果页的"建立索引"：把索引信息卡片滚进视野并高亮一下
+        const panel = document.querySelector(".material-index-panel");
+        if (panel) {
+          try { panel.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (_) { /* 忽略 */ }
+          panel.classList.add("is-flash");
+          setTimeout(() => panel.classList.remove("is-flash"), 1400);
+        }
+        toast("在「素材目录」里选好文件夹，再点「建立/更新索引」", "success");
+      }
+      if (action === "material-search") await materialSearch();
+      if (action === "material-clear-video") materialClearVideoFilter();
+      if (action === "material-copy-all") await materialCopyAllStamps();
+      if (action === "material-clear-index") await materialClearIndex();
+      if (action === "material-open") await materialOpenSource(target.dataset.materialPath || "", target.dataset.materialStart || "0");
+      if (action === "material-reveal") await materialRevealSource(target.dataset.materialPath || "");
+      if (action === "material-copy-stamp") await materialCopyStamp(target.dataset.materialText || "");
+      if (action === "material-label") await materialLabelPublisher();
     } catch (error) {
       toast(error.message || String(error), "error");
     }
@@ -2161,6 +2914,8 @@ function bindActions() {
     if (modeTarget) updateLiveRoomRecordMode(Number(modeTarget.dataset.index), modeTarget.value);
     const productSegTarget = event.target.closest("[data-live-product-segment]");
     if (productSegTarget) updateLiveRoomProductClip(Number(productSegTarget.dataset.index), productSegTarget.value);
+    const productSettingTarget = event.target.closest("[data-live-product-setting]");
+    if (productSettingTarget) updateLiveRoomProductSetting(Number(productSettingTarget.dataset.index), productSettingTarget.dataset.liveProductSetting, productSettingTarget.value);
     if (event.target.closest("#sc-versions, #mix-versions")) refreshVersionCostNotes();
   });
 
@@ -2350,6 +3105,34 @@ function markAiPresetCustom(prefix) {
   }
 }
 
+// 主界面「主商品」快捷输入 与 AI 导演面板「商品名称 / 款号」双向同步。
+// 两处最终都写进 director_controls.main_product —— 后端 build_product_target 里它的
+// 优先级高于一级类目和素材名推断（specific 时 identity_source = "main_product"）。
+// 用途：多商品混在一起的素材里，直接指定这一遍要剪哪个商品（如这一遍剪毛衣、下一遍剪裤子）。
+function bindMainProductQuickInputs() {
+  ["sc", "mix"].forEach(function (prefix) {
+    const quick = document.getElementById(prefix + "-main-product-quick");
+    const full = document.getElementById(prefix + "-main-product");
+    if (!quick || !full || quick.dataset.syncBound === "1") return;
+    quick.dataset.syncBound = "1";
+    if (!quick.value) quick.value = full.value || "";
+    quick.addEventListener("input", function () {
+      if (full.value !== quick.value) full.value = quick.value;
+    });
+    full.addEventListener("input", function () {
+      if (quick.value !== full.value) quick.value = full.value;
+    });
+  });
+}
+
+// 预设套用 / 程序写入导演面板字段后，把值同步回主界面的快捷输入框。
+function syncMainProductQuickInputs(prefix) {
+  if (!prefix) return;
+  const quick = document.getElementById(prefix + "-main-product-quick");
+  const full = document.getElementById(prefix + "-main-product");
+  if (quick && full) quick.value = full.value || "";
+}
+
 function applyAiPreset(prefix, presetKey) {
   if (!prefix || presetKey === "custom") return;
   const preset = allAiPresets()[presetKey];
@@ -2366,6 +3149,7 @@ function applyAiPreset(prefix, presetKey) {
   if (leafInput && preset.leaf_category !== undefined) leafInput.value = preset.leaf_category || "";
   const mainProductInput = $(`${prefix}-main-product`);
   if (mainProductInput && preset.main_product !== undefined) mainProductInput.value = preset.main_product || "";
+  syncMainProductQuickInputs(prefix);
   applyCompactDirectorValues(prefix, preset);
   const panel = document.querySelector(`[data-summary-kind="ai"][data-summary-prefix="${prefix}"]`);
   if (panel) updatePanelSummary(panel);
@@ -2651,6 +3435,7 @@ function bindPreviewModalShortcuts() {
     closeKeywordEditor();
     closePreviewVideo();
     closeLiveDetailModal();
+    closeFailureList();
     closeUpdateCard();
   });
 }
@@ -3262,19 +4047,74 @@ function issueForScope(scope, scopedTasks) {
   return null;
 }
 
-function renderIssueFailureRows(details = []) {
-  const visible = details.slice(0, 3);
-  if (!visible.length) return "";
-  const rows = visible.map((item) => `
-    <div class="run-summary-failure-item" title="${escapeHtml(item.message)}">
-      <strong>${escapeHtml(item.label || "失败任务")}</strong>
-      <span>${escapeHtml(item.message || "任务处理失败。")}</span>
+const failureDetailStore = new Map();
+
+function renderIssueFailureRows(details = [], scope = "") {
+  if (!details.length) return "";
+  failureDetailStore.set(String(scope || ""), details);
+  const label = details.length > 1 ? `${details.length} 个失败任务` : "1 个失败任务";
+  return `
+    <button type="button" class="run-summary-failure-entry" data-action="show-failures" data-scope="${escapeHtml(scope)}">
+      <span>查看失败清单</span>
+      <span class="run-summary-failure-entry-count">${label}</span>
+    </button>
+  `;
+}
+
+function ensureFailureListModal() {
+  let modal = $("failure-list-modal");
+  if (modal) return modal;
+  modal = document.createElement("div");
+  modal.id = "failure-list-modal";
+  modal.className = "failure-list-modal is-hidden";
+  modal.setAttribute("aria-hidden", "true");
+  modal.innerHTML = `
+    <div class="failure-list-backdrop" data-action="close-failures"></div>
+    <div class="failure-list-dialog" role="dialog" aria-modal="true" aria-labelledby="failure-list-title">
+      <div class="failure-list-head">
+        <strong id="failure-list-title">失败清单</strong>
+        <span id="failure-list-sub" class="failure-list-sub"></span>
+      </div>
+      <div class="failure-list-body" id="failure-list-body"></div>
+      <div class="failure-list-actions">
+        <a class="button button-muted button-small" href="/api/task-failures/export" download>导出 CSV</a>
+        <button class="button button-small" data-action="close-failures">关闭</button>
+      </div>
     </div>
-  `).join("");
-  const more = details.length > visible.length
-    ? `<span class="run-summary-failure-more">另有 ${details.length - visible.length} 个失败任务，请打开高级诊断查看。</span>`
-    : "";
-  return `<div class="run-summary-failure-list">${rows}${more}</div>`;
+  `;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function openFailureList(scope = "") {
+  const details = failureDetailStore.get(String(scope || "")) || [];
+  const modal = ensureFailureListModal();
+  const title = modal.querySelector("#failure-list-title");
+  const sub = modal.querySelector("#failure-list-sub");
+  const body = modal.querySelector("#failure-list-body");
+  if (title) title.textContent = "失败清单";
+  if (sub) sub.textContent = details.length ? `共 ${details.length} 个失败任务` : "";
+  if (body) {
+    body.innerHTML = details.length
+      ? details.map((item, index) => `
+        <div class="failure-list-row">
+          <strong title="${escapeHtml(item.label || "")}">${escapeHtml(item.label || `失败任务 ${index + 1}`)}</strong>
+          <span>${escapeHtml(item.message || "任务处理失败。")}</span>
+        </div>
+      `).join("")
+      : `<div class="failure-list-empty">暂无失败任务。</div>`;
+  }
+  modal.classList.remove("is-hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("failure-list-modal-open");
+}
+
+function closeFailureList() {
+  const modal = $("failure-list-modal");
+  if (!modal) return;
+  modal.classList.add("is-hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("failure-list-modal-open");
 }
 
 function fileNameFromPath(path) {
@@ -3402,7 +4242,7 @@ function renderRunSummary(scope) {
       ? `
         <strong>${escapeHtml(issue.title)}</strong>
         <span>${escapeHtml(issue.message)}</span>
-        ${renderIssueFailureRows(issue.details)}
+        ${renderIssueFailureRows(issue.details, scope)}
         <em>${escapeHtml(issue.suggestion)}</em>
       `
       : "<span>暂无异常</span>";
@@ -3676,8 +4516,65 @@ async function loadSettings(showToast = false) {
   applyTheme(data.ui_theme || "system");
   applyPreferenceWeights(data.preference_weights || {});
   applyAiRules(data.ai_rules || {});
+  await refreshGpuAccelStatus();
   await loadAiFeedbackSamples(false);
   if (showToast) toast("设置已重新载入", "success");
+}
+
+function renderGpuAccelStatus(data) {
+  const badge = $("gpu-accel-badge");
+  const text = $("gpu-accel-text");
+  const detail = $("gpu-accel-detail");
+  const button = $("gpu-accel-btn");
+  if (!badge || !text) return;
+  const setBadge = (label, tone) => {
+    badge.textContent = label;
+    badge.classList.remove("is-ok", "is-warn", "is-off");
+    badge.classList.add(tone);
+  };
+  if (!data || !data.ok) {
+    setBadge("未检测", "is-off");
+    text.textContent = "暂时读不到显卡信息，不影响本地识别（仍然使用 CPU）。";
+    if (detail) detail.textContent = "";
+    return;
+  }
+  const specs = [];
+  if (data.gpu_name) specs.push(data.gpu_name);
+  if (data.vram_mb) specs.push(`${Math.round((data.vram_mb / 1024) * 10) / 10} GB 显存`);
+  if (data.driver_version) specs.push(`驱动 ${data.driver_version}`);
+  if (data.component_installed) {
+    setBadge("已启用", "is-ok");
+    text.textContent = "GPU 加速组件已安装，本地识别会自动优先使用显卡。";
+  } else if (data.supported) {
+    setBadge("可以支持", "is-ok");
+    const sizeGb = Math.round(((data.component_download_mb || 0) / 1024) * 10) / 10;
+    text.textContent = `检测到可用显卡，满足 GPU 加速条件；组件包约 ${sizeGb} GB，下载功能后续开放。`;
+  } else if (data.has_nvidia) {
+    setBadge("需先满足条件", "is-warn");
+    text.textContent = (data.reasons && data.reasons[0]) || "当前显卡暂不满足 GPU 加速条件。";
+  } else {
+    setBadge("不支持", "is-off");
+    text.textContent = (data.reasons && data.reasons[0]) || "未检测到 NVIDIA 显卡，本地识别继续使用 CPU。";
+  }
+  if (detail) {
+    detail.textContent = specs.length ? `${specs.join(" · ")}｜检测时间 ${data.checked_at || ""}` : "";
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = data.component_installed ? "已启用 GPU 加速" : "下载组件包（P2 开放）";
+  }
+}
+
+async function refreshGpuAccelStatus() {
+  const badge = $("gpu-accel-badge");
+  if (!badge) return;
+  let data = null;
+  try {
+    data = await api("/api/gpu-status");
+  } catch (error) {
+    data = null;
+  }
+  renderGpuAccelStatus(data);
 }
 
 function selectedAiProvider(baseUrl = $("s-base-url")?.value) {
@@ -3758,8 +4655,6 @@ function collectAiSelectionSettings() {
     preference_weights: collectPreferenceWeights(),
     style_profile_strength: normalizeStyleProfileStrength($("s-style-profile-strength")?.value),
     content_review_mode: $("s-content-review-mode")?.value || "off",
-    // 结尾风格（可选）：交给 M1 设计收尾章；空值=自然收尾
-    ending_style: $(`${prefix}-dir-ending`)?.value || "",
     m2_planner_mode: $("s-m2-planner-mode")?.value || "legacy",
     ai_rules: collectAiRules(),
   };
@@ -4278,7 +5173,7 @@ function renderAiFeedbackSamples(result = {}) {
         <span title="${escapeHtml(sample.text || "")}">${escapeHtml(sample.text || "")}</span>
       `).join("");
       return `
-        <details class="feedback-role-group">
+        <details class="feedback-role-group" data-fold="feedback-role-${role.role}">
           <summary>
             <span>${escapeHtml(roleLabels.get(role.role) || role.label || role.role)}</span>
             <strong>${roleSamples.length} 条</strong>
@@ -5278,6 +6173,100 @@ function addVideoPaths(targetId, paths) {
   setLines(targetId, next);
 }
 
+// 素材商品信息：把「单品识别」列表里的商品（含搭配商品）记到素材路径上。
+// 「其他商品搭配 = 排除」时用来剔除不属于本次主商品的素材；「允许作搭配」时把搭配商品名交给导演。
+function rememberMaterialProduct(path, info) {
+  const key = normalizeVideoPath(path);
+  if (!key || !info) return;
+  state.materialProducts[key] = {
+    title: String(info.title || ""),
+    product_id: String(info.product_id || ""),
+    promotion_id: String(info.promotion_id || ""),
+    paired: Array.isArray(info.paired) ? info.paired : [],
+  };
+}
+
+function rememberMaterialProducts(paths, rows) {
+  const byFile = new Map((Array.isArray(rows) ? rows : []).map((row) => [normalizeVideoPath(row.file), row]));
+  (Array.isArray(paths) ? paths : []).forEach((path) => {
+    const row = byFile.get(normalizeVideoPath(path));
+    if (!row) return;
+    rememberMaterialProduct(path, {
+      title: row.title || "",
+      product_id: row.product_id || "",
+      promotion_id: row.promotion_id || "",
+      paired: Array.isArray(row.paired_products) ? row.paired_products : [],
+    });
+  });
+}
+
+function materialProductInfo(path) {
+  return state.materialProducts[normalizeVideoPath(path)] || null;
+}
+
+function materialProductList(paths) {
+  return (Array.isArray(paths) ? paths : [])
+    .map((path) => {
+      const info = materialProductInfo(path);
+      return info ? { path, title: info.title, product_id: info.product_id, paired: info.paired } : null;
+    })
+    .filter(Boolean);
+}
+
+function materialPairedNames(paths) {
+  const names = [];
+  materialProductList(paths).forEach((item) => {
+    (item.paired || []).forEach((entry) => {
+      const name = String(entry?.title || "").trim();
+      if (name && !names.includes(name)) names.push(name);
+    });
+  });
+  return names;
+}
+
+// 「排除」时把不属于本次主商品的素材整条剔除；匹配不上主商品就原样返回（宁可不筛，也不误伤素材）。
+function filterSupportingMaterial(prefix, paths) {
+  const list = Array.isArray(paths) ? paths : [];
+  if (directorContentChoices(prefix).styling !== "block") return { paths: list, dropped: [] };
+  const target = String($(`${prefix}-main-product`)?.value || "").trim();
+  if (!target) return { paths: list, dropped: [], unmatched: true };
+  const want = target.toLowerCase();
+  const hit = (info) => {
+    const title = String(info?.title || "").trim().toLowerCase();
+    const pid = String(info?.product_id || "").trim().toLowerCase();
+    return Boolean(want) && (title === want || pid === want || (title && (title.includes(want) || want.includes(title))));
+  };
+  const known = list.map((path) => materialProductInfo(path)).filter(Boolean);
+  if (!known.length || !known.some(hit)) return { paths: list, dropped: [], unmatched: true };
+  const kept = [];
+  const dropped = [];
+  list.forEach((path) => {
+    const info = materialProductInfo(path);
+    if (info && !hit(info)) dropped.push(info);
+    else kept.push(path);
+  });
+  return { paths: kept, dropped };
+}
+
+function reportSupportingMaterialFilter(scope, result) {
+  if (result.dropped.length) {
+    const names = result.dropped.map((info) => info.title || info.product_id || "（无商品名）");
+    appendLog(scope, {
+      time: new Date().toLocaleTimeString(),
+      level: "warning",
+      message: `已按「排除其他商品搭配」剔除其他商品素材 ${result.dropped.length} 条：${names.join("、")}`,
+    });
+    toast(`已按「排除其他商品搭配」剔除 ${result.dropped.length} 条其他商品素材`, "warning");
+  } else if (result.unmatched) {
+    appendLog(scope, {
+      time: new Date().toLocaleTimeString(),
+      level: "info",
+      message: "素材上没有和本次主商品一致的记录，未做排除（保守处理）。",
+    });
+  }
+  return result.paths;
+}
+
 function isDesktopWebViewHost() {
   return Boolean(window.pywebview?.platform === "edgechromium");
 }
@@ -5770,7 +6759,7 @@ function videoThumbnailMap(targetId) {
 }
 
 async function inspectVideoThumbnails(targetId, lines) {
-  if (targetId !== "mix-video-paths") return;
+  if (targetId !== "mix-video-paths" && targetId !== "video-paths") return;
   const key = lines.map(normalizeVideoPath).join("\n");
   if (!key) {
     state.videoThumbnailByTarget[targetId] = {};
@@ -5849,23 +6838,29 @@ function renderVideoList(targetId) {
       (duplicateMap.nameCounts.get(nameKey) || 0) > 1 ||
       Boolean(info?.duplicate);
     const rowClass = ["video-row", isCompact ? "video-row-compact" : "", isInvalid ? "is-invalid" : "", isDuplicate ? "is-duplicate" : ""].filter(Boolean).join(" ");
+    const mateNames = (materialProductInfo(path)?.paired || [])
+      .map((entry) => String(entry?.title || "").trim())
+      .filter(Boolean);
     const badges = [
       isInvalid ? `<span class="video-badge is-invalid">无效</span>` : "",
       isDuplicate ? `<span class="video-badge is-duplicate">重复</span>` : "",
+      mateNames.length
+        ? `<span class="video-badge is-mate" title="搭配商品：${escapeHtml(mateNames.join("、"))}">+${mateNames.length} 搭配</span>`
+        : "",
     ].join("");
     const retryButton = isInvalid
       ? `<button class="icon-button video-retry" type="button" title="重新检测" aria-label="重新检测 ${escapeHtml(name)}" data-action="retry-video-inspection" data-target="${targetId}" data-index="${index}">&#8635;</button>`
       : "";
-    if (targetId === "mix-video-paths") {
+    if (targetId === "mix-video-paths" || targetId === "video-paths") {
       const thumbnailUrl = thumbnailMap[path] || thumbnailMap[normalizeVideoPath(path)] || "";
       const thumbnail = thumbnailUrl
-        ? `<img class="mix-video-thumb" src="${escapeHtml(thumbnailUrl)}" alt="" loading="lazy">`
-        : '<span class="mix-video-thumb mix-video-thumb-loading" aria-label="正在生成缩略图"></span>';
+        ? `<img class="material-video-thumb" src="${escapeHtml(thumbnailUrl)}" alt="" loading="lazy">`
+        : '<span class="material-video-thumb material-video-thumb-loading" aria-label="正在生成缩略图"></span>';
       return `
-        <div class="${rowClass} mix-video-row" draggable="true" data-video-row="${targetId}" data-index="${index}">
+        <div class="${rowClass} material-video-row" draggable="true" data-video-row="${targetId}" data-index="${index}">
           <div class="video-drag" title="拖拽排序">&#8801;</div>
-          <span class="mix-video-index">${index + 1}</span>
-          <div class="mix-video-thumb-wrap">${thumbnail}</div>
+          <span class="material-video-index">${index + 1}</span>
+          <div class="material-video-thumb-wrap">${thumbnail}</div>
           <div class="video-main">
             <div class="video-title"><strong title="${escapeHtml(path)}">${escapeHtml(name)}</strong>${badges}${retryButton}</div>
             <span class="video-meta">${escapeHtml(compactVideoMetaText(info))}</span>
@@ -6236,6 +7231,11 @@ function collectAiControls(prefix) {
     preference_weights: {},
     avoid: ["无关闲聊", "无效重复", ...(choices.styling === "block" ? ["搭配其他品"] : [])],
     supporting_products: choices.styling,
+    // 「允许作搭配」时把搭配商品名交给导演（只能作搭配、不混入独立卖点）。
+    supporting_product_names: choices.styling === "allow"
+      ? materialPairedNames(prefix === "mix" ? getLines("mix-video-paths") : getVideoPaths())
+      : [],
+    material_products: materialProductList(prefix === "mix" ? getLines("mix-video-paths") : getVideoPaths()),
     content_choices: choices,
     // Carry the currently visible policy with every run. Saving remains useful
     // for future runs, but a preview must never silently use stale settings.
@@ -6353,9 +7353,13 @@ function collectSmartPayload(options = {}) {
   if (requireVideos && !videoPaths.length) {
     throw new Error("请先填写视频路径");
   }
+  const materialPaths = reportSupportingMaterialFilter("smart-cut", filterSupportingMaterial("sc", videoPaths));
+  if (requireVideos && !materialPaths.length) {
+    throw new Error("按「排除其他商品搭配」筛完后没有可用素材，请检查主商品或素材");
+  }
   const primaryCategory = primaryCategoryValue("sc");
   return {
-    video_paths: videoPaths,
+    video_paths: materialPaths,
     srt_path: $("srt-path").value.trim(),
     output_dir: $("output-dir").value.trim(),
     output_naming_mode: $("sc-output-naming")?.value || "source_timestamp",
@@ -8118,11 +9122,11 @@ async function submitFeature(feature) {
     const groups = collectMixBatchGroups();
     if (groups.length > 1) {
       payload.groups = groups;
-      payload.video_paths = groups[0].video_paths;
+      payload.video_paths = filterSupportingMaterial("mix", groups[0].video_paths).paths;
       await submitMixBatch(payload, groups);
       return;
     } else if (groups.length === 1) {
-      payload.video_paths = groups[0].video_paths;
+      payload.video_paths = filterSupportingMaterial("mix", groups[0].video_paths).paths;
     }
   }
   await runPreflight(preflightFeature, payload, scopeForFeature(feature));
@@ -8443,6 +9447,21 @@ function scopeForFeature(feature) {
   return "settings";
 }
 
+function syncMaterialStateFromTasks(tasks) {
+  const s = materialState();
+  const materialTasks = (tasks || []).filter((task) => task.scope === "material");
+  const active = materialTasks.filter((task) => ["queued", "running"].includes(task.status));
+  const wasBusy = s.busy;
+  s.busy = active.length > 0;
+  if (wasBusy && !s.busy) {
+    // 建索引/导入/重建任务刚结束：概况和**索引列表**都要刷新，
+    // 并在已有检索词时重跑一次（否则用户得手动刷新页面才看到新索引）。
+    loadMaterialPage().then(() => {
+      if ($("material-query")?.value.trim()) materialSearch();
+    }).catch(() => {});
+  }
+}
+
 async function refreshTasks() {
   try {
     const data = await api("/api/tasks");
@@ -8452,6 +9471,7 @@ async function refreshTasks() {
     const latest = tasks.slice(-8).reverse();
     state.runningScopes = new Set(tasks.filter((task) => ["queued", "running"].includes(task.status)).map((task) => task.scope));
     syncLiveRoomActivityFromTasks(tasks);
+    syncMaterialStateFromTasks(tasks);
     renderTaskBadges(latest);
     updateLogProgressFromTasks(tasks);
     renderRunSummaries(tasks);
@@ -8532,10 +9552,17 @@ function syncLiveRoomActivityFromTasks(tasks) {
       const boundSegments = Number(task.product_bound_segments || 0);
       const pendingSegments = Number(task.product_pending_segments || 0);
       const candidateSignals = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
+      // 探针到底有没有收到任何商品信号。全为 0 时不是「等你去确认」，而是这一场没抓到商品消息
+      // （实测「影子」13:08–14:55 连续 8 段：轮询 869 次、candidate_signal 0 个、patchedMessageInstances 一直为 0）。
+      const rawSignals = Number(task.candidate_signal_count || 0)
+        + Number(task.strong_signal_count || 0)
+        + Number(task.product_evidence_count || 0);
       if (boundSegments > 0 || task.active_product_changed) {
         updates.productStatus = "已识别";
       } else if (candidateSignals > 0) {
         updates.productStatus = "候选待确认";
+      } else if (rawSignals <= 0 && (pendingSegments > 0 || task.product_segments)) {
+        updates.productStatus = "未收到商品信号";
       } else if (pendingSegments > 0 || task.product_segments) {
         updates.productStatus = "待确认";
       } else {
@@ -8560,10 +9587,15 @@ function syncLiveRoomActivityFromTasks(tasks) {
       const boundSegments = Number(task.product_bound_segments || 0);
       const pendingSegments = Number(task.product_pending_segments || 0);
       const candidateSignals = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
+      const rawSignals = Number(task.candidate_signal_count || 0)
+        + Number(task.strong_signal_count || 0)
+        + Number(task.product_evidence_count || 0);
       if (boundSegments > 0 || task.active_product_changed) {
         updates.productStatus = "已识别";
       } else if (candidateSignals > 0) {
         updates.productStatus = "候选待确认";
+      } else if (rawSignals <= 0 && (pendingSegments > 0 || task.product_segments)) {
+        updates.productStatus = "未收到商品信号";
       } else if (pendingSegments > 0 || task.product_segments) {
         updates.productStatus = "待确认";
       } else {
@@ -8581,7 +9613,10 @@ function syncLiveRoomActivityFromTasks(tasks) {
     state.liveRoomActivity[key] = { ...current, ...updates };
     changed = true;
   }
-  if (changed) renderLiveRooms();
+  if (changed) {
+    renderLiveRooms();
+    if (state.liveRecTab === "products") renderProductPanelLive();
+  }
 }
 
 function liveProductResultFromTask(task = {}) {
@@ -8595,6 +9630,12 @@ function liveProductResultFromTask(task = {}) {
   const activeCandidateCount = Number(task.active_product_candidate_count || task.status_2_candidate_count || 0);
   const ruleReviewCount = Number(task.active_product_rule_review_count || 0);
   const strongSignalCount = Number(task.strong_signal_count || 0);
+  const livenessBlock = task.liveness && typeof task.liveness === "object" ? task.liveness : {};
+  const livenessVerdict = String(livenessBlock.verdict || "").trim();
+  const livenessAction = String(task.liveness_action || "").trim();
+  const livenessText = livenessVerdict === "stalled"
+    ? (livenessAction === "failed" ? "页面自愈失败，建议手动重启 Chrome" : "页面可能已僵死，建议重启 Chrome")
+    : (livenessAction === "reload" ? "本段已自动重载页面" : livenessAction === "new_tab" ? "本段已自动切换标签页" : "");
   return {
     productOutputs,
     productOutputCount: resultCount,
@@ -8612,6 +9653,9 @@ function liveProductResultFromTask(task = {}) {
     recordingReturncode: task.recording_returncode,
     activeProductChanged: Boolean(task.active_product_changed || boundSegments > 0),
     rollingCycleCount: Number(task.rolling_cycle_count || 0),
+    livenessVerdict,
+    livenessAction,
+    livenessText,
   };
 }
 
@@ -11097,8 +12141,9 @@ function renderCommerceDirectorCostStrip(preview) {
 function collectFeaturePayload(feature) {
   if (feature === "mix") {
     const primaryCategory = primaryCategoryValue("mix");
+    const materialPaths = reportSupportingMaterialFilter("mix", filterSupportingMaterial("mix", getLines("mix-video-paths")));
     return {
-      video_paths: getLines("mix-video-paths"),
+      video_paths: materialPaths,
       output_dir: $("mix-output-dir").value.trim(),
       output_naming_mode: $("mix-output-naming")?.value || "source_timestamp",
       primary_category: primaryCategory,
@@ -11198,8 +12243,8 @@ function collectFeaturePayload(feature) {
       room_url: $("live-room-url").value.trim(),
       platform: $("live-platform").value,
       product_split_enabled: $("live-product-split-enabled")?.checked || false,
-      product_auto_cut: $("live-product-auto-cut")?.checked || false,
-      product_naming_mode: "product_id",
+      product_auto_cut: $("live-product-auto-cut")?.checked !== false,
+      product_naming_mode: liveNormalizeNamingMode($("live-naming-mode")?.value || "product_name"),
       product_default_minutes: Math.min(15, Number($("live-product-default-minutes")?.value || 10)),
       product_min_minutes: Math.min(15, Number($("live-product-min-minutes")?.value || 3)),
       product_max_minutes: Math.min(15, Number($("live-product-max-minutes")?.value || 15)),
@@ -11242,16 +12287,44 @@ function resetDedupDefaults() {
   toast("去重参数已恢复默认", "success");
 }
 
+// 右栏逐房间数字覆盖值：空 = 跟随全局（返回 ""），非法值也回落跟随全局。
+function liveNormalizeRoomNumber(value, min, max) {
+  const text = String(value === 0 ? "0" : value ?? "").trim();
+  if (!text) return "";
+  const num = Number(text);
+  if (!Number.isFinite(num)) return "";
+  return String(Math.min(max, Math.max(min, num)));
+}
+
 function normalizeLiveRoom(room = {}) {
   const name = String(room.name || "").trim();
   const url = String(room.url || "").trim();
   const platform = String(room.platform || "抖音").trim() || "抖音";
-  const product_naming_mode = liveNormalizeNamingMode(room.product_naming_mode || room.productNamingMode || room.naming_mode);
+  const raw_naming_mode = String(room.product_naming_mode || room.productNamingMode || room.naming_mode || "").trim();
+  const product_naming_mode = raw_naming_mode ? liveNormalizeNamingMode(raw_naming_mode) : "";
   const segment = liveNormalizeSegment(room.segment);
   const product_clip_minutes = liveNormalizeProductClip(room.product_clip_minutes || room.productClipMinutes);
   const record_mode = liveNormalizeRecordMode(room.record_mode || room.recordMode);
+  const product_switch_confirm_seconds = liveNormalizeRoomNumber(room.product_switch_confirm_seconds, 0, 120);
+  const product_min_minutes = liveNormalizeRoomNumber(room.product_min_minutes, 0.5, 15);
+  const product_max_minutes = liveNormalizeRoomNumber(room.product_max_minutes, 1, 15);
+  const product_head_seconds = liveNormalizeRoomNumber(room.product_head_seconds, 0, 300);
+  const product_tail_seconds = liveNormalizeRoomNumber(room.product_tail_seconds, 0, 300);
   if (!name || !url) return null;
-  return { name, url, platform, product_naming_mode, segment, product_clip_minutes, record_mode };
+  return {
+    name,
+    url,
+    platform,
+    product_naming_mode,
+    segment,
+    product_clip_minutes,
+    record_mode,
+    product_switch_confirm_seconds,
+    product_min_minutes,
+    product_max_minutes,
+    product_head_seconds,
+    product_tail_seconds,
+  };
 }
 
 function normalizeLiveRooms(rooms = []) {
@@ -11271,8 +12344,9 @@ function normalizeLiveRooms(rooms = []) {
 function liveNormalizeNamingMode(value) {
   const text = String(value || "").trim();
   if (text === "product_name") return "product_name";
+  if (text === "product_id") return "product_id";
   if (text === "room_timestamp") return "room_timestamp";
-  return "product_id";
+  return "product_name";
 }
 
 function liveNamingModeLabel(value) {
@@ -11283,7 +12357,8 @@ function liveNamingModeLabel(value) {
 }
 
 function liveEffectiveNamingMode(roomMode, namingMode) {
-  return liveNormalizeRecordMode(roomMode) === "duration"
+  const mode = liveNormalizeRecordMode(roomMode);
+  return mode === "duration" || mode === "single"
     ? "room_timestamp"
     : liveNormalizeNamingMode(namingMode);
 }
@@ -11319,17 +12394,19 @@ const LIVE_RECORD_MODE_OPTIONS = [
   { value: "", label: "跟随全局" },
   { value: "duration", label: "整场录制" },
   { value: "product", label: "单品扫描" },
+  { value: "single", label: "单文件不分段" },
 ];
 
 function liveNormalizeRecordMode(value) {
   const text = String(value || "").trim().toLowerCase();
-  return text === "duration" || text === "product" ? text : "";
+  return text === "duration" || text === "product" || text === "single" ? text : "";
 }
 
 function liveRecordModeLabel(value) {
   const mode = liveNormalizeRecordMode(value);
   if (mode === "duration") return "整场录制";
   if (mode === "product") return "单品扫描";
+  if (mode === "single") return "单文件不分段";
   return "跟随全局";
 }
 
@@ -11350,6 +12427,25 @@ function updateLiveRoomRecordMode(index, value) {
 function updateLiveRoomProductClip(index, value) {
   if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
   state.liveRooms[index] = normalizeLiveRoom({ ...state.liveRooms[index], product_clip_minutes: value }) || state.liveRooms[index];
+  saveLiveRooms();
+  renderLiveRooms();
+}
+
+// 右栏逐房间覆盖值的允许范围（与左栏全局控件一致），空值表示跟随全局。
+const LIVE_ROOM_NUMBER_RANGES = {
+  product_switch_confirm_seconds: [0, 120],
+  product_min_minutes: [0.5, 15],
+  product_max_minutes: [1, 15],
+  product_head_seconds: [0, 300],
+  product_tail_seconds: [0, 300],
+};
+
+function updateLiveRoomProductSetting(index, key, value) {
+  const range = LIVE_ROOM_NUMBER_RANGES[key];
+  if (!range) return;
+  if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
+  const room = state.liveRooms[index];
+  state.liveRooms[index] = normalizeLiveRoom({ ...room, [key]: liveNormalizeRoomNumber(value, range[0], range[1]) }) || room;
   saveLiveRooms();
   renderLiveRooms();
 }
@@ -11386,20 +12482,29 @@ function loadLiveRooms() {
   }
   state.liveRooms = localRooms;
   renderLiveRooms();
-  loadLiveRoomsFromServer(Boolean(localRooms.length));
+  loadLiveRoomsFromServer();
 }
 
-async function loadLiveRoomsFromServer(hasLocalRooms = false) {
+// 直播间列表以【服务端】为唯一权威。
+//
+// 旧实现是反的：只要本地 localStorage 里有任何房间，就无视服务端列表、并把本地那份
+// 【覆盖】写回服务端。于是另一个浏览器 / 另一个标签页 / 内嵌 WebView 里残留的旧列表
+// 会把用户刚删掉的直播间“复活”（表现为：删掉的直播间又回到列表里）。
+//
+// 现在的规则：
+//   · 服务端有列表  -> 一律以服务端为准（本地只是缓存，用完覆盖本地缓存）；
+//   · 服务端为空    -> 才把本地缓存当作「升级用户首次打开」的一次性迁移推上去。
+async function loadLiveRoomsFromServer() {
   try {
     const result = await api("/api/live-rec/rooms");
     const remoteRooms = normalizeLiveRooms(result.rooms || []);
-    if (!hasLocalRooms && remoteRooms.length) {
+    if (remoteRooms.length) {
       state.liveRooms = remoteRooms;
       persistLiveRoomsLocal();
       renderLiveRooms();
       return;
     }
-    if (hasLocalRooms) {
+    if ((state.liveRooms || []).length) {
       saveLiveRoomsToServer();
     }
   } catch (error) {
@@ -11432,18 +12537,8 @@ async function saveLiveRoomsToServer() {
 }
 
 function liveRoomsFromTable() {
-  const cards = Array.from(document.querySelectorAll("#page-live-rec .live-room-card"));
-  return cards.map((card) => {
-    return normalizeLiveRoom({
-      name: card.dataset.name || "",
-      platform: card.dataset.platform || "",
-      url: card.dataset.url || "",
-      product_naming_mode: card.querySelector("[data-live-naming-mode]")?.value || card.dataset.productNamingMode || "product_id",
-      segment: card.querySelector("[data-live-segment]")?.value || card.dataset.liveSegment || "",
-      product_clip_minutes: card.querySelector("[data-live-product-segment]")?.value || card.dataset.liveProductSegment || "",
-      record_mode: card.querySelector("[data-live-record-mode]")?.value || card.dataset.liveRecordMode || "",
-    });
-  }).filter(Boolean);
+  // 列表已改为一行式，达人配置统一在「录制设置」/⋯「独立设置」，状态对象即为唯一数据源。
+  return normalizeLiveRooms(state.liveRooms || []);
 }
 
 function liveRoomKey(room) {
@@ -11486,6 +12581,7 @@ function renderLiveProductResult(index, activity = {}, renderMode = "") {
     : "";
   return `
     <div class="live-product-result">
+      <button class="live-product-enter" data-paction="open-products-entry" data-room="${escapeHtml(((state.liveRooms || [])[Number(index)] || {}).name || "")}">在录屏页看单品识别 <span aria-hidden="true">›</span></button>
       <div class="live-product-result-head">
         <strong>${escapeHtml(title)}</strong>
         <button class="button button-muted button-small" data-action="live-open-product-dir" data-index="${index}" ${clipsDir ? "" : "disabled"}>
@@ -11573,7 +12669,7 @@ function liveRoomMatchesFilter(room, activity) {
   if (filter === "recording") return recordStatus.includes("录制中");
   if (filter === "live") return liveStatus.includes("直播中");
   if (filter === "not_started") return liveStatus.includes("未") || liveStatus.includes("待");
-  if (filter === "error") return recordStatus.includes("失败") || productStatus.includes("错误");
+  if (filter === "error") return recordStatus.includes("失败") || productStatus.includes("错误") || productStatus.includes("未收到商品信号");
   if (filter === "unmonitored") return recordStatus.includes("待录制") || productStatus.includes("未启用");
   return true;
 }
@@ -11589,9 +12685,11 @@ function renderLiveRooms() {
   const grid = document.querySelector("#live-room-grid");
   if (!grid) return;
   const active = document.activeElement;
-  if (active && grid.contains(active) && (active.tagName === "SELECT" || active.tagName === "INPUT")) {
-    // A card control is focused/open (e.g. an expanded select): defer the re-render
-    // so it is not torn down mid-interaction.
+  const inspector = document.querySelector("#live-rec-inspector");
+  const activeInControl = Boolean(active) && (active.tagName === "SELECT" || active.tagName === "INPUT");
+  const controlScopeHit = activeInControl && (grid.contains(active) || Boolean(inspector && inspector.contains(active)));
+  if (controlScopeHit) {
+    // A row or inspector control is focused/open: defer the re-render so it is not torn down mid-interaction.
     state.liveRoomsRenderPending = true;
     return;
   }
@@ -11601,125 +12699,603 @@ function renderLiveRooms() {
   const visibleRooms = rooms
     .map((room, index) => ({ room, index, activity: liveRoomActivity(room) }))
     .filter((item) => liveRoomMatchesFilter(item.room, item.activity));
+  updateLiveRecSummary(rooms);
   if (!rooms.length || !visibleRooms.length) {
     const empty = document.createElement("div");
     empty.className = "live-room-empty";
-    empty.textContent = rooms.length ? "没有符合筛选条件的直播间" : "暂无直播间";
+    empty.textContent = rooms.length
+      ? "没有符合筛选条件的达人"
+      : "还没有达人：粘贴达人主页或直播间链接，点「添加」就能开始";
     grid.appendChild(empty);
+    renderLiveInspector();
     return;
   }
   visibleRooms.forEach(({ room, index, activity }) => {
-    const productEnabled = $("live-product-split-enabled")?.checked !== false && isDouyinLiveRoom(room) && ($("live-record-mode")?.value || "product") === "product";
+    const key = liveRoomKey(room);
     const liveStatus = activity.liveStatus || "未检测";
     const recordStatus = activity.recordStatus || "待录制";
-    const productStatus = activity.productStatus || (productEnabled ? "待监控" : "未启用");
-    const qualityLabel = normalizeLiveStreamQuality(activity.streamQuality, liveMinStreamQualityLabel());
-    const liveTone = liveStatus.includes("中") || liveStatus.includes("已") ? "ok" : "";
-    const recordTone = recordStatus.includes("录制中") ? "run" : recordStatus.includes("失败") ? "danger" : recordStatus.includes("完成") ? "ok" : "";
-    const productTone = productStatus.includes("监控") ? "run" : productStatus.includes("已识别") || productStatus.includes("捕获") ? "ok" : productStatus.includes("候选") || productStatus.includes("待确认") || productStatus.includes("未捕获") ? "warn" : "";
-    const card = document.createElement("article");
-    card.className = `live-room-card ${liveRoomStatusClass(activity)}`;
-    card.dataset.name = room.name;
-    card.dataset.platform = room.platform;
-    card.dataset.url = room.url;
-    card.dataset.productNamingMode = liveNormalizeNamingMode(room.product_naming_mode);
-    card.dataset.liveSegment = liveNormalizeSegment(room.segment);
-    card.dataset.liveProductSegment = liveNormalizeProductClip(room.product_clip_minutes);
-    card.dataset.liveRecordMode = liveNormalizeRecordMode(room.record_mode);
-    const namingMode = liveNormalizeNamingMode(room.product_naming_mode);
-    const segmentMode = liveNormalizeSegment(room.segment);
-    const productSegmentMode = liveNormalizeProductClip(room.product_clip_minutes);
-    const recordMode = liveNormalizeRecordMode(room.record_mode);
-    const effectiveNaming = liveEffectiveNamingMode(recordMode, namingMode);
-    const namingLocked = recordMode === "duration";
-    card.innerHTML = `
-      <div class="live-card-top">
-        <div class="live-card-title">
-          <span class="live-platform-mark">${escapeHtml(room.platform.slice(0, 2) || "直")}</span>
+    const statusText = `${liveStatus} ${recordStatus}`;
+    const run = liveRoomHasActiveLocalTask(room) || /录制中|检测中|启动中|排队中|监控中/.test(statusText);
+    const failed = /失败|错误/.test(statusText);
+    const badgeText = statusText.includes("录制中")
+      ? "录制中"
+      : failed
+        ? "录制失败"
+        : run
+          ? "已开始监测"
+          : /未直播|未录制|未开播/.test(statusText)
+            ? "未开播"
+            : "未监测";
+    const badgeTone = statusText.includes("录制中") ? "run" : failed ? "danger" : run ? "ok" : "";
+    const duration = activity.duration && activity.duration !== "0:00"
+      ? `已录制 ${activity.duration}`
+      : (/未直播|未录制|未开播/.test(statusText) ? "未开播" : "—");
+    const quality = activity.streamQuality ? String(activity.streamQuality) : "";
+    const row = document.createElement("article");
+    row.className = `live-room-row${liveRoomStatusClass(activity) ? ` ${liveRoomStatusClass(activity)}` : ""}${state.liveSelectedKey === key ? " is-selected" : ""}`;
+    row.dataset.index = String(index);
+    row.dataset.roomKey = key;
+    row.dataset.action = "live-select-room";
+    row.title = room.url;
+    row.innerHTML = `
+      <div class="live-room-row-main">
+        <span class="live-platform-mark">${escapeHtml((room.platform || "直播").slice(0, 2))}</span>
+        <div class="live-room-row-text">
           <strong>${escapeHtml(room.name)}</strong>
-        </div>
-        ${liveStatusBadge(recordStatus, recordTone)}
-      </div>
-      <div class="live-card-meta">
-        <div>
-          <span>直播状态</span>
-          <strong>${liveStatusBadge(liveStatus, liveTone)}</strong>
-        </div>
-        <div>
-          <span>商品识别</span>
-          <strong>${liveStatusBadge(productStatus, productTone)}</strong>
-        </div>
-        <div>
-          <span>录制画质</span>
-          <strong>${escapeHtml(qualityLabel)}</strong>
-        </div>
-        <div>
-          <span>录制时长</span>
-          <strong>${escapeHtml(activity.duration || "0:00:00")}</strong>
+          <span class="live-room-row-url">${escapeHtml(room.url)}</span>
         </div>
       </div>
-      <div class="live-card-url" title="${escapeHtml(room.url)}">${escapeHtml(room.url)}</div>
-      ${renderLiveProductResult(index, activity, recordMode)}
-      <div class="live-card-control-row">
-        <div class="live-card-config">
-          <label>
-            <span>录制方式</span>
-            <select data-live-record-mode data-index="${index}">
-              ${liveRecordModeOptionsHtml(recordMode)}
-            </select>
-          </label>
-          <label>
-            <span>整场分段时间</span>
-            <select data-live-segment data-index="${index}">
-              ${liveSegmentOptionsHtml(segmentMode)}
-            </select>
-          </label>
-          <label>
-            <span>单品片段时长</span>
-            <select data-live-product-segment data-index="${index}">
-              ${liveProductClipOptionsHtml(productSegmentMode)}
-            </select>
-          </label>
-          <label>
-            <span>命名方式</span>
-            <select data-live-naming-mode data-index="${index}" ${namingLocked ? "disabled" : ""}>
-              <option value="room_timestamp" ${effectiveNaming === "room_timestamp" ? "selected" : ""}>直播间名+时间戳</option>
-              <option value="product_id" ${effectiveNaming === "product_id" ? "selected" : ""}>商品ID命名</option>
-              <option value="product_name" ${effectiveNaming === "product_name" ? "selected" : ""}>商品名称命名</option>
-            </select>
-          </label>
-        </div>
-        <div class="live-card-actions">
-          <button class="button button-secondary button-small" data-action="record-live-room" data-index="${index}"><span class="button-icon" aria-hidden="true">◎</span><span>监控</span></button>
-          <button class="button button-muted button-small" data-action="live-open-room-dir" data-index="${index}"><span class="button-icon" aria-hidden="true">■</span><span>目录</span></button>
-          <button class="button button-danger button-small" data-action="live-stop-room" data-index="${index}"><span class="button-icon" aria-hidden="true">■</span><span>停止</span></button>
-          <button class="button button-muted button-small" data-action="live-detail-room" data-index="${index}"><span class="button-icon" aria-hidden="true">i</span><span>详情</span></button>
-          <button class="button button-muted button-small" data-action="remove-live-room" data-index="${index}"><span class="button-icon" aria-hidden="true">⌫</span><span>删除</span></button>
-        </div>
+      <div class="live-room-row-stats">
+        <span class="live-room-row-meta">${escapeHtml(duration)}</span>
+        ${quality ? `<span class="live-room-row-meta">${escapeHtml(quality)}</span>` : ""}
+      </div>
+      <div class="live-room-row-state">${liveStatusBadge(badgeText, badgeTone)}</div>
+      <div class="live-room-row-actions">
+        ${run
+          ? `<button class="button button-muted button-small" data-action="live-stop-room" data-index="${index}"><span class="button-icon" aria-hidden="true">■</span><span>停止监测</span></button>`
+          : `<button class="button button-primary button-small" data-action="record-live-room" data-index="${index}"><span class="button-icon" aria-hidden="true">▶</span><span>开始监测</span></button>`}
+        <button class="button button-muted button-small" data-action="live-row-more" data-index="${index}" title="更多操作" aria-label="更多操作"><span class="button-icon" aria-hidden="true">⋯</span></button>
+      </div>
+      <div class="live-room-row-menu"${state.liveOpenRowMenu === index ? "" : " hidden"}>
+        <button class="button button-muted button-small" data-action="live-open-room-dir" data-index="${index}">录制目录</button>
+        <button class="button button-muted button-small" data-action="live-open-product-dir" data-index="${index}">单品目录</button>
+        <button class="button button-muted button-small" data-action="live-preview-room" data-index="${index}"${activity.file ? "" : " disabled"}>预览输出</button>
+        <button class="button button-muted button-small" data-action="live-detail-room" data-index="${index}">详情</button>
+        <button class="button button-muted button-small" data-action="live-refresh-room-name" data-index="${index}">重新获取名称</button>
+        <button class="button button-danger button-small" data-action="remove-live-room" data-index="${index}">删除</button>
       </div>`;
-    grid.appendChild(card);
+    grid.appendChild(row);
+  });
+  renderLiveInspector();
+}
+
+function liveSelectedIndex() {
+  const rooms = state.liveRooms || [];
+  if (!rooms.length) return -1;
+  if (state.liveSelectedKey) {
+    const hit = rooms.findIndex((room) => liveRoomKey(room) === state.liveSelectedKey);
+    if (hit >= 0) return hit;
+  }
+  const running = rooms.findIndex((room) => liveRoomHasActiveLocalTask(room));
+  return running >= 0 ? running : 0;
+}
+
+function selectLiveRoom(index) {
+  const room = (state.liveRooms || [])[index];
+  if (!room) return;
+  const key = liveRoomKey(room);
+  state.liveSelectedKey = key;
+  renderLiveRooms();
+}
+
+function updateLiveRecSummary(rooms = []) {
+  const summary = document.querySelector("#live-rec-summary");
+  const count = document.querySelector("#live-room-count");
+  if (count) count.textContent = rooms.length ? `${rooms.length} 个` : "";
+  if (!summary) return;
+  let recording = 0;
+  let monitoring = 0;
+  rooms.forEach((room) => {
+    const activity = liveRoomActivity(room);
+    const text = `${activity.liveStatus || ""} ${activity.recordStatus || ""}`;
+    if (text.includes("录制中")) recording += 1;
+    if (liveRoomHasActiveLocalTask(room) || /录制中|检测中|启动中|排队中|监控中/.test(text)) monitoring += 1;
+  });
+  if (!rooms.length) {
+    summary.innerHTML = `<span class="live-status-dot"></span>暂无监测`;
+    return;
+  }
+  summary.innerHTML = `<span class="live-status-dot${recording ? " is-run" : ""}"></span>${recording} 录制中 · ${monitoring} 监测中`;
+}
+
+// 右栏实时画面：只在"选中的达人变化 / 切页 / 手动重连"时改 src，
+// 绝不参与每 2.5 秒的重绘，否则会把正在传输的 MJPEG 流打断。
+function syncLiveInspectorPreview(index, room, force = false) {
+  const img = document.querySelector("#live-inspector-preview");
+  if (!img) return;
+  const badge = document.querySelector("#live-inspector-preview-state");
+  const tip = document.querySelector("#live-inspector-preview-tip");
+  const pageEl = document.querySelector("#live-rec-inspector")?.closest(".page");
+  const pageActive = !pageEl || pageEl.classList.contains("is-active");
+  const key = room && pageActive ? `${liveRoomKey(room)}#${index}` : "";
+  if (!force && state.livePreviewKey === key) return;
+  state.livePreviewKey = key;
+  if (!key) {
+    img.removeAttribute("src");
+    if (badge) badge.textContent = "";
+    if (tip) tip.textContent = "选中左栏达人后显示画面（未开播时不显示）。";
+    return;
+  }
+  img.onerror = () => {
+    if (!img.getAttribute("src")) return;
+    img.removeAttribute("src");
+    state.livePreviewKey = "";
+    if (badge) badge.textContent = "";
+    if (tip) tip.textContent = "没取到画面：可能是该直播间未开播，或后端未重启（实时画面接口在服务端，重启应用后生效）。";
+  };
+  img.src = `/api/live-rec/preview?index=${index}&t=${Date.now()}`;
+  if (badge) badge.textContent = "● 实时";
+  if (tip) tip.textContent = "约 1 秒延迟 · 2 帧/秒；画面为纯深色表示该直播间未开播。";
+}
+
+function liveFoldOpen(key) {
+  return Boolean(state.foldState && state.foldState[key]);
+}
+
+// 右栏 5 张卡折叠后显示的一句话摘要：一处集中算，回填到卡片标题行右侧。
+function updateLiveInspectorDigests(context = {}) {
+  const keys = ["preview", "mode", "slice", "detail", "product"];
+  const set = (key, text) => {
+    const el = document.querySelector(`#live-digest-${key}`);
+    if (!el) return;
+    const value = String(text || "");
+    el.textContent = value;
+    el.title = value;
+  };
+  const room = context.room;
+  if (!room) {
+    keys.forEach((key) => set(key, ""));
+    return;
+  }
+  const activity = context.activity || {};
+  const mode = context.effectiveMode || liveRoomEffectiveMode(room);
+  const modeLabel = liveRecordModeLabel(mode);
+  const status = activity.liveStatus || "未检测";
+  const quality = String(activity.streamQuality || "").trim();
+  set("preview", quality ? `${status} · ${quality}` : status);
+
+  const globalSegment = String($("live-segment")?.value || "");
+  const segment = liveNormalizeSegment(room.segment) || (globalSegment === "不限" ? "不分段" : globalSegment);
+  const rawNaming = String(room.product_naming_mode || "").trim();
+  const naming = liveEffectiveNamingMode(mode, rawNaming ? liveNormalizeNamingMode(rawNaming) : "");
+  const namingLocked = mode === "duration" || mode === "single";
+  set("mode", namingLocked ? `${modeLabel} · ${segment}` : `${modeLabel} · ${segment} · ${liveNamingModeLabel(naming)}`);
+
+  if (mode !== "product") {
+    set("slice", "当前录制方式不产生单品段");
+  } else {
+    const clip = liveNormalizeProductClip(room.product_clip_minutes);
+    const globalClip = String($("live-product-default-minutes")?.value || "10");
+    const parts = [clip ? liveProductClipLabel(clip) : `跟随全局 ${globalClip} 分钟`];
+    const pick = (key, fallbackId) => String(room[key] ?? "").trim() || String($(fallbackId)?.value || "").trim();
+    const confirm = pick("product_switch_confirm_seconds", "live-product-switch-confirm");
+    const minMinutes = pick("product_min_minutes", "live-product-min-minutes");
+    const maxMinutes = pick("product_max_minutes", "live-product-max-minutes");
+    if (confirm) parts.push(`换品${confirm}秒`);
+    if (minMinutes || maxMinutes) parts.push(`${minMinutes || "?"}–${maxMinutes || "?"}分`);
+    set("slice", parts.join(" · "));
+  }
+
+  const { rows } = liveRoomInspectorRows(room, activity, mode);
+  const roomRows = rows.filter(([label]) => String(label).includes("（本直播间）")).length;
+  set("detail", `本直播间 ${roomRows} · 全局 ${Math.max(rows.length - roomRows, 0)}`);
+
+  set("product", activity.productStatus || (isDouyinLiveRoom(room) ? "待监控" : "未启用"));
+}
+
+function renderLiveInspector() {
+  const currentBar = document.querySelector("#live-inspector-current");
+  const detailBox = document.querySelector("#live-inspector-detail");
+  const settingsBox = document.querySelector("#live-inspector-settings");
+  const productSettingsBox = document.querySelector("#live-inspector-product-settings");
+  const sliceCard = document.querySelector("#live-inspector-product-slice");
+  const productBox = document.querySelector("#live-inspector-product");
+  const productCountEl = document.querySelector("#live-inspector-product-count");
+  if (!productBox) return;
+  const index = liveSelectedIndex();
+  const room = index >= 0 ? (state.liveRooms || [])[index] : null;
+  if (!room) {
+    syncLiveInspectorPreview(-1, null);
+    if (currentBar) currentBar.innerHTML = `<span class="live-inspector-empty">从左侧列表选一个达人</span>`;
+    if (settingsBox) settingsBox.innerHTML = `<p class="live-inspector-empty">选中达人后可改这个直播间的录制方式</p>`;
+    if (productSettingsBox) productSettingsBox.innerHTML = `<p class="live-inspector-empty">选中达人后显示单品参数</p>`;
+    if (sliceCard) sliceCard.hidden = true;
+    if (detailBox) detailBox.innerHTML = `<p class="live-inspector-empty">选中达人后显示生效值</p>`;
+    productBox.innerHTML = `<p class="live-inspector-empty">开始监测后显示单品时间线</p>`;
+    if (productCountEl) productCountEl.textContent = "";
+    updateLiveInspectorDigests({ room: null });
+    return;
+  }
+  state.liveSelectedKey = liveRoomKey(room);
+  syncLiveInspectorPreview(index, room);
+  const activity = liveRoomActivity(room);
+  const liveStatus = activity.liveStatus || "未检测";
+  const recordStatus = activity.recordStatus || "待录制";
+  const statusText = `${liveStatus} ${recordStatus}`;
+  const failed = /失败|错误/.test(statusText);
+  const run = liveRoomHasActiveLocalTask(room) || /录制中|检测中|启动中|排队中|监控中/.test(statusText);
+  const badgeText = statusText.includes("录制中") ? "录制中" : failed ? "录制失败" : run ? "已开始监测"
+    : /未直播|未录制|未开播/.test(statusText) ? "未开播" : "未监测";
+  const badgeTone = statusText.includes("录制中") ? "run" : failed ? "danger" : run ? "ok" : "";
+  if (currentBar) {
+    currentBar.innerHTML = `<span class="live-platform-mark">${escapeHtml((room.platform || "直播").slice(0, 2))}</span><strong>${escapeHtml(room.name)}</strong>${liveStatusBadge(badgeText, badgeTone)}`;
+  }
+  const effectiveMode = liveRoomEffectiveMode(room);
+  const showSlice = effectiveMode === "product";
+  if (settingsBox) settingsBox.innerHTML = renderLiveInspectorSettings(index, room);
+  if (productSettingsBox) {
+    productSettingsBox.innerHTML = showSlice
+      ? renderLiveInspectorProductSettings(index, room)
+      : `<p class="live-inspector-empty">当前录制方式不产生单品段</p>`;
+  }
+  if (sliceCard) sliceCard.hidden = !showSlice;
+  if (detailBox) detailBox.innerHTML = renderLiveInspectorDetail(index, room, activity, effectiveMode);
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const extracted = Number(activity.productOutputCount || outputs.length || 0);
+  const pending = Number(activity.productPendingSegments || 0);
+  if (productCountEl) productCountEl.textContent = (extracted || pending) ? `已提取 ${extracted} · 待确认 ${pending}` : "";
+  const productHtml = renderLiveProductResult(index, activity, "product");
+  productBox.innerHTML = (productHtml || "") + (renderLiveProductList(index, activity) || "")
+    || `<p class="live-inspector-empty">开始监测后显示单品时间线</p>`;
+  updateLiveInspectorDigests({ room, activity, effectiveMode, extracted, pending });
+}
+// 本达人的有效录制方式：房间没覆盖就用左栏全局值。
+function liveRoomEffectiveMode(room) {
+  return liveNormalizeRecordMode(room?.record_mode) || liveNormalizeRecordMode($("live-record-mode")?.value) || "product";
+}
+
+// 右栏「录制方式」卡：三项，改动立即保存（写回逻辑复用既有 updateLiveRoom*）。
+function renderLiveInspectorSettings(index, room) {
+  const effectiveMode = liveRoomEffectiveMode(room);
+  const recordMode = liveNormalizeRecordMode(room.record_mode);
+  const segment = liveNormalizeSegment(room.segment);
+  const rawNaming = String(room.product_naming_mode || "").trim();
+  const naming = rawNaming ? liveNormalizeNamingMode(rawNaming) : "";
+  const effectiveNaming = liveEffectiveNamingMode(effectiveMode, naming);
+  const namingLocked = effectiveMode === "duration" || effectiveMode === "single";
+  const namingSelection = namingLocked ? effectiveNaming : naming;
+  const segmentLocked = effectiveMode === "single";
+  const hint = segmentLocked
+    ? "单文件不分段：整场录成一个文件，不再下切成段。"
+    : namingLocked
+      ? "整场录制不做商品识别，文件名固定为「直播间名+时间戳」。"
+      : "跟随全局时按全局实际值生效；改任意一项即成为本直播间专属设置。";
+  return `
+    <div class="live-inspector-fields">
+      <label class="live-inspector-field">
+        <span>录制方式</span>
+        <select data-index="${index}" data-live-record-mode>${liveRecordModeOptionsHtml(recordMode)}</select>
+      </label>
+      <label class="live-inspector-field">
+        <span>分段时间</span>
+        <select data-index="${index}" data-live-segment${segmentLocked ? " disabled" : ""}>${liveSegmentOptionsHtml(segment)}</select>
+      </label>
+      <label class="live-inspector-field">
+        <span>文件命名</span>
+        <select data-index="${index}" data-live-naming-mode${namingLocked ? " disabled" : ""}>
+          <option value=""${namingSelection === "" ? " selected" : ""}>跟随全局</option>
+          <option value="room_timestamp"${namingSelection === "room_timestamp" ? " selected" : ""}>直播间名+时间戳</option>
+          <option value="product_id"${namingSelection === "product_id" ? " selected" : ""}>商品ID命名</option>
+          <option value="product_name"${namingSelection === "product_name" ? " selected" : ""}>商品名称命名</option>
+        </select>
+      </label>
+    </div>
+    <p class="live-inspector-hint">${hint}</p>`;
+}
+
+// 右栏「单品切片」卡：仅单品扫描时显示；数字项留空 = 跟随全局。
+function renderLiveInspectorProductSettings(index, room) {
+  const clip = liveNormalizeProductClip(room.product_clip_minutes);
+  const numberField = (label, key, min, max, step, unit) => {
+    const value = String(room[key] ?? "").trim();
+    return `
+      <label class="live-inspector-field">
+        <span>${escapeHtml(label)}（${escapeHtml(unit)}）</span>
+        <input type="number" min="${min}" max="${max}" step="${step}" data-index="${index}" data-live-product-setting="${key}" value="${escapeHtml(value)}" placeholder="跟随全局">
+      </label>`;
+  };
+  return `
+    <div class="live-inspector-fields">
+      <label class="live-inspector-field">
+        <span>单品片段时长</span>
+        <select data-index="${index}" data-live-product-segment>${liveProductClipOptionsHtml(clip)}</select>
+      </label>
+      ${numberField("换品确认", "product_switch_confirm_seconds", 0, 120, 1, "秒")}
+      ${numberField("最短单品时长", "product_min_minutes", 0.5, 15, 0.5, "分钟")}
+      ${numberField("最长单品时长", "product_max_minutes", 1, 15, 0.5, "分钟")}
+      ${numberField("片头缓冲上限", "product_head_seconds", 0, 300, 1, "秒")}
+      ${numberField("片尾缓冲上限", "product_tail_seconds", 0, 300, 1, "秒")}
+    </div>
+    <p class="live-inspector-hint">留空 = 跟随全局。片头/片尾填的是缓冲上限，实际按片段长度的 15% / 20% 自动收紧。</p>`;
+}
+
+// 右栏「本直播间生效值」：只列本达人相关的字段，每项在标签里标出来源（本直播间 / 全局）。
+function liveRoomInspectorRows(room, activity, effectiveMode) {
+  const rows = [];
+  const add = (label, source, value) => {
+    rows.push([`${label}（${source === "room" ? "本直播间" : "全局"}）`, String(value ?? "-")]);
+  };
+  const globalMode = liveNormalizeRecordMode($("live-record-mode")?.value) || "product";
+  const globalSegment = String($("live-segment")?.value || "不限");
+  const roomMode = liveNormalizeRecordMode(room.record_mode);
+  add("录制方式", roomMode ? "room" : "global", liveRecordModeLabel(roomMode || globalMode));
+  const roomSegment = liveNormalizeSegment(room.segment);
+  add("分段时间", roomSegment ? "room" : "global", roomSegment || (globalSegment === "不限" ? "不分段" : globalSegment));
+  if (effectiveMode === "product") {
+    const roomClip = liveNormalizeProductClip(room.product_clip_minutes);
+    add("单品片段时长", roomClip ? "room" : "global", roomClip ? liveProductClipLabel(roomClip) : `${$("live-product-default-minutes")?.value || "10"} 分钟`);
+    const roomNaming = String(room.product_naming_mode || "").trim();
+    add("文件命名", roomNaming ? "room" : "global", liveNamingModeLabel(roomNaming || liveNormalizeNamingMode($("live-naming-mode")?.value)));
+    [
+      ["换品确认", "product_switch_confirm_seconds", "live-product-switch-confirm", " 秒"],
+      ["最短单品时长", "product_min_minutes", "live-product-min-minutes", " 分钟"],
+      ["最长单品时长", "product_max_minutes", "live-product-max-minutes", " 分钟"],
+      ["片头缓冲上限", "product_head_seconds", "live-product-head-seconds", " 秒"],
+      ["片尾缓冲上限", "product_tail_seconds", "live-product-tail-seconds", " 秒"],
+    ].forEach(([label, key, globalId, unit]) => {
+      const roomText = String(room[key] ?? "").trim();
+      const fallback = String($(globalId)?.value || "").trim() || "-";
+      add(label, roomText ? "room" : "global", `${roomText || fallback}${unit}`);
+    });
+  }
+  add("检测间隔", "global", `${String($("live-check-interval")?.value || "30")} 秒`);
+  add("最低画质", "global", liveMinStreamQualityLabel());
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const diagnostics = [
+    ["监控状态", activity.productStatus || (isDouyinLiveRoom(room) ? "待监控" : "未启用")],
+    ["已提取单品", `${Number(activity.productOutputCount || outputs.length || 0)} 个`],
+    ["已绑定商品", `${Number(activity.productBoundSegments || 0)} 段`],
+    ["待确认单品", `${Number(activity.productPendingSegments || 0)} 段`],
+    ["候选信号", `${Number(activity.productCandidateSignals || 0)} 条`],
+    ["强信号", `${Number(activity.productStrongSignalCount || 0)} 条`],
+    ["需复核候选", `${Number(activity.productRuleReviewCount || 0)} 个`],
+    ["未确认原因", activity.productUnresolvedReason || "-"],
+    ...(activity.livenessText ? [["页面状态", activity.livenessText]] : []),
+    ["录制状态", activity.recordStatus || "未监控"],
+    ["直播状态", activity.liveStatus || "未检测"],
+  ];
+  return { rows, diagnostics };
+}
+
+// 右栏「本直播间生效值」卡：常显生效值 + 折叠运行信息。
+function renderLiveInspectorDetail(index, room, activity, effectiveMode) {
+  const { rows, diagnostics } = liveRoomInspectorRows(room, activity, effectiveMode || liveRoomEffectiveMode(room));
+  const output = String(activity.file || "").trim();
+  const lineHtml = (list) => list.map(([label, value]) => `
+      <div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "-")}</strong></div>`).join("");
+  return `
+    <div class="live-inspector-lines">
+      <div><span>输出文件</span><strong title="${escapeHtml(output)}">${escapeHtml(output ? livePathName(output) : "尚未生成")}</strong></div>
+    </div>
+    <div class="live-inspector-lines">${lineHtml(rows)}</div>
+    <details class="live-inspector-more" data-fold="live-detail-more"${liveFoldOpen("live-detail-more") ? " open" : ""}>
+      <summary>运行信息（${diagnostics.length} 项）</summary>
+      <div class="live-inspector-lines">${lineHtml(diagnostics)}</div>
+    </details>`;
+}
+
+
+// 右栏「单品识别」可点选列表：每条可一键加入混剪 / 智能成片素材。
+function renderLiveProductList(index, activity = {}) {
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  if (!outputs.length) return "";
+  const items = outputs.map((path, seq) => `
+      <div class="live-product-item">
+        <span class="live-product-item-seq">${seq + 1}</span>
+        <span class="live-product-item-name" title="${escapeHtml(path)}">${escapeHtml(livePathName(path))}</span>
+        <span class="live-product-item-actions">
+          <button class="button button-muted button-small" data-action="live-product-add" data-kind="mix" data-index="${index}" data-seq="${seq}">＋混剪</button>
+          <button class="button button-secondary button-small" data-action="live-product-add" data-kind="smart" data-index="${index}" data-seq="${seq}">＋成片</button>
+        </span>
+      </div>`).join("");
+  return `
+    <div class="live-product-list" data-count="${outputs.length}">${items}</div>
+    <p class="live-inspector-hint">＋成片 走自动剪辑；＋混剪 进手动素材。</p>`;
+}
+
+// 把某条单品加入素材列表。
+function addLiveProductTo(kind, index, seq) {
+  const room = (state.liveRooms || [])[Number(index)];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  const outputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
+  const path = outputs[Number(seq)];
+  if (!path) {
+    toast("这条单品文件还没有生成", "warning");
+    return;
+  }
+  const isMix = kind === "mix";
+  addVideoPaths(isMix ? "mix-video-paths" : "video-paths", [path]);
+  const label = isMix ? "混剪" : "智能成片";
+  toast(`已加入${label}素材：${livePathName(path)}`, "success");
+  appendLog("live-rec", {
+    time: new Date().toLocaleTimeString(),
+    level: "success",
+    message: `${room.name}: 单品已加入${label}素材 —— ${livePathName(path)}`,
   });
 }
 
-function addLiveRoom() {
-  const name = $("live-room-name").value.trim();
-  const url = $("live-room-url").value.trim();
-  const platform = $("live-platform").value;
-  if (!name || !url) {
-    toast("请先填写直播间名称和地址", "warning");
+function livePlatformFromUrl(url) {
+  const text = String(url || "").toLowerCase();
+  if (text.includes("douyin.com")) return "抖音";
+  if (text.includes("kuaishou")) return "快手";
+  if (text.includes("bilibili")) return "B站";
+  if (text.includes("rtmp")) return "自定义RTMP";
+  return "";
+}
+
+function addLiveRoom(options = {}) {
+  const autoStart = options && options.autoStart === true;
+  const url = String($("live-room-url")?.value || "").trim();
+  const platformSelect = $("live-platform");
+  const inferred = livePlatformFromUrl(url);
+  if (inferred && platformSelect) platformSelect.value = inferred;
+  const platform = String(platformSelect?.value || inferred || "抖音").trim() || "抖音";
+  const typedName = String($("live-room-name")?.value || "").trim();
+  if (!url) {
+    toast("请先粘贴达人主页或直播间链接", "warning");
     return;
   }
-  const room = normalizeLiveRoom({ name, url, platform, product_naming_mode: "product_id" });
+  // 备注留空时先用链接兜底，稍后异步换成「直播间名称」；文件命名留给全局默认（不再写死商品ID）。
+  let name = typedName || liveFallbackRoomName(url, platform);
+  const room = normalizeLiveRoom({ name, url, platform });
+  if (!room) {
+    toast("链接不完整，请粘贴达人主页或完整直播间链接", "warning");
+    return;
+  }
   const exists = state.liveRooms.some((item) => item.url === room.url);
   if (exists) {
-    toast("这个直播间已经在列表里", "warning");
+    toast("这个达人已经在列表里", "warning");
     return;
   }
   state.liveRooms.push(room);
   saveLiveRooms();
+  state.liveSelectedKey = liveRoomKey(room);
   renderLiveRooms();
   setLiveRecTab("rooms");
-  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `已添加直播间: ${name}。点击开始录制会按列表逐个启动。` });
+  if ($("live-room-url")) $("live-room-url").value = "";
+  if ($("live-room-name")) $("live-room-name").value = "";
+  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `已添加达人：${name}` });
+  if (autoStart) startLiveRoom(state.liveRooms.length - 1);
+  // 备注留空：异步抓一次直播间页面，按「直播间名称」重命名（不阻塞添加）。
+  if (!typedName) resolveLiveRoomNameFor(room, url);
+}
+
+// 添加直播间时的兜底名：解析出「直播间名称」之前临时使用。
+//
+// 不能直接把链接尾部当名字：抖音链接的尾部就是一串数字直播间号，直接拿来当名字会让
+// 列表变成一堆 ID（例如 8774237313）。纯数字尾部一律标成「待命名·<号>」——
+// 既明确表示这个名字还没解析出来，又靠号尾保持唯一（前端按 name 定位标签页/房间）。
+function liveFallbackRoomName(url, platform) {
+  const tail = String(url || "").split(/[?#]/)[0].split("/").filter(Boolean).pop() || "";
+  if (!tail) return `${platform || "直播间"}·待命名`;
+  if (/^\d+$/.test(tail)) return `待命名·${tail}`;
+  return tail;
+}
+
+// 兜底名（还没解析出真名）的判定，供界面提示与批量重命名筛选用。
+function liveRoomNameIsPlaceholder(name) {
+  const text = String(name || "").trim();
+  return text.startsWith("待命名·") || text.endsWith("·待命名");
+}
+
+// 直播间名称超长截断：上限 12 字；前 12 字里若有括号（常是活动后缀）则从括号处截断。
+function liveRoomNameFromLabel(text) {
+  const name = String(text || "").trim();
+  if (name.length <= 12) return name;
+  const head = name.slice(0, 12);
+  const cut = head.search(/[（(【\[]/);
+  return (cut > 0 ? head.slice(0, cut) : head).trim();
+}
+
+// 向服务端要一次「直播间名称」。
+async function fetchLiveRoomDisplayName(url) {
+  const result = await api("/api/live-rec/resolve-name", {
+    method: "POST",
+    body: JSON.stringify({ room_url: url }),
+  });
+  const raw = String(result?.name || "");
+  // 服务端解析失败时返回 ok:false + message。以前这里只看 name，
+  // 失败就静默保留兜底名（数字直播间号），名字于是永远停在 ID 上、也没人知道失败了。
+  const ok = result?.ok !== false && !!raw;
+  const message = String(result?.message || "");
+  return { raw, name: ok ? liveRoomNameFromLabel(raw) : "", ok, message };
+}
+
+// 添加后异步补名：只在用户没手填、房间还在、名字还没被改过时才覆盖。
+async function resolveLiveRoomNameFor(room, url) {
+  try {
+    const { raw, name, ok, message } = await fetchLiveRoomDisplayName(url);
+    const target = (state.liveRooms || []).find((item) => item && item.url === room.url);
+    if (!target || target.name !== room.name) return;
+    if (!ok || !name) {
+      // 失败要看得见：列表里会一直挂着兜底名，用户得知道为什么、以及可以点「重新获取名称」。
+      const why = message || "页面里没找到直播间名称";
+      toast(`没能解析出直播间名称（${why}），暂时显示「${room.name}」`, "warning");
+      appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: `没能解析出直播间名称，暂时沿用「${room.name}」—— ${why}` });
+      return;
+    }
+    target.name = name;
+    saveLiveRooms();
+    renderLiveRooms();
+    appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "success", message: `已按直播间名称命名：${name}${raw !== name ? `（原：${raw}）` : ""}` });
+  } catch (error) {
+    toast(`直播间名称解析失败：${error?.message || error}`, "warning");
+    appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: `直播间名称解析失败：${error?.message || error}` });
+  }
+}
+
+// 「按直播间名称重命名全部」：逐个重抓一次真名。
+// 单行的「重新获取名称」只能一个个点；列表里积累了一堆兜底名/裸数字 ID 时需要一个批量入口。
+async function refreshAllLiveRoomNames() {
+  const rooms = state.liveRooms || [];
+  if (!rooms.length) {
+    toast("列表里还没有直播间", "warning");
+    return;
+  }
+  const total = rooms.length;
+  let changed = 0;
+  let failed = 0;
+  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "info", message: `开始按直播间名称重命名 ${total} 个直播间…` });
+  for (let index = 0; index < total; index += 1) {
+    const room = state.liveRooms[index];
+    if (!room) continue;
+    const before = room.name;
+    try {
+      const { raw, name, ok, message } = await fetchLiveRoomDisplayName(room.url);
+      if (!ok || !name) {
+        failed += 1;
+        appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: `「${before}」没能解析出直播间名称 —— ${message || "页面里没找到"}` });
+        continue;
+      }
+      if (name !== before) {
+        room.name = name;
+        changed += 1;
+        appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "success", message: `已按直播间名称命名：${before} → ${name}${raw !== name ? `（原：${raw}）` : ""}` });
+      }
+    } catch (error) {
+      failed += 1;
+      appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "warning", message: `「${before}」解析失败：${error?.message || error}` });
+    }
+  }
+  saveLiveRooms();
+  renderLiveRooms();
+  const summary = `重命名完成：${changed} 个已更新，${failed} 个解析失败，共 ${total} 个`;
+  toast(summary, failed ? "warning" : "success");
+  appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: failed ? "warning" : "success", message: summary });
+}
+
+// 行菜单「重新获取名称」：手动重抓一次。
+async function refreshLiveRoomName(index) {
+  const room = (state.liveRooms || [])[Number(index)];
+  if (!room) return;
+  state.liveOpenRowMenu = null;
+  try {
+    const { raw, name, ok, message } = await fetchLiveRoomDisplayName(room.url);
+    if (!ok || !name) {
+      toast(`没解析出直播间名称：${message || "可能页面结构变了或该直播间已下播"}`, "warning");
+      return;
+    }
+    const before = room.name;
+    room.name = name;
+    saveLiveRooms();
+    renderLiveRooms();
+    const suffix = raw !== name ? `（原：${raw}）` : "";
+    toast(before === name ? `名称没变：${name}` : `已更新名称：${before} → ${name}`, "success");
+    appendLog("live-rec", { time: new Date().toLocaleTimeString(), level: "success", message: `已更新名称：${before} → ${name}${suffix}` });
+  } catch (error) {
+    toast(`解析失败：${error?.message || error}`, "warning");
+  }
 }
 
 function removeLiveRoom(index) {
@@ -11748,7 +13324,7 @@ function updateLiveRoomNamingMode(index, value) {
   if (!Number.isInteger(index) || index < 0 || index >= state.liveRooms.length) return;
   state.liveRooms[index] = normalizeLiveRoom({
     ...state.liveRooms[index],
-    product_naming_mode: liveNormalizeNamingMode(value),
+    product_naming_mode: String(value ?? "").trim() ? liveNormalizeNamingMode(value) : "",
   }) || state.liveRooms[index];
   saveLiveRooms();
   renderLiveRooms();
@@ -11757,10 +13333,8 @@ function updateLiveRoomNamingMode(index, value) {
 function fillLiveRoom(index) {
   const room = state.liveRooms[index];
   if (!room) return;
-  $("live-room-name").value = room.name;
-  $("live-room-url").value = room.url;
-  $("live-platform").value = room.platform;
-  setLiveRecTab("add");
+  state.liveSelectedKey = liveRoomKey(room);
+  renderLiveRooms();
 }
 
 async function openLiveRoomDirectory(index) {
@@ -11813,14 +13387,7 @@ async function previewLiveRoom(index) {
   await openPathValue(activity.file);
 }
 
-function showLiveRoomDetail(index) {
-  const room = state.liveRooms[index];
-  if (!room) return;
-  const activity = liveRoomActivity(room);
-  const modal = ensureLiveDetailModal();
-  const body = modal.querySelector("#live-detail-body");
-  const title = modal.querySelector("#live-detail-title");
-  if (title) title.textContent = "详情";
+function liveRoomDetailRows(room, activity) {
   const savePath = activity.productClipsDir || activity.file || liveRoomDirectory(room) || "-";
   const segment = $("live-segment")?.value || "不限";
   const productSplitEnabled = $("live-product-split-enabled")?.checked !== false;
@@ -11858,6 +13425,7 @@ function showLiveRoomDetail(index) {
     ["强信号", `${Number(activity.productStrongSignalCount || 0)} 条`],
     ["需复核候选", `${Number(activity.productRuleReviewCount || 0)} 个`],
     ["未确认原因", escapeHtml(activity.productUnresolvedReason || "-")],
+    ...(activity.livenessText ? [["页面状态", escapeHtml(activity.livenessText)]] : []),
     ["录制退出码", activity.recordingReturncode === undefined || activity.recordingReturncode === null ? "-" : escapeHtml(activity.recordingReturncode)],
     ["单品目录", escapeHtml(activity.productClipsDir || "-")],
     ["检测间隔", `${escapeHtml(checkInterval)}秒`],
@@ -11865,6 +13433,19 @@ function showLiveRoomDetail(index) {
     ["直播状态", escapeHtml(activity.liveStatus || "未检测")],
     ["保存路径", escapeHtml(savePath)],
   ];
+  return rows;
+}
+
+function showLiveRoomDetail(index) {
+  const room = state.liveRooms[index];
+  if (!room) return;
+  const activity = liveRoomActivity(room);
+  const modal = ensureLiveDetailModal();
+  const body = modal.querySelector("#live-detail-body");
+  const title = modal.querySelector("#live-detail-title");
+  if (title) title.textContent = "详情";
+  const rows = liveRoomDetailRows(room, activity);
+  const productOutputs = Array.isArray(activity.productOutputs) ? activity.productOutputs : [];
   if (body) {
     body.innerHTML = rows.map(([label, value]) => `
       <div class="live-detail-row">
@@ -11922,6 +13503,12 @@ function livePayloadForRoom(room) {
   const effectiveMode = roomMode || String(basePayload.record_mode || "product");
   const roomSegment = liveNormalizeSegment(room.segment);
   const roomClip = liveNormalizeProductClip(room.product_clip_minutes);
+  // 逐房间数字覆盖值：留空则回落全局默认。
+  const roomNumber = (key) => {
+    const text = String(room[key] ?? "").trim();
+    return text === "" ? basePayload[key] : Number(text);
+  };
+  const productOnly = (key) => (effectiveMode === "product" ? roomNumber(key) : basePayload[key]);
   return {
     ...basePayload,
     room_name: room.name,
@@ -11933,6 +13520,11 @@ function livePayloadForRoom(room) {
       ? Number(roomClip)
       : basePayload.product_default_minutes,
     product_naming_mode: liveEffectiveNamingMode(effectiveMode, room.product_naming_mode || basePayload.product_naming_mode),
+    product_switch_confirm_seconds: productOnly("product_switch_confirm_seconds"),
+    product_min_minutes: productOnly("product_min_minutes"),
+    product_max_minutes: productOnly("product_max_minutes"),
+    product_head_seconds: productOnly("product_head_seconds"),
+    product_tail_seconds: productOnly("product_tail_seconds"),
   };
 }
 
@@ -12707,20 +14299,49 @@ const directPreviewWorkbenchCandidateCategories = [
   ["live", "\u76f4\u64ad\u4e92\u52a8"], ["unclear", "\u5f85\u786e\u8ba4"], ["close", "\u6536\u5c3e"],
 ];
 
-function previewWorkbenchCandidateCategory(clip) {
-  const role = previewWorkbenchRoleKey(clip);
-  const text = `${clip?.focus || ""} ${clip?.focus_block || ""} ${clip?.text || ""}`.toLowerCase();
-  if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(text)) return "hook";
-  if (role === "close" || /\u6536\u5c3e|\u6700\u540e|\u4e0d\u8981\u9519\u8fc7/.test(text)) return "close";
-  if (/\u5c3a\u7801|\u7801\u6570|\u8eab\u9ad8|\u4f53\u91cd|\u65a4|s\u7801|m\u7801|l\u7801|xl/.test(text)) return "size";
-  if (/\u642d\u914d|\u7a7f\u642d|\u5185\u642d|\u5916\u642d|\u53e0\u7a7f|\u914d\u4e0a|\u914d\u8fd9\u4e2a/.test(text)) return "styling";
-  if (role === "scene" || /\u4e0a\u8eab|\u8bd5\u7a7f|\u65e5\u5e38|\u901a\u52e4|\u7ea6\u4f1a|\u51fa\u95e8|\u573a\u666f|\u62cd\u7167|\u8fd0\u52a8/.test(text)) return "scene";
-  if (/\u9762\u6599|\u6750\u8d28|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb/.test(text)) return "fabric";
-  if (/\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u6536\u8170|\u8170\u7ebf|\u817f\u957f|\u80a9|\u80ef|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab/.test(text)) return "fit";
-  if (role === "proof" || /\u7ec6\u8282|\u505a\u5de5|\u5de5\u827a|\u54c1\u8d28|\u8d70\u7ebf|\u5bf9\u6bd4|\u6b63\u54c1|\u53cd\u9988|\u9500\u91cf|\u4fdd\u8bc1/.test(text)) return "proof";
-  return "core";
+// [AI_WORKBENCH_CANDIDATE_CATEGORY_START]
+// 「AI 备用」句分类：判据与词表直接用全站现成的那一套
+//   previewWorkbenchCandidateCategory(clip, scope) + directPreviewWorkbenchCandidateCategories
+// 只覆盖两个叫法（沿用拍板用词），不新增第二份词表、不新增判据。
+const DIRECTOR_LOOSE_CATEGORY_LABEL_OVERRIDES = { hook: "开场钩子", close: "逼单收尾" };
+
+const directorLooseCandidateCategoryLabels = directPreviewWorkbenchCandidateCategories.map(function (item) {
+  return [item[0], DIRECTOR_LOOSE_CATEGORY_LABEL_OVERRIDES[item[0]] || item[1]];
+});
+
+// 返回 "" 表示"这一条不参与品类筛选"（章节归属不是品类，章节信息在行内"可补强：章节名"里）
+function directorLooseCandidateCategory(clip, scope = "smart") {
+  const key = String(previewWorkbenchCandidateCategory(clip, scope) || "");
+  if (!key || key.startsWith("director:")) return "";
+  return key;
 }
 
+function directorLooseCandidateCategoryLabel(clip, scope = "smart") {
+  const key = directorLooseCandidateCategory(clip, scope);
+  if (!key) return "";
+  const hit = directorLooseCandidateCategoryLabels.find(function (item) { return item[0] === key; });
+  return hit ? hit[1] : "";
+}
+
+// 与后端章首补行同一份承接连词表，不新增第二份
+const DIRECTOR_REPLACEABLE_LEADIN_PREFIXES = ["因为", "所以", "然后", "再加个", "再加上", "加上", "再有", "而且", "但是", "比如说", "还是"];
+const DIRECTOR_REPLACEABLE_MIN_SECONDS = 1.5;
+
+function previewCandidateReplaceable(clip) {
+  const text = String(previewWorkbenchCandidateText(clip) || "").trim();
+  if (!text) return false;
+  if (DIRECTOR_REPLACEABLE_LEADIN_PREFIXES.some(function (prefix) { return text.startsWith(prefix); })) return false;
+  const seconds = Number(effectiveClipDuration(clip) || previewWorkbenchCandidateDuration(clip) || 0);
+  if (seconds > 0 && seconds < DIRECTOR_REPLACEABLE_MIN_SECONDS) return false;
+  if (clip?.continuity_break_before) return false;
+  return true;
+}
+
+function previewCandidateReplaceableOnly(scope) {
+  return Boolean(state.previewDirectorReplaceableOnly?.[scope]);
+}
+
+// [AI_WORKBENCH_CANDIDATE_CATEGORY_END]
 function previewWorkbenchCategoryLabel(clip, scope = "smart") {
   if (String(clip?.director_beat_function || "").trim()) {
     return previewDirectorBeatRoleMeta(clip).label;
@@ -12846,6 +14467,63 @@ function insertPreviewWorkbenchCandidate(index, scope = "smart", targetIndex = n
 function addPreviewWorkbenchCandidate(index, scope = "smart") {
   insertPreviewWorkbenchCandidate(index, scope);
 }
+
+async function materializePreviewSentence(scope, subtitleId) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id) return null;
+  const result = await api("/api/smart-cut/preview/materialize-candidate", {
+    method: "POST",
+    body: JSON.stringify({ preview_id: preview.id, subtitle_id: Number(subtitleId || 0), scope }),
+  });
+  const clip = result?.clip;
+  if (!clip || !Number.isFinite(Number(clip.index))) return null;
+  const pool = Array.isArray(preview.candidate_clips) && preview.candidate_clips.length ? preview.candidate_clips : preview.clips;
+  if (Array.isArray(pool) && !pool.some(function (item) { return Number(item.index) === Number(clip.index); })) pool.push(clip);
+  if (Array.isArray(preview.clips) && preview.clips !== pool && !preview.clips.some(function (item) { return Number(item.index) === Number(clip.index); })) preview.clips.push(clip);
+  return clip;
+}
+
+async function addPreviewRecallOpening(scope = "smart", hookId = 0, payoffId = 0) {
+  const preview = getPreviewState(scope);
+  if (!preview?.id || preview.status !== "ready") {
+    toast("请先生成 AI 选片预览", "warning");
+    return;
+  }
+  const ids = [];
+  [hookId, payoffId].forEach(function (id) {
+    const value = Number(id || 0);
+    if (value > 0 && !ids.includes(value)) ids.push(value);
+  });
+  if (!ids.length) {
+    toast("这条开场候选没有可加入的句子编号", "warning");
+    return;
+  }
+  syncPreviewClipSelections(scope);
+  const order = previewAssemblyOrder(scope, preview);
+  // 开场位 = 已选第一句；逐句插到它前面，钩子在前、承接紧接其后。
+  let anchor = order.length ? Number(order[0]) : null;
+  let placeAfter = false;
+  let added = 0;
+  let existing = 0;
+  try {
+    for (const id of ids) {
+      const clip = await materializePreviewSentence(scope, id);
+      if (!clip) continue;
+      const index = Number(clip.index);
+      if (isPreviewWorkbenchSelected(clip)) { anchor = index; placeAfter = true; existing += 1; continue; }
+      insertPreviewWorkbenchCandidate(index, scope, anchor, placeAfter);
+      anchor = index;
+      placeAfter = true;
+      added += 1;
+    }
+    if (added) toast("已把 " + added + " 句开场加到「已选片段」最前面", "success");
+    else if (existing) toast("这一组开场已经在「已选片段」里了", "info");
+    else toast("没有可以加入的句子", "warning");
+  } catch (error) {
+    toast(error?.message || "补入开场句失败，请重试", "error");
+  }
+}
+
 
 function previewCurrentWorkbenchClip(scope = "smart") {
   const preview = getPreviewState(scope);
@@ -13081,7 +14759,9 @@ function bindDirectPreviewWorkbenchActions() {
       setPreviewCandidateSourceFilter(scope, target.dataset.value || 'recommended');
     } else if (action === 'preview-candidate-category-filter') {
       event.preventDefault();
-      setPreviewCandidateCategoryFilter(scope, target.dataset.value || 'all');
+      setPreviewCandidateCategoryFilter(scope, target.dataset.value || 'all');    } else if (action === 'preview-candidate-replaceable-only') {
+      event.preventDefault();
+      setPreviewCandidateReplaceableOnly(scope, target.dataset.value === '1');
     } else if (action === 'preview-workbench-add-candidate') {
       event.preventDefault();
       addPreviewWorkbenchCandidate(Number(target.dataset.previewIndex), scope);
@@ -13350,58 +15030,96 @@ function previewWorkbenchCategoryDomain(scope = "smart", clip = null) {
   return "general";
 }
 
+// [AI_WORKBENCH_CANDIDATE_CATEGORY_START]
+// 句品类判定：**打分制**，不是「第一个命中就返回」。
+//
+// 为什么改（2026-10-08 反馈「分类一点也不准」）：
+//   旧实现是级联第一命中，而「面料质感」排在最前、词表里又全是「质感/柔软/亲肤」
+//   这类泛用夸词，于是大量本该属于版型/场景/情绪的句子被它抢走；另外两处兜底
+//   （core 且 ≥18 字、含「设计/款式/单品」）也统统落到「面料质感」，让它变成垃圾桶；
+//   单字正则（棉/麻/值）还会误命中「海绵」「麻烦」。
+// 新规则：
+//   ① 每个品类按权重累计命中分，取最高分；同分按固定优先级（越具体越靠前）。
+//   ② 口播原文为主，focus 标签只在原文判不出来时兜底（旧实现正好相反）。
+//   ③ 取消「面料质感」的两处兜底；判不出来返回 ""（=这一条不参与品类筛选）。
+//   ④ 单字正则改成明确词组，消除「海绵/麻烦」这类误命中。
+const DIRECTOR_CATEGORY_PRIORITY = ["pref_fabric", "pref_fabric", "pref_quality", "pref_quality", "pref_fit", "pref_fit", "pref_color", "pref_color", "pref_scene", "pref_emotion", "pref_emotion", "pref_value", "pref_urgency", "pref_trend", "food_taste", "food_quality", "food_origin", "food_spec", "food_fresh", "food_scene"];
+
+// [品类, 权重, 正则]；权重越高越具体，越不容易被泛用夸词抢走。
+const DIRECTOR_CATEGORY_RULES = [
+  ["pref_fabric", 3, /\u9762\u6599|\u6750\u8d28|\u6599\u5b50|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u6bdb\u5462|\u7f8a\u6bdb|\u7f8a\u7ed2|\u7fbd\u7ed2|\u771f\u4e1d|\u96ea\u7eba|\u725b\u4ed4|\u706f\u82af\u7ed2|\u6447\u7c92\u7ed2|\u7eaf\u68c9|\u68c9\u8d28|\u68c9\u670d|\u4e9a\u9ebb|\u68c9\u9ebb|\u9ebb\u6599|\u7ed2\u9762|\u857e\u4e1d|\u76ae\u9769|pu\u76ae/],
+  ["pref_fabric", 1, /\u8d28\u611f|\u67d4\u8f6f|\u8f6f\u7cef|\u539a\u5b9e|\u539a\u5ea6|\u539a\u8584|\u8584\u6b3e|\u52a0\u539a|\u514b\u91cd|\u5206\u91cf|\u5f39\u529b|\u6709\u5f39\u6027|\u4e0d\u8d77\u7403|\u6297\u76b1|\u514d\u70eb|\u6c34\u6d17|\u67d3\u8272|\u4e0a\u8272|\u7ec7\u6cd5|\u542b\u68c9|\u542b\u6bdb/],
+  ["pref_quality", 3, /\u54c1\u8d28|\u8d28\u91cf|\u505a\u5de5|\u5de5\u827a|\u8d70\u7ebf|\u8f66\u7ebf|\u4e94\u91d1|\u62c9\u94fe|\u6263\u5b50|\u7ebd\u6263|\u91cc\u886c|\u5185\u886c|\u8d28\u68c0|\u7cbe\u81f4|\u5305\u8fb9|\u9501\u8fb9|\u7248\u5e08|\u6253\u7248|\u4e09\u6807|\u6c34\u6d17\u6807/],
+  ["pref_quality", 1, /\u7ec6\u8282|\u9488\u811a/],
+  ["pref_fit", 3, /\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u663e\u817f\u957f|\u6536\u8170|\u8170\u7ebf|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab|\u5ed3\u5f62|\u76f4\u7b52|\u9614\u817f|\u675f\u811a|\u9ad8\u8170|\u4f4e\u8170|\u4e2d\u8170|\u5747\u7801|\u52a0\u5927\u7801|\u5305\u5bb9\u6027/],
+  ["pref_fit", 2, /\u80a9\u5bbd|\u6e9c\u80a9|\u9732\u80a9|\u57ab\u80a9|\u80a9\u7ebf|\u80ef\u5bbd|\u5047\u80ef|\u5361\u80ef|\u80f8\u56f4|\u81c0\u56f4|\u8170\u56f4|\u5fae\u80d6|\u5c0f\u4e2a\u5b50|\u9ad8\u4e2a\u5b50|\u68a8\u5f62|\u82f9\u679c\u578b/],
+  ["pref_color", 3, /\u989c\u8272|\u8272\u53f7|\u663e\u767d|\u663e\u6c14\u8272|\u649e\u8272|\u914d\u8272|\u56fe\u6848|\u5370\u82b1|\u82b1\u8272|\u7eaf\u8272|\u683c\u7eb9|\u6761\u7eb9/],
+  ["pref_color", 1, /\u590d\u53e4|\u98ce\u683c|\u6c1b\u56f4|\u5143\u7d20/],
+  ["pref_scene", 3, /\u901a\u52e4|\u7ea6\u4f1a|\u4e0a\u73ed|\u65e5\u5e38|\u51fa\u95e8|\u901b\u8857|\u65c5\u884c|\u5ea6\u5047|\u62cd\u7167|\u805a\u4f1a|\u5c45\u5bb6|\u5185\u642d|\u5916\u642d|\u53e0\u7a7f|\u642d\u914d|\u7a7f\u642d|\u600e\u4e48\u914d|\u914d\u4ec0\u4e48/],
+  ["pref_emotion", 3, /\u6c14\u8d28|\u6e29\u67d4|\u8f7b\u719f|\u9ad8\u7ea7\u611f|\u6c1b\u56f4\u611f|\u5c0f\u4f17|\u8bbe\u8ba1\u611f/],
+  ["pref_emotion", 1, /\u597d\u770b|\u559c\u6b22|\u7231\u4e86|\u7edd\u4e86|\u5fc3\u52a8|\u6c1b\u56f4/],
+  ["pref_value", 3, /\u6027\u4ef7\u6bd4|\u5212\u7b97|\u8d85\u503c|\u503c\u5f97|\u4ef7\u683c|\u4ef7\u4f4d|\u798f\u5229|\u4f18\u60e0|\u4fbf\u5b9c|\u7701\u94b1|\u5dee\u4ef7|\u52a0\u4ef7/],
+  ["pref_urgency", 3, /\u9650\u91cf|\u7a00\u7f3a|\u5e93\u5b58|\u79d2\u6740|\u62a2|\u4e0a\u8f66|\u4e0b\u5355|\u6700\u540e|\u9519\u8fc7|\u5012\u8ba1\u65f6|\u624b\u6162\u65e0/],
+  ["pref_trend", 3, /\u6d41\u884c|\u8d8b\u52bf|\u7206\u6b3e|\u65b0\u6b3e|\u4e0a\u65b0|\u4eca\u5e74|\u5f53\u4e0b|\u5f53\u5b63/],
+  ["food_taste", 3, /\u53e3\u611f|\u98df\u6b32|\u597d\u5403|\u9999\u6c14|\u9165\u8106|\u8f6f\u7cef|\u9c9c\u751c|\u7206\u6c41|\u5165\u5473|\u89e3\u998b|\u5473\u9053/],
+  ["food_quality", 3, /\u65b0\u9c9c|\u9c9c\u6d3b|\u73b0\u6458|\u73b0\u91c7|\u73b0\u6355|\u73b0\u635e|\u5f53\u5929\u53d1|\u9c9c\u5ea6|\u679c\u5f62|\u679c\u5f84|\u9971\u6ee1|\u574f\u679c/],
+  ["food_origin", 3, /\u4ea7\u5730|\u6eaf\u6e90|\u539f\u4ea7|\u519c\u573a|\u679c\u56ed|\u6d77\u57df|\u6e90\u5934/],
+  ["food_spec", 3, /\u89c4\u683c|\u5206\u91cf|\u51c0\u542b\u91cf|\u4e00\u7bb1|\u4e00\u888b|\u4e00\u65a4|\u5927\u679c|\u5c0f\u679c|\u4efd\u91cf/],
+  ["food_fresh", 3, /\u53d1\u8d27|\u4fdd\u9c9c|\u51b7\u94fe|\u5305\u88c5|\u987a\u4e30|\u5230\u8d27|\u73b0\u53d1/],
+  ["food_scene", 3, /\u5403\u6cd5|\u505a\u6cd5|\u706b\u9505|\u714e|\u716e|\u70e4|\u62cc|\u65e9\u9910|\u591c\u5bb5|\u9001\u793c|\u5bb6\u5ead/],
+];
+
 function previewWorkbenchPreferenceCategory(text, domain = "general") {
+  const body = String(text || "").toLowerCase();
+  if (!body) return "";
   const allowApparel = domain !== "food";
   const allowFood = domain !== "apparel";
-  const hasQualityDetail = /\u54c1\u8d28\u7ec6\u8282|\u54c1\u8d28|\u8d28\u91cf|\u505a\u5de5|\u5de5\u827a|\u7ec6\u8282|\u8d70\u7ebf|\u62c9\u94fe|\u6263\u5b50|\u7ebd\u6263|\u9886\u53e3|\u53e3\u888b|\u91cc\u886c|\u4e94\u91d1|\u8d28\u68c0|\u7cbe\u81f4/.test(text);
-  if (allowApparel && /\u9762\u6599|\u6750\u8d28|\u8d28\u611f|\u624b\u611f|\u900f\u6c14|\u4eb2\u80a4|\u67d4\u8f6f|\u5782\u611f|\u51b0\u4e1d|\u9488\u7ec7|\u68c9|\u9ebb/.test(text)) return "pref_fabric";
-  if (domain !== "food" && hasQualityDetail) return "pref_quality";
-  if (/\u7248\u578b|\u663e\u7626|\u906e\u8089|\u663e\u9ad8|\u6536\u8170|\u8170\u7ebf|\u817f\u957f|\u80a9|\u80ef|\u8eab\u6750|\u5bbd\u677e|\u4fee\u8eab|\u7a7f\u7740\u4f53\u9a8c|\u5305\u5bb9/.test(text)) return "pref_fit";
-  if (/\u989c\u8272|\u6c1b\u56f4|\u663e\u767d|\u663e\u6c14\u8272|\u629ac\u8272|\u56fe\u6848|\u5370\u82b1|\u590d\u53e4|\u98ce\u683c|\u5143\u7d20/.test(text)) return "pref_color";
-  if (/\u573a\u666f|\u642d\u914d|\u7a7f\u642d|\u901a\u52e4|\u7ea6\u4f1a|\u65e5\u5e38|\u51fa\u95e8|\u4e0a\u73ed|\u62cd\u7167|\u53e0\u7a7f|\u5185\u642d|\u5916\u642d/.test(text)) return "pref_scene";
-  if (/\u60c5\u7eea|\u611f\u67d3|\u6c1b\u56f4\u611f|\u9ad8\u7ea7|\u6e29\u67d4|\u8f7b\u719f|\u6c14\u8d28|\u597d\u770b|\u559c\u6b22|\u5c0f\u4f17/.test(text)) return "pref_emotion";
-  if (/\u6027\u4ef7\u6bd4|\u5212\u7b97|\u503c|\u4ef7\u683c|\u798f\u5229|\u4f18\u60e0|\u4fbf\u5b9c|\u7701\u94b1/.test(text)) return "pref_value";
-  if (/\u7d27\u8feb|\u7a00\u7f3a|\u9650\u91cf|\u5e93\u5b58|\u79d2\u6740|\u62a2|\u4e0a\u8f66|\u4e0b\u5355|\u6700\u540e|\u9519\u8fc7/.test(text)) return "pref_urgency";
-  if (/\u6d41\u884c|\u8d8b\u52bf|\u7206\u6b3e|\u4eca\u5e74|\u5f53\u4e0b|\u65b0\u6b3e|\u4e0a\u65b0/.test(text)) return "pref_trend";
-  if (allowFood && /\u53e3\u611f|\u98df\u6b32|\u597d\u5403|\u9999\u6c14|\u9165\u8106|\u8f6f\u7cef|\u9c9c\u751c|\u7206\u6c41|\u5165\u5473|\u89e3\u998b/.test(text)) return "food_taste";
-  if (allowFood && /\u65b0\u9c9c|\u9c9c\u6d3b|\u73b0\u6458|\u73b0\u91c7|\u73b0\u6355|\u73b0\u635e|\u5f53\u5929\u53d1|\u9c9c\u5ea6|\u679c\u5f62|\u679c\u5f84|\u9971\u6ee1|\u574f\u679c/.test(text)) return "food_quality";
-  if (allowFood && /\u4ea7\u5730|\u6eaf\u6e90|\u539f\u4ea7|\u519c\u573a|\u679c\u56ed|\u6d77\u57df|\u6e90\u5934/.test(text)) return "food_origin";
-  if (allowFood && /\u89c4\u683c|\u5206\u91cf|\u51c0\u542b\u91cf|\u4e00\u7bb1|\u4e00\u888b|\u4e00\u65a4|\u5927\u679c|\u5c0f\u679c|\u4efd\u91cf/.test(text)) return "food_spec";
-  if (allowFood && /\u53d1\u8d27|\u4fdd\u9c9c|\u51b7\u94fe|\u5305\u88c5|\u987a\u4e30|\u5230\u8d27|\u73b0\u53d1/.test(text)) return "food_fresh";
-  if (allowFood && /\u5403\u6cd5|\u505a\u6cd5|\u706b\u9505|\u714e|\u716e|\u70e4|\u62cc|\u65e9\u9910|\u591c\u5bb5|\u9001\u793c|\u5bb6\u5ead/.test(text)) return "food_scene";
-  if (hasQualityDetail) return "pref_quality";
-  return "";
+  const scores = new Map();
+  for (let i = 0; i < DIRECTOR_CATEGORY_RULES.length; i += 1) {
+    const key = DIRECTOR_CATEGORY_RULES[i][0];
+    const weight = DIRECTOR_CATEGORY_RULES[i][1];
+    const pattern = DIRECTOR_CATEGORY_RULES[i][2];
+    const isFood = key.indexOf("food_") === 0;
+    if (isFood && !allowFood) continue;
+    if (!isFood && !allowApparel) continue;
+    if (!pattern.test(body)) continue;
+    scores.set(key, (scores.get(key) || 0) + weight);
+  }
+  if (!scores.size) return "";
+  let best = "";
+  let bestScore = 0;
+  for (let i = 0; i < DIRECTOR_CATEGORY_PRIORITY.length; i += 1) {
+    const key = DIRECTOR_CATEGORY_PRIORITY[i];
+    const score = scores.get(key) || 0;
+    if (score > bestScore) { best = key; bestScore = score; }
+  }
+  return best;
 }
 
+// 品类标签：判断这一条是不是硬废弃（空话/纯填充/直播流程话术）
 function previewWorkbenchCandidateCategory(clip, scope = "smart") {
   const directorChapterId = String(clip?.director_chapter_id || "").trim();
   if (directorChapterId) return `director:${directorChapterId}`;
   const role = previewWorkbenchRoleKey(clip);
-  const text = (String(clip?.focus || "") + " " + String(clip?.focus_block || "") + " " + String(clip?.text || "")).toLowerCase();
   const spokenText = String(clip?.text || "").toLowerCase();
   const focus = String(clip?.focus_block || clip?.focus || "").toLowerCase();
   const explicitRole = String(clip?.sales_role || "").toLowerCase();
-  const denseText = text.replace(/\s+/g, "");
   if (explicitRole === "weak_fragment") return "unclear";
   if (explicitRole === "hook" || explicitRole === "hook_followup") return "hook";
   if (explicitRole === "natural_close") return "close";
   const domain = previewWorkbenchCategoryDomain(scope, clip);
-  const incompatibleFocus = (
-    domain === "apparel"
-    && /\u53e3\u611f\u98df\u6b32|\u65b0\u9c9c\u54c1\u8d28|\u4ea7\u5730\u6eaf\u6e90|\u89c4\u683c\u5206\u91cf|\u53d1\u8d27\u4fdd\u9c9c|\u573a\u666f\u5403\u6cd5/.test(focus)
-  ) || (
-    domain === "food"
-    && /\u7248\u578b\u663e\u7626|\u9762\u6599\u8d28\u611f|\u7a7f\u7740\u4f53\u9a8c|\u54c1\u8d28\u7ec6\u8282|\u5c3a\u5bf8\u957f\u5ea6|\u989c\u8272\u6c1b\u56f4|\u573a\u666f\u642d\u914d/.test(focus)
-  );
-  const focusCategory = incompatibleFocus ? "" : previewWorkbenchPreferenceCategory(focus, domain);
+  // ① 口播原文为主。
+  const spokenCategory = previewWorkbenchPreferenceCategory(spokenText, domain);
+  if (spokenCategory) return spokenCategory;
+  // ② focus 标签只在原文判不出来时兜底；领域不相容的 focus 一律忽略。
+  const focusCategory = previewWorkbenchPreferenceCategory(focus, domain);
   if (focusCategory) return focusCategory;
-  if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(text)) return "hook";
-  if (role === "close" || /\u6536\u5c3e|\u6700\u540e|\u4e0d\u8981\u9519\u8fc7/.test(text)) return "close";
-  if (/\u4e0b\u4e00\u4f4d|\u7c89\u4e1d|\u4e3e\u62a5|\u6295\u7968|\u76f4\u64ad\u95f4|\u4e0a\u8f66|\u4e0b\u5355|\u5ba2\u670d|\u94fe\u63a5|\u53d1\u8d27|\u552e\u540e|\u5e93\u5b58|\u79d2\u6740|\u8ba2\u5355|\u62a2|\u5f00\u6389|\u542c\u6b4c|\u97f3\u4e50|\u7a0d\u7b49|\d+\s*\u5355/.test(text)) return "live";
-  const textCategory = previewWorkbenchPreferenceCategory(spokenText, domain);
-  if (textCategory) return textCategory;
-  if (role === "product" || /\u8863\u670d|\u88d9\u5b50|\u8fd9\u4e2a\u6b3e|\u8fd9\u4ef6|\u6b3e\u5f0f|\u8bbe\u8ba1|\u590f\u6b3e|\u4e0a\u65b0|\u5355\u54c1|\u7cbe\u81f4/.test(text)) return "pref_fabric";
-  if ((role === "core" || role === "product") && denseText.length >= 18) return "pref_fabric";
+  // ③ 角色/文本兜底。
+  if (role === "hook" || /\u5f00\u573a|\u7b2c\u4e00\u53e5|\u5148\u770b|\u59d0\u59b9\u4eec|\u5b9d\u5b9d\u4eec|\u6ce8\u610f/.test(spokenText)) return "hook";
+  if (role === "close" || /\u6536\u5c3e|\u4e0d\u8981\u9519\u8fc7/.test(spokenText)) return "close";
+  if (/\u4e0b\u4e00\u4f4d|\u7c89\u4e1d|\u4e3e\u62a5|\u6295\u7968|\u76f4\u64ad\u95f4|\u5ba2\u670d|\u94fe\u63a5|\u53d1\u8d27|\u552e\u540e|\u542c\u6b4c|\u97f3\u4e50|\u7a0d\u7b49/.test(spokenText)) return "live";
+  // ④ 不再兜底成「面料质感」（那是旧实现把它变成垃圾桶的根源），
+  //    但仍落回标签表里已有的「待确认」，而不是空 —— 空会让句子在品类里彻底消失。
   return "unclear";
 }
 
@@ -13489,30 +15207,59 @@ function previewWorkbenchSourceCandidates(scope, preview) {
   if (preview?.commercial_director_experiment) {
     const view = previewDirectorCandidateView(scope, preview);
     const activeChapterId = previewDirectorActiveChapterId(scope, preview);
-    const all = (preview?.clips || []).filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
+    // 「完整句库」必须是**完整**的：取完整候选池（candidate_clips = AI 选句 + 备选 +
+    // 完整可执行库存池），并且**不做**硬废弃过滤。
+    // 以前这里用 preview.clips 再套 isPreviewWorkbenchHardWasteCandidate，而那条过滤里
+    // 有一条**非锚定**的直播话术正则（直播间|客服|上车|下单|订单|链接|库存|发货…），
+    // 这个主播满口"库存/去拍/链接"，于是大量真实句子被当垃圾丢掉，
+    // 用户看到的"完整句库"自然不完整。其它视图仍保留过滤。
+    const full = (Array.isArray(preview?.candidate_clips) && preview.candidate_clips.length)
+      ? preview.candidate_clips
+      : (preview?.clips || []);
+    const all = full.filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
+    // 只有「完整句库」展示跨商品素材（后端只标记不过滤）。
+    // 另两个视图仍限定主商品：避免别的商品的句子混进自动选片与章节视图。
+    // within_main_product 缺省视为 true，兼容旧预览载荷。
+    const withinMainProduct = function (clip) { return clip?.within_main_product !== false; };
     if (view === "recommended") {
       return all.filter(function (clip) {
-        return previewWorkbenchCandidateOrigin(clip) === "extra" && !isPreviewWorkbenchSelected(clip);
+        return withinMainProduct(clip)
+          && previewWorkbenchCandidateOrigin(clip) === "extra"
+          && !isPreviewWorkbenchSelected(clip);
       });
     }
     if (view === "chapter") {
-      return all.filter(function (clip) { return String(clip?.director_chapter_id || "") === activeChapterId; });
+      return all.filter(function (clip) {
+        return withinMainProduct(clip) && String(clip?.director_chapter_id || "") === activeChapterId;
+      });
     }
-    return all;
+    return full;
   }
   return previewWorkbenchSourceCandidatesFor(scope, preview, previewWorkbenchCandidateSourceFilter(scope));
 }
 
 function previewWorkbenchFilteredCandidates(scope, preview) {
   const category = previewWorkbenchCategoryFilter(scope);
-  return previewWorkbenchSourceCandidates(scope, preview).filter(function (clip) {
-    return category === "all" || previewWorkbenchCandidateCategory(clip, scope) === category;
+  const filtered = previewWorkbenchSourceCandidates(scope, preview).filter(function (clip) {
+    if (category === "all") return true;
+    return preview?.commercial_director_experiment ? directorLooseCandidateCategory(clip, scope) === category : previewWorkbenchCandidateCategory(clip, scope) === category;
   });
+  if (!preview?.commercial_director_experiment) return filtered;
+  const replaceable = previewCandidateReplaceableOnly(scope)
+    ? filtered.filter(function (clip) { return previewCandidateReplaceable(clip); })
+    : filtered;
+  // 不再按「当前点中的句子」把同品类提到最前。
+  // 那会让列表顺序依赖选中项：点任意一句，整列同品类的行全部上移，列就"跳"了
+  // （2026-10-08 反馈：点击句子就整列跳跃）。顺序保持稳定，同品类信息由行内标签表达。
+  return replaceable;
 }
 
 function previewWorkbenchCandidateFilterStats(scope, preview) {
   if (preview?.commercial_director_experiment) {
-    const all = (preview?.clips || []).filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
+    const full = (Array.isArray(preview?.candidate_clips) && preview.candidate_clips.length)
+      ? preview.candidate_clips
+      : (preview?.clips || []);
+    const all = full.filter(function (clip) { return !isPreviewWorkbenchHardWasteCandidate(clip); });
     const activeChapterId = previewDirectorActiveChapterId(scope, preview);
     const recommended = all.filter(function (clip) {
       return previewWorkbenchCandidateOrigin(clip) === "extra" && !isPreviewWorkbenchSelected(clip);
@@ -13522,7 +15269,9 @@ function previewWorkbenchCandidateFilterStats(scope, preview) {
       recommended: recommended.length,
       extra: recommended.length,
       chapter: chapter.length,
-      all: all.length,
+      // 「完整句库」的角标必须和它实际显示的行数一致：那一栏不做硬废弃过滤。
+      all: full.length,
+      waste: full.length - all.length,
       source: previewWorkbenchSourceCandidates(scope, preview).length,
       filtered: previewWorkbenchFilteredCandidates(scope, preview).length,
       duration: all.reduce(function (sum, clip) { return sum + effectiveClipDuration(clip); }, 0),
@@ -13561,6 +15310,11 @@ function setPreviewCandidateCategoryFilter(scope = "smart", value = "all") {
   state.previewCandidateSelections[scope] = null;
   renderPreviewStateKeepStoryScroll(scope);
 }
+function setPreviewCandidateReplaceableOnly(scope = "smart", value = false) {
+  if (!state.previewDirectorReplaceableOnly) state.previewDirectorReplaceableOnly = {};
+  state.previewDirectorReplaceableOnly[scope] = Boolean(value);
+  renderPreviewStateKeepStoryScroll(scope);
+}
 
 function renderPreviewCandidateFilterBar(scope, preview) {
   const labels = new Map(directPreviewWorkbenchCandidateCategories);
@@ -13577,10 +15331,30 @@ function renderPreviewCandidateFilterBar(scope, preview) {
     ].map(function ([value, label, count]) {
       return '<button type="button" class="' + (view === value ? 'is-active' : '') + '" data-action="preview-candidate-source-filter" data-preview-scope="' + scope + '" data-value="' + value + '" aria-pressed="' + (view === value ? 'true' : 'false') + '"><span>' + label + '</span><em>' + count + '</em></button>';
     }).join("");
+    const category = previewWorkbenchCategoryFilter(scope);
+    const categoryPool = previewWorkbenchSourceCandidates(scope, preview);
+    const categoryPresent = new Map();
+    categoryPool.forEach(function (clip) {
+      const key = directorLooseCandidateCategory(clip, scope);
+      if (!key) return;
+      categoryPresent.set(key, (categoryPresent.get(key) || 0) + 1);
+    });
+    const categoryButtons = ['<button type="button" class="' + (category === 'all' ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="all"><span>全部</span><em>' + categoryPool.length + '</em></button>'];
+    directorLooseCandidateCategoryLabels.forEach(function ([key, label]) {
+      const count = categoryPresent.get(key) || 0;
+      if (!count) return;
+      categoryButtons.push('<button type="button" class="' + (category === key ? 'is-active' : '') + '" data-action="preview-candidate-category-filter" data-preview-scope="' + scope + '" data-value="' + key + '"><span>' + escapeHtml(label) + '</span><em>' + count + '</em></button>');
+    });
+    const replaceableOnly = previewCandidateReplaceableOnly(scope);
+    const replaceableToggle = '<button type="button" class="preview-candidate-replaceable-toggle' + (replaceableOnly ? ' is-active' : '') + '" data-action="preview-candidate-replaceable-only" data-preview-scope="' + scope + '" data-value="' + (replaceableOnly ? '0' : '1') + '" aria-pressed="' + (replaceableOnly ? 'true' : 'false') + '">只看能直接当替换句的</button>';
     const hint = view === "recommended"
       ? `AI 同次返回 ${stats.recommended} 条备用；更多原句请切换“完整句库”`
       : (view === "chapter" ? `正在查看：${chapterLabel}` : `当前公开候选约 ${stats.duration.toFixed(1)} 秒`);
-    return '<div class="preview-candidate-filterbar is-director"><div class="preview-candidate-source-filter" role="tablist" aria-label="候选片段范围">' + buttons + '</div><small>' + escapeHtml(hint) + '</small></div>';
+    const hintText = escapeHtml(hint) + (replaceableOnly ? ' · 已过滤半截话/过短/断裂句' : '');
+    return '<div class="preview-candidate-filterbar is-director"><div class="preview-candidate-source-filter" role="tablist" aria-label="候选片段范围">' + buttons + '</div>'
+      + '<div class="preview-candidate-category-filter">' + categoryButtons.join("") + '</div>'
+      + '<div class="preview-candidate-filter-actions">' + replaceableToggle + '</div>'
+      + '<small>' + hintText + '</small></div>';
   }
   const source = previewWorkbenchCandidateSourceFilter(scope);
   const category = previewWorkbenchCategoryFilter(scope);
@@ -13613,6 +15387,184 @@ function renderPreviewCandidateFilterBar(scope, preview) {
   return '<div class="preview-candidate-filterbar"><div class="preview-candidate-source-filter">' + sourceButtons + '</div><div class="preview-candidate-category-filter">' + categoryButtons.join("") + '</div><small>\u5f53\u524d\u663e\u793a ' + stats.filtered + ' / ' + stats.source + ' \u6bb5</small></div>';
 }
 
+// [AI_WORKBENCH_CANDIDATE_WINDOW_START]
+// 「按连续窗分组 + 窗分类 + 开场召回单列」：只读现成载荷字段（continuity_group / opening_selection），
+// 不改选片、不改顺序、不新增 AI 调用。
+function directorLooseCategoryLabelFor(key) {
+  const entry = directorLooseCandidateCategoryLabels.find(function (item) { return item[0] === key; });
+  return entry ? entry[1] : "";
+}
+
+function previewCandidateWindowMeta(scope, preview) {
+  const metas = new Map();
+  previewWorkbenchSourceCandidates(scope, preview).forEach(function (clip) {
+    const key = String(clip?.continuity_group || "");
+    if (!key) return;
+    const bounds = effectiveClipBounds(clip) || {};
+    const start = Number(bounds.start || 0);
+    const end = Number(bounds.end || 0);
+    let meta = metas.get(key);
+    if (!meta) { meta = { key: key, start: start, end: end, total: 0, present: new Map() }; metas.set(key, meta); }
+    if (start < meta.start) meta.start = start;
+    if (end > meta.end) meta.end = end;
+    meta.total += 1;
+    const category = directorLooseCandidateCategory(clip, scope);
+    if (category) meta.present.set(category, (meta.present.get(category) || 0) + 1);
+  });
+  const ordered = Array.from(metas.values()).sort(function (a, b) {
+    if (a.start !== b.start) return a.start - b.start;
+    return String(a.key).localeCompare(String(b.key));
+  });
+  ordered.forEach(function (meta, index) { meta.number = index + 1; });
+  return new Map(ordered.map(function (meta) { return [meta.key, meta]; }));
+}
+
+function previewCandidateWindowCategoryText(meta) {
+  if (!meta) return "";
+  const entries = Array.from(meta.present.entries()).sort(function (a, b) {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return String(a[0]).localeCompare(String(b[0]));
+  });
+  if (!entries.length) return "";
+  const counted = entries.reduce(function (sum, item) { return sum + item[1]; }, 0);
+  const top = entries[0];
+  const topLabel = directorLooseCategoryLabelFor(top[0]);
+  if (!topLabel) return "";
+  if (entries.length === 1 || top[1] / counted >= 0.5) return topLabel + "为主";
+  const secondLabel = directorLooseCategoryLabelFor(entries[1][0]);
+  return secondLabel ? topLabel + " + " + secondLabel + "（混合）" : topLabel + "为主";
+}
+
+function previewCandidateWindowHeadHtml(windowKey, clips, windowMetas) {
+  const meta = windowMetas.get(windowKey);
+  let start = null;
+  let end = null;
+  clips.forEach(function (clip) {
+    const bounds = effectiveClipBounds(clip) || {};
+    const value = Number(bounds.start || 0);
+    const value2 = Number(bounds.end || 0);
+    if (start === null || value < start) start = value;
+    if (end === null || value2 > end) end = value2;
+  });
+  const range = (start === null || end === null) ? "" : escapeHtml(formatSeconds(start)) + "–" + escapeHtml(formatSeconds(end));
+  const categoryText = previewCandidateWindowCategoryText(meta);
+  return '<strong>' + (meta ? '窗' + meta.number : '补充句（手动加入）') + (range ? ' · ' + range : '') + '</strong>'
+    + (categoryText ? '<em class="preview-candidate-window-cat">' + escapeHtml(categoryText) + '</em>' : '')
+    + '<span>' + clips.length + '</span>';
+}
+
+// [AI_WORKBENCH_RECALL_POOL_START] 独立 Hook 召回池：只读展示，不参与选片。
+function previewOpeningRecallPool(preview) {
+  const raw = preview?.director_review?.opening_hook_pool || preview?.opening_hook_pool;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(function (item) { return item && typeof item === "object"; });
+}
+
+function previewOpeningRecallPoolDecisions(preview) {
+  const opening = preview?.director_review?.opening_selection || preview?.opening_selection;
+  const compared = Array.isArray(opening?.compared_packages) ? opening.compared_packages : [];
+  const decisions = new Map();
+  compared.forEach(function (pkg) {
+    const ids = Array.isArray(pkg?.subtitle_ids) ? pkg.subtitle_ids : [];
+    if (!ids.length) return;
+    decisions.set(Number(ids[0]), String(pkg?.decision || ""));
+  });
+  return decisions;
+}
+
+function previewOpeningPoolNumber(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  return Number(value);
+}
+
+function renderPreviewOpeningPoolRows(preview) {
+  const pool = previewOpeningRecallPool(preview);
+  if (!pool.length) return "";
+  const decisions = previewOpeningRecallPoolDecisions(preview);
+  const badges = { selected: "已选", alternative: "备选", rejected: "已否" };
+  const rows = pool.map(function (item) {
+    const ids = Array.isArray(item?.subtitle_ids) ? item.subtitle_ids.map(Number) : [];
+    const hookId = ids.length ? ids[0] : 0;
+    const decision = decisions.get(hookId) || "";
+    const badge = '<span class="preview-opening-pool-badge' + (decision ? ' is-' + escapeHtml(decision) : '') + '">'
+      + escapeHtml(badges[decision] || "未使用") + '</span>';
+    const type = String(item?.hook_type || "").trim();
+    const strength = previewOpeningPoolNumber(item?.hook_strength);
+    const seconds = previewOpeningPoolNumber(item?.duration);
+    const meta = [];
+    if (type) meta.push(type);
+    if (Number.isFinite(strength)) meta.push("强度 " + strength);
+    if (Number.isFinite(seconds)) meta.push(seconds.toFixed(2) + "s");
+    return '<article class="preview-opening-pool-row">'
+      + '<div class="preview-opening-recall-head">' + badge
+      + '<span class="preview-opening-recall-id">#' + hookId + '</span>'
+      + '<span class="preview-opening-pool-rank">池内第 ' + Number(item?.pool_rank || 0) + '</span></div>'
+      + '<div class="preview-opening-recall-hook">' + escapeHtml(String(item?.text || "").trim() || "未识别口播") + '</div>'
+      + (meta.length ? '<small>' + escapeHtml(meta.join(" · ")) + '</small>' : '')
+      + '</article>';
+  }).join("");
+  return '<div class="preview-opening-pool"><div class="preview-opening-pool-head"><strong>独立召回池 ' + pool.length + ' 条</strong>'
+    + '<span class="preview-opening-pool-hint">AI 单次全量扫描返回，按强度降序、排名升序；标「已选/备选/已否」的是被拿去比较过的</span></div>'
+    + rows + '</div>';
+}
+// [AI_WORKBENCH_RECALL_POOL_END]
+
+function previewOpeningRecallPackages(preview) {
+  const opening = preview?.director_review?.opening_selection || preview?.opening_selection;
+  const audit = opening?.candidate_audit;
+  const candidates = Array.isArray(audit?.candidates) ? audit.candidates : [];
+  const compared = Array.isArray(opening?.compared_packages) ? opening.compared_packages : [];
+  const decisionByHookId = new Map();
+  compared.forEach(function (pkg) {
+    const ids = Array.isArray(pkg?.subtitle_ids) ? pkg.subtitle_ids : [];
+    if (!ids.length) return;
+    decisionByHookId.set(Number(ids[0]), String(pkg?.decision || ""));
+  });
+  const packages = [];
+  candidates.forEach(function (item, index) {
+    const hooks = Array.isArray(item?.hook_source) ? item.hook_source : [];
+    if (!hooks.length) return;
+    const payoffs = Array.isArray(item?.payoff_source) ? item.payoff_source : [];
+    const hookId = Number(hooks[0]?.id);
+    packages.push({
+      rank: Number(item?.ai_rank || index + 1),
+      decision: decisionByHookId.get(hookId) || String(item?.ai_receipt?.decision || "") || "alternative",
+      hookId: hookId,
+      hookText: String(hooks[0]?.text || "").trim(),
+      payoffId: Number(payoffs[0]?.id),
+      payoffText: String(payoffs[0]?.text || "").trim(),
+      reason: String(item?.ai_receipt?.reason || "").trim(),
+      seconds: Number(item?.source_seconds || 0),
+    });
+  });
+  const order = { selected: 0, alternative: 1, rejected: 2 };
+  return packages.sort(function (a, b) {
+    const oa = order[a.decision] === undefined ? 3 : order[a.decision];
+    const ob = order[b.decision] === undefined ? 3 : order[b.decision];
+    return oa - ob;
+  });
+}
+
+function renderPreviewOpeningRecallBlock(preview, scope = "smart") {
+  const packages = previewOpeningRecallPackages(preview);
+  if (!packages.length) return "";
+  const badges = { selected: "已选", alternative: "备选", rejected: "已否" };
+  const rows = packages.map(function (pkg) {
+    const head = '<div class="preview-opening-recall-head"><span class="preview-opening-recall-badge">' + escapeHtml(badges[pkg.decision] || "候选") + '</span><span class="preview-opening-recall-id">#' + Number(pkg.hookId || 0) + '</span></div>';
+    const payoff = pkg.payoffText ? '<div class="preview-opening-recall-payoff">承接 #' + Number(pkg.payoffId || 0) + ' ' + escapeHtml(pkg.payoffText) + '</div>' : '';
+    const metaText = (pkg.reason ? '理由：' + pkg.reason : '') + (pkg.seconds ? (pkg.reason ? ' · ' : '') + pkg.seconds.toFixed(2) + 's' : '');
+    // [AI_WORKBENCH_RECALL_ADD_START] 把这一组开场（钩子+承接）补进候选池并加到已选最前
+    const recallHookId = Number(pkg.hookId || 0);
+    const recallPayoffId = Number.isFinite(Number(pkg.payoffId)) ? Number(pkg.payoffId || 0) : 0;
+    const addButton = '<div class="preview-opening-recall-add"><button class="button button-small button-primary" data-action="preview-recall-add" data-preview-scope="' + escapeHtml(scope || "smart") + '" data-recall-hook-id="' + recallHookId + '" data-recall-payoff-id="' + recallPayoffId + '" title="把这一组开场的钩子和承接加到「已选片段」最前面">加入开场（钩子+承接）</button></div>';
+    // [AI_WORKBENCH_RECALL_ADD_END]
+    return '<article class="preview-opening-recall-row is-' + escapeHtml(pkg.decision) + '">' + head
+      + '<div class="preview-opening-recall-hook">' + escapeHtml(pkg.hookText || "未识别口播") + '</div>' + payoff
+      + (metaText ? '<small>' + escapeHtml(metaText) + '</small>' : '') + addButton + '</article>';
+  }).join("");
+  return '<details class="preview-candidate-group is-opening-recall" data-fold="candidate-opening-recall" data-preview-opening-recall="1" open><summary class="preview-candidate-group-head" title="点击展开或收起"><strong>开场钩子 · 召回候选</strong><span>' + packages.length + '</span></summary><div class="preview-candidate-group-rows">' + rows + renderPreviewOpeningPoolRows(preview) + '</div></details>';
+}
+// [AI_WORKBENCH_CANDIDATE_WINDOW_END]
 function previewDirectorCandidateSuggestion(scope, preview, clip) {
   const replaces = String(clip?.director_replaces_beat_id || "").trim();
   if (replaces) {
@@ -13630,7 +15582,7 @@ function renderPreviewCandidateGroups(scope, preview) {
   const labels = new Map(directPreviewWorkbenchCandidateCategories);
   const candidates = previewWorkbenchFilteredCandidates(scope, preview);
   if (preview?.commercial_director_experiment) {
-    const rows = candidates.map(function (clip) {
+    function rowHtml(clip) {
       const selected = isPreviewWorkbenchSelected(clip);
       const active = Number(activeCandidate) === Number(clip.index) || (!hasActiveCandidate && Number(state.previewDetailSelection?.[scope]) === Number(clip.index));
       const clipText = String(previewWorkbenchCandidateText(clip) || "未识别口播").trim();
@@ -13642,11 +15594,44 @@ function renderPreviewCandidateGroups(scope, preview) {
       const dragHandle = selected
         ? '<span class="preview-candidate-drag-handle is-disabled" title="已在右侧">已</span>'
         : '<span class="preview-candidate-drag-handle" data-preview-candidate-drag-handle data-preview-scope="' + scope + '" title="拖到右侧已选片段" aria-label="拖到右侧已选片段">拖</span>';
-      return '<article class="preview-candidate-row is-director ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '" data-preview-candidate-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">' + dragHandle
-        + '<button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span class="preview-candidate-time">' + escapeHtml(formatSeconds(bounds.start)) + '–' + escapeHtml(formatSeconds(bounds.end)) + '<em>' + seconds.toFixed(1) + 's</em></span><strong>' + escapeHtml(clipText) + '</strong><small class="is-' + escapeHtml(role.tone) + '">' + escapeHtml(previewDirectorCandidateSuggestion(scope, preview, clip)) + '</small></button>'
+      const categoryLabel = directorLooseCandidateCategoryLabel(clip, scope);
+      const categoryTag = categoryLabel ? '<i class="preview-candidate-category-tag">' + escapeHtml(categoryLabel) + '</i>' : '';
+      // 「完整句库」会把跨商品素材一并列出来（后端只标记不过滤），
+      // 所以必须让用户一眼看出哪条不属于主商品：程序不会自动用它，只能手工加入。
+      const offProductTag = clip?.within_main_product === false
+        ? '<i class="preview-candidate-category-tag is-off-product" title="属于其它商品或无关段落：程序不会自动选用，只能手工加入">非主商品</i>'
+        : '';
+      return '<article class="preview-candidate-row is-director ' + (active ? 'is-active ' : '') + (selected ? 'is-selected ' : '') + (clip?.within_main_product === false ? 'is-off-product ' : '') + '" data-preview-candidate-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">' + dragHandle
+        + '<button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span class="preview-candidate-time">' + escapeHtml(formatSeconds(bounds.start)) + '–' + escapeHtml(formatSeconds(bounds.end)) + '<em>' + seconds.toFixed(1) + 's</em></span><strong>' + escapeHtml(clipText) + '</strong><small class="is-' + escapeHtml(role.tone) + '">' + escapeHtml(previewDirectorCandidateSuggestion(scope, preview, clip)) + categoryTag + offProductTag + '</small></button>'
         + (selected ? inspectButton : addButton) + '</article>';
+    }
+    const recallBlock = previewWorkbenchCategoryFilter(scope) === "all" ? renderPreviewOpeningRecallBlock(preview, scope) : "";
+    if (!candidates.length) {
+      return recallBlock || '<div class="preview-sequence-empty"><strong>当前范围没有补充短句</strong><span>可以切换“当前章节”或“完整句库”继续查看，不会重新调用 AI。</span></div>';
+    }
+    const windowMetas = previewCandidateWindowMeta(scope, preview);
+    const buckets = [];
+    const bucketIndex = new Map();
+    candidates.forEach(function (clip) {
+      const key = String(clip?.continuity_group || "");
+      let bucket = bucketIndex.get(key);
+      if (!bucket) { bucket = { key: key, clips: [] }; bucketIndex.set(key, bucket); buckets.push(bucket); }
+      bucket.clips.push(clip);
+    });
+    buckets.sort(function (a, b) {
+      const metaA = windowMetas.get(a.key);
+      const metaB = windowMetas.get(b.key);
+      if (metaA && metaB && metaA.number !== metaB.number) return metaA.number - metaB.number;
+      if (metaA && !metaB) return -1;
+      if (!metaA && metaB) return 1;
+      return Number((effectiveClipBounds(a.clips[0]) || {}).start || 0) - Number((effectiveClipBounds(b.clips[0]) || {}).start || 0);
+    });
+    const windowHtml = buckets.map(function (bucket) {
+      const rows = bucket.clips.map(function (clip) { return rowHtml(clip); }).join("");
+      const head = previewCandidateWindowHeadHtml(bucket.key, bucket.clips, windowMetas);
+      return '<details class="preview-candidate-group is-window" data-fold="candidate-window-' + escapeHtml(bucket.key) + '" data-preview-candidate-window="' + escapeHtml(bucket.key) + '"><summary class="preview-candidate-group-head" title="点击展开或收起">' + head + '</summary><div class="preview-candidate-group-rows">' + rows + '</div></details>';
     }).join("");
-    return rows || '<div class="preview-sequence-empty"><strong>当前范围没有补充短句</strong><span>可以切换“当前章节”或“完整句库”继续查看，不会重新调用 AI。</span></div>';
+    return recallBlock + windowHtml;
   }
   const groups = [];
   candidates.forEach(function (clip) {
@@ -13672,7 +15657,7 @@ function renderPreviewCandidateGroups(scope, preview) {
       return '<article class="preview-candidate-row ' + (active ? 'is-active ' : '') + (selected ? 'is-selected' : '') + '" data-preview-candidate-row data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '">' + dragHandle + '<button class="preview-candidate-main" data-action="preview-workbench-select-candidate" data-preview-scope="' + scope + '" data-preview-index="' + Number(clip.index) + '" title="' + escapeHtml(clipText) + '"><span>' + escapeHtml(clipText) + '</span></button>' + (selected ? inspectButton : addButton) + '</article>';
     }).join("");
     const secondary = key === "live" || key === "unclear";
-    return '<details class="preview-candidate-group ' + (secondary ? 'is-secondary' : '') + '" data-preview-candidate-group="' + key + '"' + (secondary ? '' : ' open') + '><summary class="preview-candidate-group-head" title="\u70b9\u51fb\u5c55\u5f00\u6216\u6536\u8d77"><strong>' + label + '</strong><span>' + clips.length + '</span></summary><div class="preview-candidate-group-rows">' + rows + '</div></details>';
+    return '<details class="preview-candidate-group ' + (secondary ? 'is-secondary' : '') + '" data-fold="candidate-' + key + '" data-preview-candidate-group="' + key + '"' + (secondary ? '' : ' open') + '><summary class="preview-candidate-group-head" title="\u70b9\u51fb\u5c55\u5f00\u6216\u6536\u8d77"><strong>' + label + '</strong><span>' + clips.length + '</span></summary><div class="preview-candidate-group-rows">' + rows + '</div></details>';
   }).join("") || '<div class="preview-sequence-empty"><strong>\u8fd9\u4e2a\u7b5b\u9009\u4e0b\u6ca1\u6709\u6709\u6548\u5019\u9009</strong><span>\u5df2\u8fc7\u6ee4\u5f31\u65ad\u53e5\u3001\u4e92\u52a8\u5e9f\u8bdd\u548c\u65e0\u5356\u70b9\u7247\u6bb5\uff1b\u53ef\u5207\u6362\u54c1\u7c7b\u6216\u5907\u7528\u5019\u9009\u3002</span></div>';
 }
 
@@ -14253,7 +16238,7 @@ function renderPreviewFilmOverview(scope, preview, targetId, selected, duration)
       <div class="preview-film-actions"><button class="button button-muted button-small" data-action="preview-duration-fit" data-preview-scope="${scope}">\u9002\u914d\u65f6\u957f</button><button class="button button-secondary button-small" data-action="preview-overview-toggle" data-preview-scope="${scope}">${overview.issues.length ? "\u67e5\u770b\u95ee\u9898" : "\u67e5\u770b\u8be6\u60c5"}</button></div>
     </div>
     <div class="preview-film-duration" title="\u53ef\u63a5\u53d7 ${duration.low.toFixed(1)}-${duration.high.toFixed(1)}s\uff0c\u5f53\u524d\u9884\u8ba1 ${duration.projected.toFixed(1)}s"><span class="preview-film-duration-range" style="left:${lowPercent.toFixed(2)}%;width:${Math.max(0, highPercent - lowPercent).toFixed(2)}%"></span><span class="preview-film-duration-value" style="width:${currentPercent.toFixed(2)}%"></span><i style="left:${targetPercent.toFixed(2)}%"></i></div>
-    <details class="preview-film-details" data-preview-film-details="${scope}"><summary><span>\u6210\u7247\u8be6\u60c5</span><small>${overview.issues.length ? `${overview.issues.length}\u9879\u5f85\u68c0\u67e5` : "\u5f53\u524d\u7f16\u6392\u6b63\u5e38"}</small></summary>
+    <details class="preview-film-details" data-fold="film-${scope}" data-preview-film-details="${scope}"><summary><span>\u6210\u7247\u8be6\u60c5</span><small>${overview.issues.length ? `${overview.issues.length}\u9879\u5f85\u68c0\u67e5` : "\u5f53\u524d\u7f16\u6392\u6b63\u5e38"}</small></summary>
       <div class="preview-film-detail-rows">
         <div><strong>\u5185\u5bb9</strong><span>${escapeHtml(contentParts.join(" \u00b7 ") || "\u6682\u65e0\u4e3b\u5546\u54c1\u6216\u4e3b\u9898\u4fe1\u606f")}</span></div>
         <div><strong>\u7ed3\u6784</strong><span>${escapeHtml(`\u6210\u4ea4\u7ed3\u6784 ${overview.salesChain.label}\uff1b${overview.salesChain.title}`)}</span></div>
@@ -14568,8 +16553,60 @@ function renderCommerceDirectorRecommendationCard(preview, duration = {}, scope 
     <div class="commerce-director-status-row" role="status"><span class="commerce-director-opening"><b>开场承诺</b>${escapeHtml(openingPromise || "尚未形成明确开场承诺")}</span><div class="commerce-director-status-metrics"><span>可编辑候选约 ${Number(candidateStats.duration || 0).toFixed(1)}s</span><span>已选 ${selected.length} 段</span><span>${escapeHtml(status.progressionLabel)}</span><span>${escapeHtml(status.openingLabel)}</span><span>${escapeHtml(status.endingLabel)}</span></div><span class="commerce-director-status-badge is-${statusTone}"><small>${escapeHtml(statusSource)}</small>${escapeHtml(status.overallLabel)}</span></div>
     ${status.boundaryMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.boundaryMessage)}</p>` : ""}
     ${status.openingMessage ? `<p class="commerce-director-status-row" role="alert">${escapeHtml(status.openingMessage)}</p>` : ""}
+    ${renderPreviewStoryPolicyReceipt(preview)}
     <span class="visually-hidden" aria-live="polite">当前查看 ${escapeHtml(outline.find(function (item) { return String(item?.chapter_id || "") === activeChapterId; })?.goal || "导演方案")}</span>
   </section>`;
+}
+
+function previewStoryPolicyReceipt(preview) {
+  const raw = preview?.director_review?.story_policy_receipt || preview?.story_policy_receipt;
+  return raw && typeof raw === "object" ? raw : null;
+}
+
+function renderPreviewStoryPolicyReceipt(preview) {
+  const receipt = previewStoryPolicyReceipt(preview);
+  if (!receipt || !receipt.available) return "";
+  const chapters = Array.isArray(receipt.removed_chapters) ? receipt.removed_chapters : [];
+  const trims = Array.isArray(receipt.trimmed_chapters) ? receipt.trimmed_chapters : [];
+  const clears = Array.isArray(receipt.cleared_story_fields) ? receipt.cleared_story_fields : [];
+  const openings = Array.isArray(receipt.removed_opening_evidence_packages) ? receipt.removed_opening_evidence_packages : [];
+  const total = chapters.length + trims.length + clears.length + openings.length;
+  const depth = receipt.depth || {};
+  const depthRows = Array.isArray(depth.strategies) ? depth.strategies : [];
+  const row = function (label, text) {
+    return '<li class="preview-story-policy-row"><span class="preview-story-policy-kind">' + escapeHtml(label) + '</span>'
+      + '<span class="preview-story-policy-text">' + escapeHtml(text) + '</span></li>';
+  };
+  const rows = [];
+  chapters.forEach(function (item) {
+    rows.push(row('删章 ' + String(item.strategy_id || '') + '·' + String(item.chapter_id || ''), (item.blocked_kinds || []).join('/') || '内容边界'));
+  });
+  trims.forEach(function (item) {
+    rows.push(row('删要求 ' + String(item.strategy_id || '') + '·' + String(item.chapter_id || ''), (item.removed_requirements || []).join('；') || (item.blocked_kinds || []).join('/')));
+  });
+  clears.forEach(function (item) {
+    rows.push(row('清字段 ' + String(item.strategy_id || '') + '·' + String(item.field || ''), (item.blocked_kinds || []).join('/')));
+  });
+  openings.forEach(function (item) {
+    rows.push(row('删开场包 ' + String(item.strategy_id || '') + '·#' + Number(item.package_index || 0), (item.blocked_kinds || []).join('/')));
+  });
+  const depthLine = depthRows.map(function (item) {
+    return String(item.strategy_id || '') + ' ' + Number(item.chapter_count || 0) + '\u7ae0/' + Number(item.planned_source_seconds || 0).toFixed(1) + 's' + (item.sufficient ? '\u2713' : '\u2717');
+  }).join(' \u00b7 ');
+  const head = '<div class="preview-story-policy-head"><strong>\u5185\u5bb9\u8fb9\u754c\u56de\u6267</strong>'
+    + '<span class="preview-story-policy-count">' + total + ' \u5904\u6539\u52a8</span>'
+    + '<span class="preview-story-policy-hint">\u5408\u89c4\u5c42\u5bf9 M1 \u6545\u4e8b\u505a\u7684\u5220\u51cf\uff0c\u539f\u6837\u5c55\u793a\uff0c\u4e0d\u53c2\u4e0e\u9009\u7247</span></div>';
+  const body = rows.length
+    ? '<ul class="preview-story-policy-list">' + rows.join('') + '</ul>'
+    : '<p class="preview-story-policy-empty">\u5408\u89c4\u5c42\u672a\u5220\u6539 M1 \u6545\u4e8b\u3002</p>';
+  const depthBox = (depthLine || depth.status)
+    ? '<div class="preview-story-policy-depth"><span>\u4ea4\u4ed8\u6df1\u5ea6</span><b>' + escapeHtml(depthLine || '\u2014') + '</b>'
+      + '<span class="preview-story-policy-muted">\u76ee\u6807 ' + Number(depth.requested_seconds || 0).toFixed(0) + 's / \u4e0b\u9650 '
+      + Number(depth.minimum_planned_source_seconds || 0).toFixed(1) + 's / \u6700\u5c11 ' + Number(depth.minimum_chapters || 0) + ' \u7ae0 \u00b7 '
+      + escapeHtml(String(depth.status || '')) + '</span></div>'
+    : '';
+  return '<details class="preview-story-policy" data-preview-story-policy="1"><summary>' + head + '</summary>'
+    + body + depthBox + '</details>';
 }
 
 function togglePreviewOverviewDetails(scope = "smart") {
@@ -14620,4 +16657,1085 @@ function toast(message, type = "success") {
   item.textContent = message;
   stack.appendChild(item);
   setTimeout(() => item.remove(), 3600);
+}
+
+// ---------------------------------------------------------------------------
+// 素材库：搜关键词/整句，定位"哪个主播在哪场直播第几秒说过"
+// ---------------------------------------------------------------------------
+
+let materialSuggestTimer = null;
+
+function materialState() {
+  if (!state.material) {
+    state.material = {
+      loaded: false, busy: false, indexTaskId: "", result: null, probe: null,
+      videos: [], publishers: [], suggestItems: [],
+      currentPublisher: "", currentVideo: "", videoFilterLabel: "",
+    };
+  }
+  return state.material;
+}
+
+function materialDurationText(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  if (!total) return "0 秒";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  if (hours) return minutes ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+  return `${minutes} 分钟`;
+}
+
+function materialClock(epochSeconds) {
+  const value = Number(epochSeconds) || 0;
+  if (!value) return "";
+  const date = new Date(value * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function materialBaseName(path) {
+  return String(path || "").split(/[\\/]/).pop() || "";
+}
+
+/** 在一句话里给命中位置加高亮（spans 是相对该句原文的字符区间）。 */
+function materialHighlightSpans(text, spans) {
+  const raw = String(text || "");
+  const ranges = Array.isArray(spans) ? spans : [];
+  if (!ranges.length) return escapeHtml(raw);
+  const sorted = ranges
+    .map((span) => [Number(span?.[0]) || 0, Number(span?.[1]) || 0])
+    .filter(([start, end]) => end > start)
+    .sort((left, right) => left[0] - right[0]);
+  let cursor = 0;
+  let html = "";
+  sorted.forEach(([start, end]) => {
+    const from = Math.max(cursor, Math.min(start, raw.length));
+    const to = Math.max(from, Math.min(end, raw.length));
+    if (from > cursor) html += escapeHtml(raw.slice(cursor, from));
+    if (to > from) html += `<mark class="material-hit">${escapeHtml(raw.slice(from, to))}</mark>`;
+    cursor = to;
+  });
+  if (cursor < raw.length) html += escapeHtml(raw.slice(cursor));
+  return html;
+}
+
+function materialRenderWindow(window, group) {
+  const stamp = formatSeconds(window?.hit_start || 0);
+  const videoPath = String(group?.video_path || "");
+  const copyText = `${materialBaseName(videoPath)}  ${stamp}  ${String(window?.hit_text || "").trim()}`;
+  const lines = (window?.lines || []).map((line) => {
+    const prefix = line.is_hit ? "▶" : "·";
+    return `<div class="material-line${line.is_hit ? " is-hit" : ""}">`
+      + `<span class="material-line-prefix" aria-hidden="true">${prefix}</span>`
+      + `<span class="material-line-time">${escapeHtml(formatSeconds(line.start || 0))}</span>`
+      + `<span class="material-line-text">${materialHighlightSpans(line.text, line.spans)}</span>`
+      + "</div>";
+  }).join("");
+  return `<div class="material-window">
+    <div class="material-window-head">
+      <span class="material-stamp">${escapeHtml(stamp)}</span>
+      <button class="material-link" type="button" data-action="material-open" data-material-path="${escapeHtml(videoPath)}" data-material-start="${Number(window?.hit_start) || 0}">▶ 打开视频</button>
+      <button class="material-link" type="button" data-action="material-reveal" data-material-path="${escapeHtml(videoPath)}" title="在资源管理器里打开这个视频所在的文件夹并选中它">📁 打开视频地址</button>
+      <button class="material-link" type="button" data-action="material-copy-stamp" data-material-text="${escapeHtml(copyText)}">⧉ 复制时间点</button>
+    </div>
+    <div class="material-window-body">${lines}</div>
+  </div>`;
+}
+
+/**
+ * 把同一个视频里的多个命中窗口合并成"内容互不重复"的几段。
+ *
+ * 为什么需要：命中密集时（例如同一句口播里反复出现同一个词），各处命中的
+ * 上下文窗口会覆盖同一批句子，若逐个窗口都渲染一遍，用户看到的就是"同一段
+ * 内容在卡片里重复出现"。这里按"是否有共同行"把窗口聚成若干单元，单元内部
+ * 每句话只保留一次。
+ */
+function materialMergeGroupWindows(rawWindows) {
+  const windows = (rawWindows || []).filter((window) => window && (window.lines || []).length);
+  if (windows.length <= 1) return windows.slice();
+  const units = [];
+  windows.forEach((window) => {
+    const lineIds = new Set((window.lines || []).map((line) => line.sentence_id));
+    // 与已有单元有共同行 -> 并入同一单元（上下文本来就是重叠的）
+    const hit = units.find((unit) => [...lineIds].some((id) => unit.lineIds.has(id)));
+    if (!hit) {
+      units.push({
+        lineIds: new Set(lineIds),
+        lines: [...(window.lines || [])],
+        windows: [window],
+      });
+      return;
+    }
+    hit.windows.push(window);
+    (window.lines || []).forEach((line) => {
+      if (hit.lineIds.has(line.sentence_id)) return;
+      hit.lineIds.add(line.sentence_id);
+      hit.lines.push(line);
+    });
+  });
+  return units.map((unit) => {
+    unit.lines.sort((left, right) => (Number(left.start) || 0) - (Number(right.start) || 0));
+    const firstHit = unit.lines.find((line) => line.is_hit) || unit.lines[0];
+    const lastHit = [...unit.lines].reverse().find((line) => line.is_hit) || unit.lines[unit.lines.length - 1];
+    return {
+      ...unit.windows[0],
+      lines: unit.lines,
+      hit_start: Number(firstHit.start) || 0,
+      hit_end: Number(lastHit.end) || 0,
+      hit_text: String(firstHit.text || ""),
+      hit_count: unit.windows.length,
+    };
+  }).sort((left, right) => (Number(left.hit_start) || 0) - (Number(right.hit_start) || 0));
+}
+
+function materialRenderGroups(groups) {
+  return (groups || []).map((group) => {
+    const windows = materialMergeGroupWindows(group.windows)
+      .map((window) => materialRenderWindow(window, group))
+      .join("");
+    const total = Number(group.windows_total) || (group.windows || []).length;
+    const hidden = Math.max(0, total - (group.windows || []).length);
+    const hiddenNote = hidden ? `<p class="material-more-note">该视频还有 ${hidden} 处命中未展开（共 ${total} 处）</p>` : "";
+    const session = materialClock(group.session_epoch);
+    const publisher = group.publisher || "未标注主播";
+    // 共享索引：来自哪一批、本机有没有文件。local_file 缺失时按"有文件"处理，
+    // 避免老数据被误标成"需下载"。
+    const originLabel = String(group.origin_label || "").trim();
+    const needsDownload = group.local_file === false;
+    return `<article class="material-group">
+      <header class="material-group-head">
+        <div class="material-group-title">
+          <strong class="material-publisher">${escapeHtml(publisher)}</strong>
+          <span class="material-video-name">${escapeHtml(group.video_name || materialBaseName(group.video_path))}</span>
+          ${originLabel ? `<span class="material-origin-badge" title="这条记录来自哪个批次的索引">${escapeHtml(originLabel)}</span>` : ""}
+          ${needsDownload ? `<span class="material-need-download" title="本机没有这个视频文件：拿上面的文件名去网盘查找下载">需下载</span>` : ""}
+        </div>
+        <div class="material-group-meta">
+          <span>命中 ${Number(group.hits) || 0} 处</span>
+          <span>首次出现 ${escapeHtml(formatSeconds(group.first_hit || 0))}</span>
+          ${session ? `<span>开播 ${escapeHtml(session)}</span>` : ""}
+        </div>
+      </header>
+      <p class="material-group-path" title="${escapeHtml(group.video_path || "")}">${escapeHtml(group.video_path || "")}</p>
+      ${windows}
+      ${hiddenNote}
+    </article>`;
+  }).join("");
+}
+
+/** 结果区顶部的"没全展示"提示（如实说明，不静默丢数据）。 */
+function materialRenderTruncationNote(text) {
+  const root = $("material-truncated-note");
+  if (!root) return;
+  const value = String(text || "").trim();
+  root.textContent = value;
+  root.hidden = !value;
+}
+
+/** 兜底：万一后端仍把同一视频拆成多张卡，前端先按视频合并，绝不重复展示同一视频。 */
+function materialMergeGroupsByVideo(groups) {
+  const merged = [];
+  const indexByKey = new Map();
+  (groups || []).forEach((group) => {
+    const key = String(group?.video_path || group?.video_id || "");
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, merged.length);
+      merged.push({ ...group, windows: [...(group.windows || [])] });
+      return;
+    }
+    const target = merged[existingIndex];
+    target.hits = (Number(target.hits) || 0) + (Number(group.hits) || 0);
+    target.windows_total = (Number(target.windows_total) || 0) + (Number(group.windows_total) || 0);
+    target.first_hit = Math.min(Number(target.first_hit) || 0, Number(group.first_hit) || 0);
+    target.last_hit = Math.max(Number(target.last_hit) || 0, Number(group.last_hit) || 0);
+    // 命中互不重叠，窗口直接并集；按时间排好避免顺序错乱
+    const seen = new Set(target.windows.map((window) => window.sentence_id));
+    (group.windows || []).forEach((window) => {
+      if (seen.has(window.sentence_id)) return;
+      seen.add(window.sentence_id);
+      target.windows.push(window);
+    });
+    target.windows.sort((left, right) => (Number(left.hit_start) || 0) - (Number(right.hit_start) || 0));
+  });
+  return merged;
+}
+
+function renderMaterialResult(result) {
+  const root = $("material-results");
+  if (!root) return;
+  const groups = materialMergeGroupsByVideo(result?.groups || []);
+  if (!groups.length) {
+    root.innerHTML = `<p class="material-empty">没有找到匹配的文案。可以试试：换更短的词；把匹配方式改成「分词匹配」，用空格分隔几个词（例如 真丝 柔软）；或者确认这句话确实在已索引的视频里说过。</p>`;
+    materialRenderTruncationNote("");
+    return;
+  }
+  root.innerHTML = materialRenderGroups(groups);
+  // 如实提示"还有多少没展示"，避免用户以为这就是全部
+  const notes = [];
+  const hiddenVideos = Number(result.videos_hidden || 0);
+  const hiddenHits = Number(result.hits_hidden || 0);
+  if (hiddenVideos > 0) notes.push(`另有 ${hiddenVideos} 个视频的命中未列出`);
+  if (hiddenHits > 0) notes.push(`每张卡片最多展开前几段，还有 ${hiddenHits} 处命中未展开`);
+  materialRenderTruncationNote(notes.join("；"));
+}
+
+/**
+ * 索引列表：一个素材目录 / 一个导入包 = 一个索引，互相独立。
+ * 点一个索引 = 只搜它；再点一次 = 取消（回到搜全部）。
+ */
+function renderMaterialLibraries(libs) {
+  const box = $("material-library-list");
+  if (!box) return;
+  const s = materialState();
+  const list = Array.isArray(libs) ? libs : [];
+  s.libraries = list;
+  if (!list.length) {
+    box.innerHTML = `<p class="material-library-empty">
+      还没有任何索引。<br>
+      ① 在上面选好素材目录，点「建立/更新这个目录的索引」；<br>
+      ② 或者点右上「导入索引」拿同事分享的索引包。
+    </p>`;
+    return;
+  }
+  box.innerHTML = list
+    .map((lib) => {
+      const active = Number(s.currentLibrary || 0) === Number(lib.id);
+      const kind = lib.kind === "imported" ? "导入" : "本机";
+      const hours = lib.duration ? `${(lib.duration / 3600).toFixed(1)}h` : "";
+      const sub = lib.kind === "imported"
+        ? `来自 ${escapeHtml(lib.note || lib.source || "导入包")}`
+        : escapeHtml(lib.root || "");
+      return `<div class="material-library ${active ? "is-active" : ""}" data-library-id="${lib.id}">
+        <button class="material-library-main" type="button" data-action="material-library-pick" data-library-id="${lib.id}">
+          <span class="material-library-name">${escapeHtml(lib.name || "(未命名)")}</span>
+          <span class="material-library-meta">
+            <em class="material-library-kind">${kind}</em>
+            ${lib.videos} 视频 · ${lib.sentences} 句${hours ? " · " + hours : ""}
+            ${lib.need_download ? ` · <em class="material-library-need">${lib.need_download} 个需下载</em>` : ""}
+          </span>
+          <span class="material-library-sub" title="${sub}">${sub}</span>
+        </button>
+        <div class="material-library-actions">
+          ${lib.kind === "directory" ? `<button class="material-library-action" type="button" data-action="material-library-rebuild" data-library-id="${lib.id}" title="重新扫描这个素材目录来更新（不影响其他索引）">重建</button>` : ""}
+          <button class="material-library-action" type="button" data-action="material-library-export" data-library-id="${lib.id}" title="只导出这个索引">导出</button>
+          <button class="material-library-action is-danger" type="button" data-action="material-library-remove" data-library-id="${lib.id}" title="删掉这个索引（不影响其他索引）">删除</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+function materialScopeState() {
+  const s = materialState();
+  if (!Array.isArray(s.scopePublishers)) s.scopePublishers = [];
+  if (!Array.isArray(s.scopeDirectories)) s.scopeDirectories = [];
+  if (typeof s.scopeActive !== "boolean") s.scopeActive = false;
+  if (typeof s.currentLibrary !== "number") s.currentLibrary = 0;
+  return s;
+}
+
+function materialScopeLabel() {
+  const s = materialScopeState();
+  if (!s.currentLibrary) return "全部索引";
+  const lib = (s.libraries || []).find((item) => Number(item.id) === Number(s.currentLibrary));
+  return lib ? lib.name : "全部索引";
+}
+
+function renderMaterialScope(data) {
+  const text = $("material-scope-text");
+  const note = $("material-scope-note");
+  const inline = $("material-scope-inline");
+  const menu = $("material-scope-menu");
+  if (!data || data.ok === false) {
+    if (text) text.textContent = "不可用";
+    if (note) note.textContent = "";
+    return;
+  }
+  const s = materialScopeState();
+  const videos = Number(data.videos) || 0;
+  const sentences = Number(data.sentences) || 0;
+  const libs = s.libraries || [];
+  const lib = libs.find((item) => Number(item.id) === Number(s.currentLibrary));
+  if (text) {
+    text.textContent = lib ? `${lib.name}（${lib.videos} 视频）` : `全部索引（${videos} 视频 / ${sentences} 句）`;
+  }
+  if (inline) {
+    inline.textContent = lib
+      ? `只搜这个索引，其他索引不参与`
+      : `当前有 ${libs.length} 个索引，点左边可只搜其中一个`;
+  }
+  if (note) {
+    note.textContent = lib
+      ? `只在索引「${lib.name}」里搜（其他索引不参与）。`
+      : "在全部索引里搜。点上面「搜索范围」可以只搜某一个索引。";
+  }
+  // 下拉里列出所有索引，点一个就只搜它
+  if (menu) {
+    const rows = [`<button class="material-scope-option ${lib ? "" : "is-active"}" type="button" data-scope-lib="0">
+        <span>全部索引</span><em>${videos} 视频 / ${sentences} 句</em></button>`];
+    libs.forEach((item) => {
+      rows.push(`<button class="material-scope-option ${Number(item.id) === Number(s.currentLibrary) ? "is-active" : ""}" type="button" data-scope-lib="${item.id}">
+          <span>${escapeHtml(item.name)}</span>
+          <em>${item.kind === "imported" ? "导入" : "本机"} · ${item.videos} 视频 / ${item.sentences} 句</em></button>`);
+    });
+    if (!libs.length) {
+      rows.push(`<p class="material-scope-menu-empty">还没有索引：先建立索引，或导入同事分享的索引包。</p>`);
+    }
+    menu.innerHTML = rows.join("");
+  }
+}
+
+function renderMaterialStatus(data) {
+  const chip = $("material-status-chip");
+  const meta = $("material-index-meta");
+  const s = materialState();
+  s.status = data || {};
+  s.publishers = data?.publishers || [];
+  if (chip) {
+    const libs = (s.libraries || []).length;
+    chip.textContent = data?.ok === false
+      ? "素材库不可用"
+      : `已索引 ${data.videos || 0} 个视频 · ${data.sentences || 0} 句`
+        + (libs ? ` · ${libs} 个索引` : "");
+  }
+  if (meta) {
+    // 兼容旧的"索引信息"卡片（当前布局已改成索引列表）
+    const parts = [
+      `<div><span>素材目录</span><strong title="${escapeHtml(data?.root || "")}">${escapeHtml(data?.root || "-")}</strong></div>`,
+      `<div><span>视频数</span><strong>${data?.videos || 0}</strong></div>`,
+      `<div><span>句子数</span><strong>${data?.sentences || 0}</strong></div>`,
+      `<div><span>总时长</span><strong>${escapeHtml(materialDurationText(data?.duration))}</strong></div>`,
+      `<div><span>检索加速</span><strong>${data?.fts_enabled ? "已启用" : "未启用"}</strong></div>`,
+    ];
+    meta.innerHTML = parts.join("");
+  }
+  const pathInput = $("material-index-path");
+  if (pathInput && data?.index_path) pathInput.value = data.index_path;
+  renderMaterialScope(data);
+  const rootInput = $("material-root");
+  if (rootInput && !rootInput.value.trim()) {
+    rootInput.value = data?.root || data?.default_root || "";
+  }
+  // 只在还没扫过目录时给默认提示；扫过之后保留扫描结果，不被状态刷新覆盖
+  if (data?.root && !materialState().probe) {
+    setMaterialSourceNote(
+      data.root_exists
+        ? `默认素材目录：${data.root}（下面按主播分文件夹）；可点「选择文件夹」换成别的目录。`
+        : `默认素材目录不存在：${data.root}；请点「选择文件夹」指定录屏目录。`,
+    );
+  }
+  const publisherSelect = $("material-publisher");
+  if (publisherSelect) {
+    const options = [`<option value="">全部主播</option>`];
+    (s.publishers || []).forEach((item) => {
+      const name = item.publisher || "";
+      const label = name ? `${name}（${item.videos} 个视频）` : `未标注主播（${item.videos} 个视频）`;
+      options.push(`<option value="${escapeHtml(name)}">${escapeHtml(label)}</option>`);
+    });
+    publisherSelect.innerHTML = options.join("");
+    publisherSelect.value = s.currentPublisher || "";
+  }
+}
+
+function renderMaterialVideos(data) {
+  const s = materialState();
+  s.videos = data?.videos || [];
+  const select = $("material-video");
+  if (!select) return;
+  const options = [`<option value="">全部视频</option>`];
+  s.videos.forEach((video) => {
+    const session = materialClock(video.session_epoch);
+    const label = `${video.name}${session ? ` · ${session}` : ""} · ${video.sentences} 句`;
+    options.push(`<option value="${escapeHtml(video.name)}">${escapeHtml(label)}</option>`);
+  });
+  select.innerHTML = options.join("");
+  select.value = s.currentVideo || "";
+}
+
+function renderMaterialSuggest(items) {
+  const s = materialState();
+  s.suggestItems = items || [];
+  const box = $("material-suggest");
+  if (!box) return;
+  if (!s.suggestItems.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = s.suggestItems
+    .map((text, index) => `<button class="material-suggest-item" type="button" data-material-suggest="${index}">${escapeHtml(text)}</button>`)
+    .join("");
+}
+
+function renderMaterialTopPhrases(items) {
+  const box = $("material-top-phrases");
+  if (!box) return;
+  if (!(items || []).length) {
+    box.innerHTML = `<p class="material-empty material-empty-small">建立索引后，这里会列出说过最多的口播句。</p>`;
+    return;
+  }
+  box.innerHTML = items
+    .map((text, index) => `<button class="material-phrase" type="button" data-material-phrase="${index}" title="双击直接检索">${escapeHtml(text)}</button>`)
+    .join("");
+  box.dataset.items = JSON.stringify(items);
+}
+
+async function loadMaterialPage() {
+  await Promise.all([loadMaterialStatus(), loadMaterialLibraries()]);
+}
+
+async function loadMaterialLibraries() {
+  try {
+    const data = await api("/api/material/libraries", { method: "POST", body: "{}" });
+    renderMaterialLibraries(data.libraries || []);
+    // 选中的索引可能已被删除：清掉悬空选择
+    const s = materialScopeState();
+    if (s.currentLibrary && !(data.libraries || []).some((item) => Number(item.id) === Number(s.currentLibrary))) {
+      s.currentLibrary = 0;
+    }
+  } catch (error) {
+    const box = $("material-library-list");
+    if (box) box.innerHTML = `<p class="material-library-empty">读取索引列表失败：${escapeHtml(error.message || "")}</p>`;
+  }
+}
+
+async function loadMaterialStatus() {
+  const s = materialState();
+  try {
+    const data = await api("/api/material/status");
+    renderMaterialStatus(data);
+    s.loaded = true;
+    await loadMaterialVideos();
+    await loadMaterialTopPhrases();
+  } catch (error) {
+    const chip = $("material-status-chip");
+    if (chip) chip.textContent = "素材库不可用";
+    toast(error.message || "素材库状态读取失败", "error");
+  }
+}
+
+async function loadMaterialVideos() {
+  const s = materialState();
+  const data = await api("/api/material/videos", {
+    method: "POST",
+    body: JSON.stringify({ publisher: s.currentPublisher || "" }),
+  });
+  renderMaterialVideos(data);
+}
+
+async function loadMaterialTopPhrases() {
+  try {
+    // 按当前选中的主播取热门文案：导入共享索引后用户常按主播筛选，
+    // 不跟主播变的话会把别人家的句子当成"这个主播的热门"。
+    const publisher = materialState().currentPublisher || "";
+    const data = await api("/api/material/suggest", {
+      method: "POST",
+      body: JSON.stringify({ query: "", publisher }),
+    });
+    renderMaterialTopPhrases(data.items || []);
+  } catch (error) {
+    renderMaterialTopPhrases([]);
+  }
+}
+
+async function materialPickDirectory() {
+  const result = await api("/api/material/pick-directory", { method: "POST", body: "{}" });
+  if (!result.path) return;
+  const input = $("material-root");
+  if (input) input.value = result.path;
+  await materialProbe();
+}
+
+/** 素材目录那一行提示：只放一句话，避免长内容把布局撑破。 */
+function setMaterialSourceNote(text) {
+  const note = $("material-source-note");
+  if (note) note.textContent = String(text || "");
+}
+
+/** 试扫结果：一行汇总 + 可点的主播标签（点一下按该主播筛选）。 */
+function renderMaterialProbe(info) {
+  const s = materialState();
+  s.probe = info || null;
+  const summary = $("material-source-note");
+  if (summary) {
+    const indexed = Number(info.already_indexed) || 0;
+    const fresh = Number(info.new_videos) || 0;
+    const sizeText = info.total_bytes ? ` · ${(info.total_bytes / 1024 ** 3).toFixed(1)} GB` : "";
+    // 索引是累积的：说清"已索引多少 / 本次能新增多少"，用户才知道要不要重跑
+    summary.textContent =
+      `试扫完成：视频 ${info.videos} 个（已在索引 ${indexed} 个 · 本次可新增 ${fresh} 个）`
+      + ` · 已有字幕 ${info.with_srt} 个 · 待识别 ${info.pending_asr} 个${sizeText}`
+      + (fresh > 0
+        ? `　→ 点「建立/更新索引」只处理新增的 ${fresh} 个，已有的跳过。`
+        : `　→ 这个目录已在索引里，点「建立/更新索引」会直接跳过，无需重跑。`);
+  }
+  const chips = $("material-publisher-chips");
+  if (!chips) return;
+  const publishers = (info.publishers || []).filter((item) => item.publisher);
+  if (!publishers.length) {
+    chips.hidden = true;
+    chips.innerHTML = "";
+    return;
+  }
+  chips.hidden = false;
+  const top = publishers.slice(0, 24);
+  chips.innerHTML = top
+    .map((item) => `<button class="material-chip" type="button" data-material-publisher-chip="${escapeHtml(item.publisher)}" title="按「${escapeHtml(item.publisher)}」筛选检索结果">${escapeHtml(item.publisher)}<em>${item.videos}</em></button>`)
+    .join("")
+    + (publishers.length > top.length
+      ? `<span class="material-chip-more">…另有 ${publishers.length - top.length} 个主播</span>`
+      : "");
+}
+
+async function materialProbe() {
+  const input = $("material-root");
+  const path = input?.value.trim() || "";
+  if (!path) {
+    toast("请先选择或填写素材目录", "warning");
+    return;
+  }
+  try {
+    const info = await api("/api/material/probe", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        recursive: Boolean($("material-recursive")?.checked),
+        publish: true,
+      }),
+    });
+    renderMaterialProbe(info);
+    toast(`目录里找到 ${info.videos} 个视频，待识别 ${info.pending_asr} 个`, "success");
+  } catch (error) {
+    toast(error.message || "试扫失败", "error");
+  }
+}
+
+function materialLockedMessage(error) {
+  const text = String(error?.message || error || "");
+  if (Number(error?.status) === 403 || /激活|授权|试用|锁定/.test(text)) return text;
+  return "";
+}
+
+async function materialStartIndex() {
+  const s = materialState();
+  if (s.busy) {
+    toast("素材库正在建索引，请等它跑完或先停止任务", "warning");
+    return;
+  }
+  const input = $("material-root");
+  const path = input?.value.trim() || "";
+  if (!path) {
+    toast("请先选择或填写素材目录", "warning");
+    return;
+  }
+  // 先试扫一次：让用户看清"本次要处理多少个"，工作量大时给出确认，避免盲点后干等
+  try {
+    const info = await api("/api/material/probe", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        recursive: Boolean($("material-recursive")?.checked),
+        publish: false,
+      }),
+    });
+    renderMaterialProbe(info);
+    const pendingAsr = Number(info.pending_asr) || 0;
+    const fresh = Number(info.new_videos) || 0;
+    const willAsr = Boolean($("material-generate-srt")?.checked);
+    if (fresh <= 0) {
+      toast("这个目录已在索引里，点「建立/更新」会直接跳过，无需重跑", "success");
+      return;
+    }
+    const needAsr = willAsr ? pendingAsr : 0;
+    if (needAsr > 20) {
+      const ok = window.confirm(
+        `这个目录里有 ${fresh} 个视频要新增，其中 ${needAsr} 个没有字幕。\n\n`
+        + `「缺字幕自动语音识别」是勾选的，这 ${needAsr} 个要跑语音识别，可能很慢。\n\n`
+        + `想快一点就先取消勾选（只索引已有字幕的），之后有空再补。\n\n`
+        + `现在就开始吗？`,
+      );
+      if (!ok) {
+        toast("已取消。要快速建索引，请取消勾选「缺字幕自动语音识别」后再点一次", "warning");
+        return;
+      }
+    }
+  } catch (error) {
+    // 试扫失败不阻塞建索引（授权门禁等错误会在下一步给出准确提示）
+  }
+  try {
+    const data = await api("/api/material/index/start", {
+      method: "POST",
+      body: JSON.stringify({
+        path,
+        recursive: Boolean($("material-recursive")?.checked),
+        generate_srt: Boolean($("material-generate-srt")?.checked),
+        publish: true,
+      }),
+    });
+    s.busy = true;
+    s.indexTaskId = data.task_id || "";
+    toast("已开始建立素材库索引，进度见下方日志", "success");
+    switchPage("material");
+  } catch (error) {
+    const locked = materialLockedMessage(error);
+    if (locked) {
+      // 建索引需要授权：直接把授权面板摊开，别让用户在日志里找原因
+      toast(`建立索引需要激活：${locked}`, "error");
+      try { openLicensePanel(); } catch (_) { /* 授权面板打不开时保留提示 */ }
+      return;
+    }
+    toast(error.message || "启动建索引失败", "error");
+  }
+}
+
+function materialSearchParams(extra) {
+  const s = materialState();
+  return Object.assign({
+    query: $("material-query")?.value.trim() || "",
+    mode: $("material-mode")?.value || "smart",
+    context: Number($("material-context")?.value || 2),
+    publisher: s.currentPublisher || "",
+    video: s.currentVideo || "",
+    // 搜索前选定的范围：点中某个索引就只搜它（lib_ids），否则搜全部
+    lib_ids: s.currentLibrary ? [Number(s.currentLibrary)] : [],
+    scope_label: materialScopeLabel(),
+  }, extra || {});
+}
+
+async function materialSearch() {
+  const params = materialSearchParams();
+  if (!params.query) {
+    toast("请输入要检索的关键词或整句话", "warning");
+    $("material-query")?.focus();
+    return;
+  }
+  const button = document.querySelector('[data-action="material-search"]');
+  if (button) button.disabled = true;
+  const hint = $("material-search-hint");
+  if (hint) hint.textContent = "检索中…";
+  try {
+    const result = await api("/api/material/search", {
+      method: "POST",
+      body: JSON.stringify(params),
+    });
+    materialState().result = result;
+    if (result.ok === false) {
+      toast(result.message || "素材库还是空的，请先建立索引", "warning");
+      renderMaterialResult({ groups: [] });
+      if (hint) hint.textContent = result.message || "";
+      return;
+    }
+    // 防呆：限定了索引但后端没回显该范围，说明服务是旧版本——宁可明确报错，
+    // 也不能让用户以为"只搜了这一个索引"却在全库搜（曾因 payload 缺字段静默全搜）。
+    if (params.lib_ids.length && !Array.isArray(result.scope_lib_ids)) {
+      toast(
+        "搜索范围没生效：当前服务还是旧版本，请重启一次工具（否则会一直在全部索引里搜）。",
+        "error",
+      );
+      if (hint) hint.textContent = "范围未生效：请重启工具后再试";
+      return;
+    }
+    renderMaterialResult(result);
+    const count = $("material-result-count");
+    if (count) {
+      // 一个视频 = 一张卡片，这里如实反映视频数，而不是"组数"
+      count.textContent = `命中 ${result.hits || 0} 处 / ${result.videos || 0} 个视频`;
+    }
+    if (hint) {
+      hint.textContent = `用时 ${Number(result.elapsed_ms || 0).toFixed(0)} ms · 匹配方式 ${result.used_mode || "-"}`;
+    }
+    if (!result.hits) toast("没有找到匹配的文案", "warning");
+  } catch (error) {
+    if (hint) hint.textContent = "";
+    toast(error.message || "检索失败", "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function materialSuggest(prefix) {
+  try {
+    const data = await api("/api/material/suggest", {
+      method: "POST",
+      body: JSON.stringify({ query: prefix || "" }),
+    });
+    renderMaterialSuggest(data.items || []);
+  } catch (error) {
+    renderMaterialSuggest([]);
+  }
+}
+
+function materialClearVideoFilter() {
+  const s = materialState();
+  s.currentVideo = "";
+  const select = $("material-video");
+  if (select) select.value = "";
+  if ($("material-query")?.value.trim()) materialSearch();
+}
+
+async function materialRevealSource(path) {
+  const target = String(path || "").trim();
+  if (!target) {
+    toast("这条结果没有记录源视频路径", "warning");
+    return;
+  }
+  try {
+    const data = await api("/api/material/reveal", {
+      method: "POST",
+      body: JSON.stringify({ path: target }),
+    });
+    toast(`已在资源管理器里定位：${(data.path || "").split("\\").pop()}`, "success");
+  } catch (error) {
+    // 导入的共享索引本机没有文件：给出"去网盘找"的可执行提示
+    toast(error.message || "打开视频地址失败", "error");
+  }
+}
+
+async function materialOpenSource(path, start) {
+  const target = String(path || "").trim();
+  if (!target) {
+    toast("这条结果没有记录源视频路径", "warning");
+    return;
+  }
+  try {
+    await api("/api/material/open", {
+      method: "POST",
+      body: JSON.stringify({ path: target, start: Number(start) || 0 }),
+    });
+    const stamp = formatSeconds(Number(start) || 0);
+    toast(`已用默认播放器打开；在播放器里跳到 ${stamp} 即可（时间点已可一键复制）`, "success");
+  } catch (error) {
+    toast(error.message || "打开视频失败", "error");
+  }
+}
+
+async function materialExportIndex(mode = "", libIds = []) {
+  const s = materialState();
+  if (s.busy) {
+    toast("素材库正忙（建索引或导入中），请等它跑完", "warning");
+    return;
+  }
+  try {
+    // 注意：这个接口是 POST，fetch 默认是 GET（曾漏写 method 导致 405 Method Not Allowed）
+    const options = await api("/api/material/export-options", { method: "POST", body: "{}" });
+    const streamers = options.streamers || [];
+    const dirs = options.directories || [];
+    const libraries = options.libraries || [];
+    if (!streamers.length && !dirs.length && !libraries.length) {
+      toast("素材库还是空的，先建立索引再导出", "warning");
+      return;
+    }
+    if (!libIds.length) {
+      // 让用户知道各维度有多少可选，弹窗里再选具体项
+      toast(
+        `可导出：${libraries.length} 个索引 / ${streamers.length} 个主播 / ${dirs.length} 个目录。`
+        + `下一步在弹出的窗口里选维度，再勾选具体项。`,
+        "success",
+      );
+    }
+  } catch (error) {
+    toast(error.message || "读取导出选项失败", "error");
+    return;
+  }
+  try {
+    const data = await api("/api/material/export", {
+      method: "POST",
+      body: JSON.stringify({ choose: !libIds.length, mode, lib_ids: libIds }),
+    });
+    if (data.cancelled) {
+      toast(data.message || "已取消导出", "warning");
+      return;
+    }
+    s.busy = true;
+    toast(data.message || "正在导出索引", "success");
+    switchPage("material");
+  } catch (error) {
+    const locked = materialLockedMessage(error);
+    if (locked) {
+      toast(`导出索引需要激活：${locked}`, "error");
+      try { openLicensePanel(); } catch (_) { /* 面板打不开时保留提示 */ }
+      return;
+    }
+    toast(error.message || "导出失败", "error");
+  }
+}
+
+async function materialImportIndex() {
+  const s = materialState();
+  if (s.busy) {
+    toast("素材库正忙（建索引或导入中），请等它跑完", "warning");
+    return;
+  }
+  try {
+    const data = await api("/api/material/import", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (data.cancelled) {
+      toast(data.message || "已取消导入", "warning");
+      return;
+    }
+    const parts = (data.summaries || []).map(
+      (item) => `${item.name}（${item.source || "未知来源"}，${item.videos} 视频）`,
+    );
+    s.busy = true;
+    toast(`开始导入 ${parts.length} 个索引包：${parts.slice(0, 3).join("；")}${parts.length > 3 ? "…" : ""}`, "success");
+    switchPage("material");
+  } catch (error) {
+    const locked = materialLockedMessage(error);
+    if (locked) {
+      toast(`导入索引需要激活：${locked}`, "error");
+      try { openLicensePanel(); } catch (_) { /* 面板打不开时保留提示 */ }
+      return;
+    }
+    toast(error.message || "导入失败", "error");
+  }
+}
+
+async function materialRebuildLibrary(libId) {
+  if (!libId) return;
+  const lib = (materialState().libraries || []).find((item) => Number(item.id) === Number(libId));
+  if (!lib) return;
+  if (!window.confirm(`重建索引「${lib.name}」？\n\n会先清掉它自己的 ${lib.videos} 个视频，再从素材目录重新扫描。\n其他索引不受影响。`)) {
+    return;
+  }
+  try {
+    const data = await api("/api/material/library/rebuild", {
+      method: "POST",
+      body: JSON.stringify({ library_id: libId, generate_srt: Boolean($("material-generate-srt")?.checked) }),
+    });
+    toast(data.message || "已开始重建索引", "success");
+  } catch (error) {
+    const locked = materialLockedMessage(error);
+    if (locked) {
+      toast(`重建索引需要激活：${locked}`, "error");
+      return;
+    }
+    toast(error.message || "重建失败", "error");
+  }
+}
+
+async function materialRemoveLibrary(libId) {
+  if (!libId) return;
+  const lib = (materialState().libraries || []).find((item) => Number(item.id) === Number(libId));
+  if (!lib) return;
+  if (!window.confirm(`删除索引「${lib.name}」？\n\n会删掉它的 ${lib.videos} 个视频 / ${lib.sentences} 句索引内容。\n其他索引不受影响，视频文件不会被删。`)) {
+    return;
+  }
+  try {
+    const data = await api("/api/material/library/remove", {
+      method: "POST",
+      body: JSON.stringify({ library_id: libId }),
+    });
+    // 删完必须重新加载索引列表 + 概况 + 检索结果，否则用户得手动刷新页面
+    const s = materialState();
+    if (Number(s.currentLibrary) === Number(libId)) s.currentLibrary = 0;
+    await loadMaterialPage();
+    toast(data.message || `已删除索引「${data.name || lib.name}」`, "success");
+    if ($("material-query")?.value.trim()) await materialSearch();
+  } catch (error) {
+    toast(error.message || "删除失败", "error");
+  }
+}
+
+async function materialCopyStamp(text) {
+  const value = String(text || "").trim();
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    toast("时间点已复制", "success");
+  } catch (error) {
+    toast("复制失败，请手动选择复制", "warning");
+  }
+}
+
+async function materialCopyAllStamps() {
+  const result = materialState().result;
+  const groups = result?.groups || [];
+  if (!groups.length) {
+    toast("还没有检索结果", "warning");
+    return;
+  }
+  const lines = [];
+  groups.forEach((group) => {
+    (group.windows || []).forEach((window) => {
+      lines.push([
+        group.publisher || "未标注主播",
+        group.video_name || materialBaseName(group.video_path),
+        formatSeconds(window.hit_start || 0),
+        String(window.hit_text || "").trim(),
+      ].join("\t"));
+    });
+  });
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    toast(`已复制 ${lines.length} 条时间点（可直接粘进表格）`, "success");
+  } catch (error) {
+    toast("复制失败，请手动选择复制", "warning");
+  }
+}
+
+async function materialLabelPublisher() {
+  const s = materialState();
+  const folder = $("material-root")?.value.trim() || "";
+  if (!folder) {
+    toast("先在「素材目录」里选好要标注的目录", "warning");
+    return;
+  }
+  const name = window.prompt(
+    `给这个目录下的素材统一标注主播名：\n${folder}\n\n（目录名如果就是主播名，直接点确定即可）`,
+    folder.split(/[\\/]/).filter(Boolean).pop() || "",
+  );
+  if (name === null) return;
+  const publisher = String(name).trim();
+  if (!publisher) {
+    toast("主播名不能为空", "warning");
+    return;
+  }
+  try {
+    const data = await api("/api/material/label", {
+      method: "POST",
+      body: JSON.stringify({ folder, publisher }),
+    });
+    toast(`已把 ${data.updated} 个视频标注为「${publisher}」`, "success");
+    await loadMaterialStatus();
+    if ($("material-query")?.value.trim()) materialSearch();
+  } catch (error) {
+    toast(error.message || "标注失败", "error");
+  }
+}
+
+async function materialClearIndex() {
+  if (!window.confirm("清空素材库索引？只会删除索引数据库，不会动视频和字幕文件。")) return;
+  try {
+    await api("/api/material/clear", { method: "POST", body: "{}" });
+    materialState().result = null;
+    renderMaterialResult({ groups: [] });
+    const count = $("material-result-count");
+    if (count) count.textContent = "未检索";
+    await loadMaterialStatus();
+    toast("素材库索引已清空", "success");
+  } catch (error) {
+    toast(error.message || "清空失败", "error");
+  }
+}
+
+function bindMaterialPage() {
+  const query = $("material-query");
+  if (query) {
+    query.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        materialSearch();
+      }
+    });
+    query.addEventListener("input", () => {
+      if (materialSuggestTimer) window.clearTimeout(materialSuggestTimer);
+      materialSuggestTimer = window.setTimeout(() => materialSuggest(query.value.trim()), 220);
+    });
+    query.addEventListener("blur", () => {
+      window.setTimeout(() => {
+        const box = $("material-suggest");
+        if (box) box.hidden = true;
+      }, 180);
+    });
+  }
+  const root = $("material-root");
+  if (root) {
+    root.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        materialProbe();
+      }
+    });
+  }
+  const suggest = $("material-suggest");
+  suggest?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-material-suggest]");
+    if (!button) return;
+    const index = Number(button.dataset.materialSuggest);
+    const text = materialState().suggestItems[index];
+    if (!text) return;
+    if (query) query.value = text;
+    renderMaterialSuggest([]);
+    materialSearch();
+  });
+  const phrases = $("material-top-phrases");
+  phrases?.addEventListener("dblclick", (event) => {
+    const button = event.target.closest("[data-material-phrase]");
+    if (!button) return;
+    const items = JSON.parse(phrases.dataset.items || "[]");
+    const text = items[Number(button.dataset.materialPhrase)];
+    if (!text) return;
+    if (query) query.value = text;
+    materialSearch();
+  });
+  // 搜索范围下拉：点一个索引就切过去（只搜它），点"全部索引"取消限定
+  const scopeMenu = $("material-scope-menu");
+  scopeMenu?.addEventListener("click", async (event) => {
+    const option = event.target.closest("[data-scope-lib]");
+    if (!option) return;
+    const libId = Number(option.dataset.scopeLib || 0);
+    const s = materialScopeState();
+    s.currentLibrary = libId;
+    scopeMenu.hidden = true;
+    renderMaterialLibraries(s.libraries || []);
+    renderMaterialScope(materialState().status || {});
+    toast(libId ? `搜索范围：${materialScopeLabel()}` : "搜索范围：全部索引", "success");
+    if (query?.value.trim()) await materialSearch();
+  });
+  // 点面板外面 / 按 Esc 都要收起下拉，别让它一直挂在那儿
+  document.addEventListener("click", (event) => {
+    const menu = $("material-scope-menu");
+    if (!menu || menu.hidden) return;
+    if (event.target.closest(".material-scope-select-wrap")) return;
+    menu.hidden = true;
+    const trigger = document.querySelector('[data-action="material-scope-menu"]');
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const menu = $("material-scope-menu");
+    if (menu) menu.hidden = true;
+  });
+  const chips = $("material-publisher-chips");
+  chips?.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-material-publisher-chip]");
+    if (!button) return;
+    const name = button.dataset.materialPublisherChip || "";
+    const select = $("material-publisher");
+    if (!select) return;
+    select.value = name;
+    const s = materialState();
+    s.currentPublisher = name;
+    s.currentVideo = "";
+    await loadMaterialVideos();
+    loadMaterialTopPhrases(); // 热门文案跟着主播换
+    if (query?.value.trim()) materialSearch();
+  });
+  const publisher = $("material-publisher");
+  publisher?.addEventListener("change", async () => {
+    const s = materialState();
+    s.currentPublisher = publisher.value || "";
+    s.currentVideo = "";
+    await loadMaterialVideos();
+    loadMaterialTopPhrases(); // 热门文案跟着主播换
+    if (query?.value.trim()) materialSearch();
+  });
+  const video = $("material-video");
+  video?.addEventListener("change", () => {
+    materialState().currentVideo = video.value || "";
+    if (query?.value.trim()) materialSearch();
+  });
+  const mode = $("material-mode");
+  mode?.addEventListener("change", () => {
+    if (query?.value.trim()) materialSearch();
+  });
+  const context = $("material-context");
+  context?.addEventListener("change", () => {
+    if (query?.value.trim()) materialSearch();
+  });
 }
